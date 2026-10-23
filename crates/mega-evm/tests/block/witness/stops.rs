@@ -1,7 +1,7 @@
 //! Every stop class through the harness: a transaction stopped by the data-size and compute
 //! limits, a crossing at a precompile's price, which its caller catches, a crossing in an answer,
-//! and a block budget refusing a later transaction. A stop is what the block records, so a
-//! validator must produce the same stop from the same witness.
+//! a block budget refusing a later transaction, and an authorization list a limit skips. A stop is
+//! what the block records, so a validator must produce the same stop from the same witness.
 
 use alloy_primitives::{Bytes, U256};
 use alloy_sol_types::SolCall;
@@ -20,7 +20,8 @@ use revm::{
 
 use super::{
     basics::{slot, slot_writer},
-    harness::{call, call_with_value, Case, Run},
+    harness::{assert_differs, authorization, call, call_with_value, eip7702, Case, Oracle, Run},
+    state::creation_gas,
 };
 use crate::common::{self, loosest_tx, CALLER, CONTRACT};
 
@@ -194,4 +195,43 @@ fn test_a_stop_above_the_execution_cap_replays() {
     let run = &replay.recorded;
     assert_stopped(run, 0, LimitKind::DataSize);
     assert!(run.tx(0).gas.reservoir_remaining > 0, "the reservoir came back");
+}
+
+/// An authorization list the state-growth limit skips: two new authorities under a limit of one.
+/// Before the first frame the engine loads both to decide the list would create two accounts,
+/// applies none, and stops the first frame, so neither is written; the witness still holds both,
+/// as accounts the chain does not have, and a validator decides the same skip from it. A witness
+/// without one of them cannot replay the block.
+#[test]
+fn test_a_skipped_authorization_list_replays() {
+    let (first, first_authority) = authorization(CONTRACT, 0);
+    let (second, second_authority) = authorization(CALLER, 0);
+    assert_ne!(first_authority, second_authority);
+    let mut db = common::database();
+    db.set_account_code(CONTRACT, slot_writer());
+    let limits =
+        common::loosest().with_tx_runtime_limits(loosest_tx().with_tx_state_growth_limit(1));
+    let case = Case::new("skipped authorization list", db).limits(limits).tx(eip7702(
+        0,
+        CONTRACT,
+        slot(1),
+        vec![first, second],
+        creation_gas(),
+    ));
+    let recorded = case.record();
+    let mut witness = case.channel_witness(&recorded);
+    assert_stopped(&recorded, 0, LimitKind::StateGrowth);
+    for authority in [first_authority, second_authority] {
+        assert_eq!(recorded.record.accounts.get(&authority), Some(&None), "the list loaded it");
+        assert_eq!(witness.accounts.get(&authority), Some(&None), "the channel witness holds it");
+        let state = &recorded.tx(0).state;
+        let written = state.get(&authority).is_some_and(|account| account.is_touched());
+        assert!(!written, "a skipped list writes no authority");
+    }
+
+    witness.accounts.remove(&second_authority);
+    let short = case.replay(&witness, &recorded.included(), Oracle::Recorded);
+    assert_differs("skipped authorization list, one authority short", &recorded, &short);
+
+    case.run();
 }

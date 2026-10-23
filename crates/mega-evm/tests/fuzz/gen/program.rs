@@ -6,7 +6,7 @@
 //! the stack as it found it, so any list assembles to valid bytecode, and a program shrinks by
 //! dropping ops. The assembly is [`BytecodeBuilder`]'s.
 
-use alloy_primitives::{Address, Bytes, U256};
+use alloy_primitives::{keccak256, Address, Bytes, B256, U256};
 use alloy_sol_types::SolCall;
 use mega_evm::{
     system::{
@@ -71,6 +71,11 @@ pub(crate) enum Target {
     System(SystemContract),
     /// A precompile.
     Precompile(Precompile),
+    /// An account the running program creates: the address one of its own `CREATE2` ops lands
+    /// on, the `nth` of them modulo their number, computed from `ADDRESS` as the op computes it;
+    /// in a program with none, the address a `CREATE2` of empty init code with salt zero would
+    /// land on. A program can so fund, pay or read an account before it creates it, and after.
+    Created { nth: u8 },
 }
 
 impl Target {
@@ -83,8 +88,9 @@ impl Target {
     }
 }
 
-/// Pushes the target's address.
-fn push_target(code: BytecodeBuilder, target: Target) -> BytecodeBuilder {
+/// Pushes the target's address; a [`Target::Created`] resolves among `creations`, the `CREATE2`
+/// ops of the program the target is in.
+fn push_target(code: BytecodeBuilder, target: Target, creations: &Creations) -> BytecodeBuilder {
     match target {
         Target::Who(who) => code.push_address(who.address()),
         Target::SelfAddress => code.append(ADDRESS),
@@ -92,6 +98,53 @@ fn push_target(code: BytecodeBuilder, target: Target) -> BytecodeBuilder {
         Target::Caller => code.append(CALLER),
         Target::System(contract) => code.push_address(contract.address()),
         Target::Precompile(precompile) => code.push_address(precompile.address()),
+        Target::Created { nth } => {
+            // keccak256(0xff ++ ADDRESS ++ salt ++ keccak256(init code)) over memory 11..96: its
+            // low twenty bytes are the address, which is all a call, an account read or a
+            // `SELFDESTRUCT` takes of the word.
+            let (salt, init_hash) = creations.resolve(nth);
+            code.append_many([ADDRESS, PUSH0, MSTORE])
+                .push_number(0xff_u8)
+                .push_number(11_u8)
+                .append(MSTORE8)
+                .push_number(salt)
+                .push_number(32_u8)
+                .append(MSTORE)
+                .push_bytes(init_hash)
+                .push_number(64_u8)
+                .append(MSTORE)
+                .push_number(85_u8)
+                .push_number(11_u8)
+                .append(KECCAK256)
+        }
+    }
+}
+
+/// The `CREATE2` ops of a program, in order, as the salt and the init code hash each lands with:
+/// what a [`Target::Created`] in the program resolves to.
+struct Creations(Vec<(u8, B256)>);
+
+impl Creations {
+    fn of(ops: &[Op]) -> Self {
+        Self(
+            ops.iter()
+                .filter_map(|op| match op {
+                    Op::Create { salt: Some(salt), init, .. } => {
+                        Some((*salt, keccak256(init.assemble())))
+                    }
+                    _ => None,
+                })
+                .collect(),
+        )
+    }
+
+    /// The salt and init code hash of the `nth` creation, modulo their number; salt zero and
+    /// empty init code for a program with none.
+    fn resolve(&self, nth: u8) -> (u8, B256) {
+        if self.0.is_empty() {
+            return (0, keccak256(InitCode::Empty.assemble()));
+        }
+        self.0[usize::from(nth) % self.0.len()]
     }
 }
 
@@ -103,6 +156,7 @@ fn target() -> impl Strategy<Value = Target> {
         1 => Just(Target::Caller),
         3 => system_contract().prop_map(Target::System),
         2 => precompile().prop_map(Target::Precompile),
+        3 => (0u8..4).prop_map(|nth| Target::Created { nth }),
     ]
 }
 
@@ -338,9 +392,9 @@ fn precompile_input() -> impl Strategy<Value = PrecompileInput> {
 /// How much gas a call forwards.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Forward {
-    /// Everything (`GAS`), which the 63/64 rule caps.
+    /// Everything (`GAS`), which the 98/100 rule caps.
     All,
-    /// A fixed amount, which the 63/64 rule may cap lower.
+    /// A fixed amount, which the 98/100 rule may cap lower.
     Gas(u32),
 }
 
@@ -629,16 +683,17 @@ pub(crate) struct Program {
 impl Program {
     /// The program's bytecode.
     pub(crate) fn assemble(&self) -> Vec<u8> {
+        let creations = Creations::of(&self.ops);
         let mut code = BytecodeBuilder::default();
         for op in &self.ops {
-            code = op.assemble(code);
+            code = op.assemble(code, &creations);
         }
         match self.end {
             End::Stop => code.stop(),
             End::Return { len } => code.push_number(len).append_many([PUSH0, RETURN]),
             End::Revert { len } => code.push_number(len).append_many([PUSH0, REVERT]),
             End::Invalid => code.append(INVALID),
-            End::Selfdestruct { to } => push_target(code, to).append(SELFDESTRUCT),
+            End::Selfdestruct { to } => push_target(code, to, &creations).append(SELFDESTRUCT),
             End::Spin => {
                 let dest = code.len() as u32;
                 code.append(JUMPDEST)
@@ -753,7 +808,8 @@ impl Op {
         }
     }
 
-    fn assemble(&self, code: BytecodeBuilder) -> BytecodeBuilder {
+    /// The op's bytecode, appended to `code`; a [`Target::Created`] resolves among `creations`.
+    fn assemble(&self, code: BytecodeBuilder, creations: &Creations) -> BytecodeBuilder {
         match self {
             Self::Sstore { slot, value } => code.sstore(U256::from(*slot), value.u256()),
             Self::Sload { slot } => code.push_number(*slot).append_many([SLOAD, POP]),
@@ -770,7 +826,7 @@ impl Op {
             Self::Call { scheme, target, value, forward, args_len } => {
                 let code = code.append_many([PUSH0, PUSH0]).push_number(*args_len).append(PUSH0);
                 let code = if scheme.carries_value() { code.push_u256(value.wei()) } else { code };
-                push_forward(push_target(code, *target), *forward)
+                push_forward(push_target(code, *target, creations), *forward)
                     .append_many([scheme.opcode(), POP])
             }
             Self::System { method, scheme, value } => {
@@ -808,7 +864,7 @@ impl Op {
             }
             Self::Volatile(read) => read.assemble(code),
             Self::Account { target, read } => {
-                let code = push_target(code, *target);
+                let code = push_target(code, *target, creations);
                 match read {
                     AccountRead::Balance => code.append_many([BALANCE, POP]),
                     AccountRead::CodeSize => code.append_many([EXTCODESIZE, POP]),

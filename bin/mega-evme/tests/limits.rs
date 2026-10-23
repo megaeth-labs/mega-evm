@@ -68,9 +68,11 @@ fn test_an_override_holds_a_satin_run_to_other_limits() {
 
     let data_size = run_two_writes(Some(r#"{"txRuntimeLimits":{"txDataSizeLimit":350}}"#));
     assert_eq!(data_size["success"], false);
+    // The second write crosses the transaction's own frame's budget, the 40 bytes the body
+    // leaves of the limit, which the stop names.
     assert_eq!(
         data_size["satin"]["limit_exceeded"],
-        json!({ "kind": "data_size", "limit": 350, "used": 390 })
+        json!({ "kind": "data_size", "limit": 40, "used": 80 })
     );
     assert_eq!(data_size["satin"]["write_records"], 0, "the stop takes the writes back");
     assert_eq!(data_size["satin"]["limits_override"], defaults_with_tx_data_size(350));
@@ -89,6 +91,20 @@ fn test_an_override_is_read_from_a_file() {
         output.as_object_mut().unwrap().remove("exec_time");
     }
     assert_eq!(from_file, inline);
+}
+
+/// A limits file in the shape's first published version, written before a transaction and a block
+/// had KV-update and state-growth limits, runs: the limits it names replace Satin's, and the ones
+/// it predates stay at Satin's values.
+#[test]
+fn test_an_override_from_a_file_of_the_first_version_runs() {
+    let limits = r#"{"txRuntimeLimits":{"txDataSizeLimit":350,"frameDataSizeLimit":18446744073709551615,"blockEnvAccessComputeGasLimit":20000000,"oracleAccessComputeGasLimit":20000000},"blockTxsDataLimit":13107200}"#;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("limits.json");
+    std::fs::write(&path, limits).unwrap();
+    let run = run_two_writes(Some(path.to_str().unwrap()));
+    assert_eq!(run["success"], false, "the second write crosses the data size");
+    assert_eq!(run["satin"]["limits_override"], defaults_with_tx_data_size(350));
 }
 
 /// `tx` takes the override too: a body one byte over the transaction data-size limit is rejected
@@ -219,7 +235,7 @@ fn test_a_genesis_file_runs_satin_under_the_specs_limits() {
     let overridden = run(&["--override.limits", &limits]).json();
     assert_eq!(
         overridden["satin"]["limit_exceeded"],
-        json!({ "kind": "data_size", "limit": ONE_RECORD, "used": TWO_RECORDS })
+        json!({ "kind": "data_size", "limit": WRITE_RECORD_SIZE, "used": 2 * WRITE_RECORD_SIZE })
     );
 
     // The file is its chain's: a run on another chain is refused.

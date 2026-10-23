@@ -1,5 +1,5 @@
 //! `mega-evme replay --block`: whole blocks on either engine, compared with the chain, on the
-//! recorded mainnet blocks of `tests/fixtures/blocks` (see `common/blocks.rs`).
+//! recorded mainnet blocks of `tests/fixtures/blocks.tar.xz` (see `common/blocks.rs`).
 #![cfg(feature = "legacy")]
 
 mod common;
@@ -31,6 +31,38 @@ fn replay(number: u64, dir: &Path, extra: &[&str]) -> common::blocks::Run {
     ];
     args.extend(extra.iter().map(|s| s.to_string()));
     run_evme(&args)
+}
+
+/// Extractions of the fixture archive racing into one directory all succeed and leave every
+/// member in place, as test processes that start at once on a cold run extract it.
+#[test]
+fn test_racing_extractions_of_the_fixture_archive_all_succeed() {
+    const WRITERS: usize = 8;
+    let archive = common::fixtures_dir().join("blocks.tar.xz");
+    let destination = common::extracted_root().join(format!(".race-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&destination);
+    let barrier = std::sync::Barrier::new(WRITERS);
+    std::thread::scope(|scope| {
+        for _ in 0..WRITERS {
+            scope.spawn(|| {
+                barrier.wait();
+                common::install_archive(&archive, &destination);
+            });
+        }
+    });
+    let listing = std::process::Command::new("tar").arg("-tJf").arg(&archive).output().unwrap();
+    assert!(listing.status.success());
+    let members: Vec<String> = String::from_utf8(listing.stdout)
+        .unwrap()
+        .lines()
+        .filter(|member| !member.ends_with('/'))
+        .map(str::to_string)
+        .collect();
+    assert!(!members.is_empty());
+    for member in &members {
+        assert!(destination.join(member).is_file(), "{member} is in place");
+    }
+    std::fs::remove_dir_all(&destination).unwrap();
 }
 
 /// The legacy leg replays each recorded block exactly as the chain executed it: every
@@ -268,10 +300,13 @@ fn test_an_override_replays_a_satin_block_under_other_limits() {
                 assert!(reason.contains(mega_evm::TX_BODY_OVER_DATA_SIZE_LIMIT), "{reason}");
                 continue;
             }
+            // The frame that crosses the transaction's limit crosses its own budget, a share of
+            // what the limit leaves, which the stop names with what that frame used of it.
             let stop = &tx["satin"]["limit_exceeded"];
             assert_eq!(stop["kind"], "data_size", "{tx}");
-            assert_eq!(stop["limit"], limit, "{tx}");
-            assert!(stop["used"].as_u64().unwrap() > limit, "{tx}");
+            let budget = stop["limit"].as_u64().unwrap();
+            assert!(budget <= limit, "{tx}");
+            assert!(stop["used"].as_u64().unwrap() > budget, "{tx}");
         }
     }
     assert!(protocols > 0 && others > 0, "{protocols} {others}");

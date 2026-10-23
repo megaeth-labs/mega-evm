@@ -510,9 +510,9 @@ fn test_computation_past_the_execution_cap_is_an_ordinary_out_of_gas() {
     }
 }
 
-/// A nested call cannot compute past the cap either. Its callee is forwarded what the cap leaves,
-/// runs out of gas and fails; its caller resumes on the sixty-fourth it kept, and the transaction
-/// computes less than the cap.
+/// A nested call cannot compute past the cap either. Its callee is forwarded 98/100 of what the
+/// cap leaves, runs out of gas and fails; its caller resumes on the 2 per cent it kept, and the
+/// transaction computes less than the cap.
 ///
 /// Only above the cap: below it the gas limit bounds the callee long before the cap does.
 #[test]
@@ -536,7 +536,7 @@ fn test_a_nested_call_cannot_compute_past_the_cap() {
         "the call failed, and its flag says so",
     );
     assert!(outcome.gas.regular < TX_GAS_LIMIT_CAP, "{:?}", outcome.gas);
-    assert!(outcome.gas.regular > TX_GAS_LIMIT_CAP / 64 * 63, "the callee burned its share");
+    assert!(outcome.gas.regular > TX_GAS_LIMIT_CAP / 100 * 98, "the callee burned its share");
 }
 
 /// A transaction whose intrinsic gas alone is more computation than the cap allows is rejected

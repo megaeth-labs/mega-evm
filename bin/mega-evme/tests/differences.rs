@@ -9,7 +9,7 @@
 //! The inputs are the ones this repository can build without a chain: the `run` and `tx`
 //! fixtures, each run on both engines (`test_<name>.json` and `test_satin_<name>.json`, whose
 //! outputs `tests/integration.rs` holds the binary to), and the recorded mainnet blocks of
-//! `tests/fixtures/blocks`, whose legacy replay matches the chain.
+//! `tests/fixtures/blocks.tar.xz`, whose legacy replay matches the chain.
 #![cfg(feature = "legacy")]
 
 mod common;
@@ -155,7 +155,7 @@ fn render_blocks(out: &mut String) {
     writeln!(out, "## Recorded mainnet blocks\n").unwrap();
     writeln!(
         out,
-        "The three Rex6 blocks of `tests/fixtures/blocks`, each replayed on both engines. The \
+        "The three Rex6 blocks of `tests/fixtures/blocks.tar.xz`, each replayed on both engines. The \
          legacy replay of each matches the chain (every receipt and the receipts root), so the \
          legacy column is the chain's. Satin runs the transactions as signed, on the state \
          their parent block left.\n"

@@ -46,7 +46,8 @@ pub struct MegaTransactionOutcome {
     /// is [`LimitUsage::write_records`].
     pub usage: LimitUsage,
     /// The crossing that produced the result of the transaction's own frame, if one did: a
-    /// transaction-level limit, or that frame's own data-size budget. The result is then a revert
+    /// transaction-level limit, or that frame's own budget in data size, KV updates or state
+    /// growth. The result is then a revert
     /// whose output is its [`MegaLimitExceeded`](crate::MegaLimitExceeded); this, not the output,
     /// tells a limit stop from a contract reverting with the same bytes, or re-raising those a
     /// frame below it was stopped with.
@@ -117,18 +118,26 @@ pub struct MegaGasUsage {
 
 impl MegaGasUsage {
     /// The ledgers of a transaction that settled into `result_gas`, spent `history` gas on
-    /// history and appended `history_bytes` bytes of it.
+    /// history, appended `history_bytes` bytes of it and left `reservoir_remaining` of its
+    /// reservoir unspent.
     ///
     /// [`ResultGas`] has no history field; its total includes history gas, which is taken back
-    /// out of regular here.
-    pub const fn new(result_gas: &ResultGas, history: u64, history_bytes: u64) -> Self {
+    /// out of regular here. Nor does it carry the reservoir: the handler reads that off the
+    /// settled result
+    /// ([`AdditionalLimit::reservoir_remaining`](crate::AdditionalLimit::reservoir_remaining)).
+    pub const fn new(
+        result_gas: &ResultGas,
+        history: u64,
+        history_bytes: u64,
+        reservoir_remaining: u64,
+    ) -> Self {
         let state = result_gas.state_gas_spent_final();
         Self {
             regular: result_gas.total_gas_spent().saturating_sub(state).saturating_sub(history),
             state,
             history,
             history_bytes,
-            reservoir_remaining: result_gas.reservoir_remaining(),
+            reservoir_remaining,
             floor: result_gas.floor_gas(),
             gas_used: result_gas.tx_gas_used(),
         }
@@ -159,19 +168,19 @@ mod tests {
             .with_state_gas_spent(state)
             .with_refunded(refunded)
             .with_floor_gas(floor)
-            .with_reservoir_remaining(5_000)
     }
 
     /// The three ledgers add up to the raw spend; the receipt figure is the spend less the refund.
     #[test]
     fn test_ledgers_split_the_raw_spend() {
-        let gas = MegaGasUsage::new(&result_gas(100_000, 30_000, 4_000, 21_000), 10_000, 125);
+        let gas =
+            MegaGasUsage::new(&result_gas(100_000, 30_000, 4_000, 21_000), 10_000, 125, 5_000);
         assert_eq!(gas.regular, 60_000);
         assert_eq!(gas.state, 30_000);
         assert_eq!(gas.history, 10_000);
         assert_eq!(gas.history_bytes, 125, "a byte count, carried as it was given");
         assert_eq!(gas.regular + gas.state + gas.history, 100_000);
-        assert_eq!(gas.reservoir_remaining, 5_000);
+        assert_eq!(gas.reservoir_remaining, 5_000, "carried as it was given");
         assert_eq!(gas.gas_used, 96_000);
         assert_eq!(gas.block_execution_gas(), 60_000);
     }
@@ -179,7 +188,7 @@ mod tests {
     /// The floor binds the receipt figure and the block's execution gas, not the ledgers.
     #[test]
     fn test_floor_binds_receipt_and_block_execution_gas() {
-        let gas = MegaGasUsage::new(&result_gas(50_000, 20_000, 10_000, 45_000), 5_000, 0);
+        let gas = MegaGasUsage::new(&result_gas(50_000, 20_000, 10_000, 45_000), 5_000, 0, 0);
         assert_eq!(gas.regular, 25_000);
         assert_eq!(gas.floor, 45_000);
         assert_eq!(gas.gas_used, 45_000);

@@ -145,6 +145,20 @@ pub enum MegaBlockLimitExceededError {
         /// The block's data-size limit.
         limit: u64,
     },
+    /// The block's transactions have kept their write records: their KV count.
+    KvUpdateLimit {
+        /// The write records the block has kept.
+        block_used: u64,
+        /// The block's KV-update limit.
+        limit: u64,
+    },
+    /// The block's transactions have kept their state growth: new accounts and new slots.
+    StateGrowthLimit {
+        /// The new accounts and new slots the block has kept.
+        block_used: u64,
+        /// The block's state-growth limit.
+        limit: u64,
+    },
     /// The transaction's body does not fit in what the block has left.
     TransactionEncodeSizeLimit {
         /// The bytes the block's transaction bodies already take.
@@ -170,6 +184,8 @@ impl MegaBlockLimitExceededError {
     pub const fn block_used(&self) -> u64 {
         match self {
             Self::TransactionDataLimit { block_used, .. } |
+            Self::KvUpdateLimit { block_used, .. } |
+            Self::StateGrowthLimit { block_used, .. } |
             Self::TransactionEncodeSizeLimit { block_used, .. } |
             Self::DataAvailabilitySizeLimit { block_used, .. } => *block_used,
         }
@@ -179,6 +195,8 @@ impl MegaBlockLimitExceededError {
     pub const fn limit(&self) -> u64 {
         match self {
             Self::TransactionDataLimit { limit, .. } |
+            Self::KvUpdateLimit { limit, .. } |
+            Self::StateGrowthLimit { limit, .. } |
             Self::TransactionEncodeSizeLimit { limit, .. } |
             Self::DataAvailabilitySizeLimit { limit, .. } => *limit,
         }
@@ -190,6 +208,12 @@ impl fmt::Display for MegaBlockLimitExceededError {
         match self {
             Self::TransactionDataLimit { block_used, limit } => {
                 write!(f, "Block transactions data limit reached: block_used={block_used} >= limit={limit}")
+            }
+            Self::KvUpdateLimit { block_used, limit } => {
+                write!(f, "Block KV update limit reached: block_used={block_used} >= limit={limit}")
+            }
+            Self::StateGrowthLimit { block_used, limit } => {
+                write!(f, "Block state growth limit reached: block_used={block_used} >= limit={limit}")
             }
             Self::TransactionEncodeSizeLimit { block_used, tx_used, limit } => write!(
                 f,
@@ -404,6 +428,8 @@ mod tests {
     fn test_block_limit_error_reports_block_usage_and_limit() {
         let cases = [
             (MegaBlockLimitExceededError::TransactionDataLimit { block_used: 1, limit: 10 }, 1, 10),
+            (MegaBlockLimitExceededError::KvUpdateLimit { block_used: 2, limit: 11 }, 2, 11),
+            (MegaBlockLimitExceededError::StateGrowthLimit { block_used: 3, limit: 12 }, 3, 12),
             (
                 MegaBlockLimitExceededError::TransactionEncodeSizeLimit {
                     block_used: 4,

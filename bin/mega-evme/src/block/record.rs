@@ -215,6 +215,7 @@ fn sum_satin<'a>(reports: impl Iterator<Item = &'a SatinReport>) -> SatinReport 
         floor_gas: acc.floor_gas + r.floor_gas,
         data_size: acc.data_size + r.data_size,
         write_records: acc.write_records + r.write_records,
+        state_growth: acc.state_growth + r.state_growth,
         limit_exceeded: None,
         limits_override: None,
     })

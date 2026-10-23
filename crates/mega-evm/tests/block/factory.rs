@@ -15,7 +15,7 @@ use alloy_primitives::U256;
 use alloy_sol_types::SolError;
 use mega_evm::{
     test_utils::{BytecodeBuilder, GasInspector},
-    DeclaredObserver, EvmTxRuntimeLimits, LimitCheck, LimitKind, MegaBlockExecutor, MegaEvmFactory,
+    EvmTxRuntimeLimits, LimitCheck, LimitKind, MegaBlockExecutor, MegaEvmFactory,
     MegaLimitExceeded, MegaSpecId, ProtocolLimits,
 };
 use revm::{context::result::ExecutionResult, database::State};
@@ -56,9 +56,9 @@ fn test_trait_path_applies_the_specs_runtime_limits() {
     assert_eq!(executor.protocol_limits(), &limits());
 }
 
-/// The two routes to an executor install the same limits, so neither is a way around them.
+/// The routes to an executor install the same limits, so neither is a way around them.
 #[test]
-fn test_trusted_inspector_and_trait_paths_apply_same_runtime_limits() {
+fn test_inspector_and_plain_paths_apply_same_runtime_limits() {
     let trait_path = {
         let mut state = common::state();
         let factory = common::factory();
@@ -73,12 +73,12 @@ fn test_trusted_inspector_and_trait_paths_apply_same_runtime_limits() {
     let inspector_path = {
         let mut state = common::state();
         let factory = common::factory();
-        let executor = factory.create_executor_with_trusted_inspector(
+        let evm = factory.evm_factory().create_evm_with_inspector(
             &mut state,
             common::evm_env(),
-            common::unlimited_ctx(),
-            DeclaredObserver::new(GasInspector::new()),
+            GasInspector::new(),
         );
+        let executor = factory.create_executor(evm, common::unlimited_ctx());
         *executor.evm().tx_runtime_limits()
     };
 
@@ -151,16 +151,20 @@ fn test_direct_construction_stops_a_transaction_over_the_blocks_data_size_limit(
         outcome.limit_exceeded,
         Some(LimitCheck::ExceedsLimit {
             kind: LimitKind::DataSize,
-            limit: DATA_SIZE_LIMIT,
-            used: mega_evm::TX_BODY_SIZE + 2 * 40,
-            frame_local: false,
-        })
+            limit: DATA_SIZE_LIMIT - mega_evm::TX_BODY_SIZE,
+            used: 2 * 40,
+            frame_local: true,
+        }),
+        "the transaction's own frame crosses its budget, what the body leaves of the limit"
     );
     match &outcome.result {
         ExecutionResult::Revert { output, .. } => assert_eq!(
             output.as_ref(),
-            MegaLimitExceeded { kind: LimitKind::DataSize.as_u8(), limit: DATA_SIZE_LIMIT }
-                .abi_encode(),
+            MegaLimitExceeded {
+                kind: LimitKind::DataSize.as_u8(),
+                limit: DATA_SIZE_LIMIT - mega_evm::TX_BODY_SIZE,
+            }
+            .abi_encode(),
             "the stop's revert data"
         ),
         other => panic!("expected a revert-class stop, got {other:?}"),

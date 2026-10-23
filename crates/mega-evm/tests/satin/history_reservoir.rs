@@ -5,7 +5,7 @@
 //! gas. Below the cap the reservoir is empty, every charge spills straight onto regular gas, and
 //! a charge that is silently given back looks exactly like a charge that was made and kept.
 //!
-//! So the rule this lane carries, and the next mechanism inherits: **every ledger invariant gets
+//! So the rule these tests carry, and the next mechanism inherits: **every ledger invariant gets
 //! at least one case above the cap**. Each holds its transaction to
 //!
 //! ```text
@@ -30,8 +30,12 @@ use mega_evm::{
 };
 use revm::bytecode::opcode::{CALL, CREATE, GAS, MSTORE, POP, PUSH0, PUSH1, RETURN, REVERT, STOP};
 
-use crate::common::{
-    body_history, call, execute, history_is_free, history_rounds, runs_at_measurement_prices,
+use crate::{
+    common::{
+        body_history, call, execute, history_is_free, history_rounds, runs_at_measurement_prices,
+        state_is_free,
+    },
+    salt::{crowded_account, minimal_envs, salt_context},
 };
 
 const CALLER: Address = address!("0000000000000000000000000000000000700000");
@@ -184,7 +188,7 @@ fn test_a_reverting_child_gives_its_records_back_to_the_reservoir() {
     assert!(outcome.result.is_success(), "the caller survives its child's revert");
     assert_eq!(
         outcome.usage,
-        LimitUsage { data_size: mega_evm::TX_BODY_SIZE, write_records: 0 },
+        LimitUsage { data_size: mega_evm::TX_BODY_SIZE, write_records: 0, state_growth: 0 },
         "the reverted transfer kept nothing but the body"
     );
     assert_eq!(outcome.gas.history, BODY, "the body alone");
@@ -195,10 +199,10 @@ fn test_a_reverting_child_gives_its_records_back_to_the_reservoir() {
     );
 }
 
-/// A value call a system contract's interceptor refuses never starts a frame: its lane is empty
-/// and the whole charge comes back. It is the path where the caller is paid back twice if the
-/// frame inherited the caller's reservoir from before the charge, because the empty lane refills
-/// what the adoption already restored.
+/// A value call a system contract's interceptor refuses never starts a frame: its start counts
+/// nothing and the whole charge comes back. It is the path where the caller is paid back twice if
+/// the frame inherited the caller's reservoir from before the charge, because the refund of the
+/// start charge refills what the adoption already restored.
 #[test]
 fn test_an_intercepted_value_call_gives_its_records_back_once() {
     if runs_at_measurement_prices() {
@@ -218,7 +222,7 @@ fn test_an_intercepted_value_call_gives_its_records_back_once() {
     assert!(outcome.result.is_success(), "the caller survives the refusal");
     assert_eq!(
         outcome.usage,
-        LimitUsage { data_size: mega_evm::TX_BODY_SIZE, write_records: 0 },
+        LimitUsage { data_size: mega_evm::TX_BODY_SIZE, write_records: 0, state_growth: 0 },
         "the refused call wrote nothing but the body"
     );
     assert_eq!(outcome.gas.history, BODY, "the body alone");
@@ -305,4 +309,40 @@ fn test_the_body_draws_the_reservoir_first_and_only_its_excess_from_regular_gas(
     }
     assert_eq!(body, 310 * 88, "the body at the spec's price");
     assert_eq!(INTRINSIC + ANSWERING + body, 42_295, "the empty call's 42,280 and the program");
+}
+
+/// A transaction above the execution cap that runs out of gas in the runtime gas phase, before its
+/// first frame, keeps its body's history charged, and what the reservoir paid of it with it:
+/// revm rebuilds the transaction's gas from its intrinsic cost on that path, and the body is
+/// intrinsic [S5]. The rest of the regular budget is consumed, and what is left of the reservoir
+/// returns to the sender.
+///
+/// The phase runs out here on EIP-2780's charge for the account a value call creates, in a bucket
+/// crowded past what the regular budget and the reservoir together can pay. A body charged where
+/// the rebuild drops it would leave the reservoir whole and the history ledger empty.
+#[test]
+fn test_an_out_of_gas_before_the_first_frame_keeps_the_body_the_reservoir_paid() {
+    if history_is_free() || history_rounds() || state_is_free() {
+        return;
+    }
+    const EMPTY: Address = address!("0000000000000000000000000000000000700e00");
+    let body = body_history(0);
+    let reservoir = body + 1_000;
+    let account = mega_evm::satin_gas_params()
+        .get(revm::context_interface::cfg::GasId::new_account_state_gas());
+    let m = (TX_GAS_LIMIT_CAP + reservoir) / account + 2;
+    let envs = crowded_account(minimal_envs(), EMPTY, m);
+    let tx = call(CALLER, EMPTY, U256::from(1), TX_GAS_LIMIT_CAP + reservoir);
+    let outcome = mega_evm::MegaEvm::new(salt_context(funded(), envs))
+        .execute_transaction(tx)
+        .expect("the transaction is valid");
+    assert!(outcome.result.is_halt(), "{:?}", outcome.result);
+    assert_eq!(outcome.gas.history, body, "the body stays charged");
+    assert_eq!(outcome.gas.state, 0, "the account was not created");
+    assert_eq!(outcome.gas.reservoir_remaining, reservoir - body, "the reservoir paid the body");
+    assert_eq!(outcome.gas.gas_used, TX_GAS_LIMIT_CAP + body, "the regular budget is consumed");
+    assert_eq!(
+        outcome.usage,
+        LimitUsage { data_size: TX_BODY_SIZE, write_records: 0, state_growth: 0 }
+    );
 }

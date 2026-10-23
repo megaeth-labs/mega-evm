@@ -1,18 +1,16 @@
-//! Inspectors on Satin: what a rewriting inspector gets, the one rewrite refused, and the
-//! admission gate block execution keys on.
+//! Inspectors on Satin: what a rewriting inspector gets and what its rewrites do not change.
 
 use alloy_evm::Evm;
 use alloy_primitives::{address, Address, Bytes, Log, U256};
 use mega_evm::{
-    test_utils::{transfer_log, BytecodeBuilder, GasInspector, MemoryDatabase},
-    DeclaredObserver, MegaContext, MegaEvm, TX_BODY_SIZE, WRITE_RECORD_SIZE,
+    test_utils::{transfer_log, BytecodeBuilder, GasInspector, MemoryDatabase, ReadOnlyObserver},
+    MegaContext, MegaEvm, LOG_BASE_SIZE, TX_BODY_SIZE, WRITE_RECORD_SIZE,
 };
 use revm::{
-    bytecode::opcode::{CALL, CREATE, GAS, INVALID, PUSH0, REVERT, SSTORE},
+    bytecode::opcode::{CALL, CREATE, GAS, INVALID, LOG0, PUSH0, REVERT, SSTORE},
     context::result::EVMError,
-    inspector::NoOpInspector,
     interpreter::{
-        interpreter::EthInterpreter, interpreter_types::Jumps, CallInputs, CallOutcome,
+        interpreter::EthInterpreter, interpreter_types::Jumps, CallInputs, CallOutcome, CallValue,
         CreateInputs, CreateOutcome, Gas, InstructionResult, Interpreter, InterpreterResult,
     },
     Database, Inspector,
@@ -20,7 +18,7 @@ use revm::{
 use revm_inspectors::tracing::{TracingInspector, TracingInspectorConfig};
 
 use crate::common::{
-    account_state_gas, body_history, call, context, execute_under, history, slot_state_gas,
+    account_state_gas, body_history, call, context, execute_under, history, share, slot_state_gas,
 };
 
 const CALLER: Address = address!("0000000000000000000000000000000000400000");
@@ -29,16 +27,16 @@ const B: Address = address!("00000000000000000000000000000000000000B1");
 const FAKE: Address = address!("00000000000000000000000000000000000FA4E0");
 
 /// 1,000,000 of regular gas on top of what these scenarios add at the byte prices in effect: two
-/// fresh slots and a new account, the body and four records, and 64 times the history of two
-/// records, which a call or a creation that forwards all but a 64th of its gas pays for the frame
-/// it starts from the 64th it keeps.
+/// fresh slots and a new account, the body and four records, and 50 times the history of two
+/// records, which a call or a creation that forwards all but 2 per cent of its gas pays for the
+/// frame it starts from the fiftieth it keeps.
 fn gas_limit() -> u64 {
     1_000_000 +
         2 * slot_state_gas() +
         account_state_gas() +
         body_history(0) +
         history(4 * WRITE_RECORD_SIZE) +
-        64 * history(2 * WRITE_RECORD_SIZE)
+        50 * history(2 * WRITE_RECORD_SIZE)
 }
 
 /// Calls `B` with `value` and stores the call's success flag in slot 0.
@@ -220,7 +218,7 @@ fn test_short_circuited_value_call_moves_no_value() {
     );
     assert_eq!(result.state[&A].info.balance, U256::from(100), "no value left A");
     assert!(result.state.get(&B).is_none_or(|b| b.info.balance.is_zero()), "no value reached B");
-    assert_eq!(evm.ctx().additional_limit().usage().write_records, 1, "only A's slot 0");
+    assert_eq!(evm.ctx().limit_usage().write_records, 1, "only A's slot 0");
 }
 
 /// An address rewritten in `create_end` is what the caller sees, but the code is where the
@@ -241,48 +239,53 @@ fn test_create_end_address_rewrite_reaches_the_caller_not_the_code() {
 }
 
 /// A creation its own frame budget stops, revived by an inspector: the stop is the creation's alone
-/// and no stop of the transaction, so the creation failed as any failed creation does and its
-/// revival settles as the failure — the transaction is not refused. Under a data-size limit of the
-/// body and 122 bytes, the creator may keep 122 and the creation 98% of them, 119: the creation's
-/// start makes two records, 80 bytes, and the write in its init code is a third, 40 more, over its
-/// budget, which the transaction's limit still holds. Under the body and 160 bytes the budget holds
-/// it, and so does the transaction's limit once the creator stores the address, a fourth record:
-/// the same creation succeeds.
+/// and no stop of the transaction, so the creation failed as any failed creation does, and its
+/// revival settles as the success the inspector made of it — the transaction is not refused. Under
+/// a data-size limit of the body and 4,000 bytes the creation gets 98% of them, 3,920: its start
+/// makes the created account's record, 40 bytes, and the log in its init code 3,881 more, one byte
+/// over its budget, which the transaction's limit still holds. Revived, it hands its creator the
+/// record it counted, and the creator keeps that, its nonce record and the address it stores. Under
+/// the body and 4,100 bytes the budget, 4,018, holds the log, and the creator keeps its two records
+/// on top: the same creation succeeds.
 #[test]
 fn test_a_creation_its_frame_budget_stops_may_be_revived() {
-    // A write of 1 to slot 1, short enough for `create_and_store_address`.
+    // A log one byte past the creation's share once the created account's record is counted.
+    const LOGGED: u64 = 3_849;
+    assert_eq!(WRITE_RECORD_SIZE + LOG_BASE_SIZE + LOGGED, share(4_000) + 1);
     let init_code = BytecodeBuilder::default()
-        .push_number(1_u8)
-        .push_number(1_u8)
-        .append(SSTORE)
+        .push_number(LOGGED)
+        .push_number(0_u8)
+        .append(LOG0)
         .stop()
         .build();
+    // What `gas_limit` covers, and the log the creation keeps when its budget holds it.
+    let gas_limit = gas_limit() + history(LOG_BASE_SIZE + LOGGED) + 100_000;
     let db = || MemoryDatabase::default().account_code(A, create_and_store_address(&init_code));
     let under = |bytes: u64| {
         mega_evm::EvmTxRuntimeLimits::default().with_tx_data_size_limit(TX_BODY_SIZE + bytes)
     };
     let plain =
-        |bytes: u64| execute_under(db(), call(CALLER, A, U256::ZERO, gas_limit()), under(bytes));
+        |bytes: u64| execute_under(db(), call(CALLER, A, U256::ZERO, gas_limit), under(bytes));
     let created = |outcome: &mega_evm::MegaTransactionOutcome| {
         outcome.state[&A]
             .storage
             .get(&U256::ZERO)
             .is_some_and(|slot| !slot.present_value().is_zero())
     };
-    let roomy = plain(160);
+    let roomy = plain(4_100);
     assert!(roomy.result.is_success() && created(&roomy), "{:?}", roomy.result);
 
     // Without the inspector the creation fails alone: its creator stores no address and succeeds,
     // and the transaction is not stopped.
-    let stopped = plain(122);
+    let stopped = plain(4_000);
     assert!(stopped.result.is_success(), "{:?}", stopped.result);
     assert_eq!(stopped.limit_exceeded, None, "a frame budget below is no stop");
     assert!(!created(&stopped), "the creation failed");
 
-    let limits = under(122);
+    let limits = under(4_000);
     let revived = MegaEvm::new(context(db()).with_tx_runtime_limits(limits))
         .with_inspector(Rewriter { create_succeeds: true, ..Default::default() })
-        .execute_transaction(call(CALLER, A, U256::ZERO, gas_limit()))
+        .execute_transaction(call(CALLER, A, U256::ZERO, gas_limit))
         .unwrap();
     assert!(revived.result.is_success(), "{:?}", revived.result);
     assert_eq!(revived.limit_exceeded, None, "and the revival is no stop either");
@@ -299,33 +302,33 @@ fn test_a_creation_its_frame_budget_stops_may_be_revived() {
     );
 }
 
-/// A declared observer that writes back fails its declaration in a debug build.
+/// A read-only observer that writes back fails its declaration in a debug build.
 #[test]
 #[cfg(debug_assertions)]
-#[should_panic(expected = "a declared observer wrote to the interpreter in `step_end`")]
-fn test_false_declaration_fails_in_debug() {
+#[should_panic(expected = "a read-only observer wrote to the interpreter in `step_end`")]
+fn test_false_read_only_claim_fails_in_debug() {
     let rewriter = Rewriter { charge_after_sstore: 1, ..Default::default() };
-    let mut evm = MegaEvm::new(context(writes_two_slots()))
-        .with_trusted_inspector(DeclaredObserver(rewriter));
+    let mut evm =
+        MegaEvm::new(context(writes_two_slots())).with_inspector(ReadOnlyObserver(rewriter));
     let _ = evm.transact_raw(call(CALLER, A, U256::ZERO, gas_limit()));
 }
 
-/// A declared call rewrite fails too.
+/// A read-only observer's call rewrite fails too.
 #[test]
 #[cfg(debug_assertions)]
-#[should_panic(expected = "a declared observer rewrote a call result")]
-fn test_false_declaration_of_a_call_rewrite_fails_in_debug() {
+#[should_panic(expected = "a read-only observer rewrote a call result")]
+fn test_false_read_only_claim_of_a_call_rewrite_fails_in_debug() {
     let db = MemoryDatabase::default()
         .account_code(A, call_b_and_store_flag(0))
         .account_code(B, Bytes::from_static(&[INVALID]));
     let rewriter = Rewriter { call_succeeds: true, ..Default::default() };
-    let mut evm = MegaEvm::new(context(db)).with_trusted_inspector(DeclaredObserver(rewriter));
+    let mut evm = MegaEvm::new(context(db)).with_inspector(ReadOnlyObserver(rewriter));
     let _ = evm.transact_raw(call(CALLER, A, U256::ZERO, gas_limit()));
 }
 
-/// A declared observer that only reads produces the transaction no inspector produces.
+/// A read-only observer that only reads produces the transaction no inspector produces.
 #[test]
-fn test_declared_tracer_changes_nothing() {
+fn test_read_only_tracer_changes_nothing() {
     let db = || {
         MemoryDatabase::default()
             .account_code(A, call_b_and_store_flag(0))
@@ -334,7 +337,7 @@ fn test_declared_tracer_changes_nothing() {
     let plain =
         MegaEvm::new(context(db())).transact_raw(call(CALLER, A, U256::ZERO, gas_limit())).unwrap();
     let tracer = TracingInspector::new(TracingInspectorConfig::default_parity());
-    let mut evm = MegaEvm::new(context(db())).with_trusted_inspector(DeclaredObserver(tracer));
+    let mut evm = MegaEvm::new(context(db())).with_inspector(ReadOnlyObserver(tracer));
     let traced = evm.transact_raw(call(CALLER, A, U256::ZERO, gas_limit())).unwrap();
     assert_eq!(plain.result, traced.result);
     assert_eq!(plain.state, traced.state);
@@ -365,27 +368,6 @@ fn test_the_gas_inspector_keeps_the_byte_of_an_undefined_opcode() {
             "the rendering names the byte: {last:?}"
         );
     }
-}
-
-/// The admission gate: only an enabled inspector that did not arrive declared is a rewriting one.
-#[test]
-fn test_has_rewriting_inspector_truth_table() {
-    let evm = || MegaEvm::new(context(MemoryDatabase::default()));
-    assert!(!evm().has_rewriting_inspector(), "no inspector");
-    assert!(evm().with_inspector(NoOpInspector).has_rewriting_inspector(), "a tool's inspector");
-    assert!(
-        evm().with_inspector(GasInspector::new()).has_rewriting_inspector(),
-        "test utilities are tools"
-    );
-    assert!(!evm().with_trusted_inspector(NoOpInspector).has_rewriting_inspector());
-    let tracer = TracingInspector::new(TracingInspectorConfig::default_parity());
-    assert!(!evm().with_trusted_inspector(DeclaredObserver(tracer)).has_rewriting_inspector());
-
-    let mut disabled = evm().with_inspector(Rewriter::default());
-    disabled.set_inspector_enabled(false);
-    assert!(!disabled.has_rewriting_inspector(), "a disabled inspector does not run");
-    disabled.set_inspector_enabled(true);
-    assert!(disabled.has_rewriting_inspector());
 }
 
 /// Counts frame starts and ends.
@@ -530,13 +512,13 @@ fn busy_contract() -> MemoryDatabase {
     MemoryDatabase::default().account_code(A, code).account_code(B, Bytes::from_static(&[0x00]))
 }
 
-/// A declared observer forwards every callback to the inspector inside.
+/// A read-only observer forwards every callback to the inspector inside.
 #[test]
-fn test_declared_observer_forwards_every_callback() {
+fn test_read_only_observer_forwards_every_callback() {
     let mut plain = MegaEvm::new(context(busy_contract())).with_inspector(Recorder::default());
     plain.transact_raw(call(CALLER, A, U256::ZERO, gas_limit())).unwrap();
     let mut declared = MegaEvm::new(context(busy_contract()))
-        .with_trusted_inspector(DeclaredObserver::new(Recorder::default()));
+        .with_inspector(ReadOnlyObserver::new(Recorder::default()));
     declared.transact_raw(call(CALLER, A, U256::ZERO, gas_limit())).unwrap();
 
     let seen = plain.inspector().clone();
@@ -555,7 +537,7 @@ fn test_declared_observer_forwards_every_callback() {
             seen.selfdestruct > 0,
         "every callback ran: {seen:?}"
     );
-    assert_eq!(DeclaredObserver::new(Recorder::default()).into_inner(), Recorder::default());
+    assert_eq!(ReadOnlyObserver::new(Recorder::default()).into_inner(), Recorder::default());
 }
 
 /// Keeps every log handed to `Inspector::log`, the callback for a log journaled outside an
@@ -569,16 +551,16 @@ impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for FrameStartLogs
     }
 }
 
-/// A declared observer forwards the EIP-7708 transfer logs a frame's start journals: the
+/// A read-only observer forwards the EIP-7708 transfer logs a frame's start journals: the
 /// transaction's value into `A`, whose frame runs, and `A`'s value into `B`, an account with no
 /// code, whose frame is answered without running.
 #[test]
-fn test_declared_observer_forwards_the_transfer_logs_of_frame_starts() {
+fn test_read_only_observer_forwards_the_transfer_logs_of_frame_starts() {
     let db = MemoryDatabase::default()
         .account_balance(CALLER, U256::from(5))
         .account_code(A, call_b_and_store_flag(2));
-    let mut evm = MegaEvm::new(context(db))
-        .with_trusted_inspector(DeclaredObserver::new(FrameStartLogs::default()));
+    let mut evm =
+        MegaEvm::new(context(db)).with_inspector(ReadOnlyObserver::new(FrameStartLogs::default()));
     let outcome = evm.transact_raw(call(CALLER, A, U256::from(5), gas_limit())).unwrap();
     assert!(outcome.result.is_success(), "{:?}", outcome.result);
     assert_eq!(
@@ -634,32 +616,32 @@ impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for Writer {
 #[cfg(debug_assertions)]
 fn run_declared(writer: Writer) {
     let mut evm =
-        MegaEvm::new(context(writes_two_slots())).with_trusted_inspector(DeclaredObserver(writer));
+        MegaEvm::new(context(writes_two_slots())).with_inspector(ReadOnlyObserver(writer));
     let _ = evm.transact_raw(call(CALLER, A, U256::ZERO, gas_limit()));
 }
 
-/// A declared observer that edits a frame's inputs fails its declaration in a debug build.
+/// A read-only observer that edits a frame's inputs fails its declaration in a debug build.
 #[test]
 #[cfg(debug_assertions)]
-#[should_panic(expected = "a declared observer rewrote a frame's inputs")]
-fn test_false_declaration_of_an_input_edit_fails_in_debug() {
+#[should_panic(expected = "a read-only observer rewrote a frame's inputs")]
+fn test_false_read_only_claim_of_an_input_edit_fails_in_debug() {
     run_declared(Writer { edit_inputs: true, ..Default::default() });
 }
 
-/// A declared observer that writes to the journal fails its declaration in a debug build.
+/// A read-only observer that writes to the journal fails its declaration in a debug build.
 #[test]
 #[cfg(debug_assertions)]
-#[should_panic(expected = "a declared observer wrote to the journal in `step`")]
-fn test_false_declaration_of_a_journal_write_fails_in_debug() {
+#[should_panic(expected = "a read-only observer wrote to the journal in `step`")]
+fn test_false_read_only_claim_of_a_journal_write_fails_in_debug() {
     run_declared(Writer { log_in_step: true, ..Default::default() });
 }
 
-/// A declared observer that rewrites a frame result in `frame_end` fails its declaration in a
+/// A read-only observer that rewrites a frame result in `frame_end` fails its declaration in a
 /// debug build.
 #[test]
 #[cfg(debug_assertions)]
-#[should_panic(expected = "a declared observer rewrote a frame result in `frame_end`")]
-fn test_false_declaration_of_a_frame_end_rewrite_fails_in_debug() {
+#[should_panic(expected = "a read-only observer rewrote a frame result in `frame_end`")]
+fn test_false_read_only_claim_of_a_frame_end_rewrite_fails_in_debug() {
     run_declared(Writer { rewrite_frame_end: true, ..Default::default() });
 }
 
@@ -686,10 +668,11 @@ impl<CTX> Inspector<CTX, EthInterpreter> for Seen {
 }
 
 /// A system call runs on the handler's plain system-call path wherever the engine and alloy-evm
-/// make one — the pre-block calls' entry point, alloy-evm's and revm's — so the EVM's inspector
-/// sees nothing of it, as alloy-evm's own EVMs have it. revm's inspecting entry point is the one
-/// that hands it to the inspector, and there the call keeps every exemption a system call has: a
-/// data-size limit of zero, which would stop a transaction before its first frame, stops nothing.
+/// make one — alloy-evm's and revm's entry points here, the block's pre-block calls in the block
+/// tests — so the EVM's inspector sees nothing of it, as alloy-evm's own EVMs have it. revm's
+/// inspecting entry point is the one that hands it to the inspector, and there the call keeps every
+/// exemption a system call has: a data-size limit of zero, which would stop a transaction before
+/// its first frame, stops nothing.
 #[test]
 fn test_only_the_inspecting_system_call_entry_point_runs_the_inspector() {
     use revm::{InspectSystemCallEvm, SystemCallEvm};
@@ -699,8 +682,6 @@ fn test_only_the_inspecting_system_call_entry_point_runs_the_inspector() {
     let mut evm =
         MegaEvm::new(context(db).with_tx_runtime_limits(limits)).with_inspector(Seen::default());
 
-    let result = evm.transact_system_call_with_gas_limit(CALLER, A, Bytes::new(), 30_000_000);
-    assert!(result.unwrap().result.is_success());
     assert!(Evm::transact_system_call(&mut evm, CALLER, A, Bytes::new())
         .unwrap()
         .result
@@ -770,4 +751,35 @@ fn test_intrinsic_data_size_overflow_with_inspector_early_return() {
     assert_eq!(evm.inspector().answered, 0, "the inspector never saw a frame");
     assert_eq!(format!("{inspected:?}"), format!("{plain:?}"));
     assert!(format!("{plain:?}").contains(mega_evm::TX_BODY_OVER_DATA_SIZE_LIMIT), "{plain:?}");
+}
+
+/// Turns every call into a transfer of one wei, whatever value its opcode or the transaction gave
+/// it.
+struct AddsValue;
+
+impl<CTX> Inspector<CTX, EthInterpreter> for AddsValue {
+    fn call(&mut self, _: &mut CTX, inputs: &mut CallInputs) -> Option<CallOutcome> {
+        inputs.value = CallValue::Transfer(U256::from(1));
+        None
+    }
+}
+
+/// A rewriting inspector may change what a start writes after its history was charged: the
+/// transaction's own call and `A`'s call to `B` carry no value when they are charged — before
+/// execution and at `A`'s `CALL` — and one wei each once the inspector rewrote them. The checks
+/// that the records counted are the ones charged, which a debug build makes on every other path,
+/// are not made under such an inspector, and the rewritten starts run: both transfers move their
+/// wei.
+#[test]
+fn test_a_rewriting_inspector_may_change_what_a_start_writes() {
+    let db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(10u64.pow(18)))
+        .account_balance(A, U256::from(1))
+        .account_code(A, call_b_and_store_flag(0));
+    let mut evm = MegaEvm::new(context(db)).with_inspector(AddsValue);
+    let outcome = evm.execute_transaction(call(CALLER, A, U256::ZERO, gas_limit())).unwrap();
+    assert!(outcome.result.is_success(), "{:?}", outcome.result);
+    assert_eq!(outcome.state[&A].storage[&U256::ZERO].present_value, U256::from(1), "B ran");
+    assert_eq!(outcome.state[&B].info.balance, U256::from(1), "A's rewritten call moved its wei");
+    assert_eq!(outcome.state[&A].info.balance, U256::from(1), "and the transaction's moved A's");
 }

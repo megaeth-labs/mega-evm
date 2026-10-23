@@ -29,15 +29,15 @@ const CALLER: Address = address!("0000000000000000000000000000000000900000");
 const CALLEE: Address = address!("0000000000000000000000000000000000900001");
 
 /// 1,000,000 of regular gas on top of what the transactions here add at the byte prices in effect:
-/// a new account and a fresh slot, a kilobyte of history, and 64 times the history of two records,
-/// which a `CREATE` that forwards all but a 64th of its gas pays for the frame it starts from the
-/// 64th it keeps.
+/// a new account and a fresh slot, a kilobyte of history, and 50 times the history of two records,
+/// which a `CREATE` that forwards all but 2 per cent of its gas pays for the frame it starts from
+/// the fiftieth it keeps.
 fn gas_limit() -> u64 {
     1_000_000 +
         account_state_gas() +
         slot_state_gas() +
         history(1_000) +
-        64 * history(2 * mega_evm::WRITE_RECORD_SIZE)
+        50 * history(2 * mega_evm::WRITE_RECORD_SIZE)
 }
 
 /// The gas a transaction used, the state gas inside it, the history gas the schedule does not

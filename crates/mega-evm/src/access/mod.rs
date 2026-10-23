@@ -37,22 +37,27 @@
 //! (which every account opcode and every call goes through, the EIP-7702 delegate's included), its
 //! storage load and its `SELFDESTRUCT`. A load that fails — a cold account the frame cannot pay
 //! for, a database error — marks nothing, and neither does an opcode that fails after the load:
-//! the Host only observes, and the opcode's wrapper commits the read once the opcode completed,
-//! as it does with a write record.
+//! the Host only marks the read, and the opcode's wrapper commits it once the opcode completed, as
+//! a write record is counted only once its opcode completed.
+//!
+//! A load is a read only when one of those opcodes makes it, inside its wrapper. `CREATE` and
+//! `CREATE2` load their creator's account and the created address's through the same Host load,
+//! to check the creator's balance and nonce and to price the created account; those loads are the
+//! creation's own checks, as a value call's check of its caller's balance is the call's, and are
+//! neither marked nor refused, whichever of the two accounts is the beneficiary's.
 //!
 //! # The cap
 //!
 //! Compute is the regular gas the transaction spends on what it runs, read off revm's `Gas`: state
 //! and history gas that spilled onto regular gas are not compute, gas withheld from regular
-//! charges is never spent, and what a halting frame burns is not compute either ([`Detention`]).
-//! The one burn counted as compute is what a frame has left when an opcode's static gas fails,
-//! which no wrapper sees: per halting frame, under the failed charge's price (at most 4,999, on
-//! `SELFDESTRUCT`). Burned gas is counted as compute, so the stop comes earlier, never later.
-//! A value call's stipend is not compute either: compute is regular gas drawn from the
-//! transaction's own pools, and the stipend is gas nobody paid. A callee may run up to 2,300 gas
-//! on each value call's stipend, and a warm value call to an empty account counts 6,800 of compute
-//! (9,100, less the 2,300 stipend the callee leaves unspent and returns to its caller), so the
-//! gas run after a read is at most about 34% (2,300 / 6,800) more than the cap.
+//! charges is never spent, and what a halting frame burns is not compute either ([`Detention`]),
+//! whatever charge it failed on, an opcode's static gas included: the revm fork records what the
+//! frame had before the halt zeroed it. What a callee runs on a value call's stipend is compute, as
+//! everything a frame runs is: compute counts every regular charge an instruction makes, whoever
+//! funds it, and nothing else, so the gas run after a read is at most the cap. The stipend itself
+//! is gas nobody paid, so the regular ledger bills the transaction its compute less the stipends of
+//! its value calls. A precompile that runs out of gas counts nothing of its forward: it burns it,
+//! as a halting frame burns what it has left.
 //!
 //! A read sets a limit: the transaction's compute at the read plus the read's cap. The limit only
 //! goes down, so the most restrictive of several reads is the one that binds, whatever their
@@ -64,7 +69,7 @@
 //! the frame runs out of regular gas. So the cap is enforced through the frame's gas, with the
 //! revm fork's two parts of a frame's regular gas: a spendable part, the only one a regular charge
 //! draws, and a withheld part. Every other reader of the frame's gas sees the two together — `GAS`,
-//! the 63/64 forward and the clamp on an explicit call gas, the `SSTORE` sentry, the skip-cold
+//! the 98/100 forward and the clamp on an explicit call gas, the `SSTORE` sentry, the skip-cold
 //! checks, the gas a child returns, the reimbursement — and a forward or a state or history spill
 //! draws the withheld part first.
 //!

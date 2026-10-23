@@ -215,7 +215,7 @@ impl Scenario {
                     self.to,
                     self.data.clone(),
                 );
-                render_system_call(result.map(|r| (r.result, r.state)))
+                render_system_call(result.map(|r| (r.result, r.state)), evm.ctx())
             } else {
                 render_outcome(evm.execute_transaction(self.tx()))
             };
@@ -230,7 +230,7 @@ impl Scenario {
                 self.to,
                 self.data.clone(),
             );
-            render_system_call(result.map(|r| (r.result, r.state)))
+            render_system_call(result.map(|r| (r.result, r.state)), evm.ctx())
         } else {
             render_outcome(evm.execute_transaction(self.tx()))
         };
@@ -540,6 +540,9 @@ fn scenarios() -> Vec<Scenario> {
         /* Limits. */
         let data_size = Deployment::new(logging(2_000));
         let body = reference(data_size.call_data(LARGE_OVERRIDE), GAS_LIMITS[0]).usage.data_size;
+        // The call keeps 40 bytes for the signer's record, and the creation's share of them, 39,
+        // is one short of its start.
+        let small_body = reference(small.call_data(LARGE_OVERRIDE), GAS_LIMITS[0]).usage.data_size;
         let compute = Deployment::new(reads_then_burns(TIMESTAMP, 1_000));
         for nonce in [0, 1] {
             let db = |d: &Deployment| system_db().account_nonce(d.signer, nonce);
@@ -588,7 +591,7 @@ fn scenarios() -> Vec<Scenario> {
                     &small,
                     gas_limit,
                 )
-                .limits(EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(body + 40)),
+                .limits(EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(small_body + 40)),
             );
         }
         all.push(
@@ -956,6 +959,7 @@ impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for Recorder {
             address: None,
             charged_create_state_gas: inputs.charged_create_state_gas(),
             charged_state_gas_address: inputs.charged_state_gas_address(),
+            charged_start: Default::default(),
         })
     }
 
@@ -1031,11 +1035,17 @@ fn render_outcome<E: core::fmt::Debug>(outcome: Result<MegaTransactionOutcome, E
     )
 }
 
-fn render_system_call<R: core::fmt::Debug, E: core::fmt::Debug>(
+/// A system call's result and state, and the reservoir it left, which its result does not carry.
+fn render_system_call<R: core::fmt::Debug, E: core::fmt::Debug, DB: Database>(
     result: Result<(R, EvmState), E>,
+    ctx: &MegaContext<DB>,
 ) -> String {
     match result {
-        Ok((result, state)) => format!("result: {result:?}\nstate:\n{}", render_state(&state)),
+        Ok((result, state)) => format!(
+            "result: {result:?}\nreservoir_remaining: {}\nstate:\n{}",
+            ctx.additional_limit().reservoir_remaining(),
+            render_state(&state)
+        ),
         Err(error) => format!("error: {error:?}\n"),
     }
 }

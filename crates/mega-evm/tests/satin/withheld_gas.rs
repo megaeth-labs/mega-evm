@@ -1,7 +1,7 @@
 //! Gas detention against every other reader of a frame's gas, and against every out-of-gas.
 //!
 //! A detained frame's spendable gas is held at what the limit leaves the transaction, and the rest
-//! is withheld: only a regular charge sees the difference. `GAS`, the 63/64 forward, the `SSTORE`
+//! is withheld: only a regular charge sees the difference. `GAS`, the 98/100 forward, the `SSTORE`
 //! sentry, the skip-cold checks and a callee's inheritance see the whole regular gas. So a
 //! transaction that reads volatile data runs as it does without the read — the same result and the
 //! same bill on every ledger — unless its compute crosses the limit, which is a regular charge the
@@ -426,8 +426,8 @@ fn test_a_callees_out_of_gas_is_caught_as_without_the_read() {
 ///
 /// The callee's charge fails on an operand, a memory expansion, a hash, four copies, a log and an
 /// invalid opcode, all on all the gas; and on the history of the write records a value call makes,
-/// after the call forwarded 63/64 of its gas to a frame that never starts. That callee is given
-/// 400,000, or less where it would pay that history out of the 64th it keeps, and its caller
+/// after the call forwarded 98/100 of its gas to a frame that never starts. That callee is given
+/// 400,000, or less where it would pay that history out of the fiftieth it keeps, and its caller
 /// computes twenty rounds further, so the limit is left less than the callee forwards. Above the
 /// execution cap the reservoir pays that history, so that case runs below it. A precompile that
 /// rejects its input halts without running a frame, and burns all it was forwarded too.
@@ -456,12 +456,13 @@ fn test_what_a_halting_callee_burns_is_not_compute() {
     ];
     // 6,396 rounds: 19,878,768 of compute before the call.
     let rounds = 6_396;
-    // The value call's callee keeps a 64th of what it has at its `CALL`, which has to be less than
-    // the history of the records the call makes. It spends at most 40,000 before the forward — the
-    // value transfer, the new account and the cold access. Where 64 times that history is under
-    // 100,000, as where a history byte costs nothing, the callee cannot also forward past the
-    // margin its caller leaves, and the case has nothing to show.
-    let middle_gas = (64 * history(2 * WRITE_RECORD_SIZE)).saturating_sub(1).min(400_000);
+    // The value call's callee keeps a fiftieth of what it has at its `CALL` once the forward is
+    // taken, which has to be less than the history of the records the call makes: given less than
+    // 50 times that history, it keeps less whatever it spends before the forward — the value
+    // transfer, the new account and the cold access. Where 50 times that history is under 100,000,
+    // as where a history byte costs nothing, the callee cannot also forward past the margin its
+    // caller leaves, and the case has nothing to show.
+    let middle_gas = (50 * history(2 * WRITE_RECORD_SIZE)).saturating_sub(1).min(400_000);
     for gas_limit in TIERS {
         for (name, callee) in &cases {
             let records = name.starts_with("a value call");
@@ -486,11 +487,11 @@ fn test_what_a_halting_callee_burns_is_not_compute() {
             assert_eq!(slot(&detained, 0), Some(U256::ZERO), "{name}: the call failed");
             if records {
                 // `MIDDLE` halted on all it was given; the rest of the regular ledger is compute,
-                // and it leaves the limit less than the 63/64 `MIDDLE` forwarded, so counting that
+                // and it leaves the limit less than the 98/100 `MIDDLE` forwarded, so counting that
                 // forward as compute would have stopped the transaction.
                 let compute = plain.outcome.gas.regular - intrinsic(gas_limit) - middle_gas;
                 let margin = detained.limit.unwrap() - compute;
-                let forwarded = (middle_gas - 40_000) * 63 / 64;
+                let forwarded = (middle_gas - 40_000) * 98 / 100;
                 assert!(margin < forwarded, "{name}: {margin} short of the limit");
             }
         }
@@ -610,73 +611,41 @@ fn test_a_returndatacopy_that_cannot_pay_its_words_burns_what_its_frame_had() {
 /// for the recipient. The body's history is on the history ledger, whichever pool paid it.
 const CALL_INTRINSIC: u64 = 12_000 + 3_000;
 
-/// A charge the interpreter's step loop makes before the opcode runs — its static gas — is seen by
-/// no wrapper, so what a frame had when it fails counts as compute: burned gas counted as compute,
-/// which brings the stop earlier, never later, and by less than the failed charge's price per
-/// halting frame.
+/// A charge the interpreter's step loop makes before the opcode runs — its static gas — records
+/// what the frame had when it fails, as every failed charge does, so a halt on it burns that, and
+/// what it burns is not compute.
 ///
 /// Fifty children forwarded 5,002 gas each run a `PUSH20` and a `SELFDESTRUCT`, whose static
-/// charge of 5,000 fails with 4,999 left. Under a cap of 200,000 the caller stops, though about
-/// 8,500 gas of instructions ran after its read. The child that took the compute past the limit
-/// did so without a charge crossing it, so the stop is its caller's next charge, and the stop's
-/// compute, which the regular ledger bills, is the limit and that child's overshoot, under the
-/// 5,000 it failed to pay. Under a cap of 300,000, above fifty times the forward and the caller's
-/// own work, the caller completes as without the read.
+/// charge of 5,000 fails with 4,999 left. Each burns those, and the caller completes under a cap of
+/// 200,000 as without the read: counted as compute, the fifty burns would pass the cap.
 ///
-/// Rules: [S12.18], [S12]. Independence: independent — the limit, the walk of the charges to the
-/// crossing and the intrinsic gas are hand arithmetic from the opcode prices and EIP-2780.
+/// Rules: [S12.18], [S12]. Independence: independent — every charge is the opcode's price, the
+/// burns are the forward less the `PUSH20`, and the intrinsic gas is EIP-2780's.
 #[test]
-fn test_a_halt_on_a_static_charge_counts_what_its_frame_had_as_compute() {
+fn test_a_halt_on_a_static_charge_burns_what_its_frame_had() {
     let child = BytecodeBuilder::default().push_address(CALLER).append(SELFDESTRUCT).build();
+    // The read and its `POP`, then fifty calls: five pushes, the address, the forward, the access
+    // (cold the first time), the child's `PUSH20`, and the `POP` of the status.
+    let warm = crate::salt::entry(GasId::warm_storage_read_cost());
+    let compute = 2 + 2 + 50 * (10 + 3 + 3 + 3 + 2) + cold_access() + 49 * warm;
+    let burned = 50 * (5_002 - 3);
+    let limit = 2 + 200_000;
+    assert!(compute <= limit && compute + burned > limit, "only the burns would pass the limit");
     for gas_limit in TIERS {
-        let build = |first| {
+        let (detained, plain) = with_and_without_read_under(200_000, |first| {
             let code = calls_to_child(op(BytecodeBuilder::default(), first), 50, 5_002);
             let db = MemoryDatabase::default()
                 .account_code(CONTRACT, code.stop().build())
                 .account_code(CHILD, child.clone());
             (db, gas_limit)
-        };
-        let (detained, plain) = with_and_without_read_under(200_000, build);
-        let limit = detained.limit.unwrap();
-        assert_eq!(limit, 2 + 200_000);
-        assert_eq!(detained.outcome.result.output(), Some(&stop_data(limit)));
-        // The compute after the read: its `POP`, then each call — five pushes, the address, the
-        // forward's push, the access, cold the first time — and the child's whole forward, which
-        // it computes with or burns counted as compute, and the caller's `POP`. The caller's first
-        // charge the limit leaves no room for is the stop.
-        let mut since_read = 2;
-        let crossing = 'calls: {
-            for call in 0..50 {
-                let access = if call == 0 { cold_access() } else { 100 };
-                for charge in [2, 2, 2, 2, 2, 3, 3, access] {
-                    if since_read + charge > 200_000 {
-                        break 'calls since_read;
-                    }
-                    since_read += charge;
-                }
-                since_read += 5_002;
-                if since_read + 2 > 200_000 {
-                    break 'calls since_read;
-                }
-                since_read += 2;
-            }
-            panic!("the calls fit the cap");
-        };
-        assert!(crossing > 200_000 && crossing - 200_000 < 5_000, "an overshoot: {crossing}");
-        let used = 2 + crossing;
-        assert_eq!(
-            detained.outcome.limit_exceeded,
-            Some(LimitCheck::ExceedsLimit {
-                kind: LimitKind::ComputeGas,
-                limit,
-                used,
-                frame_local: false
-            })
-        );
-        assert_eq!(detained.outcome.gas.regular, CALL_INTRINSIC + used);
-        assert!(plain.outcome.result.is_success());
-        let (detained, plain) = with_and_without_read_under(300_000, build);
+        });
+        assert_eq!(detained.limit, Some(limit), "the read's compute plus the cap");
         assert_as_without_read(&detained, &plain, "fifty halts on a static charge");
+        assert_eq!(
+            plain.outcome.gas.regular,
+            intrinsic(gas_limit) + compute + burned,
+            "the bill is the intrinsic gas, the compute and the burns"
+        );
     }
 }
 
@@ -692,92 +661,77 @@ fn call_forwarding(code: BytecodeBuilder, to: Address, gas: u32) -> BytecodeBuil
         .append(CALL)
 }
 
-/// One case of [`test_a_static_gas_halt_takes_the_compute_past_the_limit`]: the transaction's
-/// code after its read, the cap, and the bill worked out by hand.
-struct Overshoot {
+/// One case of [`test_static_gas_halts_leave_the_compute_where_it_was`]: the transaction's code
+/// after its read, the cap, and the bill worked out by hand.
+struct StaticHalts {
     name: &'static str,
     /// [`CONTRACT`]'s code after its read: the read's `POP`, a call, and what follows it.
     after_read: fn(BytecodeBuilder) -> BytecodeBuilder,
     /// The block-environment cap.
     cap: u64,
-    /// The transaction's compute, the read's own two gas included, up to the end of the run or
-    /// to the charge that crossed.
+    /// The transaction's compute, the read's own two gas included: every charge its frames made.
     compute: u64,
-    /// Whether that compute ends on a stop.
-    stopped: bool,
-    /// The compute of the same program without the read, which completes.
-    plain_compute: u64,
+    /// What the halting frames burned: what each had when its static charge failed.
+    burned: u64,
 }
 
-/// A frame that halts because it cannot pay an opcode's static gas counts what it had left as
-/// compute, and that can take the transaction's compute past the limit without a crossing: no
-/// regular charge crossed the limit, so nothing stopped it. The overshoot is less than the static
-/// gas the frame failed to pay. Its caller then resumes with no spendable gas, so its next non-zero
-/// regular charge is the crossing; a caller whose whole gas cannot pay its own next static gas
-/// halts the same way first and adds what it had left, so the overshoots of a chain of halting
-/// frames add up. A transaction that makes no non-zero regular charge after the overshoot is not
-/// stopped at all, and ends with its compute past the limit.
+/// A frame that halts because it cannot pay an opcode's static gas burns what it had left, so a
+/// halt adds nothing to the transaction's compute, along a chain of such frames too: the compute
+/// stays within the limit where the burns counted as compute would take it past.
 ///
 /// Every halt here is a `SELFDESTRUCT`, whose static gas of 5,000 is the largest. The charges,
 /// from the read on: `TIMESTAMP` 2, which is the compute at the read, then `POP` 2; a call is five
 /// `PUSH0` at 2, a `PUSH20` and a `PUSH4` at 3, and its cold access of 3,000; a callee forwarded
-/// 5,002 runs a `PUSH20` of 3 and halts on its `SELFDESTRUCT` with 4,999 left, all of which is
-/// compute. So a call to a halting callee is 3,016 of compute in its caller and the 5,002 it
-/// forwarded.
+/// 5,002 runs a `PUSH20` of 3 and halts on its `SELFDESTRUCT` with 4,999 left, which it burns.
 ///
-/// - **One frame.** The callee's halt brings the compute from 3,023 to 8,022; under a cap of 3,400
-///   the limit is 3,402, so the halt overshoots it by 4,620, less than 5,000. The caller's `POP` is
-///   its next charge and the crossing: the stop reports 8,022, and the bill is the intrinsic gas
-///   and that compute, without the `POP`.
+/// - **One frame.** The callee's halt leaves the compute at 3,023; under a cap of 3,400 the limit
+///   is 3,402, which the caller's `POP` stays within: 3,025, and 4,999 burned.
 /// - **A chain of two.** [`HALTING_MIDDLE`] is forwarded 12,000, calls [`CHILD`] with 5,002 —
 ///   compute 6,036 at its `CALL`, 6,039 after the child's `PUSH20` — and keeps 12,000 − 3,016 −
-///   5,002 = 3,982. The child's halt brings the compute to 11,038, 4,996 past a limit of 6,042 (a
-///   cap of 6,040); the middle frame's next opcode is a `SELFDESTRUCT` its 3,982 cannot pay, so it
-///   halts too and adds them: 15,020, 8,978 past the limit, more than either halt could add alone.
-///   The caller's `POP` is the crossing.
-/// - **No charge after.** The one-frame case ending on `STOP`, which charges nothing, after the
-///   call: the transaction succeeds, its compute 8,022, past the limit of 3,402.
+///   5,002 = 3,982. The child's halt burns 4,999, and the middle frame's next opcode is a
+///   `SELFDESTRUCT` its 3,982 cannot pay, so it halts too and burns them. The caller's `POP` brings
+///   the compute to 6,041, within a limit of 6,042 (a cap of 6,040).
+/// - **No charge after.** The one-frame case ending on `STOP` after the call: 3,023.
 ///
-/// Each case runs below the execution cap and above it, and is billed the same in both; without
-/// the read the program completes and is billed its whole compute.
+/// Each case runs below the execution cap and above it, completes as without the read, and is
+/// billed its compute and its burns.
 ///
 /// Rules: [S12.18], [S12.24], [S12.38], [S11], [S12]. Independence: independent — every charge is
 /// the opcode's price, the limit is the read's compute plus the cap, and the intrinsic gas is
 /// EIP-2780's.
 #[test]
-fn test_a_static_gas_halt_takes_the_compute_past_the_limit() {
+fn test_static_gas_halts_leave_the_compute_where_it_was() {
     let child = BytecodeBuilder::default().push_address(CALLER).append(SELFDESTRUCT).build();
     // The middle frame's `SELFDESTRUCT` names the status its call left as the beneficiary.
     let middle =
         call_forwarding(BytecodeBuilder::default(), CHILD, 5_002).append(SELFDESTRUCT).build();
-    // The cold access the call to the first callee pays, which every case's caps are set above.
-    let call = 2 + 2 + 10 + 3 + 3 + cold_access();
+    // A call to a cold callee: five pushes, the address, the forward and the cold access.
+    let call = 10 + 3 + 3 + cold_access();
+    // The read and its `POP`, then the call to the first callee.
+    let to_callee = 2 + 2 + call;
     let cases = [
-        Overshoot {
+        StaticHalts {
             name: "one frame",
             after_read: |code| call_forwarding(code.append(POP), CHILD, 5_002).append(POP).stop(),
             cap: 3_400,
-            compute: call + 5_002,
-            stopped: true,
-            plain_compute: call + 5_002 + 2,
+            compute: to_callee + 3 + 2,
+            burned: 5_002 - 3,
         },
-        Overshoot {
+        StaticHalts {
             name: "a chain of two",
             after_read: |code| {
                 call_forwarding(code.append(POP), HALTING_MIDDLE, 12_000).append(POP).stop()
             },
             cap: 6_040,
-            compute: call + 12_000,
-            stopped: true,
-            plain_compute: call + 12_000 + 2,
+            compute: to_callee + call + 3 + 2,
+            burned: (5_002 - 3) + (12_000 - call - 5_002),
         },
-        Overshoot {
+        StaticHalts {
             name: "no charge after",
             after_read: |code| call_forwarding(code.append(POP), CHILD, 5_002).stop(),
             cap: 3_400,
-            compute: call + 5_002,
-            stopped: false,
-            plain_compute: call + 5_002,
+            compute: to_callee + 3,
+            burned: 5_002 - 3,
         },
     ];
     for gas_limit in TIERS {
@@ -793,41 +747,16 @@ fn test_a_static_gas_halt_takes_the_compute_past_the_limit() {
             });
             let limit = 2 + case.cap;
             assert_eq!(detained.limit, Some(limit), "{name}: the read's compute plus the cap");
-            assert!(case.compute > limit, "{name}: the halts took the compute past the limit");
-            if case.stopped {
-                assert_eq!(
-                    detained.outcome.result.output(),
-                    Some(&stop_data(limit)),
-                    "{name}: the stop"
-                );
-                assert_eq!(
-                    detained.outcome.limit_exceeded,
-                    Some(LimitCheck::ExceedsLimit {
-                        kind: LimitKind::ComputeGas,
-                        limit,
-                        used: case.compute,
-                        frame_local: false
-                    }),
-                    "{name}: the stop reports the compute past the limit"
-                );
-            } else {
-                assert!(
-                    detained.outcome.result.is_success(),
-                    "{name}: {:?}",
-                    detained.outcome.result
-                );
-                assert_eq!(detained.outcome.limit_exceeded, None, "{name}: no stop");
-            }
-            assert_eq!(
-                detained.outcome.gas.regular,
-                CALL_INTRINSIC + case.compute,
-                "{name}: the bill is the intrinsic gas and the compute"
+            assert!(case.compute <= limit, "{name}: the compute stays within the limit");
+            assert!(
+                case.compute + case.burned > limit,
+                "{name}: the burns counted as compute would pass it"
             );
-            assert!(plain.outcome.result.is_success(), "{name}: {:?}", plain.outcome.result);
+            assert_as_without_read(&detained, &plain, name);
             assert_eq!(
                 plain.outcome.gas.regular,
-                CALL_INTRINSIC + case.plain_compute,
-                "{name}: without the read"
+                CALL_INTRINSIC + case.compute + case.burned,
+                "{name}: the bill is the intrinsic gas, the compute and the burns"
             );
         }
     }
@@ -1538,6 +1467,69 @@ fn test_the_kzg_point_evaluation_is_priced_and_keeps_no_clamp() {
     }
 }
 
+/// Upstream's KZG point evaluation, which costs 50,000, put at the KZG address in place of the
+/// Satin entry, which costs 100,000, and called as above, after a read with 80,000 under a cap of
+/// 50,000, whose allowance pays neither price. Gas detention decides the same call two ways,
+/// priced and unpriced — a failed call against a crossing — and which way follows the route that
+/// installed the precompile, not the precompile:
+///
+/// - installed through `with_dyn_precompiles`, the route a node changes its set by, it is not
+///   priced: it is run on the allowance, runs out of it, and is the stop, which gives its forward
+///   back and which its caller catches before it stores the failure;
+/// - put in the map around the engine, through the mutable reference `EvmTr::all_mut` hands out,
+///   under the Satin entry's id, it is still priced from the Satin table: priced past its forward,
+///   it runs on the forward, as the Satin entry does, and fails — on its input, past its own gas
+///   check — a failed call that burns its forward, which its caller survives to store. A valid
+///   input would compute there, past the cap: the boundary a node keeps to by changing its set
+///   through the engine.
+#[test]
+fn test_a_priced_and_an_unpriced_precompile_part_as_a_failed_call_and_a_crossing() {
+    let kzg = vec![0_u8; 192];
+    let kzg_address = mega_evm::kzg_point_evaluation::ADDRESS;
+    let upstream = || {
+        DynPrecompile::new(PrecompileId::KzgPointEvaluation, |input| {
+            let result = revm::precompile::kzg_point_evaluation::run(input.data, input.gas);
+            Ok(PrecompileOutput::from_eth_result(result, input.reservoir))
+        })
+    };
+    let cap = 50_000;
+    let limits = EvmTxRuntimeLimits::default().with_block_env_access_compute_gas_limit(cap);
+    let allowance = cap - charges_to_the_precompile(kzg.len(), Some(80_000)).total();
+    assert!(allowance < 50_000, "the allowance pays neither price");
+    for gas_limit in TIERS {
+        let evm = || {
+            let db = MemoryDatabase::default()
+                .account_code(CONTRACT, calls_precompile(TIMESTAMP, kzg_address, Some(80_000)));
+            MegaEvm::new(context(db).with_tx_runtime_limits(limits))
+        };
+        let ended = |evm: &MegaEvm<MemoryDatabase, Calls>| {
+            let call = evm.inspector().calls.iter().find(|call| call.target == kzg_address);
+            let call = call.expect("the call ended");
+            assert_eq!(call.forward, 80_000);
+            (call.result, call.precompile_ran)
+        };
+
+        let mut unpriced = evm()
+            .with_dyn_precompiles(HashMap::from_iter([(kzg_address, upstream())]))
+            .with_inspector(Calls::default());
+        let run = run_on(&mut unpriced, tx_with(&kzg, gas_limit));
+        let intrinsic = intrinsic_with(&kzg, gas_limit);
+        assert_caught(&run, intrinsic, allowance, &failed_status_store());
+        assert_eq!(ended(&unpriced), (InstructionResult::Revert, true), "the stop, run on the cap");
+
+        let mut priced = evm().with_inspector(Calls::default());
+        revm::handler::EvmTr::all_mut(&mut priced)
+            .2
+            .apply_precompile(&kzg_address, |_| Some(upstream()));
+        let run = run_on(&mut priced, tx_with(&kzg, gas_limit));
+        assert!(run.outcome.result.is_success(), "{:?}", run.outcome.result);
+        assert_eq!(run.outcome.limit_exceeded, None, "a failed call, no stop");
+        let ran_and_failed = (InstructionResult::PrecompileError, true);
+        assert_eq!(ended(&priced), ran_and_failed, "run on its forward, failed on its input");
+        assert_eq!(slot(&run, 0), Some(U256::ZERO), "the call fails and its caller goes on");
+    }
+}
+
 /// A precompile priced between the allowance and its forward whose input fails a check made after
 /// its gas check: the BN254 pairing of three pairs and a stray byte, priced 147,000 for its three
 /// whole pairs, which checks the input's length after its gas. Under a cap of 100,000 it is
@@ -1811,38 +1803,34 @@ impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for AnswersPastThe
     }
 }
 
-/// An answer past the allowance is the stop, billed the intrinsic gas alone, whatever state or
-/// history gas the answer charged: the answer's spending is the charge that crossed, so none of it
-/// is made, and the frame, detained from its start, computed nothing before it. Below the
-/// execution cap the state or history gas spills onto regular gas and the stop's revert gives it
-/// back; above the cap the reservoir pays it and nothing spills.
+/// An inspector's answer is taken as given, as revm's inspected frame start takes it: gas
+/// detention holds the engine's answers to the compute limit, and an inspector's answer never
+/// reaches the engine's frame start. An answer to a frame detained from its start that spent past
+/// the cap, with state or history gas on top, is no stop: the transaction succeeds and is billed
+/// what the answer spent, the regular gas on the regular ledger and the state or history gas on
+/// its own, below the execution cap where it spills onto regular gas and above it where the
+/// reservoir pays it.
 #[test]
-fn test_an_answer_past_the_allowance_with_a_spill_is_billed_nothing_of_it() {
+fn test_an_inspectors_answer_to_the_transactions_frame_past_the_cap_is_taken_as_given() {
     for gas_limit in TIERS {
         for history in [false, true] {
+            let case = format!("{gas_limit}, history {history}");
             let db = MemoryDatabase::default().account_code(CONTRACT, Bytes::from_static(&[STOP]));
-            let intrinsic = run_on(
+            let plain = run_on(
                 &mut MegaEvm::new(context(db.clone())),
                 tx(BENEFICIARY, CONTRACT, gas_limit),
             )
             .outcome
-            .gas
-            .regular;
+            .gas;
             let mut evm =
                 MegaEvm::new(context(db)).with_inspector(AnswersPastTheCapWithASpill { history });
             let run = run_on(&mut evm, tx(BENEFICIARY, CONTRACT, gas_limit));
-            assert_eq!(run.outcome.result.output(), Some(&stop_data(CAP)), "{gas_limit} {history}");
-            assert_eq!(
-                run.outcome.limit_exceeded,
-                Some(LimitCheck::ExceedsLimit {
-                    kind: LimitKind::ComputeGas,
-                    limit: CAP,
-                    used: 0,
-                    frame_local: false
-                }),
-                "{gas_limit}, history {history}"
-            );
-            assert_eq!(run.outcome.gas.regular, intrinsic, "{gas_limit}, history {history}");
+            assert!(run.outcome.result.is_success(), "{case}: {:?}", run.outcome.result);
+            assert_eq!(run.outcome.limit_exceeded, None, "{case}: no stop");
+            assert_eq!(run.outcome.gas.regular, plain.regular + CAP + 1, "{case}: regular");
+            let (state, kept_history) = if history { (0, 1_000) } else { (1_000, 0) };
+            assert_eq!(run.outcome.gas.state, plain.state + state, "{case}: state");
+            assert_eq!(run.outcome.gas.history, plain.history + kept_history, "{case}: history");
         }
     }
 }

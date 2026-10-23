@@ -211,17 +211,20 @@ fn test_a_blocks_receipts_pin_their_bytes_bloom_and_cumulative_gas() {
                 outcome.inner.limit_exceeded,
                 Some(LimitCheck::ExceedsLimit {
                     kind: LimitKind::DataSize,
-                    limit: DATA_SIZE_LIMIT,
-                    used: stop_body + STOP_START,
-                    frame_local: false,
+                    limit: DATA_SIZE_LIMIT - stop_body,
+                    used: STOP_START,
+                    frame_local: true,
                 }),
-                "the first frame's start crossed the data-size limit",
+                "the first frame's start crossed its budget, what the body leaves of the limit",
             );
             let output = stop.clone().expect("the stop reverts");
             assert_eq!(
                 output.as_ref(),
-                MegaLimitExceeded { kind: LimitKind::DataSize.as_u8(), limit: DATA_SIZE_LIMIT }
-                    .abi_encode(),
+                MegaLimitExceeded {
+                    kind: LimitKind::DataSize.as_u8(),
+                    limit: DATA_SIZE_LIMIT - stop_body,
+                }
+                .abi_encode(),
                 "the stop's revert data is MegaLimitExceeded",
             );
         } else {

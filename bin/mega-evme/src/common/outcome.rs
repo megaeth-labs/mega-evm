@@ -60,8 +60,11 @@ pub struct SatinReport {
     pub data_size: u64,
     /// Account and storage write records the transaction kept: its KV count.
     pub write_records: u64,
+    /// New accounts and new storage slots the transaction kept, net: its state growth.
+    pub state_growth: u64,
     /// The limit that stopped the transaction, if one did: the crossing that produced the result
-    /// of its own frame, a transaction-level limit or that frame's own data-size budget.
+    /// of its own frame, a transaction-level limit or that frame's own budget in data size, KV
+    /// updates or state growth.
     pub limit_exceeded: Option<LimitStop>,
     /// The protocol limits the run was held to, in the shape `--override.limits` takes them;
     /// present only when that flag replaced the schedule's, so the record of a counterfactual
@@ -73,7 +76,7 @@ pub struct SatinReport {
 /// A limit that stopped a Satin transaction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct LimitStop {
-    /// The dimension: `data_size` or `compute_gas`.
+    /// The dimension: `data_size`, `kv_updates`, `compute_gas` or `state_growth`.
     pub kind: &'static str,
     /// The limit crossed, in the dimension's unit.
     pub limit: u64,
@@ -94,6 +97,7 @@ impl SatinReport {
             floor_gas: gas.floor,
             data_size: outcome.usage.data_size,
             write_records: outcome.usage.write_records,
+            state_growth: outcome.usage.state_growth,
             limit_exceeded: match outcome.limit_exceeded {
                 Some(LimitCheck::ExceedsLimit { kind, limit, used, .. }) => {
                     Some(LimitStop { kind: limit_kind_name(kind), limit, used })
@@ -109,7 +113,9 @@ impl SatinReport {
 pub const fn limit_kind_name(kind: LimitKind) -> &'static str {
     match kind {
         LimitKind::DataSize => "data_size",
+        LimitKind::KvUpdate => "kv_updates",
         LimitKind::ComputeGas => "compute_gas",
+        LimitKind::StateGrowth => "state_growth",
     }
 }
 
@@ -253,6 +259,7 @@ pub fn print_satin_report(report: &SatinReport) {
     println!("Floor Gas:        {}", report.floor_gas);
     println!("Data Size:        {}", report.data_size);
     println!("Write Records:    {}", report.write_records);
+    println!("State Growth:     {}", report.state_growth);
     if let Some(stop) = report.limit_exceeded {
         println!("Limit Exceeded:   {} (limit {}, used {})", stop.kind, stop.limit, stop.used);
     }

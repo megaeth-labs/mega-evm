@@ -68,8 +68,8 @@ pub use mega_system_contracts::oracle::IOracle;
 /// A `STATICCALL` does forward: `sendHint` is a view method and writes nothing.
 ///
 /// The payload is counted toward the transaction's data size before it is decoded
-/// ([`AdditionalLimit::record_hint_bytes`](crate::AdditionalLimit)), so trailing bytes an ABI
-/// decoder ignores are paid for; a payload that would cross the transaction's limit is neither
+/// ([`AdditionalLimit::admit_hint`](crate::AdditionalLimit)), so trailing bytes an ABI decoder
+/// ignores are paid for; a payload that would cross the transaction's limit is neither
 /// forwarded nor counted, and the call is answered with the stop: a revert carrying
 /// `MegaLimitExceeded`, on the gas it was forwarded, as the frame it would have started. So the
 /// data size a transaction keeps holds exactly the hints that were admitted.
@@ -91,7 +91,7 @@ pub(crate) fn intercept<DB: Database, ExtEnvs: ExternalEnvTypes>(
         return None;
     }
     let payload = inputs.input.bytes(&*ctx);
-    let check = ctx.additional_limit.record_hint_bytes(payload.len() as u64);
+    let check = ctx.additional_limit.admit_hint(payload.len() as u64);
     if check.exceeded_limit() {
         let output = ctx.additional_limit.note_frame_stop(&check);
         return Some(synthetic_call_result(inputs, InstructionResult::Revert, output));
@@ -150,6 +150,9 @@ mod tests {
             scheme: CallScheme::Call,
             is_static: false,
             charged_new_account_state_gas: false,
+            charged_start: Default::default(),
+            pool_shares: revm::interpreter::PoolAmounts::UNLIMITED,
+            history_allowance: 0,
         }
     }
 
@@ -175,11 +178,11 @@ mod tests {
         assert_eq!(result.output, stop.revert_data());
         assert_eq!(result.gas.remaining(), FORWARD, "the forward is untouched");
         assert!(envs.recorded_hints().is_empty(), "nothing is forwarded");
-        assert_eq!(ctx.additional_limit.usage().data_size, 0, "nothing is counted");
+        assert_eq!(ctx.limit_usage().data_size, 0, "nothing is counted");
 
         let (mut ctx, envs) = recording(payload);
         assert!(intercept(&mut ctx, &inputs, 1).is_none(), "the bytecode runs");
         assert_eq!(envs.recorded_hints().len(), 1);
-        assert_eq!(ctx.additional_limit.usage().data_size, payload);
+        assert_eq!(ctx.limit_usage().data_size, payload);
     }
 }

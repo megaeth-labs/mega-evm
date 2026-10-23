@@ -1,16 +1,17 @@
 //! The Host of the Satin engine.
 //!
-//! # The Host only observes
+//! # Writes are counted once their opcode completed
 //!
-//! revm hands the Host the facts of every state-writing opcode: an `SSTORE`'s original, present and
-//! new values, a log's topics and data, a `SELFDESTRUCT`'s balance and beneficiary. The Host
-//! stages them ([`AdditionalLimit::stage_record`](crate::AdditionalLimit)) and records nothing.
-//! The opcode's wrapper commits the staged record after the opcode completed, and charges the
-//! frame the history the record costs; it discards the record, and charges nothing, when the
-//! opcode failed. Recording in the Host would count a write the opcode's own failure then takes
-//! back: `SSTORE` charges its dynamic gas after the Host call, and an out-of-gas there halts the
-//! frame with the record already counted — and would have charged the frame for a byte the chain
-//! never carries.
+//! revm hands the Host the facts of every state-writing opcode twice: as it makes the write (an
+//! `SSTORE`'s slot, a log, a `SELFDESTRUCT`'s beneficiary), and once the opcode completed, in the
+//! completed-write hook ([`write_completed`](revm::context_interface::Host::write_completed)),
+//! after every charge the opcode makes. The Host counts nothing in the first: the write methods
+//! only write, whoever calls them. The hook commits the write's record to the running frame, holds
+//! it to the limits and charges the frame the history the record costs. Counting at the write
+//! would count one the opcode's own failure then takes back: `SSTORE` charges its dynamic gas after
+//! the write, and an out-of-gas there halts the frame with the record already counted — and would
+//! have charged the frame for a byte the chain never carries. A tool's write through the Host, an
+//! inspector's log among them, reaches no hook, and is not counted.
 //!
 //! `block_hash` serves the read and records it, so a stateless witness learns of a `BLOCKHASH`
 //! that bypassed the journal.
@@ -51,7 +52,20 @@
 //! through this hook. A frame that fails instead rolls its own charges back by the amounts it
 //! recorded while running, without asking for a price at all. Both cancel exactly, for different
 //! reasons: the re-priced sites because the multiplier of a bucket is read once per transaction,
-//! the rolled-back amounts because nothing but this hook priced them in the first place.
+//! the rolled-back amounts because nothing but this hook priced them in the first place. The one
+//! exception is an inspector's: a call's upfront charge is given back for the account its frame's
+//! inputs name, as revm reads it, so an inspector that rewrites the target has it priced there.
+//!
+//! A charge on an account created in the transaction and destroyed since is priced at nothing:
+//! its destruction gave back what the transaction had charged for it, at the prices charged and
+//! outside that rule, so a re-pricing after the mark gives nothing back a second time, and the
+//! account keeps no further state gas.
+//!
+//! The destruction gives the account's leaf back only when no account stood at the address at the
+//! transaction's start: the database answered none for it, `None` from
+//! [`Database::basic`](revm::Database::basic), or an earlier transaction on the same journal
+//! destroyed it. A database that answers an empty account for an address it holds none for gives
+//! that leaf back to no destruction: an empty account is a leaf the state holds.
 //!
 //! Every other Host method delegates to op-revm's context.
 
@@ -63,9 +77,12 @@ use delegate::delegate;
 use revm::{
     context::ContextTr,
     context_interface::{
-        cfg::{GasId, GasParams, StateGasSite},
+        cfg::{
+            gas::{GasTracker, PoolAmounts, StartCharge},
+            GasId, GasParams, StateGasCharge, StateGasSite,
+        },
         context::{ContextError, SStoreResult, SelfDestructResult, StateLoad},
-        host::LoadError,
+        host::{CompletedWrite, FrameStart, LoadError, WriteVerdict},
         journaled_state::AccountInfoLoad,
     },
     primitives::{Address, Log, StorageKey, StorageValue, B256, U256},
@@ -73,8 +90,10 @@ use revm::{
 };
 
 use crate::{
-    system::ORACLE_CONTRACT_ADDRESS, ExternalEnvTypes, MegaContext, OracleEnv, StagedRecord,
-    VolatileDataAccess,
+    charge_write_records_history, history_gas,
+    limit::{DestroyedParts, HistoryBytes},
+    system::ORACLE_CONTRACT_ADDRESS,
+    ExternalEnvTypes, MegaContext, OracleEnv, VolatileDataAccess,
 };
 
 impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
@@ -93,6 +112,22 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
             fn is_amsterdam_eip8037_enabled(&self) -> bool;
             fn tstore(&mut self, address: Address, key: StorageKey, value: StorageValue);
             fn tload(&mut self, address: Address, key: StorageKey) -> StorageValue;
+            // A write is counted once its opcode completed, in `write_completed`: what the Host's
+            // write methods are called with, by an opcode or by a tool, counts nothing.
+            fn sstore(
+                &mut self,
+                address: Address,
+                key: StorageKey,
+                value: StorageValue,
+            ) -> Option<StateLoad<SStoreResult>>;
+            fn sstore_skip_cold_load(
+                &mut self,
+                address: Address,
+                key: StorageKey,
+                value: StorageValue,
+                skip_cold_load: bool,
+            ) -> Result<StateLoad<SStoreResult>, LoadError>;
+            fn log(&mut self, log: Log);
         }
     }
 
@@ -175,7 +210,10 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
         self.inner.sload_skip_cold_load(address, key, skip_cold_load)
     }
 
-    /// Loads the account, marking a read of the block beneficiary's.
+    /// Loads the account, marking a read of the block beneficiary's, or refusing it in a frame
+    /// whose volatile-data access is off, when the load is a read: when an opcode's read wrapper
+    /// makes it. `CREATE`'s and `CREATE2`'s loads of their creator and of the created address are
+    /// no reads (see [`Detention`](crate::Detention)).
     #[inline]
     fn load_account_info_skip_cold_load(
         &mut self,
@@ -197,7 +235,194 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
 
     /// Prices one EIP-8037 state gas unit, scaling the schedule's entry by the SALT bucket
     /// capacity of the account — or, for a slot-scoped entry, of the storage slot — the charge
-    /// lands on.
+    /// lands on ([`priced_state_gas`](MegaContext::priced_state_gas)).
+    ///
+    /// A charge on an account created in the transaction and destroyed since is priced at
+    /// nothing: from that mark until the transaction ends the account keeps no further state gas,
+    /// so an `SSTORE` of one of its slots neither charges nor refills fresh-slot state gas, and
+    /// code its own constructor deposits after destroying it is charged no state gas, whatever gas
+    /// the frame holds. The destruction gave back what the transaction had charged for the
+    /// account at the prices charged, outside this rule. The neutral configuration prices as the
+    /// fixture's fork does ([`destruction_table_prices_state_gas`]).
+    ///
+    /// [`destruction_table_prices_state_gas`]: MegaContext::destruction_table_prices_state_gas
+    #[inline]
+    fn state_gas_price(&mut self, id: GasId, site: StateGasSite) -> Option<u64> {
+        if self.destruction_table_prices_state_gas() && self.accounts().is_destroyed(site.address) {
+            return Some(0);
+        }
+        self.priced_state_gas(id, site)
+    }
+
+    /// Serves the hash and records that this block read it.
+    ///
+    /// `BLOCKHASH` reads the chain's history through the database, so a witness built from the
+    /// journal alone would miss it; the record is where a node learns of the read.
+    #[inline]
+    fn block_hash(&mut self, number: u64) -> Option<B256> {
+        if !self.read_block_env(VolatileDataAccess::BLOCK_HASH) {
+            return Some(B256::ZERO);
+        }
+        let hash = self.inner.block_hash(number)?;
+        self.block_hash_record.record(number, hash);
+        Some(hash)
+    }
+
+    /// Destructs the account, marking a read of the block beneficiary's account when it is either
+    /// end: the source's balance is read and cleared, the target's read and credited.
+    #[inline]
+    fn selfdestruct(
+        &mut self,
+        address: Address,
+        target: Address,
+        skip_cold_load: bool,
+    ) -> Result<StateLoad<SelfDestructResult>, LoadError> {
+        let beneficiary = self.inner.block.beneficiary;
+        let volatile = target == beneficiary || address == beneficiary;
+        if volatile && self.detention.refuses(VolatileDataAccess::BENEFICIARY_BALANCE) {
+            return Err(LoadError::ColdLoadSkipped);
+        }
+        let load = self.inner.selfdestruct(address, target, skip_cold_load)?;
+        if volatile {
+            self.detention.observe(VolatileDataAccess::BENEFICIARY_BALANCE);
+        }
+        Ok(load)
+    }
+
+    /// Counts the record of a write an opcode completed on the running frame's pool, holds it to
+    /// the limits, and charges the frame the history it costs. revm calls it at the end of
+    /// `SSTORE`, `LOG0`..`LOG4` and `SELFDESTRUCT`, after every charge the opcode makes, so a write
+    /// the opcode's own failure takes back is never counted.
+    ///
+    /// The record is held to the limits first, and only then is its history charged: a record the
+    /// limit rejects is not kept, so its history is no charge, and the stop is what the frame
+    /// reports — a revert whose output is the stop's
+    /// [`MegaLimitExceeded`](crate::MegaLimitExceeded), on the frame's gas, so its caller resumes
+    /// as after any revert. A record the limit accepts is charged, and a charge the frame cannot
+    /// pay, or a byte count with no price, is an ordinary out-of-gas.
+    ///
+    /// A log's history is drawn from the frame's history allowance first, and the frame's gas pays
+    /// the rest ([`history_allowance_gas`](crate::history_allowance_gas)): a write record is the
+    /// frame's own to pay for, and a record taken back — a slot written back to its original
+    /// value, an account a `SELFDESTRUCT` returns to what the transaction loaded — gives back what
+    /// the frame's gas paid, never what an allowance did. Both sides are priced the same way, so a
+    /// record taken back cancels its own charge exactly, whichever frame made it: a refill below
+    /// zero is reconciled when the frame merges into its caller. A write that takes records back
+    /// and makes others is refilled before it is charged, so what it nets to nothing costs
+    /// nothing.
+    ///
+    /// The first effective `SELFDESTRUCT` of an account created in the transaction gives back every
+    /// part of it the transaction made ([`DestroyedParts`]) to the destroying frame, whichever
+    /// frame paid: what the parts take back is in the same check as what the operation adds, so
+    /// the positive effects are held after the give-back; once the check passed, each part's
+    /// state gas is refilled at the price it was charged, with the history of its records and of
+    /// its code, before the operation's own records are charged. From that mark an `SSTORE` of
+    /// one of the account's slots counts nothing, and the pricing hook prices its state gas at
+    /// nothing ([`state_gas_price`](revm::context_interface::Host::state_gas_price)).
+    ///
+    /// A completed `SSTORE` holds the frame to the compute limit again: a slot restored to its
+    /// original value refills the state gas (revm, before this hook) and the history gas (here)
+    /// that spilled onto regular gas, and the spill may predate the limit.
+    #[inline]
+    fn write_completed(&mut self, write: CompletedWrite<'_>, gas: &mut GasTracker) -> WriteVerdict {
+        let (from_allowance, holds_again) = match write {
+            CompletedWrite::Sstore { .. } => (false, true),
+            CompletedWrite::Log { .. } => (true, false),
+            CompletedWrite::SelfDestruct { .. } => (false, false),
+        };
+        let (counted, history, destroyed) = self.accounts().write_counted(&write);
+        let check = self.additional_limit.draw(gas, &counted);
+        if check.exceeded_limit() {
+            return WriteVerdict::Revert(self.additional_limit.note_frame_stop(&check));
+        }
+        let state_given_back = match write {
+            CompletedWrite::SelfDestruct { address, .. } => destroyed
+                .as_ref()
+                .is_none_or(|parts| self.refill_destroyed_parts(address, parts, gas)),
+            CompletedWrite::Sstore { .. } | CompletedWrite::Log { .. } => true,
+        };
+        if !state_given_back {
+            return WriteVerdict::OutOfGas;
+        }
+        if self.prices_history() {
+            let HistoryBytes { appended, taken } = history;
+            if taken != 0 {
+                gas.refill_history(history_gas(taken).unwrap_or(0));
+            }
+            if let Some(parts) = &destroyed {
+                let code = usize::try_from(parts.code).unwrap_or(usize::MAX);
+                gas.refill_history(self.inner.cfg.gas_params.code_deposit_history_gas(code));
+            }
+            if appended != 0 {
+                let Some(cost) = history_gas(appended) else { return WriteVerdict::OutOfGas };
+                let cost = if from_allowance { gas.draw_history_allowance(cost) } else { cost };
+                if !gas.record_history_cost(cost) {
+                    return WriteVerdict::OutOfGas;
+                }
+            }
+        }
+        if holds_again {
+            self.detention.hold(gas);
+        }
+        WriteVerdict::Continue
+    }
+
+    /// Charges the running frame the history of the write records the frame it is starting makes
+    /// — the accounts a value transfer changes from what the transaction loaded, a creation's
+    /// created account when the transaction had not changed it, and its creator's nonce — as the
+    /// journal's state stands ([`Accounts::start_records`](crate::limit::Accounts)). revm calls it
+    /// at `CALL`, `CALLCODE`, `DELEGATECALL`, `STATICCALL`, `CREATE` and `CREATE2`, once the opcode
+    /// made every charge and took the gas it forwards, and before it builds the frame's input.
+    ///
+    /// It is a price, made at the opcode as revm charges a new account's gas at `CALL`, and counts
+    /// nothing: the records themselves are counted once revm decided the start, the frame's on the
+    /// pool it starts with and the creator's on the creator once the creation returned.
+    ///
+    /// The charge comes out of what the caller kept rather than out of what the callee gets, so
+    /// the frame's allowance is free for what the recipient does. What the frame's own records
+    /// cost is declared on the start ([`FrameStart::charge`]), which the fork carries on the
+    /// frame's input and gives back to the caller when the frame fails; the creator's record
+    /// outlives the creation and is not declared. The frame's input copies the caller's
+    /// reservoir after the charge, so the frame, or the answer revm gives in its place,
+    /// inherits the reservoir the charge left. An opcode that starts no frame — a creation the
+    /// balance, the nonce or the depth refuses, an out-of-gas before the forward — never calls
+    /// it, and makes no records; with EIP-8037 off, such a creation calls it without the address
+    /// it would take, which makes none either. A start revm then refuses — a value the caller
+    /// cannot fund, a frame past the call-stack limit — makes no records, and the charge comes
+    /// back when it returns, as does what a frame that ran did not keep.
+    ///
+    /// A charge the caller cannot pay, or a price that does not fit in a `u64`, fails the opcode
+    /// with an out-of-gas and starts no frame, even where revm would have refused the start. The
+    /// gas the opcode forwarded goes back to the caller first, so the halt burns it with the rest:
+    /// the frame never ran, and gas detention must not count the forward as compute. The halt's
+    /// record of what the frame had, which detention reads where the frame ends, is written again
+    /// once the forward is back: a failed charge recorded the gas left after the forward was
+    /// taken, and a price that could not be computed failed before any charge.
+    #[inline]
+    fn frame_starting(&mut self, start: &mut FrameStart, gas: &mut GasTracker) -> bool {
+        let charge = if self.prices_history() {
+            let records =
+                self.accounts().start_records(start.kind, start.caller, start.target, start.value);
+            let on_frame = records.on_frame().added;
+            let creator = u64::from(records.creator);
+            let Some((charge, _)) = charge_write_records_history(gas, on_frame, creator) else {
+                gas.erase_cost(start.forward);
+                gas.set_failed_charge_remaining(Some(gas.remaining()));
+                return false;
+            };
+            charge
+        } else {
+            0
+        };
+        start.charge = StartCharge::new(charge, PoolAmounts::ZERO);
+        true
+    }
+}
+
+impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
+    /// Prices one EIP-8037 state gas unit `id` at `site`, scaling the schedule's entry by the SALT
+    /// bucket capacity of the account — or, for a slot-scoped entry, of the storage slot — the
+    /// charge lands on.
     ///
     /// `state gas = schedule entry x m`, where `m` is the bucket's capacity in minimum buckets.
     /// A charge in a minimum-capacity bucket pays the schedule's own number, and a charge in a
@@ -215,8 +440,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
     /// database failure, and the charge site turns it into a bail-out that the transaction
     /// surfaces as an error. A price the engine could not look up is never replaced by one
     /// nobody chose.
-    #[inline]
-    fn state_gas_price(&mut self, id: GasId, site: StateGasSite) -> Option<u64> {
+    fn priced_state_gas(&mut self, id: GasId, site: StateGasSite) -> Option<u64> {
         let base = self.inner.cfg.gas_params.get(id);
         if base == 0 || self.is_system_originated() {
             return Some(base);
@@ -235,86 +459,47 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
         }
     }
 
-    /// Serves the hash and records that this block read it.
+    /// Refills on `gas`, the destroying frame's, the state gas of the `parts` of the account at
+    /// `address` its first effective destruction gives back, each at the price it was charged:
+    /// the leaf's new account, the code deposit's bytes and each slot made non-zero, priced at the
+    /// site the charge landed on, so SALT gives back what it scaled. The leaf was charged once as a
+    /// new account, by whichever site made it — a value transfer, a `SELFDESTRUCT`'s balance, the
+    /// transaction's value, or the creation itself — and every such charge is the same entry. The
+    /// account is destroyed by now, which the pricing hook prices at nothing, so the parts are
+    /// priced as they were charged, before the mark ([`priced_state_gas`](Self::priced_state_gas)).
     ///
-    /// `BLOCKHASH` reads the chain's history through the database, so a witness built from the
-    /// journal alone would miss it; the record is where a node learns of the read.
-    #[inline]
-    fn block_hash(&mut self, number: u64) -> Option<B256> {
-        if !self.read_block_env(VolatileDataAccess::BLOCK_HASH) {
-            return Some(B256::ZERO);
+    /// Nothing is refilled where the transaction's state gas is not the spec's: the neutral
+    /// configuration prices as the fixture's fork does, and EIP-8037 gives back nothing for this
+    /// destruction. `false` when a price could not be looked up, whose cause is recorded and fails
+    /// the transaction.
+    fn refill_destroyed_parts(
+        &mut self,
+        address: Address,
+        parts: &DestroyedParts,
+        gas: &mut GasTracker,
+    ) -> bool {
+        if !self.destruction_table_prices_state_gas() {
+            return true;
         }
-        let hash = self.inner.block_hash(number)?;
-        self.block_hash_record.record(number, hash);
-        Some(hash)
-    }
-
-    /// Writes the slot and stages the write's values.
-    #[inline]
-    fn sstore_skip_cold_load(
-        &mut self,
-        address: Address,
-        key: StorageKey,
-        value: StorageValue,
-        skip_cold_load: bool,
-    ) -> Result<StateLoad<SStoreResult>, LoadError> {
-        let load = self.inner.sstore_skip_cold_load(address, key, value, skip_cold_load)?;
-        self.additional_limit.stage_record(StagedRecord::Sstore(load.data.clone()));
-        Ok(load)
-    }
-
-    /// Writes the slot and stages the write's values.
-    #[inline]
-    fn sstore(
-        &mut self,
-        address: Address,
-        key: StorageKey,
-        value: StorageValue,
-    ) -> Option<StateLoad<SStoreResult>> {
-        let load = self.inner.sstore(address, key, value)?;
-        self.additional_limit.stage_record(StagedRecord::Sstore(load.data.clone()));
-        Some(load)
-    }
-
-    /// Stages the log's topic count and data length, then appends it.
-    #[inline]
-    fn log(&mut self, log: Log) {
-        self.additional_limit.stage_record(StagedRecord::Log {
-            topics: log.topics().len() as u8,
-            data_len: log.data.data.len() as u64,
+        debug_assert_eq!(
+            self.inner.cfg.gas_params.get(GasId::new_account_state_gas()),
+            self.inner.cfg.gas_params.get(GasId::create_state_gas()),
+            "a leaf a creation charged comes back at the price of one a transfer charged"
+        );
+        let account = StateGasSite::account(address);
+        let leaf = parts.leaf.then(|| StateGasCharge::one(GasId::new_account_state_gas(), account));
+        let code = (parts.code != 0)
+            .then(|| StateGasCharge::units(GasId::code_deposit_state_gas(), account, parts.code));
+        let slots = parts.slots.iter().map(|&key| {
+            StateGasCharge::one(GasId::sstore_set_state_gas(), StateGasSite::slot(address, key))
         });
-        self.inner.log(log);
+        for charge in leaf.into_iter().chain(code).chain(slots) {
+            let Some(price) = self.priced_state_gas(charge.id, charge.site) else { return false };
+            gas.refill_reservoir(charge.total(price));
+        }
+        true
     }
 
-    /// Destructs the account and stages whether value moved and where to, marking a read of the
-    /// block beneficiary's account when it is either end: the source's balance is read and
-    /// cleared, the target's read and credited.
-    #[inline]
-    fn selfdestruct(
-        &mut self,
-        address: Address,
-        target: Address,
-        skip_cold_load: bool,
-    ) -> Result<StateLoad<SelfDestructResult>, LoadError> {
-        let beneficiary = self.inner.block.beneficiary;
-        let volatile = target == beneficiary || address == beneficiary;
-        if volatile && self.detention.refuses(VolatileDataAccess::BENEFICIARY_BALANCE) {
-            return Err(LoadError::ColdLoadSkipped);
-        }
-        let load = self.inner.selfdestruct(address, target, skip_cold_load)?;
-        if volatile {
-            self.detention.observe(VolatileDataAccess::BENEFICIARY_BALANCE);
-        }
-        self.additional_limit.stage_record(StagedRecord::SelfDestruct {
-            had_value: load.data.had_value,
-            to_other_account: target != address,
-            beneficiary: target,
-        });
-        Ok(load)
-    }
-}
-
-impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// Reads the block-environment field `access` stands for: `false` when the read is refused,
     /// and the accessor answers zero instead of the field.
     #[inline]
@@ -395,11 +580,12 @@ mod tests {
     use alloy_primitives::{address, Bytes};
     use revm::context::JournalTr;
 
-    /// The Host stages what each state-writing call observed and counts nothing: counting is the
-    /// opcode wrapper's, after the opcode completed.
+    /// The Host's write methods count nothing, whoever calls them — an opcode, or a tool such as
+    /// an inspector appending a log in its `step`: a write is counted once its opcode completed,
+    /// through the completed-write hook, which only revm's write instructions call.
     #[test]
-    fn test_host_stages_observations_and_counts_nothing() {
-        use crate::{test_utils::MemoryDatabase, MegaSpecId};
+    fn test_host_writes_count_nothing() {
+        use crate::{test_utils::MemoryDatabase, LimitUsage, MegaSpecId, WRITE_RECORD_SIZE};
         use revm::{context_interface::Host, primitives::LogData};
 
         const CONTRACT: Address = address!("00000000000000000000000000000000000000c1");
@@ -409,40 +595,27 @@ mod tests {
         ctx.inner.journaled_state.load_account(CONTRACT).unwrap();
 
         let slot = Host::sstore(&mut ctx, CONTRACT, U256::from(1), U256::from(9)).unwrap();
-        assert_eq!(
-            ctx.additional_limit.staged_record(),
-            Some(&StagedRecord::Sstore(slot.data.clone())),
-            "the non-Berlin entry point stages too"
-        );
         assert_eq!(slot.data.new_value, U256::from(9));
-        let slot =
-            Host::sstore_skip_cold_load(&mut ctx, CONTRACT, U256::from(1), U256::from(4), false)
-                .unwrap();
-        assert_eq!(ctx.additional_limit.staged_record(), Some(&StagedRecord::Sstore(slot.data)));
-
+        Host::sstore_skip_cold_load(&mut ctx, CONTRACT, U256::from(2), U256::from(4), false)
+            .unwrap();
         let log = Log {
             address: CONTRACT,
             data: LogData::new(vec![B256::ZERO, B256::ZERO], Bytes::from_static(b"abc")).unwrap(),
         };
         Host::log(&mut ctx, log);
-        assert_eq!(
-            ctx.additional_limit.staged_record(),
-            Some(&StagedRecord::Log { topics: 2, data_len: 3 })
-        );
+        let destructed = Host::selfdestruct(&mut ctx, CONTRACT, BENEFICIARY, false).unwrap();
+        assert!(destructed.data.had_value);
+        assert_eq!(ctx.limit_usage(), LimitUsage::ZERO, "the Host counts nothing");
 
-        Host::selfdestruct(&mut ctx, CONTRACT, BENEFICIARY, false).unwrap();
+        // The hook is what counts: the slot's first change is one write record, and a slot made
+        // non-zero from an original of zero is one of state growth.
+        let mut gas = GasTracker::new(1_000_000, 1_000_000, 0);
+        let write =
+            CompletedWrite::Sstore { address: CONTRACT, key: U256::from(1), result: &slot.data };
+        assert_eq!(Host::write_completed(&mut ctx, write, &mut gas), WriteVerdict::Continue);
         assert_eq!(
-            ctx.additional_limit.staged_record(),
-            Some(&StagedRecord::SelfDestruct {
-                had_value: true,
-                to_other_account: true,
-                beneficiary: BENEFICIARY,
-            })
-        );
-        assert_eq!(
-            ctx.additional_limit.usage(),
-            crate::LimitUsage::ZERO,
-            "the Host counts nothing"
+            ctx.limit_usage(),
+            LimitUsage { data_size: WRITE_RECORD_SIZE, write_records: 1, state_growth: 1 }
         );
     }
 }

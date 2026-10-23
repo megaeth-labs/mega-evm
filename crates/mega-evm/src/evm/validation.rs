@@ -144,11 +144,10 @@ pub fn validate_transaction_stateless(
     let handler = MegaHandler::<_, MegaEvmError<Infallible>, EthFrame<EthInterpreter>>::new();
     handler.validate_env_as(&mut evm, system_address, false)?;
     let gas = handler.validate_initial_tx_gas(&mut evm)?;
-    let history = evm.ctx().additional_limit.intrinsic_history_gas();
     Ok(IntrinsicGas {
         regular: gas.initial_regular_gas(),
-        state: gas.initial_state_gas_final() - history,
-        history,
+        state: gas.initial_state_gas_final(),
+        history: evm.ctx().additional_limit.intrinsic_history_gas(),
         floor: gas.floor_gas(),
     })
 }

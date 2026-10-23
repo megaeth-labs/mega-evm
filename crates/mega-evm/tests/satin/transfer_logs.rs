@@ -2,26 +2,30 @@
 //!
 //! Every value movement emits a `Transfer(from, to, amount)` log from `0xff…fe`, which revm
 //! journals itself — no `LOG` opcode runs — and the receipt carries. Satin counts it by the rule a
-//! `LOG3` carrying one word is counted, 160 bytes, on the lane of the frame whose journal
+//! `LOG3` carrying one word is counted, 160 bytes, on the byte pool of the frame whose journal
 //! checkpoint holds the move, and charges it nothing:
 //!
 //! - a frame start that moves value — the transaction's own value, a value `CALL`, a creation's
-//!   endowment — counts its log with the frame's records, before revm builds the frame, so a
-//!   crossing answers the frame with the stop before any value moves;
-//! - a `SELFDESTRUCT` that moves a balance counts its log with the beneficiary's record, once the
-//!   opcode completed, and a crossing stops the destructing frame, which takes the move back.
+//!   endowment — counts its log with the frame's records, held to the limits once revm decided the
+//!   start, so a crossing stops the frame before it runs and takes the move back;
+//! - a `SELFDESTRUCT` that moves a balance counts its log with its records, once the opcode
+//!   completed, and a crossing stops the destructing frame, which takes the move back.
 //!
 //! Every site runs below the execution cap and above it, and is pinned four ways: the exact bytes
 //! it adds and the log the receipt carries; a frame budget one byte short of them, which stops the
 //! frame that moves the value and lets its caller resume; the transaction's limit one byte short,
 //! which does the same, and stops the transaction when the frame is its own; and a failure above
 //! the move, which takes the log and its bytes back. Each stop is the one a `LOG3` of one word
-//! makes in the same place, where the same bytes are counted: its twin below.
+//! makes in the same place, where the same bytes are counted: its twin below. A creation's bytes
+//! are held to its creator's budget: the creation's share of it holds the created account's record
+//! and the log, and the creator's nonce record is counted on the creator once the creation
+//! returned, so it is the creator that is one byte short, and its stop takes the move back.
 //!
-//! A frame start is counted before revm decides it. A start revm refuses on its caller's account
-//! — a value the caller cannot fund, a creation whose creator's nonce cannot be bumped — counts
-//! nothing, and runs under a limit as it does without one; a creation onto an occupied address is
-//! counted, and revm refuses it after the count.
+//! A frame start is held to the limits once revm decided it. A start revm refuses on its caller's
+//! account — a value the caller cannot fund, a creation whose creator's nonce cannot be bumped —
+//! counts nothing, and runs under a limit as it does without one; a value call revm answers
+//! without building a frame has its move taken back with the stop; a creation onto an occupied
+//! address fails on the collision, its start held to nothing.
 
 use alloy_op_evm::OpTx;
 use alloy_primitives::{address, keccak256, Address, Bytes, Log, TxKind, B256, U256};
@@ -40,8 +44,8 @@ use mega_evm::{
 };
 use revm::{
     bytecode::opcode::{
-        ADDRESS, CALL, CALLDATASIZE, DELEGATECALL, GAS, JUMPDEST, JUMPI, LOG1, POP, PUSH0, PUSH1,
-        REVERT, SELFDESTRUCT, STOP,
+        ADD, ADDRESS, CALL, CALLDATASIZE, GAS, JUMPDEST, JUMPI, LOG1, MSTORE, POP, PUSH0, PUSH1,
+        RETURN, RETURNDATACOPY, RETURNDATASIZE, REVERT, SELFBALANCE, SELFDESTRUCT, STOP,
     },
     context::{
         result::{ExecutionResult, Output},
@@ -51,7 +55,9 @@ use revm::{
     Database, Inspector,
 };
 
-use crate::common::{account_state_gas, context, execute_under, history_rounds, share};
+use crate::common::{
+    account_state_gas, context, execute_under, history_rounds, share, value_call_room,
+};
 
 const CALLER: Address = address!("0000000000000000000000000000000000d00000");
 /// The contract a nested site's transaction calls: it calls [`ACTOR`] and returns what that
@@ -105,7 +111,7 @@ enum Site {
 enum Variant {
     /// The move, as it is.
     Plain,
-    /// The same bytes on the same lane with no value moved, the last of them a `LOG3` of one word
+    /// The same bytes on the same pool with no value moved, the last of them a `LOG3` of one word
     /// where the transfer log is.
     Twin,
     /// The move, then a failure above it that takes it back.
@@ -124,7 +130,7 @@ impl Site {
         Self::SelfDestruct,
     ];
 
-    /// The depth of the frame whose lane holds the log: the transaction's own, or the one the
+    /// The depth of the frame whose pool holds the log: the transaction's own, or the one the
     /// actor starts.
     const fn depth(self) -> u32 {
         match self {
@@ -133,29 +139,52 @@ impl Site {
         }
     }
 
+    /// The depth of the frame whose budget holds all the bytes the move counts: the frame whose
+    /// pool holds the log, but for a creation its creator, the actor. The creation's share of the
+    /// actor's budget holds the created account's record and the log, 200 bytes, whenever the
+    /// actor's holds those and its own nonce record, 240, which it counts once the creation
+    /// returned: `share(240)` is 235.
+    const fn holding_depth(self) -> u32 {
+        match self {
+            Self::Create | Self::Create2 => 1,
+            _ => self.depth(),
+        }
+    }
+
     /// The write records the move makes: the recipient's or the created account's, and the
-    /// caller's own below the transaction's frame; a destruction's beneficiary alone.
+    /// caller's own below the transaction's frame; a destruction's beneficiary and the account it
+    /// clears.
     const fn records(self) -> u64 {
         match self {
-            Self::TxValue | Self::TxEndowment | Self::SelfDestruct => 1,
+            Self::TxValue | Self::TxEndowment => 1,
             _ => 2,
         }
     }
 
-    /// The bytes the move counts on its frame's lane: its records and its transfer log.
+    /// The new accounts and slots `variant` keeps once it ran to its end: the account the move
+    /// creates — the created account, or [`PAYEE`]'s and the identity precompile's, which hold
+    /// nothing before the value reaches them — and for the twin, the account it creates or the
+    /// fresh slots it writes for the records. A move taken back keeps none.
+    const fn growth(self, variant: Variant) -> u64 {
+        match (self, variant) {
+            (_, Variant::TakenBack) => 0,
+            (Self::TxEndowment | Self::Create | Self::Create2, _) |
+            (Self::CallWithoutCode | Self::CallToPrecompile, Variant::Plain) => 1,
+            (_, Variant::Plain) => 0,
+            (_, Variant::Twin) => self.records(),
+        }
+    }
+
+    /// The bytes the move counts: its records and its transfer log.
     const fn bytes(self) -> u64 {
         self.records() * WRITE_RECORD_SIZE + TRANSFER_LOG_SIZE
     }
 
-    /// What a stop at the move leaves counted beside the body: the nonce record a creation
-    /// stopped at its start leaves its creator; nothing otherwise.
-    const fn left_by_a_stop(self) -> LimitUsage {
-        match self {
-            Self::Create | Self::Create2 => {
-                LimitUsage { data_size: WRITE_RECORD_SIZE, write_records: 1 }
-            }
-            _ => LimitUsage::ZERO,
-        }
+    /// The budget of the frame that holds the move, when the transaction's own frame starts with
+    /// `first`: that frame itself at the transaction's own frame; below it, 98% of `first` for the
+    /// actor, and 98% of what the actor has left for the frame it starts.
+    fn holding_budget(self, first: u64) -> u64 {
+        budget(self.holding_depth(), first)
     }
 
     /// The account the value moves to. The sender and the actor start at nonce zero.
@@ -356,7 +385,11 @@ fn assert_completed(
     assert_eq!(balance(outcome, site.recipient()), moved, "{case}: the value at the recipient");
     assert_eq!(
         outcome.usage,
-        LimitUsage { data_size: body + site.bytes(), write_records: site.records() },
+        LimitUsage {
+            data_size: body + site.bytes(),
+            write_records: site.records(),
+            state_growth: site.growth(variant)
+        },
         "{case}: the body, the records and one log",
     );
     let history_bytes = body + site.records() * WRITE_RECORD_SIZE + log_history;
@@ -373,7 +406,7 @@ fn assert_completed(
 }
 
 /// Asserts `outcome` is `site` stopped at its move by `stop`, with nothing of the move left: no
-/// transfer log, no value moved, and only what a stop leaves beside the body counted.
+/// transfer log, no value moved, and nothing but the body counted.
 fn assert_stopped_at_the_move(
     case: &str,
     site: Site,
@@ -389,10 +422,9 @@ fn assert_stopped_at_the_move(
     );
     assert!(transfer_logs(outcome).is_empty(), "{case}: no transfer log");
     assert_eq!(balance(outcome, site.recipient()), U256::ZERO, "{case}: no value moved");
-    let left = site.left_by_a_stop();
     assert_eq!(
         outcome.usage,
-        LimitUsage { data_size: body + left.data_size, write_records: left.write_records },
+        LimitUsage { data_size: body, write_records: 0, state_growth: 0 },
         "{case}: the move's bytes are not counted",
     );
 }
@@ -415,18 +447,20 @@ fn test_each_site_counts_its_transfer_log() {
     }
 }
 
-/// A frame budget holds the move at exactly its bytes, and one byte short of them stops the frame
-/// that moves the value before anything moves, frame-locally: the caller resumes — the relay and
-/// the actor return the stop as their output — and the transaction reports no stop. The
-/// transaction's own frame has no caller, so its stop reverts the transaction, and the outcome
-/// names it, the crossing that produced that frame's result.
+/// A frame budget holds the move at exactly the bytes it counts, and one byte short of them stops
+/// the frame that holds the move, which keeps nothing of it, frame-locally: the caller resumes —
+/// the relay and the actor return the stop as their output — and the transaction reports no stop.
+/// The transaction's own frame has no caller, so its stop reverts the transaction, and the outcome
+/// names it, the crossing that produced that frame's result. A creation's bytes are held to its
+/// creator's budget, whose nonce record is counted on it once the creation returned: one byte
+/// short, the creation runs and returns, and the creator is stopped before it runs on.
 ///
 /// A `LOG3` of one word where the transfer log is, after the same bytes of records, stops the
 /// same frame at the same budget with the same revert.
 #[test]
 fn test_each_site_stops_one_byte_short_of_its_frame_budget() {
     for site in Site::ALL {
-        let cap = cap_for(site.depth(), site.bytes());
+        let cap = cap_for(site.holding_depth(), site.bytes());
         for gas_limit in GAS_LIMITS {
             for variant in [Variant::Plain, Variant::Twin] {
                 let case = format!("{site:?} {variant:?} at {gas_limit}");
@@ -470,8 +504,7 @@ fn test_each_site_stops_one_byte_short_of_its_frame_budget() {
                             Some(&Bytes::from(stop.abi_encode())),
                             "{case}: the same stop",
                         );
-                        let left = site.left_by_a_stop();
-                        assert_eq!(over.usage.data_size - body, left.data_size, "{case}");
+                        assert_eq!(over.usage.data_size, body, "{case}: the body alone");
                         assert!(over.result.logs().is_empty(), "{case}: the log went");
                     }
                     Variant::TakenBack => unreachable!(),
@@ -482,10 +515,11 @@ fn test_each_site_stops_one_byte_short_of_its_frame_budget() {
     }
 }
 
-/// The transaction's limit one byte short of the move stops the frame that moves the value there,
-/// as its budget does: the stop names the data size and the transaction's limit, the caller
-/// resumes — the relay and the actor return the stop as their output — and the move's bytes go
-/// with the frame. At the transaction's own frame the stop is the transaction's result, the
+/// The transaction's limit one byte short of the move stops the frame that holds the move there,
+/// as its budget does: the stop names the data size and the frame's budget, which the limit leaves
+/// it, the caller resumes — the relay and the actor return the stop as their output — and the
+/// move's bytes go with the frame. For a creation that frame is its creator, stopped once the
+/// creation returned. At the transaction's own frame the stop is the transaction's result, the
 /// outcome names it with the move's bytes in the figure that crossed, and a limit of exactly the
 /// bytes holds. A `LOG3` of one word where the transfer log is, after the same bytes of records,
 /// crosses the same way.
@@ -504,11 +538,17 @@ fn test_each_site_stops_one_byte_short_of_the_transaction_limit() {
                 };
 
                 let (outcome, body, limit) = run(1);
+                // The frame that holds the move crosses its own budget with the transaction's
+                // limit, and the stop names the budget: at the transaction's own
+                // frame what the body leaves of the limit; below it, 98% of that
+                // for the actor, and 98% of what the actor has left for the frame
+                // it starts.
+                let budget = site.holding_budget(limit - body);
                 let own_frames = (site.depth() == 0).then_some(LimitCheck::ExceedsLimit {
                     kind: LimitKind::DataSize,
-                    limit,
-                    used: body + site.bytes(),
-                    frame_local: false,
+                    limit: budget,
+                    used: site.bytes(),
+                    frame_local: true,
                 });
                 assert_eq!(
                     outcome.limit_exceeded, own_frames,
@@ -520,7 +560,7 @@ fn test_each_site_stops_one_byte_short_of_the_transaction_limit() {
                     "{case}: the caller resumes: {:?}",
                     outcome.result
                 );
-                let stop = MegaLimitExceeded { kind: LimitKind::DataSize.as_u8(), limit };
+                let stop = MegaLimitExceeded { kind: LimitKind::DataSize.as_u8(), limit: budget };
                 match variant {
                     Variant::Plain => {
                         assert_stopped_at_the_move(&case, site, &outcome, body, stop);
@@ -531,8 +571,7 @@ fn test_each_site_stops_one_byte_short_of_the_transaction_limit() {
                             Some(&Bytes::from(stop.abi_encode())),
                             "{case}: the same stop",
                         );
-                        let left = site.left_by_a_stop();
-                        assert_eq!(outcome.usage.data_size - body, left.data_size, "{case}");
+                        assert_eq!(outcome.usage.data_size, body, "{case}: the body alone");
                         assert!(outcome.result.logs().is_empty(), "{case}: the log went");
                     }
                     Variant::TakenBack => unreachable!(),
@@ -546,6 +585,64 @@ fn test_each_site_stops_one_byte_short_of_the_transaction_limit() {
                 }
             }
         }
+    }
+}
+
+/// A value call revm answers without building a frame — to an account with no code, to a
+/// precompile — whose start crosses the transaction's limit is answered with the stop once revm
+/// moved the value, and what the start moved is taken back before its caller resumes: the caller,
+/// which wrote a slot before the call and reads its own balance before and after it, finds its
+/// balance as it was, keeps its slot, and returns the stop it caught.
+#[test]
+fn test_an_answered_value_call_whose_start_crosses_is_taken_back_before_its_caller_resumes() {
+    for site in [Site::CallWithoutCode, Site::CallToPrecompile] {
+        let held = U256::from(10 * VALUE);
+        let actor = BytecodeBuilder::default()
+            .sstore(U256::from(1), U256::from(1))
+            .append_many([SELFBALANCE, PUSH0, MSTORE])
+            .call(site.recipient(), U256::from(VALUE))
+            .append_many([POP, SELFBALANCE])
+            .push_number(0x20_u8)
+            .append_many([MSTORE, RETURNDATASIZE, PUSH0])
+            .push_number(0x40_u8)
+            .append_many([RETURNDATACOPY, RETURNDATASIZE])
+            .push_number(0x40_u8)
+            .append_many([ADD, PUSH0, RETURN])
+            .build();
+        let db = MemoryDatabase::default()
+            .account_balance(CALLER, U256::from(10u64.pow(18)))
+            .account_balance(ACTOR, held)
+            .account_code(ACTOR, actor);
+        let tx = OpTx(op_transaction(TxEnv {
+            caller: CALLER,
+            kind: TxKind::Call(ACTOR),
+            gas_limit: 20_000_000,
+            ..Default::default()
+        }));
+        // The body, the slot's record, then the call's two records and its transfer log, but one.
+        let limit = transaction_body_bytes(&tx) + WRITE_RECORD_SIZE + site.bytes() - 1;
+        let outcome =
+            execute_under(db, tx, EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(limit));
+
+        assert!(outcome.result.is_success(), "{site:?}: {:?}", outcome.result);
+        assert_eq!(outcome.limit_exceeded, None, "{site:?}: the caller caught the stop");
+        let output = outcome.result.output().expect("the caller returns").clone();
+        let (before, after) =
+            (U256::from_be_slice(&output[..32]), U256::from_be_slice(&output[32..64]));
+        assert_eq!(
+            (before, after),
+            (held, held),
+            "{site:?}: the move is taken back before it reads"
+        );
+        // The actor's budget is what the body leaves; once its slot is kept, the call's start gets
+        // 98% of what is left, which the move crosses with the transaction's limit.
+        let budget = crate::common::share(site.bytes() - 1);
+        let stop = MegaLimitExceeded { kind: LimitKind::DataSize.as_u8(), limit: budget };
+        assert_eq!(&output[64..], stop.abi_encode().as_slice(), "{site:?}: the call is the stop");
+        assert_eq!(balance(&outcome, site.recipient()), U256::ZERO, "{site:?}: nothing moved");
+        assert!(transfer_logs(&outcome).is_empty(), "{site:?}: no transfer log");
+        let slot = outcome.state[&ACTOR].storage[&U256::from(1)].present_value;
+        assert_eq!(slot, U256::from(1), "{site:?}: the caller keeps its own write");
     }
 }
 
@@ -565,7 +662,11 @@ fn test_a_failure_takes_each_sites_transfer_log_back() {
             assert!(!outcome.result.is_halt(), "{case}: {:?}", outcome.result);
             assert_eq!(outcome.result.is_success(), site.depth() > 0, "{case}: the relay resumes");
             assert!(outcome.result.logs().is_empty(), "{case}: the log went with the move");
-            assert_eq!(outcome.usage, LimitUsage { data_size: body, write_records: 0 }, "{case}");
+            assert_eq!(
+                outcome.usage,
+                LimitUsage { data_size: body, write_records: 0, state_growth: 0 },
+                "{case}"
+            );
             if site == Site::SelfDestruct {
                 assert_eq!(balance(&outcome, DESTRUCTOR), U256::from(VALUE), "{case}");
             }
@@ -627,23 +728,26 @@ fn test_no_transfer_log_where_no_value_moves_to_another_account() {
         .append_many([PUSH0, CALLDATASIZE, PUSH1, end, JUMPI, POP])
         .append_many(self_call.build_vec())
         .append(JUMPDEST);
-    let cases: [(&str, MemoryDatabase, MegaTransaction, u64, usize); 7] = [
-        ("a CALLCODE", db(actor().callcode(RECEIVER, value)), call(ACTOR, 0), 1, 0),
-        // The move's sender and recipient are one account, recorded once.
-        ("a CALL to itself", db(calls_itself_once), call(ACTOR, 0), 1, 0),
-        ("a zero-value CALL", db(actor().call(RECEIVER, U256::ZERO)), call(ACTOR, 0), 0, 0),
-        ("a transaction's value to its sender", db(actor()), call(CALLER, VALUE), 0, 0),
+    // (case, database, transaction, write records, logs, new accounts and slots)
+    let cases: [(&str, MemoryDatabase, MegaTransaction, u64, usize, u64); 7] = [
+        // The move's sender and recipient are one account, which it leaves as it was: no record.
+        ("a CALLCODE", db(actor().callcode(RECEIVER, value)), call(ACTOR, 0), 0, 0, 0),
+        ("a CALL to itself", db(calls_itself_once), call(ACTOR, 0), 0, 0, 0),
+        ("a zero-value CALL", db(actor().call(RECEIVER, U256::ZERO)), call(ACTOR, 0), 0, 0, 0),
+        ("a transaction's value to its sender", db(actor()), call(CALLER, VALUE), 0, 0, 0),
         (
-            "a creation that destructs to itself: its endowment's log alone",
+            "a creation that destructs to itself: its endowment's log alone; the destruction takes \
+             back the new account's record and its growth, and the creator's record stands",
             db(actor().create(value, &burner)),
             call(ACTOR, 0),
-            2,
             1,
+            1,
+            0,
         ),
-        ("an older account destructing to itself", db(actor()), call(DESTRUCTOR, 0), 0, 0),
-        ("a value call a system contract refuses", db(refused), call(ACTOR, 0), 0, 0),
+        ("an older account destructing to itself", db(actor()), call(DESTRUCTOR, 0), 0, 0, 0),
+        ("a value call a system contract refuses", db(refused), call(ACTOR, 0), 0, 0, 0),
     ];
-    for (name, db, tx, records, logs) in cases {
+    for (name, db, tx, records, logs, growth) in cases {
         let body = transaction_body_bytes(&tx);
         let outcome = execute_under(db, tx, EvmTxRuntimeLimits::no_limits());
         assert!(outcome.result.is_success(), "{name}: {:?}", outcome.result);
@@ -654,6 +758,7 @@ fn test_no_transfer_log_where_no_value_moves_to_another_account() {
             LimitUsage {
                 data_size: body + records * WRITE_RECORD_SIZE + logs as u64 * TRANSFER_LOG_SIZE,
                 write_records: records,
+                state_growth: growth,
             },
             "{name}",
         );
@@ -673,10 +778,11 @@ fn test_no_transfer_log_where_no_value_moves_to_another_account() {
 /// A start revm refuses on its caller's account moves nothing and writes nothing, so nothing is
 /// counted for it, and no limit stops it for what it would have counted: it runs as it does with
 /// no limit. Here, a value call its caller cannot fund, which revm answers with `OutOfFunds` and no
-/// data, which the actor returns: a `CALL`, whose move would count two records and a transfer log,
-/// and a `CALLCODE`, whose move to its own account would count the caller's record alone. Neither
-/// the transaction's limit nor the frame's budget one byte short of those bytes changes anything.
-/// The same call funded to the last wei is made, and both stop it there.
+/// data, which the actor returns: a `CALL`, whose move would count two records and a transfer log.
+/// Neither the transaction's limit nor the frame's budget one byte short of those bytes changes
+/// anything. The same call funded to the last wei is made, and both stop it there. A `CALLCODE`
+/// is not among the cases: its move is to the calling account itself, which counts nothing funded
+/// or not, so no limit can stop it.
 #[test]
 fn test_a_value_call_its_caller_cannot_fund_runs_as_without_a_limit() {
     let value = U256::from(VALUE);
@@ -695,18 +801,11 @@ fn test_a_value_call_its_caller_cannot_fund_runs_as_without_a_limit() {
     }));
     let body = transaction_body_bytes(&tx);
     let actor = |call: BytecodeBuilder| call.append(POP).return_returndata().build();
-    let cases = [
-        (
-            "a CALL",
-            actor(BytecodeBuilder::default().call(RECEIVER, value)),
-            2 * WRITE_RECORD_SIZE + TRANSFER_LOG_SIZE,
-        ),
-        (
-            "a CALLCODE",
-            actor(BytecodeBuilder::default().callcode(RECEIVER, value)),
-            WRITE_RECORD_SIZE,
-        ),
-    ];
+    let cases = [(
+        "a CALL",
+        actor(BytecodeBuilder::default().call(RECEIVER, value)),
+        2 * WRITE_RECORD_SIZE + TRANSFER_LOG_SIZE,
+    )];
     for (name, actor, bytes) in cases {
         let tx_limit = EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(body + bytes - 1);
         let frame_budget =
@@ -717,7 +816,11 @@ fn test_a_value_call_its_caller_cannot_fund_runs_as_without_a_limit() {
         assert!(free.result.is_success(), "{name}: {:?}", free.result);
         assert_eq!(free.result.output(), Some(&Bytes::new()), "{name}: the refusal's empty data");
         assert!(free.result.logs().is_empty(), "{name}");
-        assert_eq!(free.usage, LimitUsage { data_size: body, write_records: 0 }, "{name}");
+        assert_eq!(
+            free.usage,
+            LimitUsage { data_size: body, write_records: 0, state_growth: 0 },
+            "{name}"
+        );
         assert_eq!(balance(&free, ACTOR), U256::from(VALUE - 1), "{name}: nothing moved");
         for limits in [tx_limit, frame_budget] {
             let limited = execute_under(db(VALUE - 1, &actor), tx.clone(), limits);
@@ -728,7 +831,9 @@ fn test_a_value_call_its_caller_cannot_fund_runs_as_without_a_limit() {
         }
 
         let stopped = execute_under(db(VALUE, &actor), tx.clone(), tx_limit);
-        let stop = MegaLimitExceeded { kind: LimitKind::DataSize.as_u8(), limit: body + bytes - 1 };
+        // The call's start gets 98% of the actor's budget, which the move crosses first.
+        let budget = crate::common::share(bytes - 1);
+        let stop = MegaLimitExceeded { kind: LimitKind::DataSize.as_u8(), limit: budget };
         assert_eq!(
             stopped.result.output(),
             Some(&Bytes::from(stop.abi_encode())),
@@ -745,10 +850,16 @@ fn test_a_value_call_its_caller_cannot_fund_runs_as_without_a_limit() {
     }
 }
 
-/// A value call its caller cannot fund is charged nothing for the records it would make, as it
-/// counts none: a caller that keeps less gas, once it has forwarded all it can, than those records'
-/// history carries on past the refused call. Funded, the same call runs it out of gas at its
-/// opcode, which shows the caller does keep less than that.
+/// A value call its caller cannot fund is charged nothing at its opcode: the frame-start hook,
+/// which charges a start's records from the journal's state, sees the caller cannot fund the value
+/// revm then refuses, and the refused call makes no record. So the caller runs on past the refused
+/// call, billed its body's history alone and counting nothing more, even where it keeps less than
+/// the records would have cost once it has forwarded all it can; the same caller, able to fund the
+/// value, runs out of gas at the opcode on the records' history.
+///
+/// Before the net-change rule the opcode charged the records whether or not the caller could fund
+/// the value, and the charge came back when the refused start returned; a caller that could not
+/// pay it halted at the opcode though the start would have been refused.
 #[test]
 fn test_a_value_call_its_caller_cannot_fund_is_charged_nothing() {
     let actor =
@@ -768,26 +879,13 @@ fn test_a_value_call_its_caller_cannot_fund_is_charged_nothing() {
             ..Default::default()
         }))
     };
-    // About 150,000 gas for the actor, of which it keeps a sixty-fourth at its `CALL`: less than
-    // the history of the two records the move would make. Where 64 times that history is not
-    // above the 20,000 the actor needs to reach its `CALL`, as where a history byte costs
-    // nothing, no actor both reaches the call and keeps less than the records cost.
-    let records = history_gas(2 * WRITE_RECORD_SIZE).unwrap();
-    let actor_gas = (64 * records).saturating_sub(1).min(150_000);
-    if actor_gas < 20_000 {
-        return;
-    }
-    assert!(actor_gas / 64 < records, "the actor keeps less than the records cost");
-    let gas_limit = 21_000 + history_gas(transaction_body_bytes(&tx(0))).unwrap() + actor_gas;
+    let body = transaction_body_bytes(&tx(0));
 
-    let refused = execute_under(db(VALUE - 1), tx(gas_limit), EvmTxRuntimeLimits::no_limits());
+    let refused = execute_under(db(VALUE - 1), tx(20_000_000), EvmTxRuntimeLimits::no_limits());
     assert!(refused.result.is_success(), "{:?}", refused.result);
-    let funded = execute_under(db(VALUE), tx(gas_limit), EvmTxRuntimeLimits::no_limits());
-    assert!(funded.result.is_halt(), "{:?}", funded.result);
-    let body = transaction_body_bytes(&tx(gas_limit));
     assert_eq!(
         refused.usage,
-        LimitUsage { data_size: body, write_records: 0 },
+        LimitUsage { data_size: body, write_records: 0, state_growth: 0 },
         "the refused call counted nothing",
     );
     assert_eq!(
@@ -795,128 +893,28 @@ fn test_a_value_call_its_caller_cannot_fund_is_charged_nothing() {
         history_gas(body).unwrap(),
         "and paid the body's history alone"
     );
-    assert_eq!(funded.gas.gas_used, gas_limit, "the funded call's halt used the whole gas limit");
-}
 
-/// Appends a call carrying [`VALUE`] to `MegaAccessControl`, which answers it with
-/// `NonZeroTransfer()` before revm looks at the caller's balance, leaving the call's status on the
-/// stack. From a caller that holds less, it is a start revm would refuse, answered before its
-/// init.
-fn call_the_system_contract_answers(code: BytecodeBuilder) -> BytecodeBuilder {
-    code.mstore(0, IMegaAccessControl::isVolatileDataAccessDisabledCall::SELECTOR)
-        .append_many([PUSH0, PUSH0])
-        .push_number(4u64)
-        .append(PUSH0)
-        .push_u256(U256::from(VALUE))
-        .push_address(ACCESS_CONTROL_ADDRESS)
-        .append_many([GAS, CALL])
-}
-
-/// Whether revm refuses a start on its caller's account is found once, by the opcode starting it,
-/// and taken by the frame's init. A start answered before its init leaves that answer behind:
-/// here a value call its caller cannot fund, which the system contract answers with
-/// `NonZeroTransfer()` before revm could refuse it. The frame the caller starts next takes none
-/// of it: a `DELEGATECALL` whose two fresh slots cross its budget by a byte reverts on that
-/// budget, as it does with no call before it, and keeps nothing.
-#[test]
-fn test_a_start_answered_before_its_init_leaves_no_refusal_for_the_next() {
-    const WRITER: Address = address!("0000000000000000000000000000000000d00008");
-    let writer = BytecodeBuilder::default()
-        .sstore(U256::from(1), U256::from(1))
-        .sstore(U256::from(2), U256::from(1))
-        .stop()
-        .build();
-    // The `ACTOR` holds nothing, so revm would refuse the value; the system contract answers first.
-    let answered_call = call_the_system_contract_answers;
-    let delegate_to_writer = |code: BytecodeBuilder| {
-        code.append_many([PUSH0, PUSH0, PUSH0, PUSH0])
-            .push_address(WRITER)
-            .append_many([GAS, DELEGATECALL])
-            .return_top()
-    };
-    let db = |actor: BytecodeBuilder| {
-        MemoryDatabase::default()
-            .account_balance(CALLER, U256::from(10u64.pow(18)))
-            .account_code(ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE)
-            .account_code(WRITER, writer.clone())
-            .account_code(ACTOR, actor.build())
-    };
-    let tx = OpTx(op_transaction(TxEnv {
-        caller: CALLER,
-        kind: TxKind::Call(ACTOR),
-        gas_limit: 20_000_000,
-        ..Default::default()
-    }));
-    let body = transaction_body_bytes(&tx);
-    let limits = EvmTxRuntimeLimits::no_limits()
-        .with_frame_data_size_limit(cap_for(1, 2 * WRITE_RECORD_SIZE - 1));
-
-    let answer = execute_under(
-        db(answered_call(BytecodeBuilder::default()).append(POP).return_returndata()),
-        tx.clone(),
-        limits,
-    );
-    assert_eq!(
-        answer.result.output(),
-        Some(&Bytes::from(IMegaAccessControl::NonZeroTransfer::SELECTOR.to_vec())),
-        "the system contract answers the call, not revm"
-    );
-
-    let cases = [
-        ("alone", delegate_to_writer(BytecodeBuilder::default())),
-        (
-            "after the answered call",
-            delegate_to_writer(answered_call(BytecodeBuilder::default()).append(POP)),
-        ),
-    ];
-    for (name, actor) in cases {
-        let outcome = execute_under(db(actor), tx.clone(), limits);
-        assert_eq!(
-            outcome.result.output(),
-            Some(&Bytes::from(U256::ZERO.to_be_bytes::<32>())),
-            "{name}: the DELEGATECALL reverted on its budget",
+    // About 150,000 gas for the actor, of which it keeps a fiftieth at its `CALL`: less than the
+    // history of the two records the move would make. Where 50 times that history is not above
+    // the 20,000 the actor needs to reach its `CALL`, as where a history byte costs nothing, no
+    // actor both reaches the call and keeps less than the records cost.
+    let records = history_gas(2 * WRITE_RECORD_SIZE).unwrap();
+    let actor_gas = (50 * records).saturating_sub(1).min(150_000);
+    if actor_gas < 20_000 {
+        mega_evm::test_utils::note_price_guard(
+            "two write records' history is too cheap for a caller to keep less than it",
         );
-        assert_eq!(outcome.limit_exceeded, None, "{name}: a frame budget below is no stop");
-        assert_eq!(outcome.usage, LimitUsage { data_size: body, write_records: 0 }, "{name}");
+        return;
     }
-}
-
-/// The answer a transaction's last start left behind is not taken by the next transaction's first
-/// frame, whose own answer nothing staged: a deposit pays no history, so no record of its is
-/// charged before execution and nothing asks its sender's account before the frame's init. Its
-/// value to `RECEIVER` is counted — the recipient's record and the transfer log — as on an EVM
-/// that ran nothing before it.
-#[test]
-fn test_an_answer_a_transaction_leaves_is_not_taken_by_the_next() {
-    let db = MemoryDatabase::default()
-        .account_balance(CALLER, U256::from(10u64.pow(18)))
-        .account_code(ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE)
-        .account_code(RECEIVER, Bytes::from_static(&[STOP]))
-        .account_code(
-            ACTOR,
-            call_the_system_contract_answers(BytecodeBuilder::default()).stop().build(),
-        );
-    let answered = OpTx(op_transaction(TxEnv {
-        caller: CALLER,
-        kind: TxKind::Call(ACTOR),
-        gas_limit: 20_000_000,
-        ..Default::default()
-    }));
-    let user_deposit = || deposit(TxKind::Call(RECEIVER), 1_000, 400);
-    let body = transaction_body_bytes(&user_deposit());
-
-    let alone = execute_under(db.clone(), user_deposit(), EvmTxRuntimeLimits::no_limits());
-    let mut evm = MegaEvm::new(context(db).with_tx_runtime_limits(EvmTxRuntimeLimits::no_limits()));
-    let first = evm.execute_transaction(answered).expect("the transaction is valid");
-    assert!(first.result.is_success(), "{:?}", first.result);
-    let next = evm.execute_transaction(user_deposit()).expect("the transaction is valid");
-
-    assert_eq!(
-        next.usage,
-        LimitUsage { data_size: body + WRITE_RECORD_SIZE + TRANSFER_LOG_SIZE, write_records: 1 },
-    );
-    assert_eq!(next.usage, alone.usage);
-    assert_eq!(next.result, alone.result);
+    assert!(actor_gas / 50 < records, "the actor keeps less than the records cost");
+    let gas_limit = 21_000 + history_gas(body).unwrap() + actor_gas;
+    let unfunded = execute_under(db(VALUE - 1), tx(gas_limit), EvmTxRuntimeLimits::no_limits());
+    assert!(unfunded.result.is_success(), "unfunded: charged nothing: {:?}", unfunded.result);
+    assert_eq!(unfunded.usage, refused.usage, "unfunded: nothing counted");
+    assert_eq!(unfunded.gas.history, refused.gas.history, "unfunded: the body's history alone");
+    let funded = execute_under(db(VALUE), tx(gas_limit), EvmTxRuntimeLimits::no_limits());
+    assert!(funded.result.is_halt(), "funded: out of gas on the records: {:?}", funded.result);
+    assert_eq!(funded.gas.gas_used, gas_limit, "funded: the halt used the gas limit");
 }
 
 /// Raises the value of every call to [`RECEIVER`] by one wei as the call starts: an inspector's
@@ -936,12 +934,12 @@ impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for RaisesValue {
     }
 }
 
-/// An inspector may rewrite a frame's input after the opcode that starts it found whether revm
-/// refuses it, so the inspected start asks again on the input the inspector leaves. The `ACTOR`
-/// can fund the value its `CALL` carries and not the one the inspector raises it to: revm refuses
-/// the start with `OutOfFunds` and no data, which the actor returns, and nothing is counted for
-/// it — under a frame budget one byte short of the records and the transfer log the start would
-/// count, which would stop it with the limit's revert data otherwise.
+/// An inspector may rewrite a frame's input after the opcode that starts it charged its records,
+/// and revm decides the start on the input the inspector leaves. The `ACTOR` can fund the value
+/// its `CALL` carries and not the one the inspector raises it to: revm refuses the start with
+/// `OutOfFunds` and no data, which the actor returns, and nothing is counted for it — under a
+/// frame budget one byte short of the records and the transfer log the start would count, which
+/// would stop it with the limit's revert data otherwise.
 #[test]
 fn test_a_start_an_inspector_rewrites_is_refused_on_the_input_it_leaves() {
     let actor = BytecodeBuilder::default()
@@ -972,20 +970,19 @@ fn test_a_start_an_inspector_rewrites_is_refused_on_the_input_it_leaves() {
     assert_eq!(outcome.result.output(), Some(&Bytes::new()), "the refusal's empty data");
     assert!(transfer_logs(&outcome).is_empty(), "nothing moved");
     assert_eq!(balance(&outcome, ACTOR), U256::from(VALUE));
-    assert_eq!(outcome.usage, LimitUsage { data_size: body, write_records: 0 });
+    assert_eq!(outcome.usage, LimitUsage { data_size: body, write_records: 0, state_growth: 0 });
     assert_eq!(outcome.limit_exceeded, None);
 }
 
-/// A creation onto an occupied address is the one refusal decided after its start is counted:
-/// revm reads the created address's account only once it builds the frame, and reading it any
-/// earlier would load it. Without a limit, the creation fails on the collision after it bumped its
-/// creator's nonce, so the creator's record is kept, and the created account's record and the
-/// transfer log are not. Under the transaction's limit one byte short of what the start counts,
-/// the start's records and transfer log cross it, and the stop comes first: the creation returns
-/// the stop rather than the collision's empty data, which the creator returns, and the creator
-/// keeps its nonce record either way.
+/// A creation onto an occupied address fails on the collision once revm bumped its creator's
+/// nonce, and its start is held to nothing: under the transaction's limit one byte short of what
+/// its start would count — the created account's record, its creator's nonce and the transfer log
+/// — it fails as without a limit, with the collision's empty data, which the creator returns. The
+/// created account's record and the transfer log go with the failure; the creator keeps its nonce
+/// record, held to its own limits with it, so a limit one byte short of the body and that record
+/// stops the creator.
 #[test]
-fn test_a_creation_onto_an_occupied_address_is_counted_before_revm_refuses_it() {
+fn test_a_creation_onto_an_occupied_address_fails_on_the_collision() {
     let occupied = Site::Create2.recipient();
     let actor = BytecodeBuilder::default()
         .create2(U256::from(VALUE), [], U256::ZERO)
@@ -1006,6 +1003,13 @@ fn test_a_creation_onto_an_occupied_address_is_counted_before_revm_refuses_it() 
         ..Default::default()
     }));
     let body = transaction_body_bytes(&tx);
+    let under = |limit| {
+        execute_under(
+            db(),
+            tx.clone(),
+            EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(limit),
+        )
+    };
 
     let free = execute_under(db(), tx.clone(), EvmTxRuntimeLimits::no_limits());
     assert!(free.result.is_success(), "{:?}", free.result);
@@ -1015,19 +1019,24 @@ fn test_a_creation_onto_an_occupied_address_is_counted_before_revm_refuses_it() 
     assert_eq!(balance(&free, occupied), U256::ZERO, "no value moved");
     assert_eq!(
         free.usage,
-        LimitUsage { data_size: body + WRITE_RECORD_SIZE, write_records: 1 },
+        LimitUsage { data_size: body + WRITE_RECORD_SIZE, write_records: 1, state_growth: 0 },
         "the creator's nonce alone",
     );
 
-    let limit = body + Site::Create2.bytes() - 1;
-    let stopped =
-        execute_under(db(), tx, EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(limit));
-    assert!(stopped.result.is_success(), "the creator catches the stop: {:?}", stopped.result);
-    let stop = MegaLimitExceeded { kind: LimitKind::DataSize.as_u8(), limit };
-    assert_eq!(stopped.result.output(), Some(&Bytes::from(stop.abi_encode())), "the stop first");
-    assert_eq!(stopped.limit_exceeded, None);
-    assert_eq!(stopped.usage, free.usage, "the creator's nonce alone");
-    assert_eq!(stopped.state[&ACTOR].info.nonce, 1, "the stopped creation bumped it too");
+    let limited = under(body + Site::Create2.bytes() - 1);
+    assert_eq!(limited.limit_exceeded, None);
+    assert_eq!(limited.result, free.result, "the collision, as without a limit");
+    assert_eq!(limited.usage, free.usage, "the creator's nonce alone");
+    assert_eq!(limited.gas, free.gas);
+
+    let limit = body + WRITE_RECORD_SIZE - 1;
+    let stopped = under(limit);
+    // The creator's nonce record overdraws the actor's budget, which is held first and named.
+    let stop =
+        MegaLimitExceeded { kind: LimitKind::DataSize.as_u8(), limit: WRITE_RECORD_SIZE - 1 };
+    assert_eq!(stopped.result.output(), Some(&Bytes::from(stop.abi_encode())), "the creator's");
+    assert!(stopped.limit_exceeded.is_some(), "the transaction's own frame is the creator");
+    assert_eq!(stopped.usage, LimitUsage { data_size: body, write_records: 0, state_growth: 0 });
 }
 
 /// A deposit's value moves in its first frame and is logged there, from the depositor to the
@@ -1050,7 +1059,12 @@ fn test_a_deposits_value_is_logged_and_its_mint_is_not() {
     assert_eq!(balance(&outcome, DEPOSITOR), U256::from(600));
     assert_eq!(
         outcome.usage,
-        LimitUsage { data_size: body + WRITE_RECORD_SIZE + TRANSFER_LOG_SIZE, write_records: 1 },
+        LimitUsage {
+            data_size: body + WRITE_RECORD_SIZE + TRANSFER_LOG_SIZE,
+            write_records: 1,
+            state_growth: 1
+        },
+        "the recipient's record and the log; the deposit creates its depositor",
     );
     assert_eq!((outcome.gas.history, outcome.gas.history_bytes), (0, 0), "a deposit pays none");
 
@@ -1071,8 +1085,8 @@ fn test_a_deposits_value_is_logged_and_its_mint_is_not() {
     );
     assert_eq!(
         stopped.limit_exceeded.map(|stop| (stop.exceeded_limit(), stop.is_frame_local())),
-        Some((true, false)),
-        "a user's deposit is stopped at its transfer log",
+        Some((true, true)),
+        "a user's deposit is stopped at its transfer log, on its frame's budget",
     );
     assert!(stopped.result.logs().is_empty());
     assert_eq!(balance(&stopped, DEPOSITOR), U256::from(1_000), "the mint stays, the value not");
@@ -1107,6 +1121,135 @@ fn test_a_deposit_its_depositor_cannot_fund_fails_as_without_a_limit() {
     }
 }
 
+/// A value call whose recipient cannot hold the value — its balance would overflow — is refused by
+/// revm with `OverflowPayment` before it journals the move: no transfer log, no record, and the
+/// history the actor paid for the records at its opcode comes back with the refusal. A limit one
+/// byte short of the start's bytes changes nothing: nothing was counted.
+#[test]
+fn test_a_value_call_its_recipient_cannot_hold_keeps_nothing() {
+    let actor = BytecodeBuilder::default().call(PAYEE, U256::from(VALUE)).return_top().build();
+    let db = || {
+        MemoryDatabase::default()
+            .account_balance(ACTOR, U256::from(VALUE))
+            .account_balance(PAYEE, U256::MAX)
+            .account_code(ACTOR, actor.clone())
+    };
+    for gas_limit in GAS_LIMITS {
+        let tx = OpTx(op_transaction(TxEnv {
+            caller: CALLER,
+            kind: TxKind::Call(ACTOR),
+            gas_limit,
+            ..Default::default()
+        }));
+        let body = transaction_body_bytes(&tx);
+        let start = 2 * WRITE_RECORD_SIZE + TRANSFER_LOG_SIZE;
+        for limits in [
+            EvmTxRuntimeLimits::no_limits(),
+            EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(body + start - 1),
+        ] {
+            let outcome = execute_under(db(), tx.clone(), limits);
+            assert!(outcome.result.is_success(), "{limits:?}: {:?}", outcome.result);
+            assert_eq!(outcome.result.output(), Some(&Bytes::from(vec![0; 32])), "the call failed");
+            assert!(outcome.result.logs().is_empty(), "{limits:?}: no transfer log");
+            assert_eq!(
+                outcome.usage,
+                LimitUsage { data_size: body, write_records: 0, state_growth: 0 }
+            );
+            assert_eq!(
+                outcome.gas.history,
+                history_gas(body).unwrap(),
+                "the records' charge came back"
+            );
+        }
+    }
+}
+
+/// A value call to a precompile that fails after its gas check — the BN254 pairing given an input
+/// of the wrong length — moved its value and journaled its transfer log before the precompile ran,
+/// and revm takes both back with the failure. The start is held to the limits as revm made it, on
+/// the records and the log it counted before the failure took them back: under a limit one byte
+/// short of them the call is answered with the stop rather than the failure, and either way the
+/// transaction keeps its body alone.
+#[test]
+fn test_a_failed_precompiles_start_is_held_to_the_limits_it_counted_against() {
+    const EC_PAIRING: Address = address!("0000000000000000000000000000000000000008");
+    let actor = BytecodeBuilder::default()
+        .append_many([PUSH0, PUSH0])
+        .push_number(1_u8)
+        .append(PUSH0)
+        .push_number(VALUE)
+        .push_address(EC_PAIRING)
+        .append_many([GAS, CALL, POP])
+        .return_returndata()
+        .build();
+    let db = || {
+        MemoryDatabase::default()
+            .account_balance(ACTOR, U256::from(VALUE))
+            .account_code(ACTOR, actor.clone())
+    };
+    let tx = OpTx(op_transaction(TxEnv {
+        caller: CALLER,
+        kind: TxKind::Call(ACTOR),
+        gas_limit: value_call_room(),
+        ..Default::default()
+    }));
+    let body = transaction_body_bytes(&tx);
+    let start = 2 * WRITE_RECORD_SIZE + TRANSFER_LOG_SIZE;
+
+    let failed = execute_under(db(), tx.clone(), EvmTxRuntimeLimits::no_limits());
+    assert!(failed.result.is_success(), "{:?}", failed.result);
+    assert_eq!(failed.result.output(), Some(&Bytes::new()), "the precompile's failure");
+    assert!(failed.result.logs().is_empty(), "the failure took the transfer log back");
+    assert_eq!(failed.usage, LimitUsage { data_size: body, write_records: 0, state_growth: 0 });
+
+    let limit = body + start - 1;
+    let stopped =
+        execute_under(db(), tx, EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(limit));
+    let budget = crate::common::share(start - 1);
+    let stop = MegaLimitExceeded { kind: LimitKind::DataSize.as_u8(), limit: budget };
+    assert_eq!(stopped.result.output(), Some(&Bytes::from(stop.abi_encode())), "the stop");
+    assert!(stopped.result.logs().is_empty());
+    assert_eq!(stopped.usage, LimitUsage { data_size: body, write_records: 0, state_growth: 0 });
+}
+
+/// A `CREATE` from a contract whose nonce cannot be bumped is refused by the opcode itself, which
+/// pushes zero before its start's hook: no account, no record, no log, and no history charged for
+/// the two records the start would have made. A limit one byte short of the start's bytes changes
+/// nothing.
+#[test]
+fn test_a_nested_creation_whose_nonce_cannot_be_bumped_keeps_nothing() {
+    let actor = BytecodeBuilder::default().create(U256::from(1), [STOP]).return_top().build();
+    let db = || {
+        MemoryDatabase::default()
+            .account_balance(ACTOR, U256::from(VALUE))
+            .account_nonce(ACTOR, u64::MAX)
+            .account_code(ACTOR, actor.clone())
+    };
+    let tx = OpTx(op_transaction(TxEnv {
+        caller: CALLER,
+        kind: TxKind::Call(ACTOR),
+        gas_limit: value_call_room(),
+        ..Default::default()
+    }));
+    let body = transaction_body_bytes(&tx);
+    let start = 2 * WRITE_RECORD_SIZE + TRANSFER_LOG_SIZE;
+    for limits in [
+        EvmTxRuntimeLimits::no_limits(),
+        EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(body + start - 1),
+    ] {
+        let outcome = execute_under(db(), tx.clone(), limits);
+        assert!(outcome.result.is_success(), "{limits:?}: {:?}", outcome.result);
+        assert_eq!(outcome.result.output(), Some(&Bytes::from(vec![0; 32])), "no address");
+        assert!(outcome.result.logs().is_empty(), "{limits:?}");
+        assert_eq!(
+            outcome.usage,
+            LimitUsage { data_size: body, write_records: 0, state_growth: 0 }
+        );
+        assert_eq!(outcome.state[&ACTOR].info.nonce, u64::MAX, "{limits:?}: not bumped");
+        assert_eq!(outcome.gas.history, history_gas(body).unwrap(), "no charge for the records");
+    }
+}
+
 /// A creation from an account whose nonce cannot be bumped is answered by revm with a success
 /// that creates nothing and moves nothing: a `Return` with no address, and no log. It keeps
 /// nothing either, and no limit stops it for what it did not do.
@@ -1134,7 +1277,11 @@ fn test_a_creation_whose_nonce_cannot_be_bumped_keeps_nothing() {
         let outcome = execute_under(db, tx.clone(), limits);
         assert!(created_nothing(&outcome), "{limits:?}: {:?}", outcome.result);
         assert_eq!(outcome.limit_exceeded, None, "{limits:?}");
-        assert_eq!(outcome.usage, LimitUsage { data_size: body, write_records: 0 }, "{limits:?}");
+        assert_eq!(
+            outcome.usage,
+            LimitUsage { data_size: body, write_records: 0, state_growth: 0 },
+            "{limits:?}"
+        );
     }
 
     let db = MemoryDatabase::default()
@@ -1155,7 +1302,7 @@ fn test_a_creation_whose_nonce_cannot_be_bumped_keeps_nothing() {
         .execute_transaction(tx)
         .expect("the transaction is valid with the nonce check off");
     assert!(created_nothing(&outcome), "{:?}", outcome.result);
-    assert_eq!(outcome.usage, LimitUsage { data_size: body, write_records: 0 });
+    assert_eq!(outcome.usage, LimitUsage { data_size: body, write_records: 0, state_growth: 0 });
     assert_eq!(outcome.gas.history_bytes, body, "its body alone");
     assert_eq!(outcome.gas.history, history_gas(body).unwrap(), "and the history of its body");
 }
@@ -1202,7 +1349,8 @@ fn test_a_system_transactions_value_is_logged_and_no_limit_stops_it() {
             outcome.usage,
             LimitUsage {
                 data_size: body + WRITE_RECORD_SIZE + TRANSFER_LOG_SIZE,
-                write_records: 1
+                write_records: 1,
+                state_growth: 0,
             },
             "counted all the same",
         );
@@ -1224,8 +1372,8 @@ fn test_transfer_logs_keep_execution_order() {
     const MOVED: u64 = 7;
     let marker = B256::repeat_byte(0x4d);
     // Regular room, the new account a creation adds, and sixty-four times the history of a few
-    // records: the creation is forwarded all but a 64th of the gas, and the caller pays the
-    // records from the 64th it keeps, at whatever a byte costs.
+    // records: the creation is forwarded all but 2 per cent of the gas, and the caller pays the
+    // records from the fiftieth it keeps, at whatever a byte costs.
     let gas_limit = 2_000_000 +
         2 * account_state_gas() +
         crate::common::body_history(0) +

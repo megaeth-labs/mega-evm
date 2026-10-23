@@ -586,7 +586,7 @@ fn test_a_failure_from_nonce_one_keeps_no_record_of_the_signer() {
 #[test]
 fn test_every_way_a_deployment_from_nonce_one_fails_leaves_the_nonce_at_one() {
     let one = U256::ONE;
-    // The call's lane gets 39 bytes, and its creation 98% of that: less than its start's two
+    // The call's pool gets 39 bytes, and its creation 98% of that: less than its start's two
     // records.
     let a_share_short_of_the_start = EvmTxRuntimeLimits::no_limits().with_frame_data_size_limit(39);
     let cases = [

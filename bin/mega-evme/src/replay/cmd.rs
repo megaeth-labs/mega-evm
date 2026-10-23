@@ -8,7 +8,7 @@ use clap::Parser;
 use mega_evm::{
     alloy_evm::{
         block::{BlockExecutionError, BlockExecutor},
-        Evm, EvmEnv,
+        Evm, EvmEnv, EvmFactory,
     },
     alloy_op_evm::block::OpAlloyReceiptBuilder,
     revm::{
@@ -19,8 +19,8 @@ use mega_evm::{
         primitives::{eip4844, Address, Log},
         DatabaseRef, Inspector,
     },
-    BlockLimits, DeclaredObserver, MegaBlockExecutionCtx, MegaBlockExecutorFactory, MegaEvmFactory,
-    MegaHardforks, MegaSpecId,
+    BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutor, MegaEvmFactory, MegaHardforks,
+    MegaSpecId,
 };
 use tracing::{debug, info, trace, warn};
 
@@ -443,11 +443,6 @@ impl Cmd {
         let evm_env = EvmEnv::new(cfg_env, block_env);
 
         let evm_factory = MegaEvmFactory::new().with_external_env_factory(external_envs);
-        let block_executor_factory = MegaBlockExecutorFactory::new(
-            OpAlloyReceiptBuilder::default(),
-            &hardforks,
-            evm_factory,
-        );
         // The block is held to Satin's protocol limits, or the override's, with no building
         // policy, as a validator holds it; the block's gas limit comes from its header. Whether
         // it admits only deposits comes from the schedule and the parent block's timestamp, as a
@@ -465,18 +460,14 @@ impl Cmd {
         .with_satin_activation_block(activates_satin);
 
         let start = Instant::now();
-        // The tracer reads and writes nothing back, so block execution admits it declared.
-        // It is attached only for `--trace`: otherwise preceding transactions would be recorded
-        // and then discarded.
-        let mut inspector = DeclaredObserver::new(ReplayTracer::from_args(&self.trace_args));
+        // The tracer is attached only for `--trace`: otherwise preceding transactions would be
+        // recorded and then discarded.
+        let mut inspector = ReplayTracer::from_args(&self.trace_args);
         let mut state =
             StateBuilder::new().with_database(&mut database).with_bundle_update().build();
-        let mut block_executor = block_executor_factory.create_executor_with_trusted_inspector(
-            &mut state,
-            evm_env,
-            block_ctx,
-            &mut inspector,
-        );
+        let evm = evm_factory.create_evm_with_inspector(&mut state, evm_env, &mut inspector);
+        let mut block_executor =
+            MegaBlockExecutor::new(evm, block_ctx, &hardforks, OpAlloyReceiptBuilder::default());
         if let Some(limits) = limits_override {
             block_executor = block_executor.with_protocol_limits(limits);
         }
@@ -541,7 +532,7 @@ impl Cmd {
             .unwrap_or(0);
 
         // The trace covers the target transaction only.
-        if let ReplayTracer::On(tracer) = &mut block_executor.evm_mut().inspector_mut().0 {
+        if let ReplayTracer::On(tracer) = block_executor.evm_mut().inspector_mut() {
             tracer.fuse();
         }
         let outcome = block_executor
@@ -570,7 +561,7 @@ impl Cmd {
             state: evm_state.clone(),
         };
 
-        let trace_data = match &block_executor.inspector().0 {
+        let trace_data = match block_executor.inspector() {
             ReplayTracer::On(tracer) => Some(self.trace_args.generate_trace(
                 tracer,
                 &result_and_state,

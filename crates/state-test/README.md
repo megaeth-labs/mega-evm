@@ -10,6 +10,11 @@ state-test [--mode equivalence|satin] --fork Osaka|Amsterdam [options] <paths>..
 - `--mode satin` is the report: it runs the same entries under Satin's own configuration, prints the counts by outcome, and exits zero unless a fixture file cannot be read.
 - `--fork` names the fork whose fixture entries run.
 - `--expect-executed N`, `--expect-skipped N` and `--expect-deviations` pin the counts of a full run; CI passes all three.
+- `--json-digest` prints one JSON line per executed transaction on standard error: the test's identity and the hash of the canonical record of the transaction's whole Mega outcome.
+  `--json-digest-full` adds the record itself to each line.
+  The two make a whole-outcome differential: run both at two revisions, sort and compare (`sort | cmp`), and read the full lines of the ids that differ.
+- `--limit-data-size BYTES`, `--limit-frame-data-size BYTES`, `--limit-kv-updates RECORDS`, `--limit-state-growth UNITS` and `--limit-compute-gas GAS` (Satin mode only) hold every transaction to tighter per-transaction limits than the spec's, so the limit-stop paths run across the corpus; the frame budget follows `--limit-data-size`.
+  The verdicts of such a run are expected to fail; it is for comparing digests.
 - `--summary-json FILE` writes the counts as JSON, `--json-outcome` prints one JSON line per test on standard error, `--trace` runs every test under an EIP-3155 tracer and `--threads` sets the worker count.
 
 ```bash

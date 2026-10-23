@@ -15,10 +15,15 @@ use alloy_op_evm::OpTx;
 use alloy_primitives::{address, Address, Bytes, TxKind, B256, U256};
 use alloy_sol_types::{SolCall, SolError};
 use mega_evm::{
-    constants::{BLOCK_ENV_ACCESS_COMPUTE_GAS, ORACLE_ACCESS_COMPUTE_GAS, TX_GAS_LIMIT_CAP},
+    constants::{
+        BLOCK_ENV_ACCESS_COMPUTE_GAS, ORACLE_ACCESS_COMPUTE_GAS, TX_GAS_LIMIT_CAP,
+        TX_STATE_GROWTH_LIMIT,
+    },
     history_gas,
     system::{IMegaLimitControl, LIMIT_CONTROL_ADDRESS, ORACLE_CONTRACT_ADDRESS},
-    test_utils::{op_transaction, zero_fee_l1_block_info, BytecodeBuilder, MemoryDatabase},
+    test_utils::{
+        note_price_guard, op_transaction, zero_fee_l1_block_info, BytecodeBuilder, MemoryDatabase,
+    },
     volatile_data_access_disabled_revert_data, write_record_history_gas, EvmTxRuntimeLimits,
     LimitCheck, LimitKind, LimitUsage, MegaContext, MegaEvm, MegaLimitExceeded, MegaSpecId,
     MegaTransaction, MegaTransactionOutcome, OracleRead, ProtocolLimits, VolatileDataAccess,
@@ -82,6 +87,12 @@ pub(crate) fn cold_access() -> u64 {
 /// What a call carrying value pays for the transfer, the callee's stipend included.
 pub(crate) fn value_transfer() -> u64 {
     crate::salt::entry(GasId::transfer_value_cost())
+}
+
+/// The stipend a call carrying value gives its callee on top of the gas it forwards, which its
+/// caller does not pay.
+pub(crate) fn call_stipend() -> u64 {
+    mega_evm::satin_gas_params().call_stipend()
 }
 
 /// What a write to a fresh slot costs beside its compute: the slot's state gas and its record's
@@ -207,6 +218,17 @@ pub(crate) fn stop_data(limit: u64) -> Bytes {
 /// charge, `left` short of the limit, so the transaction's compute, which the stop reports and its
 /// regular ledger bills, is the limit less `left`. Returns the limit.
 pub(crate) fn assert_stopped(run: &Run, intrinsic: u64, left: u64) -> u64 {
+    assert_stopped_with_stipends(run, intrinsic, left, 0)
+}
+
+/// [`assert_stopped`] for a transaction whose value calls gave their callees `stipends` of gas in
+/// all: gas nobody paid, so the regular ledger bills the transaction's compute less them.
+pub(crate) fn assert_stopped_with_stipends(
+    run: &Run,
+    intrinsic: u64,
+    left: u64,
+    stipends: u64,
+) -> u64 {
     let limit = run.limit.expect("a read set a limit");
     match &run.outcome.result {
         ExecutionResult::Revert { output, .. } => assert_eq!(output, &stop_data(limit)),
@@ -224,7 +246,7 @@ pub(crate) fn assert_stopped(run: &Run, intrinsic: u64, left: u64) -> u64 {
     );
     assert_eq!(
         run.outcome.gas.regular,
-        intrinsic + used,
+        intrinsic + used - stipends,
         "the transaction computed up to the charge that crossed its limit and not one unit past it"
     );
     assert_eq!(run.outcome.gas.state, 0, "a stop keeps no state");
@@ -241,8 +263,20 @@ pub(crate) fn assert_stopped(run: &Run, intrinsic: u64, left: u64) -> u64 {
 /// charge crosses the limit again, and that is the stop the transaction reports
 /// ([`assert_stopped`]). Returns the limit.
 pub(crate) fn assert_caught(run: &Run, intrinsic: u64, left: u64, after: &Charges) -> u64 {
+    assert_caught_with_stipends(run, intrinsic, left, after, 0)
+}
+
+/// [`assert_caught`] for a transaction whose value calls gave their callees `stipends` of gas in
+/// all: gas nobody paid, so the regular ledger bills the transaction's compute less them.
+pub(crate) fn assert_caught_with_stipends(
+    run: &Run,
+    intrinsic: u64,
+    left: u64,
+    after: &Charges,
+    stipends: u64,
+) -> u64 {
     if let Some(left) = after.crossing(left) {
-        return assert_stopped(run, intrinsic, left);
+        return assert_stopped_with_stipends(run, intrinsic, left, stipends);
     }
     let limit = run.limit.expect("a read set a limit");
     assert!(
@@ -253,7 +287,7 @@ pub(crate) fn assert_caught(run: &Run, intrinsic: u64, left: u64, after: &Charge
     assert_eq!(run.outcome.limit_exceeded, None, "a stop below the transaction's own frame");
     assert_eq!(
         run.outcome.gas.regular,
-        intrinsic + limit - left + after.total(),
+        intrinsic + limit - left + after.total() - stipends,
         "the transaction computed up to the charge that crossed, then what its caller ran"
     );
     assert!(run.outcome.gas.regular <= intrinsic + limit, "within the limit");
@@ -352,6 +386,12 @@ impl Charges {
                 .repeat(&round, u64::from(rounds) - 1),
         };
         charges.then(&[2])
+    }
+
+    /// The charges of [`cheap_spin`]'s loop: `JUMPDEST`, the push of the loop's start and `JUMP`,
+    /// over and over.
+    pub(crate) fn cheap_spin(self) -> Self {
+        self.forever(&[1, 3, 8])
     }
 
     /// The charges of [`burn`]'s `rounds` rounds: the push of the counter, then each round —
@@ -721,6 +761,81 @@ fn test_blobhash_is_not_volatile() {
     assert_eq!(run.accessed, VolatileDataAccess::empty());
 }
 
+/// A call to the EIP-2935 history contract reads the block environment: the contract's `get` runs
+/// `NUMBER` before it loads the slot, so the call marks the block number, and in a frame whose
+/// access is off it is refused with access type 0 before it loads the slot. A call to the EIP-4788
+/// beacon-roots contract loads storage alone, state the pre-block calls committed before the
+/// block's first transaction, which is no volatile read: it marks nothing and is not refused.
+#[test]
+fn test_the_history_contract_reads_the_block_number_and_the_beacon_roots_contract_reads_state() {
+    use alloy_eips::{
+        eip2935::{HISTORY_SERVE_WINDOW, HISTORY_STORAGE_ADDRESS, HISTORY_STORAGE_CODE},
+        eip4788::{BEACON_ROOTS_ADDRESS, BEACON_ROOTS_CODE},
+    };
+    // The ring the beacon-roots contract keeps its timestamps and roots in.
+    const HISTORY_BUFFER_LENGTH: u64 = 8_191;
+
+    let number = block().number.to::<u64>() - 1;
+    let hash = U256::from_be_bytes([0x11; 32]);
+    let timestamp = block().timestamp.to::<u64>();
+    let root = U256::from_be_bytes([0x22; 32]);
+    let history_slot = U256::from(number % HISTORY_SERVE_WINDOW as u64);
+    let beacon_slot = U256::from(timestamp % HISTORY_BUFFER_LENGTH);
+    let db = || {
+        MemoryDatabase::default()
+            .account_code(HISTORY_STORAGE_ADDRESS, HISTORY_STORAGE_CODE.clone())
+            .account_storage(HISTORY_STORAGE_ADDRESS, history_slot, hash)
+            .account_code(BEACON_ROOTS_ADDRESS, BEACON_ROOTS_CODE.clone())
+            .account_storage(BEACON_ROOTS_ADDRESS, beacon_slot, U256::from(timestamp))
+            .account_storage(
+                BEACON_ROOTS_ADDRESS,
+                beacon_slot + U256::from(HISTORY_BUFFER_LENGTH),
+                root,
+            )
+    };
+    let get = |to: Address, key: u64| {
+        OpTx(op_transaction(TxEnv {
+            caller: CALLER,
+            kind: TxKind::Call(to),
+            data: Bytes::from(U256::from(key).to_be_bytes::<32>()),
+            gas_limit: BELOW,
+            ..Default::default()
+        }))
+    };
+    let answer = |value: U256| Bytes::from(value.to_be_bytes::<32>());
+
+    let read = execute(db(), get(HISTORY_STORAGE_ADDRESS, number));
+    assert_eq!(read.outcome.result.output(), Some(&answer(hash)), "the parent's hash");
+    assert_eq!(read.accessed, VolatileDataAccess::BLOCK_NUMBER);
+    assert!(read.limit.is_some(), "the read caps the transaction");
+    let loaded = &read.outcome.state[&HISTORY_STORAGE_ADDRESS].storage;
+    assert!(loaded.contains_key(&history_slot), "a read the state holds");
+
+    let mut evm = MegaEvm::new(context(db()).with_volatile_access_disabled_from(0));
+    let refused = run_on(&mut evm, get(HISTORY_STORAGE_ADDRESS, number));
+    match &refused.outcome.result {
+        ExecutionResult::Revert { output, .. } => {
+            let refusal =
+                volatile_data_access_disabled_revert_data(VolatileDataAccess::BLOCK_NUMBER);
+            assert_eq!(output, &refusal);
+            assert_eq!(output[4..], [0; 32], "access type 0");
+        }
+        other => panic!("the history contract is refused: {other:?}"),
+    }
+    let storage = &refused.outcome.state[&HISTORY_STORAGE_ADDRESS].storage;
+    assert!(!storage.contains_key(&history_slot), "refused before it loads the slot");
+
+    for disabled in [false, true] {
+        let ctx = context(db());
+        let ctx = if disabled { ctx.with_volatile_access_disabled_from(0) } else { ctx };
+        let run = run_on(&mut MegaEvm::new(ctx), get(BEACON_ROOTS_ADDRESS, timestamp));
+        let case = format!("access disabled: {disabled}");
+        assert_eq!(run.outcome.result.output(), Some(&answer(root)), "{case}: the root");
+        assert_eq!(run.accessed, VolatileDataAccess::empty(), "{case}");
+        assert_eq!(run.limit, None, "{case}");
+    }
+}
+
 /// A read answers with the block's own field: the Host marks the read and serves the value it
 /// loaded, whether or not the read caps anything.
 #[test]
@@ -951,13 +1066,13 @@ fn test_spending_exactly_the_cap_completes() {
     }
 }
 
-/// A value call's stipend is gas nobody paid, so what the callee runs on it is not compute beyond
-/// what its caller's ledger shows: a value-carrying child that reads and spins stops with the
-/// regular ledger at its compute before the charge that crossed, which its caller catches and
-/// ends on, and so does a transaction carrying value, whose own frame is given what the
-/// transaction has left and no stipend.
+/// A value-called child that reads is counted from its caller's charges in full — the value call's
+/// own included, though revm gave the child a stipend the caller never paid — and stops where its
+/// own charges after the read reach the cap; its caller catches the stop and ends. The regular
+/// ledger bills the transaction its compute less the stipend. A transaction carrying value has no
+/// stipend: its own frame is given what the transaction has left, and stops the same way.
 #[test]
-fn test_a_stipend_is_not_compute() {
+fn test_a_value_called_child_reads_from_its_callers_whole_charges() {
     let child = spin(op(BytecodeBuilder::default(), TIMESTAMP));
     let parent = BytecodeBuilder::default()
         .append_many([PUSH0, PUSH0, PUSH0, PUSH0])
@@ -965,6 +1080,9 @@ fn test_a_stipend_is_not_compute() {
         .push_address(CHILD)
         .append_many([GAS, CALL, STOP])
         .build();
+    // The caller's four `PUSH0`, its `PUSH1`, `PUSH20` and `GAS`, and the call to the cold child
+    // carrying value; then the child's `TIMESTAMP`.
+    let at_the_read = 2 * 4 + 3 + 3 + 2 + cold_access() + value_transfer() + 2;
     for gas_limit in TIERS {
         let db = MemoryDatabase::default()
             .account_code(CONTRACT, parent.clone())
@@ -973,7 +1091,14 @@ fn test_a_stipend_is_not_compute() {
         let run = execute(db, tx(CALLER, CONTRACT, gas_limit));
         // Either way the reading frame's `POP` and its loop come after the read.
         let left = Charges::default().then(&[2]).spin(0).left(CAP);
-        assert_caught(&run, intrinsic(gas_limit), left, &Charges::default());
+        let limit = assert_caught_with_stipends(
+            &run,
+            intrinsic(gas_limit),
+            left,
+            &Charges::default(),
+            call_stipend(),
+        );
+        assert_eq!(limit, at_the_read + CAP, "at {gas_limit}");
 
         let db = MemoryDatabase::default()
             .account_code(CONTRACT, spin(op(BytecodeBuilder::default(), TIMESTAMP)))
@@ -983,6 +1108,92 @@ fn test_a_stipend_is_not_compute() {
         let run = execute(db, valued);
         let limit = assert_stopped(&run, intrinsic_of_a_value_call(gas_limit), left);
         assert_eq!(limit, CAP + 2, "TIMESTAMP was the first opcode");
+    }
+}
+
+/// The regular charges a contract makes from its first `POP` after a read up to a `CALL` of one wei
+/// that forwards no gas to a cold contract: the `POP`, the call's seven pushes, and the call's own
+/// charges, the cold access and the transfer.
+fn charges_to_a_stipend_call() -> Charges {
+    Charges::default().then(&[2, 2, 2, 2, 2, 3, 3, 2, cold_access(), value_transfer()])
+}
+
+/// Appends a `CALL` of one wei to `CHILD` forwarding no gas, so the child runs on its stipend
+/// alone, dropping its status.
+fn stipend_call(code: BytecodeBuilder) -> BytecodeBuilder {
+    code.append_many([PUSH0, PUSH0, PUSH0, PUSH0])
+        .push_number(1_u8)
+        .push_address(CHILD)
+        .append_many([PUSH0, CALL])
+}
+
+/// Appends a loop that never ends, twelve gas a round: `JUMPDEST`, a push and `JUMP`.
+fn cheap_spin(code: BytecodeBuilder) -> Bytes {
+    let dest = code.len() as u32;
+    code.append(JUMPDEST).push_number(dest).append(JUMP).build()
+}
+
+/// What a value call's callee runs on its stipend is compute, whoever funds it: after its caller's
+/// read, a callee given the stipend alone, which spins, is stopped at the compute limit once it has
+/// run what the limit leaves, though it holds more of the stipend — where it would run out of the
+/// stipend if that were not compute. Its caller catches the stop and ends. The regular ledger bills
+/// the transaction its compute less the stipend, which is gas the transaction never paid.
+#[test]
+fn test_stipend_funded_work_is_compute() {
+    let to_the_call = charges_to_a_stipend_call();
+    // A thousand gas past the call, well within the stipend.
+    let cap = to_the_call.total() + 1_000;
+    let parent = stipend_call(op(BytecodeBuilder::default(), TIMESTAMP)).stop().build();
+    let child = cheap_spin(BytecodeBuilder::default());
+    for gas_limit in TIERS {
+        let db = MemoryDatabase::default()
+            .account_code(CONTRACT, parent.clone())
+            .account_balance(CONTRACT, U256::from(1))
+            .account_code(CHILD, child.clone());
+        let limits = EvmTxRuntimeLimits::default().with_block_env_access_compute_gas_limit(cap);
+        let mut evm = MegaEvm::new(context(db).with_tx_runtime_limits(limits))
+            .with_inspector(Calls::default());
+        let run = run_on(&mut evm, tx(CALLER, CONTRACT, gas_limit));
+
+        // TIMESTAMP was the first opcode.
+        let limit = run.limit.expect("the read set a limit");
+        assert_eq!(limit, 2 + cap, "at {gas_limit}");
+        let call = evm.inspector().calls.iter().find(|call| call.target == CHILD).unwrap();
+        assert_eq!(call.result, InstructionResult::Revert, "at {gas_limit}: the stop");
+        assert_eq!(call.output, stop_data(limit), "at {gas_limit}");
+        assert!(run.outcome.result.is_success(), "at {gas_limit}: {:?}", run.outcome.result);
+        assert_eq!(run.outcome.limit_exceeded, None, "at {gas_limit}: the caller caught it");
+        let left = to_the_call.clone().cheap_spin().left(cap);
+        assert_eq!(
+            run.outcome.gas.regular,
+            intrinsic(gas_limit) + limit - left - call_stipend(),
+            "at {gas_limit}: compute up to the crossing, less the stipend nobody paid"
+        );
+    }
+}
+
+/// A value call that returns leaves its caller's compute counting every charge made since the read
+/// — the call's own in full, and what the callee ran on its stipend — though the stipend the callee
+/// did not spend came back to the caller's gas: the caller, spinning after the call, is stopped
+/// where those charges, its own and its callee's in the order they were made, reach the limit.
+#[test]
+fn test_a_returned_value_call_counts_what_its_callee_ran() {
+    // The callee runs eighty rounds of a counting loop, 2,085 gas, within the stipend.
+    let callee = burn(BytecodeBuilder::default(), 80).stop().build();
+    let parent = cheap_spin(stipend_call(op(BytecodeBuilder::default(), TIMESTAMP)).append(POP));
+    for gas_limit in TIERS {
+        let db = MemoryDatabase::default()
+            .account_code(CONTRACT, parent.clone())
+            .account_balance(CONTRACT, U256::from(1))
+            .account_code(CHILD, callee.clone());
+        let cap = 50_000;
+        let limits = EvmTxRuntimeLimits::default().with_block_env_access_compute_gas_limit(cap);
+        let run = run_on(
+            &mut MegaEvm::new(context(db).with_tx_runtime_limits(limits)),
+            tx(CALLER, CONTRACT, gas_limit),
+        );
+        let charges = charges_to_a_stipend_call().burn(80).then(&[2]).cheap_spin();
+        assert_stopped_with_stipends(&run, intrinsic(gas_limit), charges.left(cap), call_stipend());
     }
 }
 
@@ -1165,7 +1376,14 @@ fn test_running_out_of_the_frames_own_gas_still_halts() {
 /// halts.
 #[test]
 fn test_writes_after_a_read_stop_at_the_cap_or_run_out_of_their_own_gas() {
+    // More fresh slots than the 1,000 the spec's state-growth limit lets a transaction keep, so
+    // the rows run with that limit lifted: under it the 1,001st slot stops the frame first.
     let slots = CAP / fresh_write() + 1;
+    assert!(slots > TX_STATE_GROWTH_LIMIT, "{slots} fresh slots");
+    let execute = |db: MemoryDatabase, tx| {
+        let limits = EvmTxRuntimeLimits::default().with_tx_state_growth_limit(u64::MAX);
+        run_on(&mut MegaEvm::new(context(db).with_tx_runtime_limits(limits)), tx)
+    };
     let mut code = op(BytecodeBuilder::default(), TIMESTAMP);
     for slot in 1..=slots {
         code = code.sstore(U256::from(slot), U256::from(1));
@@ -1487,7 +1705,7 @@ fn test_the_switch_is_scoped_to_its_subtree() {
 
 /// An interceptor's answer carries the forwarded gas back without running a frame: the caller
 /// is held to the limit as it resumes. The call forwards what it forwards without the read — the
-/// withheld part of the caller's gas is part of the 63/64 — and gets all of it back, so the
+/// withheld part of the caller's gas is part of the 98/100 — and gets all of it back, so the
 /// caller holds the same gas after the call with the read and without it.
 ///
 /// What `remainingComputeGas()` answers is what the caller could still spend: without the read,
@@ -1625,9 +1843,13 @@ fn test_state_and_history_gas_are_not_compute() {
     // Each slot as (slot, original, present), by slot.
     let written: Vec<_> =
         (1..=slots).map(|slot| (U256::from(slot), U256::ZERO, U256::from(1))).collect();
+    // At cheaper byte prices the cap's compute pays for more fresh slots than the 1,000 the spec's
+    // state-growth limit lets a transaction keep, so the rows run with that limit lifted.
+    let limits = EvmTxRuntimeLimits::default().with_tx_state_growth_limit(u64::MAX);
     for gas_limit in TIERS {
-        let run = execute(
-            MemoryDatabase::default().account_code(CONTRACT, code.clone()),
+        let db = MemoryDatabase::default().account_code(CONTRACT, code.clone());
+        let run = run_on(
+            &mut MegaEvm::new(context(db).with_tx_runtime_limits(limits)),
             tx(CALLER, CONTRACT, gas_limit),
         );
         assert!(run.outcome.result.is_success(), "{:?}", run.outcome.result);
@@ -1648,8 +1870,8 @@ fn test_state_and_history_gas_are_not_compute() {
         assert_eq!(run.limit, Some(2 + CAP), "{case}: TIMESTAMP set the limit, first");
         assert_eq!(
             run.outcome.usage,
-            LimitUsage { data_size: history_bytes, write_records: slots },
-            "{case}: one write record a slot",
+            LimitUsage { data_size: history_bytes, write_records: slots, state_growth: slots },
+            "{case}: one write record and one new slot a slot",
         );
     }
 }
@@ -1692,6 +1914,171 @@ fn test_a_refill_after_the_read_does_not_lift_the_cap() {
     // warm write that restores its slot's original value — then the loop.
     let left = Charges::default().then(&[2, 3, 3, 100]).spin(0).left(CAP);
     assert_stopped(&run, intrinsic(BELOW), left);
+}
+
+/// A slot written away from a non-zero original value and back takes its record back, and the
+/// history the record paid with it; there is no state gas to give back, since the write added no
+/// state. That history spilled onto regular gas before the read, and its refill — the
+/// completed-write hook's own, after revm's state refill — must not give the frame compute past the
+/// cap either.
+#[test]
+fn test_a_history_refill_after_the_read_does_not_lift_the_cap() {
+    // A record that costs nothing refills nothing.
+    if crate::common::history_is_free() {
+        return;
+    }
+    let code = BytecodeBuilder::default().sstore(U256::from(1), U256::from(2));
+    let code = op(code, TIMESTAMP).sstore(U256::from(1), U256::from(1));
+    let db = MemoryDatabase::default().account_code(CONTRACT, spin(code)).account_storage(
+        CONTRACT,
+        U256::from(1),
+        U256::from(1),
+    );
+    let run = execute(db, tx(CALLER, CONTRACT, BELOW));
+    // The `POP`, then the restoring write — two pushes and `SSTORE`'s static gas, the whole of a
+    // warm write that restores its slot's original value — then the loop.
+    let left = Charges::default().then(&[2, 3, 3, 100]).spin(0).left(CAP);
+    assert_stopped(&run, intrinsic(BELOW), left);
+    assert_eq!(run.outcome.gas.history, history_gas(TX_BODY_SIZE).unwrap(), "the body's alone");
+}
+
+/// A frame-starting opcode whose caller cannot pay the history of the records the start makes
+/// starts no frame, and halts its caller: what the caller forwarded is burned with the rest of its
+/// gas, and none of it is compute, since the frame never ran — nor is a value call's stipend,
+/// which the caller never held. So a transaction that read before it called that caller computes
+/// the caller's charges up to its forward and no more, and is stopped at the cap exactly where
+/// those and its own reach it; its regular ledger bills the burned gas on top.
+///
+/// `MIDDLE` starts each kind of frame that makes records, with all but 2 per cent of what it holds,
+/// a fiftieth short of the records' price; and a value call with an explicit forward that leaves
+/// it one gas short. One gas less forwarded leaves it the price: that frame starts, its callee
+/// returns the stipend, and the transaction computes the same. A value `CALLCODE` is not among
+/// them: it moves nothing and makes no record, so there is no price to fall short of.
+#[test]
+fn test_a_start_its_caller_cannot_pay_for_counts_none_of_its_forward() {
+    // Records that cost nothing leave no price to be short of, and records priced at a fraction of
+    // a gas may round to nothing.
+    if crate::common::history_is_free() || crate::common::history_rounds() {
+        return;
+    }
+    const MIDDLE: Address = address!("0000000000000000000000000000000000d00004");
+    const OTHER: Address = address!("0000000000000000000000000000000000d00005");
+    let price = |records| write_record_history_gas(records).expect("records have a price");
+    let create = crate::salt::entry(GasId::create());
+    let account = crate::salt::entry(GasId::create_state_gas());
+    // `PUSH0` ×4, `PUSH1` of the value, `PUSH20 OTHER`, then `GAS` or a push of the forward.
+    let value_call = |scheme, forward: Option<u64>| {
+        let code =
+            BytecodeBuilder::default().append_many([PUSH0, PUSH0, PUSH0, PUSH0]).push_number(1_u8);
+        let code = code.push_address(OTHER);
+        let code = match forward {
+            Some(forward) => code.push_number(forward),
+            None => code.append(GAS),
+        };
+        code.append_many([scheme, STOP]).build()
+    };
+    let value_call_charges = |pushed: bool| {
+        let push = if pushed { 3 } else { 2 };
+        vec![2, 2, 2, 2, 3, 3, push, cold_access(), value_transfer()]
+    };
+    /// A start `MIDDLE` makes: its code, its charges up to its forward, the price of the start's
+    /// records, the state gas it spills before its forward, and the gas it is given — `None` for
+    /// 50 times the price less one, which leaves it a fiftieth of what it holds a gas short.
+    struct Start {
+        name: &'static str,
+        code: Bytes,
+        charges: Vec<u64>,
+        price: u64,
+        spilled: u64,
+        given: Option<u64>,
+    }
+    let creation = |name, code: &[u8], charges| Start {
+        name,
+        code: BytecodeBuilder::default().append_many(code.iter().copied()).append(STOP).build(),
+        charges,
+        price: price(2),
+        spilled: account,
+        given: None,
+    };
+    let mut rows = vec![
+        Start {
+            name: "a value CALL",
+            code: value_call(CALL, None),
+            charges: value_call_charges(false),
+            price: price(2),
+            spilled: 0,
+            given: None,
+        },
+        creation("a CREATE", &[PUSH0, PUSH0, PUSH0, CREATE], vec![2, 2, 2, create]),
+        creation("a CREATE2", &[PUSH0, PUSH0, PUSH0, PUSH0, CREATE2], vec![2, 2, 2, 2, create]),
+    ];
+    // An explicit forward: `MIDDLE`, given its charges and 50 times the price less one, forwards
+    // all but 2 per cent of it, and keeps the price less one.
+    let charges = value_call_charges(true);
+    let given = charges.iter().sum::<u64>() + 50 * (price(2) - 1);
+    let forward = 49 * (price(2) - 1);
+    rows.push(Start {
+        name: "a value CALL forwarding one gas too many",
+        code: value_call(CALL, Some(forward)),
+        charges: charges.clone(),
+        price: price(2),
+        spilled: 0,
+        given: Some(given),
+    });
+
+    let run = |middle: Bytes, given: u64| {
+        let parent = op(BytecodeBuilder::default(), TIMESTAMP)
+            .append_many([PUSH0, PUSH0, PUSH0, PUSH0, PUSH0])
+            .push_address(MIDDLE)
+            .push_number(given)
+            .append_many([CALL, POP]);
+        let db = MemoryDatabase::default()
+            .account_code(CONTRACT, spin(parent))
+            .account_code(MIDDLE, middle)
+            .account_balance(MIDDLE, U256::from(1))
+            .account_balance(OTHER, U256::from(1));
+        let mut evm = MegaEvm::new(context(db)).with_inspector(Calls::default());
+        let run = run_on(&mut evm, tx(CALLER, CONTRACT, BELOW));
+        let called_other = evm
+            .inspector()
+            .calls
+            .iter()
+            .find(|call| call.target == OTHER)
+            .map(|call| (call.result, call.forward));
+        (run, called_other)
+    };
+    // After the read: its `POP`; the call to `MIDDLE` — `PUSH0` ×5, `PUSH20`, the push of the gas
+    // and the cold access; then what `MIDDLE` charged; then the `POP` of the status and the loop.
+    let left = |middle: &[u64]| {
+        Charges::default()
+            .then(&[2, 2, 2, 2, 2, 2, 3, 3, cold_access()])
+            .then(middle)
+            .then(&[2])
+            .spin(0)
+            .left(CAP)
+    };
+
+    for Start { name, code: middle, charges, price, spilled, given } in rows {
+        let spent: u64 = charges.iter().sum();
+        let given = given.unwrap_or(50 * price - 1);
+        if given <= spent + spilled {
+            note_price_guard("a new account's state gas outweighs 50 times two records' history");
+            continue;
+        }
+        let (run, called_other) = run(middle, given);
+        assert_eq!(called_other, None, "{name}: no frame started");
+        assert_eq!(run.outcome.usage.write_records, 0, "{name}");
+        // `MIDDLE` burned all it was given but its charges; the transaction computed those.
+        assert_stopped(&run, intrinsic(BELOW) + given - spent, left(&charges));
+    }
+
+    let (run, called_other) = run(value_call(CALL, Some(forward - 1)), given);
+    assert_eq!(
+        called_other,
+        Some((InstructionResult::Stop, forward - 1 + call_stipend())),
+        "one gas less forwarded, the frame starts, with the stipend on top"
+    );
+    assert_stopped_with_stipends(&run, intrinsic(BELOW), left(&charges), call_stipend());
 }
 
 /// A chain's caps must be below [`MAX_TX_COMPUTE_GAS`], the most compute a transaction can

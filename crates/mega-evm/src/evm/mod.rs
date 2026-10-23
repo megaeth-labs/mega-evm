@@ -1,9 +1,42 @@
 //! The Satin EVM.
 //!
 //! [`MegaEvm`] runs transactions on a [`MegaContext`] configured for the Satin spec through
-//! [`MegaHandler`], which wraps op-revm's handler. The EVM implements revm's frame lifecycle
-//! itself (see [`execution`](self::execution)), which is where `MegaETH`'s frame-level mechanisms
-//! plug in.
+//! [`MegaHandler`], which wraps op-revm's handler. The EVM implements revm's frame start and
+//! return itself (see [`execution`](self::execution)), which is where `MegaETH`'s frame-level
+//! mechanisms plug in.
+//!
+//! # Inspectors
+//!
+//! An inspector runs as revm runs it: through revm's inspected handler and frame lifecycle,
+//! unchanged, which start a frame, hand over the result of its run and return it through the same
+//! three methods the plain path does. The engine does nothing for an inspector, and an inspector
+//! keeps its own consistency.
+//!
+//! - **A rewrite is taken as given.** revm commits or reverts a frame's journal checkpoint before
+//!   the inspector sees its result, and the caller settles the result the inspector hands back —
+//!   its classification, output and gas, reservoir and byte pool included — and an answer the
+//!   inspector gives in place of a frame never reaches the engine's frame start: the depth guard,
+//!   the interceptors and gas detention see none of it, and it settles on the gas it is built on.
+//! - **A callback's writes to gas are the inspector's.** A charge a frame cannot pay is refused,
+//!   and leaves its record on the frame's gas as an opcode's does: a crossing of the withheld part
+//!   stops nothing in a frame that ends without an out-of-gas, and a later halt that records
+//!   nothing of its own is read off the record. An inspector that overwrites the interpreter's gas
+//!   overwrites gas detention's split and the byte pool with it, until detention next holds the
+//!   frame.
+//! - **What an inspector sees.** A frame's end as the engine settled it: a frame that crossed gas
+//!   detention's compute limit ends with the stop, which the engine makes of its out-of-gas once
+//!   its run returns and before the inspector's `call_end`, `create_end` and `frame_end` see it, as
+//!   the caller and the receipt do. A frame whose start crossed a limit ends with the stop before
+//!   it runs, and is seen to start and end as an answer is. A `keylessDeploy` call's frame runs no
+//!   instruction: the action made for it before each of its runs is set on its interpreter, and
+//!   revm's inspected run returns an action set before it runs without a `step`, and hands a frame
+//!   built with one to no `initialize_interp`, so the inspector sees the call start, its creation,
+//!   and the call end. A frame a child returned into over a limit returns the stop the same way,
+//!   with no `step` after the child's end.
+//! - **Where an inspector runs.** Every transaction, the system-address transaction included. A
+//!   pre-block call runs on the handler's plain system-call path, with no callback; a tool runs a
+//!   system call through revm's `InspectSystemCallEvm` to watch it. The end of a block runs no
+//!   code.
 
 mod context;
 mod execution;
@@ -11,7 +44,6 @@ mod factory;
 mod frame;
 mod history;
 mod host;
-mod inspector;
 mod instructions;
 mod precompiles;
 mod prices;
@@ -26,7 +58,6 @@ pub use execution::*;
 pub use factory::*;
 pub use frame::*;
 pub use history::*;
-pub use inspector::*;
 pub use precompiles::*;
 pub use prices::*;
 pub use result::*;
@@ -92,9 +123,6 @@ pub struct MegaEvm<DB: Database, INSP, ExtEnvs: ExternalEnvTypes = EmptyExternal
     inner: MegaInnerEvm<DB, INSP, ExtEnvs>,
     /// Whether [`alloy_evm::Evm::transact_raw`] runs the inspector.
     inspect: bool,
-    /// Whether the inspector's type carries a [`TrustedObserver`] declaration. Set only by the
-    /// constructors that require the declaration; true without an inspector.
-    trusted_inspector: bool,
     /// Which precompile calls gas detention may price from the Satin table.
     priced_precompiles: PricedPrecompiles,
 }
@@ -110,12 +138,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, NoOpInspector, ExtEnvs
             precompiles: satin_precompiles_map(),
             frame_stack: FrameStack::new_prealloc(8),
         };
-        Self {
-            inner,
-            inspect: false,
-            trusted_inspector: true,
-            priced_precompiles: PricedPrecompiles::default(),
-        }
+        Self { inner, inspect: false, priced_precompiles: PricedPrecompiles::default() }
     }
 }
 
@@ -123,40 +146,15 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
     /// Replaces the inspector with a tool's. The new inspector runs on every alloy-evm
     /// [`transact`](alloy_evm::Evm::transact) until it is disabled again.
     ///
-    /// The inspector may rewrite what execution produces (see the `inspector` module), so the
-    /// EVM reports [`has_rewriting_inspector`](Self::has_rewriting_inspector) while it runs, and
-    /// block execution refuses it.
+    /// The inspector may rewrite what execution produces (see the module documentation). The engine
+    /// does not refuse one in block execution: a node decides which inspectors run on block
+    /// production.
     pub fn with_inspector<I>(self, inspector: I) -> MegaEvm<DB, I, ExtEnvs> {
         MegaEvm {
             inner: self.inner.with_inspector(inspector),
             inspect: true,
-            trusted_inspector: false,
             priced_precompiles: self.priced_precompiles,
         }
-    }
-
-    /// Replaces the inspector with one whose type is declared a [`TrustedObserver`]: it writes
-    /// nothing back, so the transactions it observes are the ones the chain executes, and block
-    /// execution admits them.
-    pub fn with_trusted_inspector<I: TrustedObserver>(
-        self,
-        inspector: I,
-    ) -> MegaEvm<DB, I, ExtEnvs> {
-        MegaEvm {
-            inner: self.inner.with_inspector(inspector),
-            inspect: true,
-            trusted_inspector: true,
-            priced_precompiles: self.priced_precompiles,
-        }
-    }
-
-    /// Whether the EVM runs an inspector that may rewrite what execution produces: an enabled
-    /// inspector that did not arrive through
-    /// [`with_trusted_inspector`](Self::with_trusted_inspector).
-    ///
-    /// The admission gate block execution refuses a transaction on.
-    pub const fn has_rewriting_inspector(&self) -> bool {
-        self.inspect && !self.trusted_inspector
     }
 
     /// The execution context.
@@ -221,7 +219,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
 
     /// Enforces `limits` on every transaction this EVM runs from now on.
     pub const fn set_tx_runtime_limits(&mut self, limits: crate::EvmTxRuntimeLimits) {
-        self.inner.ctx.additional_limit.set_limits(limits);
+        self.inner.ctx.set_tx_runtime_limits(limits);
     }
 
     /// The limits every transaction this EVM runs is held to.
@@ -290,8 +288,8 @@ where
     ExtEnvs: ExternalEnvTypes,
 {
     /// Executes `tx`, through the inspector when one is enabled, and returns its outcome: the
-    /// result and state, the gas by ledger, the usage the common execution layer counted, the
-    /// limit that stopped the transaction, if any, and the reads of the Oracle's storage it made
+    /// result and state, the gas by ledger, the usage the common execution layer counted, the limit
+    /// that stopped the transaction, if any, and the reads of the Oracle's storage it made
     /// through the oracle service. Nothing is committed.
     pub fn execute_transaction(
         &mut self,
@@ -303,11 +301,12 @@ where
             result_and_state.result.gas(),
             layer.history_gas_spent(),
             layer.history_bytes(),
+            layer.reservoir_remaining(),
         );
         Ok(MegaTransactionOutcome {
             result_and_state,
             gas,
-            usage: layer.usage(),
+            usage: self.inner.ctx.limit_usage(),
             limit_exceeded: layer.limit_exceeded().copied(),
             oracle_reads: self.inner.ctx.oracle_reads().reads().to_vec(),
         })
@@ -392,20 +391,6 @@ where
 {
 }
 
-/// revm's system-call transaction from `caller` to `contract` with `data`
-/// ([`SystemCallTx::new_system_tx_with_caller`]), on `gas_limit` instead of revm's
-/// [`SYSTEM_CALL_GAS_LIMIT`](revm::handler::SYSTEM_CALL_GAS_LIMIT).
-fn system_tx_with_gas_limit(
-    caller: Address,
-    contract: Address,
-    data: Bytes,
-    gas_limit: u64,
-) -> MegaTransaction {
-    let mut tx = MegaTransaction::new_system_tx_with_caller(caller, contract, data);
-    tx.0.base.gas_limit = gas_limit;
-    tx
-}
-
 impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> SystemCallEvm for MegaEvm<DB, INSP, ExtEnvs> {
     fn system_call_one_with_caller(
         &mut self,
@@ -422,25 +407,26 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> SystemCallEvm for MegaEvm<DB
 }
 
 impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
-    /// Runs a system call from `caller` to `contract` with `data` on `gas_limit`, and returns its
-    /// result and state. Nothing is committed.
+    /// Runs a pre-block system call from `caller` to `contract` with `data`, and returns its result
+    /// and state. Nothing is committed.
     ///
-    /// It is [`transact_system_call`](alloy_evm::Evm::transact_system_call) on the gas limit the
-    /// caller names instead of revm's [`SYSTEM_CALL_GAS_LIMIT`]. The limit is split as every
-    /// system call's is: at most [`SYSTEM_CALL_REGULAR_GAS_LIMIT`] of it is regular gas and the
-    /// rest is the call's state-gas reservoir, so a limit above 30,000,000 widens the reservoir
-    /// and never the regular budget. The block's pre-block calls run through it.
+    /// It is [`transact_system_call`](alloy_evm::Evm::transact_system_call) on the pre-block
+    /// budget, [`PRE_BLOCK_CALL_GAS_LIMIT`], instead of revm's [`SYSTEM_CALL_GAS_LIMIT`]: at most
+    /// [`SYSTEM_CALL_REGULAR_GAS_LIMIT`] of it is regular gas, as of every system call, and the
+    /// rest is the call's state-gas reservoir. What the call left of its reservoir is
+    /// [`AdditionalLimit::reservoir_remaining`](crate::AdditionalLimit::reservoir_remaining).
     ///
+    /// [`PRE_BLOCK_CALL_GAS_LIMIT`]: crate::constants::PRE_BLOCK_CALL_GAS_LIMIT
     /// [`SYSTEM_CALL_GAS_LIMIT`]: revm::handler::SYSTEM_CALL_GAS_LIMIT
-    /// [`SYSTEM_CALL_REGULAR_GAS_LIMIT`]: revm::handler::SYSTEM_CALL_REGULAR_GAS_LIMIT
-    pub fn transact_system_call_with_gas_limit(
+    /// [`SYSTEM_CALL_REGULAR_GAS_LIMIT`]: crate::SYSTEM_CALL_REGULAR_GAS_LIMIT
+    pub(crate) fn transact_pre_block_system_call(
         &mut self,
         caller: Address,
         contract: Address,
         data: Bytes,
-        gas_limit: u64,
     ) -> Result<ResultAndState<OpHaltReason>, EVMError<DB::Error, MegaTransactionError>> {
-        let tx = system_tx_with_gas_limit(caller, contract, data, gas_limit);
+        let mut tx = MegaTransaction::new_system_tx_with_caller(caller, contract, data);
+        tx.0.base.gas_limit = crate::constants::PRE_BLOCK_CALL_GAS_LIMIT;
         let result = self.run_system_call(tx).map_err(map_op_err)?;
         Ok(ResultAndState::new(result, ExecuteEvm::finalize(self)))
     }
@@ -553,7 +539,7 @@ mod tests {
     use revm::{
         context::{result::InvalidTransaction, ContextSetters, Transaction, TxEnv},
         database::State,
-        handler::{SYSTEM_CALL_GAS_LIMIT, SYSTEM_CALL_REGULAR_GAS_LIMIT},
+        handler::system_call::SYSTEM_CALL_GAS_LIMIT,
         DatabaseRef,
     };
     use revm_inspectors::tracing::{TracingInspector, TracingInspectorConfig};
@@ -734,35 +720,29 @@ mod tests {
         assert_eq!(evm.ctx().tx().kind(), TxKind::Call(CALLEE));
     }
 
-    /// The gas limit a caller names is the system call's: the part above 30M is its reservoir,
-    /// and a limit below 30M is regular gas alone.
+    /// A pre-block call runs on the pre-block budget whatever the block's gas limit: 30M of
+    /// regular gas and the rest of the budget as its reservoir.
     #[test]
-    fn test_transact_system_call_with_gas_limit_uses_passed_value() {
-        let mut db = funded_db();
-        let mut evm = MegaEvm::new(context(&mut db));
-
-        let result = evm
-            .transact_system_call_with_gas_limit(CALLER, CALLEE, Bytes::new(), 123_456_789)
-            .unwrap();
-        assert!(result.result.is_success());
-        assert_eq!(evm.ctx().tx().gas_limit(), 123_456_789);
-        assert_eq!(
-            result.result.gas().reservoir_remaining(),
-            123_456_789 - SYSTEM_CALL_REGULAR_GAS_LIMIT,
-            "an empty callee draws nothing from the reservoir",
-        );
-
-        let result = evm
-            .transact_system_call_with_gas_limit(CALLER, CALLEE, Bytes::new(), 1_000_000)
-            .unwrap();
-        assert!(result.result.is_success());
-        assert_eq!(evm.ctx().tx().gas_limit(), 1_000_000);
-        assert_eq!(result.result.gas().reservoir_remaining(), 0);
+    fn test_a_pre_block_call_runs_on_the_pre_block_budget() {
+        use crate::constants::PRE_BLOCK_CALL_GAS_LIMIT;
+        for block_gas_limit in [1_000_000, 10_000_000_000] {
+            let mut db = funded_db();
+            let block = BlockEnv { gas_limit: block_gas_limit, ..Default::default() };
+            let mut evm = MegaEvm::new(context(&mut db).with_block(block));
+            let result = evm.transact_pre_block_system_call(CALLER, CALLEE, Bytes::new()).unwrap();
+            assert!(result.result.is_success());
+            assert_eq!(evm.ctx().tx().gas_limit(), PRE_BLOCK_CALL_GAS_LIMIT, "{block_gas_limit}");
+            assert_eq!(
+                evm.ctx().additional_limit().reservoir_remaining(),
+                PRE_BLOCK_CALL_GAS_LIMIT - SYSTEM_CALL_REGULAR_GAS_LIMIT,
+                "an empty callee draws nothing from the reservoir",
+            );
+        }
     }
 
     /// The default system-call entry point runs on revm's system-call gas limit whatever the
     /// block's gas limit is: its regular budget is the base 30M, and the margin above it is the
-    /// reservoir. Only an explicit gas limit moves either.
+    /// reservoir.
     #[test]
     fn test_default_system_call_keeps_the_30m_regular_budget() {
         let mut db = funded_db();
@@ -777,7 +757,7 @@ mod tests {
         assert_eq!(evm.ctx().tx().gas_limit(), 31_566_720);
         assert_eq!(SYSTEM_CALL_GAS_LIMIT, 31_566_720);
         assert_eq!(
-            result.result.gas().reservoir_remaining(),
+            evm.ctx().additional_limit().reservoir_remaining(),
             31_566_720 - 30_000_000,
             "30M of it is regular gas",
         );

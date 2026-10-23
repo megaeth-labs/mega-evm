@@ -22,6 +22,11 @@ mod salt;
 mod schedule;
 mod sequencer_registry;
 mod sequences;
+// This target compares a pre-block call alone: the reference's transactions and the reservoir it
+// reads are the `satin` target's.
+#[allow(dead_code)]
+#[path = "../shared/op_reference.rs"]
+mod op_reference;
 #[path = "../shared/snapshot.rs"]
 mod snapshot;
 mod stale;

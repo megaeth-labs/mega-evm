@@ -10,7 +10,8 @@ use mega_evm::{
     constants::{
         ACCOUNT_STATE_GAS, BLOCK_DATA_LIMIT, BLOCK_ENV_ACCESS_COMPUTE_GAS, COST_PER_HISTORY_BYTE,
         COST_PER_STATE_BYTE, MAX_CONTRACT_SIZE, MAX_INITCODE_SIZE, MAX_TX_COMPUTE_GAS,
-        ORACLE_ACCESS_COMPUTE_GAS, SLOT_STATE_GAS, TX_DATA_LIMIT, TX_GAS_LIMIT_CAP,
+        ORACLE_ACCESS_COMPUTE_GAS, PRE_BLOCK_CALL_GAS_LIMIT, SLOT_STATE_GAS, TX_DATA_LIMIT,
+        TX_GAS_LIMIT_CAP, TX_KV_UPDATE_LIMIT, TX_STATE_GROWTH_LIMIT,
     },
     kzg_point_evaluation,
     op_revm::precompiles::{
@@ -23,7 +24,6 @@ use mega_evm::{
     revm::{
         bytecode::opcode::{EXTCODECOPY, EXTCODESIZE},
         context_interface::cfg::{gas::WARM_STORAGE_READ_COST, GasId, GasParams},
-        handler::SYSTEM_CALL_REGULAR_GAS_LIMIT,
         interpreter::instructions::gas_table_spec,
         precompile::secp256r1::{P256VERIFY_BASE_GAS_FEE_OSAKA, P256VERIFY_OSAKA},
         primitives::{
@@ -44,10 +44,10 @@ use mega_evm::{
     },
     LimitKind, MegaSpecId, ProtocolLimits, SatinPrices, VolatileDataAccess,
     ACCESS_LIST_ADDRESS_SIZE, ACCESS_LIST_SLOT_SIZE, AUTHORIZATION_SIZE,
-    FRAME_DATA_SHARE_DENOMINATOR, FRAME_DATA_SHARE_NUMERATOR, HISTORY_GAS_PRICED, LOG_BASE_SIZE,
-    LOG_TOPIC_SIZE, MIN_BUCKET_SIZE, STATE_GAS_REPRICED, STORAGE_CALL_STIPEND_BYTES,
-    SYSTEM_ADDRESS, TRANSFER_LOG_SIZE, TX_BASE_SIZE, TX_BODY_SIZE, TX_FIXED_WRITE_RECORDS,
-    WRITE_RECORD_SIZE,
+    FRAME_DATA_SHARE_DENOMINATOR, FRAME_DATA_SHARE_NUMERATOR, HISTORY_ALLOWANCE_BYTES,
+    HISTORY_GAS_PRICED, LOG_BASE_SIZE, LOG_TOPIC_SIZE, MIN_BUCKET_SIZE, STATE_GAS_REPRICED,
+    SYSTEM_ADDRESS, SYSTEM_CALL_REGULAR_GAS_LIMIT, TRANSFER_LOG_SIZE, TX_BASE_SIZE, TX_BODY_SIZE,
+    TX_FIXED_WRITE_RECORDS, WRITE_RECORD_SIZE,
 };
 
 const SATIN_MD: &str = include_str!("../../../../docs/spec/upgrades/satin.md");
@@ -80,7 +80,7 @@ fn named_constants(doc: &str) {
     require_eq(doc, "AUTHORIZATION_SIZE", AUTHORIZATION_SIZE);
     require_eq(doc, "WRITE_RECORD_SIZE", WRITE_RECORD_SIZE);
     require_eq(doc, "TRANSFER_LOG_SIZE", TRANSFER_LOG_SIZE);
-    require_eq(doc, "HISTORY_ALLOWANCE_BYTES", STORAGE_CALL_STIPEND_BYTES);
+    require_eq(doc, "HISTORY_ALLOWANCE_BYTES", HISTORY_ALLOWANCE_BYTES);
     require_eq(doc, "MIN_BUCKET_SIZE", MIN_BUCKET_SIZE as u64);
     require_eq(doc, "KEYLESS_DEPLOY_OVERHEAD_GAS", KEYLESS_DEPLOY_OVERHEAD_GAS);
     require_eq(doc, "BLOCK_ENV_ACCESS_COMPUTE_GAS", BLOCK_ENV_ACCESS_COMPUTE_GAS);
@@ -96,29 +96,21 @@ fn named_constants(doc: &str) {
             grouped(LOG_TOPIC_SIZE)
         ),
     );
-    require(doc, &format!("({} gas)", grouped(STORAGE_CALL_STIPEND_BYTES * COST_PER_HISTORY_BYTE)));
+    require(doc, &format!("({} gas)", grouped(HISTORY_ALLOWANCE_BYTES * COST_PER_HISTORY_BYTE)));
     require(doc, &format!("capped at {} per transaction", grouped(TX_GAS_LIMIT_CAP)));
     require(doc, &format!("at most {} of regular gas", grouped(SYSTEM_CALL_REGULAR_GAS_LIMIT)));
-    require(doc, &format!("max(block_gas_limit, {})", grouped(SYSTEM_CALL_REGULAR_GAS_LIMIT)));
-    require(doc, &format!("A {}-byte allowance", STORAGE_CALL_STIPEND_BYTES));
+    require_eq(doc, "PRE_BLOCK_CALL_GAS_LIMIT", PRE_BLOCK_CALL_GAS_LIMIT);
     require(
         doc,
         &format!(
-            "`FRAME_DATA_SHARE_NUMERATOR / FRAME_DATA_SHARE_DENOMINATOR` = {}/{}",
-            FRAME_DATA_SHARE_NUMERATOR, FRAME_DATA_SHARE_DENOMINATOR
+            "a reservoir of {}, the state gas of sixteen fresh storage slots",
+            grouped(PRE_BLOCK_CALL_GAS_LIMIT - SYSTEM_CALL_REGULAR_GAS_LIMIT)
         ),
     );
+    require(doc, &format!("A {}-byte allowance", HISTORY_ALLOWANCE_BYTES));
+    require_eq(doc, "FRAME_DATA_SHARE_NUMERATOR", FRAME_DATA_SHARE_NUMERATOR);
+    require_eq(doc, "FRAME_DATA_SHARE_DENOMINATOR", FRAME_DATA_SHARE_DENOMINATOR);
     require(doc, &format!("KV × {WRITE_RECORD_SIZE} ≤ data size"));
-    let records = TX_DATA_LIMIT / WRITE_RECORD_SIZE;
-    require(
-        doc,
-        &format!(
-            "fewer than {} write records ({} / {})",
-            grouped(records),
-            grouped(TX_DATA_LIMIT),
-            WRITE_RECORD_SIZE
-        ),
-    );
 }
 
 fn schedule(doc: &str) {
@@ -249,21 +241,34 @@ fn limits(doc: &str) {
         "the page states one detention cap for both"
     );
 
-    // Data size is the one dimension limited per transaction and per block: no table row names a
-    // limit on KV updates, state gas or execution gas.
+    // No table row names a block limit on state gas or execution gas.
     let resources = section(doc, "### 10. Resource Limits", "### 11. The Revert-Class");
     assert!(
         table_row(resources, "Data size")[2].contains(&grouped(TX_DATA_LIMIT)),
         "the transaction's data-size limit"
     );
+    assert_eq!(
+        table_row(resources, "KV updates")[2],
+        format!("`TX_KV_UPDATE_LIMIT` = {}", grouped(TX_KV_UPDATE_LIMIT)),
+        "the transaction's KV-update limit"
+    );
+    assert_eq!(defaults.tx_runtime_limits.tx_kv_update_limit, TX_KV_UPDATE_LIMIT);
+    assert_eq!(
+        table_row(resources, "State growth")[2],
+        format!("`TX_STATE_GROWTH_LIMIT` = {}", grouped(TX_STATE_GROWTH_LIMIT)),
+        "the transaction's state-growth limit"
+    );
+    assert_eq!(defaults.tx_runtime_limits.tx_state_growth_limit, TX_STATE_GROWTH_LIMIT);
+    require(
+        resources,
+        &format!(
+            "{} records weigh {} bytes",
+            grouped(TX_KV_UPDATE_LIMIT),
+            grouped(TX_KV_UPDATE_LIMIT * WRITE_RECORD_SIZE)
+        ),
+    );
     let blocks = section(doc, "### 20. Block Limits", "### 21. Transaction and Block");
-    for (page, removed) in [
-        (resources, "KV updates"),
-        (resources, "State growth"),
-        (blocks, "Execution gas"),
-        (blocks, "State gas"),
-        (blocks, "KV updates"),
-    ] {
+    for (page, removed) in [(blocks, "Execution gas"), (blocks, "State gas")] {
         assert!(
             !page.lines().any(|line| line.contains(removed) && line.contains('|')),
             "no table row limits {removed}"
@@ -271,17 +276,16 @@ fn limits(doc: &str) {
     }
     assert_eq!(
         *table_row(blocks, "Data size").last().unwrap(),
-        format!("{} bytes", grouped(BLOCK_DATA_LIMIT))
+        format!("`BLOCK_DATA_LIMIT` = {}", grouped(BLOCK_DATA_LIMIT))
     );
 
     let safety = section(doc, "## Safety and Compatibility", "## References");
+    require(safety, &format!("data size at {} bytes", grouped(TX_DATA_LIMIT)));
+    require(safety, &format!("KV updates at {}", grouped(TX_KV_UPDATE_LIMIT)));
+    require(safety, &format!("state growth at {}", grouped(TX_STATE_GROWTH_LIMIT)));
     require(
         safety,
-        &format!(
-            "the data-size limits at {} bytes and the detention caps at {} each",
-            grouped(TX_DATA_LIMIT),
-            grouped(BLOCK_ENV_ACCESS_COMPUTE_GAS)
-        ),
+        &format!("the detention caps at {} each", grouped(BLOCK_ENV_ACCESS_COMPUTE_GAS)),
     );
 }
 
@@ -371,19 +375,15 @@ fn detention_and_stops(doc: &str) {
     );
 
     let stops = section(doc, "### 11. The Revert-Class", "### 12. Gas Detention");
-    let kinds =
-        [(LimitKind::DataSize, "Data size"), (LimitKind::ComputeGas, "Compute (gas detention)")];
+    let kinds = [
+        (LimitKind::DataSize, "Data size"),
+        (LimitKind::KvUpdate, "KV updates"),
+        (LimitKind::ComputeGas, "Compute (gas detention)"),
+        (LimitKind::StateGrowth, "State growth"),
+    ];
     for (kind, name) in kinds {
         let cells = row_with_first(stops, &kind.as_u8().to_string());
         assert_eq!(cells[1], name, "kind {}", kind.as_u8());
-    }
-    for retired in [1_u8, 3] {
-        assert_eq!(LimitKind::from_u8(retired), None, "kind {retired} names no dimension");
-        let first = retired.to_string();
-        assert!(
-            stops.lines().map(cells).all(|cells| cells.first() != Some(&first.as_str())),
-            "the page lists no kind {retired}"
-        );
     }
 
     let access = section(doc, "### 13. Volatile-Data", "### 14. EIP-7708");

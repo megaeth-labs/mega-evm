@@ -345,3 +345,53 @@ fn test_a_signer_that_sends_its_own_deployment_makes_no_record_of_its_own() {
         "sent by a relayer: the signer's nonce record too",
     );
 }
+
+/// Records the reservoir each frame start hands its frame: the call's, then the creation's.
+#[derive(Default)]
+struct Reservoirs(Vec<u64>);
+
+impl<DB: revm::Database>
+    revm::Inspector<MegaContext<DB>, revm::interpreter::interpreter::EthInterpreter>
+    for Reservoirs
+{
+    fn call(
+        &mut self,
+        _: &mut MegaContext<DB>,
+        inputs: &mut revm::interpreter::CallInputs,
+    ) -> Option<revm::interpreter::CallOutcome> {
+        self.0.push(inputs.reservoir);
+        None
+    }
+
+    fn create(
+        &mut self,
+        _: &mut MegaContext<DB>,
+        inputs: &mut revm::interpreter::CreateInputs,
+    ) -> Option<revm::interpreter::CreateOutcome> {
+        self.0.push(inputs.reservoir());
+        None
+    }
+}
+
+/// The call, the transaction's own frame, takes the whole reservoir; the creation it starts takes
+/// all but the call's 2 per cent of what the call has left once it paid for the creation's start —
+/// the signer's account, the created account and the two records — as a `CREATE` opcode's child
+/// does.
+#[test]
+fn test_the_creation_takes_the_reservoir_share_of_what_the_call_has_left() {
+    let deployment = Deployment::new(deploying(&runtime(RUNTIME_LEN)));
+    let data = deployment.call_data(LARGE_OVERRIDE);
+    let gas_limit = TX_GAS_LIMIT_CAP * 2;
+    let mut tx = call_tx(KEYLESS_DEPLOY_ADDRESS, data.clone(), U256::ZERO);
+    tx.0.base.gas_limit = gas_limit;
+    let mut evm = MegaEvm::new(context(system_db())).with_inspector(Reservoirs::default());
+    let outcome = evm.execute_transaction(tx).expect("the transaction is valid");
+    assert_eq!(returned(&outcome).deployedAddress, deployment.address);
+
+    let whole = gas_limit - TX_GAS_LIMIT_CAP - history(mega_evm::TX_BODY_SIZE + data.len() as u64);
+    let left = whole -
+        entry(GasId::new_account_state_gas()) -
+        entry(GasId::create_state_gas()) -
+        2 * record();
+    assert_eq!(evm.inspector().0, [whole, left - left * 2 / 100]);
+}

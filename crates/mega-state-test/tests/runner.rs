@@ -18,7 +18,7 @@ use state_test::{
     runner::{run, Config, FailureKind, Outcome, Report},
     skips::SkipReason,
     types::TestSuite,
-    Fork, Mode,
+    EvmTxRuntimeLimits, Fork, Mode,
 };
 
 const SENDER: &str = "0xa94f5374fce5edbc8e2a8697c15331677e6ebf0b";
@@ -31,7 +31,16 @@ const BASE_FEE_VAULT: &str = "0x4200000000000000000000000000000000000019";
 const STORE_AND_LOG: &str = "0x602a5f5560075f5260205fa000";
 
 fn config(mode: Mode, fork: Fork) -> Config {
-    Config { mode, fork, threads: 2, json_outcome: false, trace: false, deviations: DEVIATIONS }
+    Config {
+        mode,
+        fork,
+        threads: 2,
+        json_outcome: false,
+        trace: false,
+        digest: None,
+        limits: None,
+        deviations: DEVIATIONS,
+    }
 }
 
 /// A unit calling `CONTRACT` with `transaction` fields over the defaults, and one entry per fork
@@ -498,4 +507,106 @@ fn test_the_registry_does_not_absorb_another_failure_of_its_entries() {
         Outcome::Failed(failure) if failure.kind == listed.produced.kind() && failure.deviation.is_none()
     ));
     assert_eq!(report.summary().unattributed, 1);
+}
+
+/// The records of a run's tests, in test order: none for a test whose transaction did not run.
+fn records(report: &Report) -> Vec<Option<&Value>> {
+    report.results.iter().map(|result| result.record.as_ref()).collect()
+}
+
+/// A run's digest does not depend on the thread count or on the run: the records of a file of
+/// several tests are the same on one thread and on several, twice over, whatever the verdicts.
+#[test]
+fn test_the_digest_is_stable_across_runs_and_thread_counts() {
+    let dir = tempfile::tempdir().unwrap();
+    let units: serde_json::Map<_, _> = (0..6)
+        .map(|n| {
+            let unit = unit(
+                &[Fork::Osaka],
+                json!({ "gasLimit": ["0x0f4240"], "value": [format!("0x{n:02x}")] }),
+            );
+            (format!("call_{n}"), fill_from_ethereum(unit))
+        })
+        .collect();
+    let paths = [write(dir.path(), "a.json", units.clone().into()), {
+        write(dir.path(), "b.json", units.into())
+    }];
+    let run_with = |threads| {
+        let report = run(&paths, Config { threads, ..config(Mode::Satin, Fork::Osaka) });
+        records(&report).into_iter().map(|r| r.cloned()).collect::<Vec<_>>()
+    };
+    let one = run_with(1);
+    assert_eq!(one.len(), 12);
+    assert!(one.iter().all(Option::is_some), "every transaction ran");
+    assert_eq!(one, run_with(1));
+    assert_eq!(one, run_with(4));
+    assert_eq!(one, run_with(4));
+    let hashes: std::collections::BTreeSet<_> =
+        one.iter().flatten().map(state_test::digest::hash).collect();
+    assert_eq!(hashes.len(), 6, "six distinct values, two files of each");
+}
+
+/// A test that fails its fixture still has the record of what ran, and a transaction the engine
+/// rejects has one that says so; a test skipped by its fixture has none.
+#[test]
+fn test_the_digest_covers_failed_and_rejected_tests() {
+    let dir = tempfile::tempdir().unwrap();
+    let filled = fill_from_ethereum(unit(&[Fork::Osaka], json!({})));
+    let mut wrong_root = filled.clone();
+    wrong_root["post"]["Osaka"][0]["hash"] = json!(B256::repeat_byte(1));
+    let mut rejected = fill_from_ethereum(unit(
+        &[Fork::Osaka],
+        json!({ "gasLimit": ["0x5208"], "data": ["0x00"] }),
+    ));
+    rejected["post"]["Osaka"][0]["expectException"] =
+        json!("TransactionException.INTRINSIC_GAS_TOO_LOW");
+    let path = write(
+        dir.path(),
+        "a.json",
+        json!({ "a_passes": filled, "b_wrong_root": wrong_root, "c_rejected": rejected }),
+    );
+    let report = run(&[path], config(Mode::Equivalence, Fork::Osaka));
+    let kinds: Vec<_> = outcomes(&report).into_iter().map(failure_kind).collect();
+    assert_eq!(kinds, [None, Some(FailureKind::StateRootMismatch), None]);
+    let records = records(&report);
+    assert!(records.iter().all(Option::is_some));
+    assert!(records[0].unwrap()["result"]["status"] == "success");
+    assert_eq!(
+        records[0], records[1],
+        "the same transaction, the same record, whatever the verdict"
+    );
+    assert!(records[2].unwrap()["rejected"]
+        .as_str()
+        .unwrap()
+        .contains("CallGasCostMoreThanGasLimit"));
+}
+
+/// Running under tighter limits stops the transaction a limit holds: its record names the stop,
+/// where the same fixture under the spec's limits has none.
+#[test]
+fn test_tightened_limits_reach_the_limit_stop_paths() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write(
+        dir.path(),
+        "a.json",
+        json!({ "call": fill_from_ethereum(unit(&[Fork::Osaka], json!({ "gasLimit": ["0x0f4240"] }))) }),
+    );
+    let spec = run(std::slice::from_ref(&path), config(Mode::Satin, Fork::Osaka));
+    let tight = run(
+        &[path],
+        Config {
+            limits: Some(
+                EvmTxRuntimeLimits::default()
+                    .with_tx_data_size_limit(400)
+                    .with_frame_data_size_limit(400),
+            ),
+            ..config(Mode::Satin, Fork::Osaka)
+        },
+    );
+    let (spec, tight) = (records(&spec)[0].unwrap(), records(&tight)[0].unwrap());
+    assert!(spec["limit_exceeded"].is_null());
+    assert_eq!(tight["limit_exceeded"]["kind"], "DataSize");
+    // The transaction's own frame crosses its budget, what the body leaves of the 400 bytes.
+    assert_eq!(tight["limit_exceeded"]["limit"], 400 - mega_evm::TX_BODY_SIZE);
+    assert_ne!(state_test::digest::hash(spec), state_test::digest::hash(tight));
 }

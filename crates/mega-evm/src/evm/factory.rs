@@ -365,13 +365,15 @@ mod tests {
             .tx_runtime_limits
             .with_tx_data_size_limit(crate::TX_BODY_SIZE + 40);
         let stopped = run(&MegaEvmFactory::new().with_tx_runtime_limits(one_record));
+        // The second record crosses the transaction's own frame's budget, the record the body
+        // leaves of the limit, which is named.
         assert_eq!(
             stopped.limit_exceeded,
             Some(LimitCheck::ExceedsLimit {
                 kind: LimitKind::DataSize,
-                limit: crate::TX_BODY_SIZE + 40,
-                used: crate::TX_BODY_SIZE + 2 * 40,
-                frame_local: false,
+                limit: 40,
+                used: 2 * 40,
+                frame_local: true,
             })
         );
 

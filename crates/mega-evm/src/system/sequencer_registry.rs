@@ -116,7 +116,7 @@ fn read_slot<DB: revm::Database>(
 /// state. Nothing is committed.
 ///
 /// It is a system call from the EIP-4788 system address on the pre-block budget
-/// ([`pre_block_call_gas_limit`](crate::pre_block_call_gas_limit)): at most 30M of regular gas,
+/// ([`PRE_BLOCK_CALL_GAS_LIMIT`](crate::constants::PRE_BLOCK_CALL_GAS_LIMIT)): 30M of regular gas,
 /// the rest reservoir, its state priced at the minimum SALT bucket. One call applies whichever of
 /// the two roles is due; the block executor makes it only when [`is_apply_pending_changes_due`]
 /// says one is.
@@ -212,12 +212,13 @@ fn system_address_named_by(code_hash: B256, current: U256) -> Option<Address> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{system::MEGA_SYSTEM_ADDRESS, MegaContext, MegaSpecId};
+    use crate::{
+        system::MEGA_SYSTEM_ADDRESS, MegaContext, MegaSpecId, SYSTEM_CALL_REGULAR_GAS_LIMIT,
+    };
     use alloy_primitives::address;
     use revm::{
         context::{BlockEnv, ContextTr, JournalTr, Transaction},
         database::{InMemoryDB, State},
-        handler::SYSTEM_CALL_REGULAR_GAS_LIMIT,
         state::{AccountInfo, Bytecode},
         Database, DatabaseCommit,
     };
@@ -376,28 +377,23 @@ mod tests {
         }
     }
 
-    /// The call runs on the block's gas limit, of which 30M is regular gas and the rest the
-    /// reservoir: a registry with nothing due writes nothing, and all of the reservoir is left.
+    /// The call runs on the pre-block budget whatever the block's gas limit, of which 30M is
+    /// regular gas and the rest the reservoir: a registry with nothing due writes nothing, and all
+    /// of the reservoir is left, in a block of 1M and in one of 250M.
     #[test]
-    fn test_transact_apply_pending_changes_uses_block_gas_limit() {
-        let mut db = registry_with(&[]);
-        let mut evm = evm(&mut db, 250_000_000);
-        let outcome = transact_apply_pending_changes(&mut evm).expect("the call succeeds");
-        assert_eq!(evm.ctx().tx().gas_limit(), 250_000_000);
-        assert_eq!(
-            outcome.result.gas().reservoir_remaining(),
-            250_000_000 - SYSTEM_CALL_REGULAR_GAS_LIMIT
-        );
-    }
-
-    /// A block whose gas limit is below 30M still gives the call 30M, all of it regular gas.
-    #[test]
-    fn test_transact_apply_pending_changes_respects_30m_floor() {
-        let mut db = registry_with(&[]);
-        let mut evm = evm(&mut db, 1_000_000);
-        let outcome = transact_apply_pending_changes(&mut evm).expect("the call succeeds");
-        assert_eq!(evm.ctx().tx().gas_limit(), SYSTEM_CALL_REGULAR_GAS_LIMIT);
-        assert_eq!(outcome.result.gas().reservoir_remaining(), 0);
+    fn test_transact_apply_pending_changes_runs_on_the_pre_block_budget() {
+        use crate::constants::PRE_BLOCK_CALL_GAS_LIMIT;
+        for block_gas_limit in [1_000_000, 250_000_000] {
+            let mut db = registry_with(&[]);
+            let mut evm = evm(&mut db, block_gas_limit);
+            transact_apply_pending_changes(&mut evm).expect("the call succeeds");
+            assert_eq!(evm.ctx().tx().gas_limit(), PRE_BLOCK_CALL_GAS_LIMIT, "{block_gas_limit}");
+            assert_eq!(
+                evm.ctx().additional_limit().reservoir_remaining(),
+                PRE_BLOCK_CALL_GAS_LIMIT - SYSTEM_CALL_REGULAR_GAS_LIMIT,
+                "{block_gas_limit}"
+            );
+        }
     }
 
     /// A read the database cannot serve during the call is the database's error, not a verdict on

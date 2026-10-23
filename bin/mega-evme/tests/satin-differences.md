@@ -35,7 +35,7 @@ Each fixture's command run on both engines: `tests/fixtures/test_<name>.json` an
 
 ## Recorded mainnet blocks
 
-The three Rex6 blocks of `tests/fixtures/blocks`, each replayed on both engines. The legacy replay of each matches the chain (every receipt and the receipts root), so the legacy column is the chain's. Satin runs the transactions as signed, on the state their parent block left.
+The three Rex6 blocks of `tests/fixtures/blocks.tar.xz`, each replayed on both engines. The legacy replay of each matches the chain (every receipt and the receipts root), so the legacy column is the chain's. Satin runs the transactions as signed, on the state their parent block left.
 
 | Block | Transactions | Legacy gas | Satin gas | Satin / legacy | Regular | State | History | Status differs | Logs | Refused |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|

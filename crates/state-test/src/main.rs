@@ -17,8 +17,8 @@ use std::{path::PathBuf, process::ExitCode};
 use clap::Parser;
 use state_test::{
     deviations,
-    runner::{find_json_files, run, Config, Outcome, Report, Summary, TestResult},
-    Fork, Mode,
+    runner::{find_json_files, run, Config, DigestForm, Outcome, Report, Summary, TestResult},
+    EvmTxRuntimeLimits, Fork, Mode,
 };
 
 /// How many unattributed failures, and how many unreproduced entries, the summary lists.
@@ -47,6 +47,34 @@ struct Cmd {
     /// Print one JSON line per test to standard error.
     #[arg(long)]
     json_outcome: bool,
+    /// Print one JSON line per executed transaction on standard error: the test's identity and the
+    /// hash of the canonical record of the transaction's whole outcome (result, state, gas by
+    /// ledger, usage, logs, oracle reads), whatever the fixture's verdict.
+    #[arg(long)]
+    json_digest: bool,
+    /// As `--json-digest`, with the canonical record in each line, to see which field differs.
+    #[arg(long)]
+    json_digest_full: bool,
+    /// Satin mode: hold every transaction to this data-size limit, in bytes, instead of the
+    /// spec's; the frame budget follows it unless `--limit-frame-data-size` names one.
+    #[arg(long, value_name = "BYTES")]
+    limit_data_size: Option<u64>,
+    /// Satin mode: cap every frame's data-size budget at this many bytes.
+    #[arg(long, value_name = "BYTES")]
+    limit_frame_data_size: Option<u64>,
+    /// Satin mode: gas detention's two caps, the compute a transaction may still spend once it
+    /// read volatile data, instead of the spec's.
+    #[arg(long, value_name = "GAS")]
+    limit_compute_gas: Option<u64>,
+    /// Satin mode: hold every transaction to this many write records, its KV count, instead of
+    /// the spec's; every frame's budget is its share of what its parent has left.
+    #[arg(long, value_name = "RECORDS")]
+    limit_kv_updates: Option<u64>,
+    /// Satin mode: hold every transaction to this many new accounts and new slots, its state
+    /// growth, instead of the spec's; every frame's budget is its share of what its parent has
+    /// left.
+    #[arg(long, value_name = "UNITS")]
+    limit_state_growth: Option<u64>,
     /// Trace every test with an EIP-3155 tracer on standard error; runs on one thread.
     #[arg(long)]
     trace: bool,
@@ -92,12 +120,26 @@ fn main() -> ExitCode {
     } else {
         cmd.threads.unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()))
     };
+    let limits = match tightened_limits(&cmd) {
+        Ok(limits) => limits,
+        Err(error) => {
+            eprintln!("error: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let digest = match (cmd.json_digest, cmd.json_digest_full) {
+        (_, true) => Some(DigestForm::Full),
+        (true, false) => Some(DigestForm::Compact),
+        (false, false) => None,
+    };
     let config = Config {
         mode: cmd.mode,
         fork: cmd.fork,
         threads,
         json_outcome: cmd.json_outcome,
         trace: cmd.trace,
+        digest,
+        limits,
         deviations: deviations::DEVIATIONS,
     };
     let report = run(&files, config);
@@ -133,6 +175,42 @@ fn main() -> ExitCode {
         Mode::Satin if summary.file_failures > 0 => ExitCode::FAILURE,
         Mode::Satin => ExitCode::SUCCESS,
     }
+}
+
+/// The limits the `--limit-*` options name, over the spec's own, or none when no option is given.
+fn tightened_limits(cmd: &Cmd) -> Result<Option<EvmTxRuntimeLimits>, String> {
+    if cmd.limit_data_size.is_none() &&
+        cmd.limit_frame_data_size.is_none() &&
+        cmd.limit_compute_gas.is_none() &&
+        cmd.limit_kv_updates.is_none() &&
+        cmd.limit_state_growth.is_none()
+    {
+        return Ok(None);
+    }
+    if cmd.mode == Mode::Equivalence {
+        return Err(
+            "the --limit-* options need --mode satin: equivalence mode holds no limit".into()
+        );
+    }
+    let mut limits = EvmTxRuntimeLimits::default();
+    if let Some(bytes) = cmd.limit_data_size {
+        limits = limits.with_tx_data_size_limit(bytes).with_frame_data_size_limit(bytes);
+    }
+    if let Some(bytes) = cmd.limit_frame_data_size {
+        limits = limits.with_frame_data_size_limit(bytes);
+    }
+    if let Some(gas) = cmd.limit_compute_gas {
+        limits = limits
+            .with_block_env_access_compute_gas_limit(gas)
+            .with_oracle_access_compute_gas_limit(gas);
+    }
+    if let Some(records) = cmd.limit_kv_updates {
+        limits = limits.with_tx_kv_update_limit(records);
+    }
+    if let Some(units) = cmd.limit_state_growth {
+        limits = limits.with_tx_state_growth_limit(units);
+    }
+    Ok(Some(limits))
 }
 
 fn print_summary(report: &Report, summary: &Summary) {

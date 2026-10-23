@@ -4,7 +4,7 @@
 //!
 //! One shape names the charge and asks the hook for its price again: the same opcode taking its
 //! own write back (`SSTORE` 0 -> x -> 0), the upfront charge a caller made for a call or a
-//! creation that did not add the leaf after all, the transaction-level refund, and the
+//! creation that did not add the leaf after all, the transaction-level refund, and revm's
 //! settlement of a frame result built without running a frame. Because the site is re-priced
 //! through the one hook, and because the multiplier of a bucket is read once per transaction,
 //! the refill is the charge — a bucket cannot be read at one capacity for the charge and another
@@ -23,19 +23,21 @@
 
 use alloy_primitives::{address, Address, Bytes, TxKind, U256};
 use mega_evm::{
-    settle_frame_result, synthetic_frame_result,
+    synthetic_frame_result,
     test_utils::{BytecodeBuilder, MemoryDatabase},
     MegaTransaction,
 };
 use revm::{
     bytecode::opcode::{CALL, PUSH0, RETURN, REVERT},
+    context::result::EVMError,
     context_interface::{
         cfg::{gas::GasTracker, GasId, StateGasCharge, StateGasSite},
         Host,
     },
+    handler::EthFrame,
     interpreter::{
-        CallInput, CallInputs, CallScheme, CallValue, CreateInputs, CreateScheme, FrameInput,
-        InstructionResult,
+        interpreter::EthInterpreter, CallInput, CallInputs, CallScheme, CallValue, CreateInputs,
+        CreateScheme, FrameInput, InstructionResult,
     },
 };
 
@@ -389,8 +391,9 @@ struct Settled {
 }
 
 /// Charges `charge` through the pricing hook of a context reading `envs`, hands the frame the
-/// reservoir the caller has left, and settles a synthetic failure for it through the public
-/// helper — the route a mechanism takes when it answers a frame rather than running it.
+/// reservoir the caller has left, and settles a synthetic failure for it into the caller through
+/// revm's own frame return — the route a result takes when a mechanism answers a frame rather
+/// than running it.
 fn settle_a_synthetic_failure(
     envs: &SaltEnvs,
     reservoir: u64,
@@ -404,16 +407,18 @@ fn settle_a_synthetic_failure(
     assert!(caller.record_state_cost(price), "the caller can pay the crowded charge");
     let spilled = caller.state_gas_spilled();
 
-    let mut result =
-        synthetic_frame_result(&input(caller.reservoir()), InstructionResult::Revert, Bytes::new());
-    settle_frame_result::<_, revm::context::result::EVMError<core::convert::Infallible>>(
-        &mut ctx,
-        &mut caller,
-        &mut result,
-    )
-    .expect("the refund is priced through the same hook");
+    // The calling opcode hands the frame the reservoir its charge left, taken out of the caller,
+    // whose return adds what the frame gives back to what the caller kept.
+    let share = caller.reservoir();
+    caller.forward_reservoir(share);
+    let result = synthetic_frame_result(&input(share), InstructionResult::Revert, Bytes::new());
+    let mut frame = EthFrame::<EthInterpreter>::default();
+    *frame.interpreter.gas.tracker_mut() = caller;
+    frame
+        .return_result::<_, EVMError<core::convert::Infallible>>(&mut ctx, result)
+        .expect("the refund is priced through the same hook");
 
-    Settled { caller, price, spilled }
+    Settled { caller: *frame.interpreter.gas.tracker(), price, spilled }
 }
 
 /// The inputs of a `CALL` whose calling opcode charged the caller for the account it would add.
@@ -431,6 +436,9 @@ fn charged_call_input(reservoir: u64) -> FrameInput {
         is_static: false,
         reservoir,
         charged_new_account_state_gas: true,
+        charged_start: Default::default(),
+        pool_shares: revm::interpreter::PoolAmounts::UNLIMITED,
+        history_allowance: 0,
     }))
 }
 
@@ -467,7 +475,7 @@ fn assert_restores_both_pools(site: &str, envs: &SaltEnvs, reservoir: u64, settl
     );
 }
 
-/// A synthetic `CALL` failure settled through the public helper gives back a SALT-priced upfront
+/// A synthetic `CALL` failure settled into its caller gives back a SALT-priced upfront
 /// charge, both when the reservoir paid for it and when it spilled onto regular gas.
 #[test]
 fn test_a_synthetic_call_failure_refunds_the_crowded_upfront_charge() {
@@ -573,7 +581,7 @@ fn test_a_creation_that_cannot_pay_its_code_deposit_keeps_no_state_gas() {
         return;
     }
     // The deposit's price on top of the rest, below the execution cap as every probe here runs:
-    // forwarded 63/64 of it, the creation runs its init code and falls short of the deposit.
+    // forwarded 98/100 of it, the creation runs its init code and falls short of the deposit.
     let gas_limit = (without_the_deposit + deposit).min(GAS_LIMIT);
 
     let envs = crowd(minimal_envs());
@@ -611,11 +619,13 @@ fn test_a_creation_that_cannot_pay_its_code_deposit_keeps_no_state_gas() {
 /// A `CREATE` whose init code `SELFDESTRUCT`s the account it is creating, in the same transaction.
 ///
 /// EIP-8037's gas refills for `SELFDESTRUCT` say that destruction leaves the account, its code
-/// and its storage out of the trie, and still produces no state-gas refill and no change to the
-/// state gas the transaction has spent. The created-account charge therefore stands, priced in
-/// the created address's bucket, at the minimum multiplier and above it.
+/// and its storage out of the trie, and produces no state-gas refill. Satin's destruction table
+/// gives back the parts the transaction made: the account was absent at the transaction's start,
+/// so its leaf's state gas comes back to the destroying frame at the price it was charged, priced
+/// in the created address's bucket, and the transaction keeps none, at the minimum multiplier and
+/// above it.
 #[test]
-fn test_a_created_account_selfdestructed_in_the_same_transaction_keeps_its_state_gas() {
+fn test_a_created_account_selfdestructed_in_the_same_transaction_gives_its_state_gas_back() {
     // A charge that costs nothing is the same number whether or not it is given back.
     if state_is_free() {
         return;
@@ -624,7 +634,6 @@ fn test_a_created_account_selfdestructed_in_the_same_transaction_keeps_its_state
     // is that account, which the creation itself just added, so no second account is charged.
     let init = selfdestruct_to_self();
     let created = CONTRACT.create(0);
-    let account = entry(GasId::create_state_gas());
 
     assert_eq!(
         net_state_at(
@@ -632,19 +641,80 @@ fn test_a_created_account_selfdestructed_in_the_same_transaction_keeps_its_state
             move |envs, m| crowded_account(envs, created, m),
             || (db(create_with(&init).stop().build()), call_contract()),
         ),
-        [account, account * 2, account * 8],
-        "the created account's state gas is not refilled",
+        [0, 0, 0],
+        "the created account's state gas comes back at the price it was charged",
     );
 
-    let outcome = run(
-        db(create_with(&init).stop().build()),
-        crowded_account(minimal_envs(), created, 8),
-        call_contract(),
+    let envs = crowded_account(minimal_envs(), created, 8);
+    let outcome = run(db(create_with(&init).stop().build()), envs.clone(), call_contract());
+    assert_eq!(outcome.gas.state, 0);
+    assert_eq!(
+        envs.bucket_queries(account_bucket(created)),
+        1,
+        "one capacity read priced both the charge and the give-back",
     );
     assert!(
         outcome.state.get(&created).is_some_and(|account| account.is_selfdestructed()),
         "the same-transaction destruction removes the account from the trie",
     );
+}
+
+/// A contract created in the transaction and destroyed by a later call gives back every state
+/// charge the transaction made for it, each at the price it was charged in its own bucket: the
+/// account leaf, the slot its init code wrote and the code it deposited, the leaf and the code in
+/// the account's bucket and the slot in the slot's. The transaction keeps none of them, at the
+/// minimum multiplier and above it, with either bucket crowded, and each bucket is read once.
+#[test]
+fn test_a_contract_destroyed_after_its_creation_gives_back_its_leaf_slot_and_code() {
+    use revm::bytecode::opcode::{ADDRESS, DUP6, GAS, POP, SELFDESTRUCT};
+    if state_is_free() {
+        return;
+    }
+    let init = BytecodeBuilder::default()
+        .sstore(U256::from(SLOT), U256::from(1))
+        .return_with_data([ADDRESS, SELFDESTRUCT])
+        .build();
+    let created = CONTRACT.create(0);
+    // The creation leaves the created address on the stack, and a call to it destroys it.
+    let code = || {
+        create_with(&init)
+            .append_many([PUSH0, PUSH0, PUSH0, PUSH0, PUSH0, DUP6, GAS, CALL, POP, POP])
+            .stop()
+            .build()
+    };
+    type Crowd = fn(SaltEnvs, Address, u64) -> SaltEnvs;
+    let crowds: [(&str, Crowd); 2] = [
+        ("the account's bucket", crowded_account),
+        ("the slot's bucket", |envs, address, m| crowded_slot(envs, address, U256::from(SLOT), m)),
+    ];
+    for (crowded, crowd) in crowds {
+        assert_eq!(
+            net_state_at(
+                [1, 2, 8],
+                move |envs, m| crowd(envs, created, m),
+                || { (db(code()), call_contract()) }
+            ),
+            [0, 0, 0],
+            "{crowded}: every part comes back at the price it was charged",
+        );
+    }
+
+    let envs =
+        crowded_slot(crowded_account(minimal_envs(), created, 8), created, U256::from(SLOT), 8);
+    let outcome = run(db(code()), envs.clone(), call_contract());
+    assert!(outcome.result.is_success(), "{:?}", outcome.result);
+    assert!(outcome.state[&created].is_selfdestructed(), "the call destroyed the contract");
+    assert_eq!(outcome.gas.state, 0);
+    for (bucket, read) in [
+        (account_bucket(created), "the account's"),
+        (slot_bucket(created, U256::from(SLOT)), "the slot's"),
+    ] {
+        assert_eq!(
+            envs.bucket_queries(bucket),
+            1,
+            "{read} bucket priced its charges and give-backs"
+        );
+    }
 }
 
 /// Init code that self-destructs the account being created: `ADDRESS SELFDESTRUCT`.

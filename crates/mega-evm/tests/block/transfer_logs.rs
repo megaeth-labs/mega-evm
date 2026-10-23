@@ -59,16 +59,16 @@ fn state() -> State<mega_evm::test_utils::MemoryDatabase> {
 }
 
 /// A gas limit for any transaction here: 1,000,000 of regular gas on top of the state of two new
-/// accounts and a fresh slot, a kilobyte of history beyond the body, and 64 times the history of
-/// two write records, at the byte prices in effect: [`FORWARDER`] forwards all but a 64th of its
-/// gas with the value it passes on, and pays the records of the frame it starts from the 64th it
-/// keeps.
+/// accounts and a fresh slot, a kilobyte of history beyond the body, and 50 times the history of
+/// two write records, at the byte prices in effect: [`FORWARDER`] forwards all but 2 per cent of
+/// its gas with the value it passes on, and pays the records of the frame it starts from the
+/// fiftieth it keeps.
 fn gas_limit() -> u64 {
     1_000_000 +
         2 * common::new_account_state_gas() +
         common::slot_state_gas() +
         common::body_history(1_000) +
-        64 * mega_evm::write_record_history_gas(2).expect("two records have a price")
+        50 * mega_evm::write_record_history_gas(2).expect("two records have a price")
 }
 
 /// A legacy transaction from `signer` with `value`.
@@ -138,8 +138,8 @@ fn test_a_blocks_receipts_carry_its_transfer_logs_in_execution_order() {
         vec![transfer_log(DESTRUCTOR, PAYEE, U256::from(DESTRUCTOR_BALANCE))],
     ];
     // The records each keeps: the recipient; the forwarder and the payee; the created account;
-    // the destruction's beneficiary.
-    let records = [1, 2, 1, 1];
+    // the destructed account, whose balance the destruction clears, and its beneficiary.
+    let records = [1, 2, 1, 2];
 
     let mut data_size = 0;
     let mut history_bytes = 0;
@@ -261,14 +261,14 @@ fn test_a_value_left_on_a_destroyed_account_is_burned_without_a_log() {
     executor.apply_pre_execution_changes().expect("the block starts");
     // 1,000,000 of regular gas on top of what the byte prices in effect charge: the state of up
     // to three new accounts — the child, the payee, the child again for the late value — the
-    // history of the body, and 64 times the history of the creation's two start records, because
-    // the factory forwards all but a 64th of its gas and pays a start's records from the 64th it
-    // keeps. The creation returns its unused gas before the late value call, whose single record
-    // costs less: the factory's is already written in this frame.
+    // history of the body, and 50 times the history of the creation's two start records, because
+    // the factory forwards all but 2 per cent of its gas and pays a start's records from the
+    // fiftieth it keeps. The creation returns its unused gas before the late value call, whose
+    // single record costs less: the factory's is already written in this frame.
     let gas_limit = 1_000_000 +
         3 * common::new_account_state_gas() +
         common::body_history(0) +
-        64 * mega_evm::write_record_history_gas(2).expect("two records have a price");
+        50 * mega_evm::write_record_history_gas(2).expect("two records have a price");
     let tx = common::legacy_from(
         CALLER,
         0,

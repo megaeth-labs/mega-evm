@@ -91,16 +91,16 @@ const ROOM: u64 = 1_000_000;
 ///
 /// The bill is the receipt, the EIP-7623 floor included: a gas limit below the floor is refused.
 /// What a scenario holds in passing is gas it is not billed: what it is charged and given back,
-/// the 64th a call keeps back from its forward ([`kept_back`]), and what a rule, a limit or an
+/// the fiftieth a call keeps back from its forward ([`kept_back`]), and what a rule, a limit or an
 /// assertion needs it to hold without spending it.
 fn gas_limit(expected: Ledgers, held: u64) -> u64 {
     ROOM + expected.receipt() + held
 }
 
-/// What a caller holds beyond `forwarded` for a forward of all but a 64th of its gas to still
-/// cover `forwarded`: a 63rd of it, rounded up.
+/// What a caller holds beyond `forwarded` for a forward of all but 2 per cent of its gas to still
+/// cover `forwarded`: a 49th of it, rounded up.
 const fn kept_back(forwarded: u64) -> u64 {
-    forwarded.div_ceil(63)
+    forwarded.div_ceil(49)
 }
 
 /// The gas limit the keyless deployments are signed with, which the call's forward must cover.
@@ -264,12 +264,12 @@ fn test_nested_call_inner_reverts() {
         history: gas::body(0) + gas::history(LOG_BASE_SIZE),
         floor: gas::call_floor(&[], false),
     };
-    // Held in passing: the value call forwards all but a 64th of what the caller has and pays its
-    // two records' history out of that 64th, so the caller holds 64 times that history; the
-    // callee pays its slot and the slot's record before its revert gives them back; and the
-    // forward must cover all the callee spends, which the 64th kept back does not reach.
+    // Held in passing: the value call forwards all but 2 per cent of what the caller has and pays
+    // its two records' history out of the fiftieth it keeps, so the caller holds 50 times that
+    // history; the callee pays its slot and the slot's record before its revert gives them back;
+    // and the forward must cover all the callee spends, which the part kept back does not reach.
     let spilled = gas::slot_state() + gas::records(1);
-    let held = 64 * gas::records(2) + spilled + kept_back(callee_regular + spilled);
+    let held = 50 * gas::records(2) + spilled + kept_back(callee_regular + spilled);
     let traced = Traced::run(
         funded()
             .account_code(CONTRACT, parent)
@@ -549,9 +549,9 @@ fn log0_size(data_len: u8) -> u64 {
 
 /// A first frame whose start crosses the transaction's data-size limit, at the smallest limit
 /// validation admits the transaction under: its body fits, and the record and the transfer log of
-/// its value do not. The frame is answered with the stop before it runs, so it runs no instruction
-/// and its value never moves. A body over the limit is no scenario: validation rejects it, and a
-/// rejected transaction has no trace.
+/// its value do not. The frame returns the stop before it runs an instruction, and its revert takes
+/// back the value revm moved for it. A body over the limit is no scenario: validation rejects it,
+/// and a rejected transaction has no trace.
 #[test]
 fn test_data_size_limit_stops_the_first_frame_at_its_start() {
     let limit = TX_BODY_SIZE;
@@ -570,7 +570,8 @@ fn test_data_size_limit_stops_the_first_frame_at_its_start() {
         call_tx(CALLER, CONTRACT, Bytes::new(), U256::from(1), gas_limit(expected, held)),
         EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(limit),
     );
-    assert_every_frame_stops(&traced, LimitKind::DataSize, limit, 1);
+    // The frame's budget is what the body leaves of the limit: nothing, which its start crosses.
+    assert_every_frame_stops(&traced, LimitKind::DataSize, limit - TX_BODY_SIZE, 1);
     assert!(traced.inspector.traces().nodes()[0].trace.steps.is_empty(), "no instruction ran");
     // The record's history was charged on the transaction's gas before the frame and comes back
     // after the tracer read the frame, as a failed frame's spill does.
@@ -578,8 +579,8 @@ fn test_data_size_limit_stops_the_first_frame_at_its_start() {
 }
 
 /// A child's `LOG0` that crosses the transaction's data-size limit and, with it, its own frame
-/// budget. The transaction limit is the one the child's stop names, and only the child reverts:
-/// the parent resumes, writes a slot within what the transaction has left, and succeeds.
+/// budget. The budget, tested first, is the one the child's stop names, and only the child
+/// reverts: the parent resumes, writes a slot within what the transaction has left, and succeeds.
 #[test]
 fn test_data_size_limit_stop_is_caught_by_the_parent() {
     // What the transaction may produce besides its body; the child's log is larger, the parent's
@@ -601,7 +602,7 @@ fn test_data_size_limit_stop_is_caught_by_the_parent() {
         history: gas::body(0) + gas::records(1),
         floor: gas::call_floor(&[], false),
     };
-    // Held in passing: the 64th the parent keeps back from a forward that must cover what the
+    // Held in passing: the fiftieth the parent keeps back from a forward that must cover what the
     // child spends.
     let held = kept_back(logging_regular(data_len));
     let traced = Traced::run(
@@ -617,8 +618,8 @@ fn test_data_size_limit_stop_is_caught_by_the_parent() {
     assert_eq!(child.error.as_deref(), Some("execution reverted"));
     assert_eq!(
         decode_stop(child.output.as_ref().expect("the child's revert data")),
-        (LimitKind::DataSize, limit),
-        "the child reverts with the transaction's limit"
+        (LimitKind::DataSize, room * 98 / 100),
+        "the child reverts with its budget, 98% of what the body leaves the parent"
     );
     assert!(child.logs.is_empty(), "the child's log was never made");
     assert_parent_resumed(&traced, "STOP");
@@ -652,7 +653,7 @@ fn test_frame_budget_reverts_the_child_alone() {
         history: gas::body(0) + gas::history(LOG_BASE_SIZE),
         floor: gas::call_floor(&[], false),
     };
-    // Held in passing: the 64th the parent keeps back from a forward that must cover what the
+    // Held in passing: the fiftieth the parent keeps back from a forward that must cover what the
     // child spends.
     let held = kept_back(logging_regular(data_len));
     let traced = Traced::run(
@@ -758,8 +759,8 @@ fn test_detention_stop_crosses_again_in_the_parent() {
     // Held in passing: what the child holds when it crosses. The charge that crosses, the child's
     // `JUMP`: detention stops a charge the frame's whole gas covers, and one beyond it is an
     // out-of-gas. On top of it the receipt, so the crossing step, which reads as spending the
-    // child's whole gas, shows a cost the receipt cannot have billed. And the 64th the parent keeps
-    // back from a forward that must cover the child's loop and all that.
+    // child's whole gas, shows a cost the receipt cannot have billed. And the 2 per cent the parent
+    // keeps back from a forward that must cover the child's loop and all that.
     let at_crossing = expected.receipt() + MID;
     let held = at_crossing + kept_back(compute - before_loop + at_crossing);
     let traced = Traced::run(
@@ -889,7 +890,7 @@ fn test_precompile_child_frame() {
         history: gas::body(0),
         floor: gas::call_floor(&[], false),
     };
-    // Held in passing: the 64th the contract keeps back from a forward that must cover the
+    // Held in passing: the 2 per cent the contract keeps back from a forward that must cover the
     // precompile's price.
     let traced = Traced::run(
         funded().account_code(CONTRACT, code),

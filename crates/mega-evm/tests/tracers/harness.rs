@@ -644,7 +644,13 @@ pub(crate) fn assert_every_frame_stops(
         panic!("the transaction is not stopped: {:?}", traced.outcome.result);
     };
     assert_eq!((stopped, stopped_at), (kind, limit), "the limit that stopped the transaction");
-    assert!(!frame_local, "a transaction-level limit");
+    // A counted limit the transaction's own frame crosses is that frame's budget too, which the
+    // stop names; the compute limit is the transaction's.
+    assert_eq!(
+        frame_local,
+        kind != LimitKind::ComputeGas,
+        "the frame's budget or the compute limit"
+    );
     let ExecutionResult::Revert { output, .. } = &traced.outcome.result else {
         panic!("a stop settles as a revert: {:?}", traced.outcome.result);
     };

@@ -65,11 +65,10 @@ const ARBITRARY_PRECISION_NUMBER: &str = "$serde_json::private::Number";
 ///   key cannot stand in for the one it meant, and a file written against an earlier version of the
 ///   format — one that named the registry's roles (`satinInitialSequencer`, ...) or the limits —
 ///   does not load. Every other key is another fork's and is not read.
-/// - A key given twice is refused only where the deserializer still shows both copies, as the
-///   object's text through a `serde_json::Deserializer` does. A `serde_json::Value` has already
-///   kept the last copy, so a reader that parses the file into one first — `mega-evme --genesis`
-///   does, and so does a node that serializes its chain-config type — reads the last value and
-///   refuses nothing.
+/// - A key given twice is read as its last copy, as `serde_json` reads an object into a
+///   `serde_json::Value`: a reader handed the object's text, which still shows both copies, and a
+///   reader that parses the file into a `Value` first — `mega-evme --genesis` does, and so does a
+///   node that serializes its chain-config type — read the same value.
 /// - A value of the wrong type is refused, naming its key, and so is a schedule
 ///   [`validate_schedule`](MegaHardforks::validate_schedule) refuses. One object is read as an
 ///   integer: `{"$serde_json::private::Number": "<digits>"}`, the form `serde_json` hands a number
@@ -113,12 +112,9 @@ impl SatinChainConfig {
     pub fn from_genesis_config<'de, D: Deserializer<'de>>(
         config: D,
     ) -> Result<Option<Self>, SatinChainConfigError> {
-        let Entries { mut entries, duplicate } = config
+        let mut entries = config
             .deserialize_map(EntriesVisitor)
             .map_err(|error| SatinChainConfigError::Malformed(error.to_string()))?;
-        if let Some(key) = duplicate {
-            return Err(SatinChainConfigError::DuplicateKey(key));
-        }
         if let Some(unknown) =
             entries.keys().find(|key| !SATIN_CHAIN_CONFIG_KEYS.contains(&key.as_str()))
         {
@@ -175,8 +171,6 @@ pub enum SatinChainConfigError {
     Malformed(String),
     /// A key that starts with `satin` but is not `satinTime`.
     UnknownKey(String),
-    /// A key that starts with `satin`, given twice.
-    DuplicateKey(String),
     /// A key whose value is not of its type.
     InvalidValue {
         /// The key.
@@ -195,7 +189,6 @@ impl fmt::Display for SatinChainConfigError {
                 write!(f, "the chain configuration is malformed: {message}")
             }
             Self::UnknownKey(key) => write!(f, "`{key}` is not a Satin chain-configuration key"),
-            Self::DuplicateKey(key) => write!(f, "`{key}` is given twice"),
             Self::InvalidValue { key, expected } => write!(f, "`{key}` must be {expected}"),
             Self::Schedule(error) => write!(f, "{error}"),
         }
@@ -218,19 +211,12 @@ enum Entry {
     Other,
 }
 
-/// A configuration object's entries whose key starts with [`PREFIX`], and the first such key
-/// given twice, if one was.
-struct Entries {
-    entries: BTreeMap<String, Entry>,
-    duplicate: Option<String>,
-}
-
-/// Collects a configuration object's entries whose key starts with [`PREFIX`], and skips the
-/// others' values without keeping them.
+/// Collects a configuration object's entries whose key starts with [`PREFIX`], the last copy of a
+/// key given twice, and skips the others' values without keeping them.
 struct EntriesVisitor;
 
 impl<'de> Visitor<'de> for EntriesVisitor {
-    type Value = Entries;
+    type Value = BTreeMap<String, Entry>;
 
     fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("a chain configuration object")
@@ -238,19 +224,14 @@ impl<'de> Visitor<'de> for EntriesVisitor {
 
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
         let mut entries = BTreeMap::new();
-        let mut duplicate = None;
         while let Some(key) = map.next_key::<String>()? {
             if is_satin_key(&key) {
-                let entry = map.next_value::<Entry>()?;
-                if entries.contains_key(&key) {
-                    duplicate.get_or_insert_with(|| key.clone());
-                }
-                entries.insert(key, entry);
+                entries.insert(key, map.next_value::<Entry>()?);
             } else {
                 map.next_value::<IgnoredAny>()?;
             }
         }
-        Ok(Entries { entries, duplicate })
+        Ok(entries)
     }
 }
 
@@ -323,13 +304,16 @@ impl<'de> Visitor<'de> for EntryVisitor {
     /// `arbitrary_precision` feature, which a node's dependencies may switch on, hands every number
     /// over as a one-entry map from [`ARBITRARY_PRECISION_NUMBER`] to the number's text. That
     /// number is read as the same number is read without the feature, so the feature changes
-    /// nothing a reader accepts.
+    /// nothing a reader accepts: its text is decimal digits alone, with no sign, which a JSON
+    /// number cannot carry and `u64::from_str` would otherwise take.
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Entry, A::Error> {
         let mut entry = Entry::Other;
         if let Some(key) = map.next_key::<String>()? {
             if key == ARBITRARY_PRECISION_NUMBER {
                 let text = map.next_value::<String>()?;
-                entry = text.parse::<u64>().map_or(Entry::Other, Entry::Unsigned);
+                if text.bytes().all(|byte| byte.is_ascii_digit()) {
+                    entry = text.parse::<u64>().map_or(Entry::Other, Entry::Unsigned);
+                }
             } else {
                 map.next_value::<IgnoredAny>()?;
             }
@@ -527,27 +511,48 @@ mod tests {
         }
     }
 
-    /// A key given twice is refused where the deserializer shows both, as in the object's text; a
-    /// `serde_json::Value` has already kept the last one, and a key of another fork given twice is
-    /// not read.
+    /// A key given twice is read as its last copy, by every reader: the object's text through a
+    /// `serde_json::Deserializer`, which shows both copies, reads what a `serde_json::Value`, which
+    /// kept the last one, reads — the last copy, whether the first is valid or not. A key of
+    /// another fork given twice is not read.
     #[test]
-    fn test_a_key_given_twice_is_refused() {
+    fn test_the_last_copy_of_a_key_given_twice_is_read() {
+        let streamed = |text: &str| {
+            SatinChainConfig::from_genesis_config(&mut serde_json::Deserializer::from_str(text))
+        };
+        let as_value = |text: &str| parse(&serde_json::from_str::<Value>(text).unwrap());
         let text = genesis_config().to_string();
-        let twice = text.replacen("\"satinTime\":", "\"satinTime\":1,\"satinTime\":", 1);
-        assert_eq!(
-            SatinChainConfig::from_genesis_config(&mut serde_json::Deserializer::from_str(&twice)),
-            Err(SatinChainConfigError::DuplicateKey(SATIN_TIME_KEY.into()))
-        );
+        let given = |first: &str, last: &str| {
+            text.replacen(
+                "\"satinTime\":1800000000",
+                &format!("\"satinTime\":{first},\"satinTime\":{last}"),
+                1,
+            )
+        };
+        let refused = Err(SatinChainConfigError::InvalidValue {
+            key: SATIN_TIME_KEY,
+            expected: "an integer from 0 to 2^64 - 1",
+        });
+        let at = |time| Ok(Some(SatinChainConfig { activation_time: time }));
+        for (first, last, expected) in [
+            ("1", "1800000000", at(ACTIVATION)),
+            ("1800000000", "7", at(7)),
+            ("\"a string\"", "1800000000", at(ACTIVATION)),
+            ("1800000000", "\"a string\"", refused),
+        ] {
+            let twice = given(first, last);
+            assert_ne!(twice, text, "{first}, then {last}");
+            assert_eq!(streamed(&twice), expected, "{first}, then {last}");
+            assert_eq!(as_value(&twice), expected, "{first}, then {last}");
+        }
         let other = text.replacen("\"chainId\":", "\"chainId\":1,\"chainId\":", 1);
-        assert_eq!(
-            SatinChainConfig::from_genesis_config(&mut serde_json::Deserializer::from_str(&other)),
-            Ok(Some(config()))
-        );
+        assert_eq!(streamed(&other), Ok(Some(config())));
     }
 
     /// A number `serde_json` hands over as its `arbitrary_precision` feature does — a map from
-    /// its token to the number's text — reads as the number, and what the text does not hold as
-    /// an integer in 64 bits is refused as the number would be; any other map is refused.
+    /// its token to the number's text — reads as the number. Text that is not an integer in 64
+    /// bits written in decimal digits alone — with a sign before them, for one — is refused as the
+    /// number would be; any other map is refused.
     #[test]
     fn test_an_arbitrary_precision_number_reads_as_the_number() {
         let with_time = |value: Value| {
@@ -563,7 +568,9 @@ mod tests {
             key: SATIN_TIME_KEY,
             expected: "an integer from 0 to 2^64 - 1",
         });
-        for text in ["1.5", "-1", "18446744073709551616", "1e3"] {
+        // Decimal digits alone: no sign, which `u64::from_str` would take and the number form
+        // cannot carry.
+        for text in ["1.5", "-1", "+7", "+1800000000", "", "18446744073709551616", "1e3"] {
             assert_eq!(with_time(number(text)), refused, "{text}");
         }
         let mut two = number("1");
@@ -612,10 +619,6 @@ mod tests {
             SatinChainConfigError::InvalidValue { key: "satinTime", expected: "an integer" }
                 .to_string(),
             "`satinTime` must be an integer"
-        );
-        assert_eq!(
-            SatinChainConfigError::DuplicateKey("satinTime".into()).to_string(),
-            "`satinTime` is given twice"
         );
     }
 }

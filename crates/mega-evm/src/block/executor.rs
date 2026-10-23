@@ -30,18 +30,6 @@
 //!   block contract reads as zeroes, not as an error, and a caller that placed its own info for
 //!   this block keeps it. alloy-op-evm's executor pre-loads no info either.
 //!
-//! # The admission gate
-//!
-//! Block execution refuses an inspector that may rewrite what execution produces
-//! ([`MegaEvm::has_rewriting_inspector`]). alloy-evm's `BlockExecutorFactory` asks for an executor
-//! for every `I: Inspector`, so the refusal cannot be a bound on the type: it is checked at every
-//! entry point that runs code or moves the block on — the pre-block changes, the execution of a
-//! transaction, the commit of an outcome and the end of the block — before anything changes. The
-//! trusted route
-//! ([`create_executor_with_trusted_inspector`](crate::MegaBlockExecutorFactory::create_executor_with_trusted_inspector))
-//! is the compile-time proof that an inspector observes and writes nothing back; the generic route
-//! is the checked one.
-//!
 //! # Committing an outcome
 //!
 //! alloy-evm's [`commit_transaction`](BlockExecutor::commit_transaction) cannot fail. Its contract
@@ -90,8 +78,9 @@
 //! and EIP-4788 calls, in the block in which Satin activates checks that the system contracts and
 //! the EIP-7997 factory hold the code Satin expects, then applies a role change the
 //! `SequencerRegistry` has due in this block. Every call is a system call
-//! on the pre-block budget ([`pre_block_call_gas_limit`](crate::pre_block_call_gas_limit)), and
-//! one that does not succeed refuses the block.
+//! on the pre-block budget
+//! ([`PRE_BLOCK_CALL_GAS_LIMIT`](crate::constants::PRE_BLOCK_CALL_GAS_LIMIT)), and one that does
+//! not succeed refuses the block.
 //!
 //! The pre-block step does not read the live system address, but it is what leaves the registry
 //! naming this block's address. The executor reads the address off the block's state before every
@@ -225,11 +214,6 @@ pub enum MegaBlockExecutionError {
         /// The footprint the block has left.
         available_block_da_footprint: u64,
     },
-    /// The EVM runs an inspector that may rewrite what execution produces, which block execution
-    /// does not admit.
-    ///
-    /// The inspector is the node's own choice, not a verdict on the block: an internal error.
-    RewritingInspector,
     /// In the block in which Satin activates, a predeploy's address does not hold the code Satin
     /// expects: it holds other code, an older version of the contract, no code, or no account.
     ///
@@ -277,9 +261,6 @@ impl fmt::Display for MegaBlockExecutionError {
                  transaction_da_footprint: {transaction_da_footprint}, \
                  available_block_da_footprint: {available_block_da_footprint}"
             ),
-            Self::RewritingInspector => f.write_str(
-                "block execution does not admit an inspector that may rewrite execution",
-            ),
             Self::UnexpectedSystemContractCode { address, expected, found } => {
                 write_unexpected_code(f, *address, *expected, *found)
             }
@@ -298,13 +279,12 @@ impl fmt::Display for MegaBlockExecutionError {
 impl core::error::Error for MegaBlockExecutionError {}
 
 impl From<MegaBlockExecutionError> for BlockExecutionError {
-    /// A block refused for what the node itself does is an internal error: an inspector the node
-    /// runs that may rewrite execution, or an outcome the builder let go stale, says nothing about
-    /// the block, and a node must not mark a block invalid because of its own choices. Every other
+    /// A block refused for what the node itself does is an internal error: an outcome the builder
+    /// let go stale says nothing about the block, and a node must not mark a block invalid because
+    /// of its own choices. Every other
     /// refusal is a verdict on the block, a validation error.
     fn from(error: MegaBlockExecutionError) -> Self {
         match error {
-            MegaBlockExecutionError::RewritingInspector |
             MegaBlockExecutionError::StaleOutcome { .. } => Self::other(error),
             MegaBlockExecutionError::UnexpectedNonDepositTxInActivationBlock |
             MegaBlockExecutionError::TransactionDaFootprintAboveGasLimit { .. } |
@@ -405,14 +385,16 @@ where
     /// test's, which a node executing the chain never runs.
     ///
     /// Their per-transaction half is installed on the EVM and before every transaction from now
-    /// on, and the block's data-size budget is theirs, lowered to the building policy where that
-    /// is lower. What the block counted so far stays counted. Behind the `test-utils` feature, so
-    /// a node build cannot reach it.
+    /// on, and the block's packing budgets are theirs, each lowered to the building policy where
+    /// that is lower. What the block counted so far stays counted. Behind the `test-utils` feature,
+    /// so a node build cannot reach it.
     #[cfg(any(test, feature = "test-utils"))]
     pub fn with_protocol_limits(mut self, limits: ProtocolLimits) -> Self {
         self.evm.set_tx_runtime_limits(limits.tx_runtime_limits);
-        self.limiter.limits.block_txs_data_limit =
-            self.ctx.block_limits.within(&limits).block_txs_data_limit;
+        let held = self.ctx.block_limits.within(&limits);
+        self.limiter.limits.block_txs_data_limit = held.block_txs_data_limit;
+        self.limiter.limits.block_kv_update_limit = held.block_kv_update_limit;
+        self.limiter.limits.block_state_growth_limit = held.block_state_growth_limit;
         self.protocol_limits = limits;
         self
     }
@@ -532,19 +514,6 @@ where
             .map_err(BlockExecutionError::other)?;
         Ok(classify_system_transaction(tx, system_address).unwrap_or(false))
     }
-
-    /// Refuses an EVM that runs an inspector which may rewrite what execution produces.
-    ///
-    /// Checked at every entry point rather than once, because the inspector can be enabled after
-    /// the block was set up ([`Evm::set_inspector_enabled`] through
-    /// [`evm_mut`](BlockExecutor::evm_mut)) and because a caller may run transactions without
-    /// calling [`apply_pre_execution_changes`](BlockExecutor::apply_pre_execution_changes) at all.
-    fn check_admission(&self) -> Result<(), BlockExecutionError> {
-        if self.evm.has_rewriting_inspector() {
-            return Err(MegaBlockExecutionError::RewritingInspector.into());
-        }
-        Ok(())
-    }
 }
 
 impl<DB, INSP, ExtEnvs, R, Spec> MegaBlockExecutor<MegaEvm<DB, INSP, ExtEnvs>, R, Spec>
@@ -625,7 +594,7 @@ where
 
     /// Runs what a block does before its transactions.
     ///
-    /// In order: the admission gate, the reset of the block-hash and bucket records, the EIP-2935
+    /// In order: the reset of the block-hash and bucket records, the EIP-2935
     /// and EIP-4788 pre-block calls, in the block in which Satin activates the check of the
     /// predeploys, the `SequencerRegistry`'s due role changes and the read of the L1 block info.
     /// Each step's state is committed here, on its own and read-only entries included, rather
@@ -643,8 +612,8 @@ where
     /// parent beacon root into their own contracts (`0x0…2935` and `0x0…4788`), which are not
     /// `MegaETH` system contracts and do not read them, so their outcome does not depend on the
     /// check that follows. Each runs on the pre-block budget
-    /// ([`pre_block_call_gas_limit`](eips::pre_block_call_gas_limit)), and one that does not
-    /// succeed refuses the block before its state is committed.
+    /// ([`PRE_BLOCK_CALL_GAS_LIMIT`](crate::constants::PRE_BLOCK_CALL_GAS_LIMIT)), and one that
+    /// does not succeed refuses the block before its state is committed.
     ///
     /// The check is made once, in the block in which Satin activates
     /// ([`MegaBlockExecutionCtx::satin_activation_block`]): each of the seven predeploys must hold
@@ -661,8 +630,6 @@ where
     /// it is validated, after these steps are committed, and nothing inside the block can
     /// change it again.
     fn apply_pre_execution_changes(&mut self) -> Result<(), BlockExecutionError> {
-        self.check_admission()?;
-
         // The block starts with empty block-hash and bucket records, so what they hold at the end
         // is what this block read.
         self.evm.clear_accessed_block_hashes();
@@ -892,7 +859,7 @@ where
         self.execute(tx, Some(reported))
     }
 
-    /// Re-checks the block's admission and commits `output`.
+    /// Re-checks the block's limits and commits `output`.
     ///
     /// This is the commit for a builder that executes several candidates and then chooses among
     /// them: the block's counters may have moved between a candidate executing and its commit, so
@@ -911,7 +878,6 @@ where
         &mut self,
         output: MegaBlockTxResult<<R::Transaction as TransactionEnvelope>::TxType>,
     ) -> Result<GasOutput, BlockExecutionError> {
-        self.check_admission()?;
         self.check_room(&output)?;
         self.check_sender_unchanged(&output)?;
         Ok(self.commit_transaction(output))
@@ -927,8 +893,6 @@ where
         MegaBlockTxResult<<R::Transaction as TransactionEnvelope>::TxType>,
         BlockExecutionError,
     > {
-        self.check_admission()?;
-
         let (tx_env, tx) = tx.into_parts();
         let inner = tx.tx();
         let is_deposit = inner.ty() == DEPOSIT_TRANSACTION_TYPE;
@@ -1035,8 +999,6 @@ where
     pub fn finish_with_counters(
         mut self,
     ) -> Result<MegaFinishedBlock<DB, INSP, ExtEnvs, R>, BlockExecutionError> {
-        self.check_admission()?;
-
         let balance_increments =
             post_block_balance_increments::<Header>(&self.spec, self.evm.block(), &[], None);
         self.evm
@@ -1093,6 +1055,14 @@ mod tests {
             executor.limiter().limits.block_txs_data_limit,
             crate::constants::BLOCK_DATA_LIMIT
         );
+        assert_eq!(
+            (
+                executor.limiter().limits.block_kv_update_limit,
+                executor.limiter().limits.block_state_growth_limit
+            ),
+            (crate::constants::BLOCK_KV_UPDATE_LIMIT, crate::constants::BLOCK_STATE_GROWTH_LIMIT),
+            "and the spec's KV and state-growth budgets"
+        );
         executor.evm_mut().set_inspector_enabled(true);
         assert!(executor.into_evm().is_inspecting());
     }
@@ -1117,11 +1087,16 @@ mod tests {
         assert_eq!(*executor.evm().tx_runtime_limits(), satin.tx_runtime_limits);
         assert_eq!(executor.limiter().limits.block_txs_data_limit, 13_107_200);
 
-        let counterfactual = ProtocolLimits::no_limits().with_block_txs_data_limit(7);
+        let counterfactual = ProtocolLimits::no_limits()
+            .with_block_txs_data_limit(7)
+            .with_block_kv_update_limit(8)
+            .with_block_state_growth_limit(9);
         let executor = executor.with_protocol_limits(counterfactual);
         assert_eq!(executor.protocol_limits(), &counterfactual);
         assert_eq!(*executor.evm().tx_runtime_limits(), counterfactual.tx_runtime_limits);
         assert_eq!(executor.limiter().limits.block_txs_data_limit, 7);
+        assert_eq!(executor.limiter().limits.block_kv_update_limit, 8);
+        assert_eq!(executor.limiter().limits.block_state_growth_limit, 9);
 
         let tighter = MegaBlockExecutor::new(
             MegaEvm::new(MegaContext::new(MemoryDatabase::default(), MegaSpecId::SATIN)),
@@ -1146,9 +1121,9 @@ mod tests {
             .unwrap_or_else(|| panic!("not an internal refusal of this engine: {error:?}"))
     }
 
-    /// Every refusal but those for what the node itself does — an inspector it runs, here — is a
-    /// verdict on the block: a validation error. A predeploy that does not hold Satin's code when
-    /// Satin activates is one.
+    /// Every refusal but those for what the node itself does — an outcome it let go stale, here —
+    /// is a verdict on the block: a validation error. A predeploy that does not hold Satin's code
+    /// when Satin activates is one.
     #[test]
     fn test_a_refusal_of_the_block_is_a_validation_error() {
         let address = alloy_primitives::Address::repeat_byte(1);
@@ -1172,7 +1147,7 @@ mod tests {
             };
             assert_eq!(inner.downcast_ref::<MegaBlockExecutionError>(), Some(&refusal));
         }
-        let inspector = MegaBlockExecutionError::RewritingInspector;
-        assert_eq!(internal(&BlockExecutionError::from(inspector.clone())), &inspector);
+        let stale = MegaBlockExecutionError::StaleOutcome { tx_hash: B256::ZERO, sender: address };
+        assert_eq!(internal(&BlockExecutionError::from(stale.clone())), &stale);
     }
 }

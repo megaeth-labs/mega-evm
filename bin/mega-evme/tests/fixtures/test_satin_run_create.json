@@ -23,6 +23,7 @@
       "floor_gas": 24640,
       "data_size": 361,
       "write_records": 1,
+      "state_growth": 1,
       "limit_exceeded": null
     }
   }

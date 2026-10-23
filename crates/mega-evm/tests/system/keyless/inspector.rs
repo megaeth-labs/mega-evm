@@ -5,8 +5,8 @@
 
 use alloy_sol_types::SolError;
 use mega_evm::{
-    system::keyless::KEYLESS_DEPLOY_OVERHEAD_GAS, test_utils::BytecodeBuilder, LimitKind,
-    MegaLimitExceeded, WRITE_RECORD_SIZE,
+    system::keyless::KEYLESS_DEPLOY_OVERHEAD_GAS, test_utils::BytecodeBuilder, EvmTxRuntimeLimits,
+    LimitKind, MegaLimitExceeded, WRITE_RECORD_SIZE,
 };
 use revm::{
     bytecode::opcode::{LOG0, PUSH0, REVERT},
@@ -75,6 +75,7 @@ impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for Recorder {
             address: None,
             charged_create_state_gas: inputs.charged_create_state_gas(),
             charged_state_gas_address: inputs.charged_state_gas_address(),
+            charged_start: Default::default(),
         })
     }
 
@@ -182,12 +183,14 @@ fn test_a_failed_deployment_ends_as_a_revert_in_the_trace() {
 }
 
 /// An inspector that answers the creation itself — a tool's rewrite — starts no creation: the
-/// signer's nonce is not spent, so neither its account nor the created one is charged, and the
-/// call reports what the inspector answered. The transaction spends the overhead, the regular gas
-/// the `CREATE` opcode charges whatever its frame does, and the reference's gas, and nothing
-/// else.
+/// signer's nonce is not spent, and the call reports what the inspector answered. The answer is
+/// taken as given, as revm takes it: what the call was charged for the creation's start stays
+/// charged — the history of the signer's nonce record and of the created account's record — and
+/// no record is counted, the signer's nonce never having been bumped. The transaction spends the
+/// overhead, the regular gas the `CREATE` opcode charges whatever its frame does, those two
+/// records' history, and the reference's gas.
 #[test]
-fn test_a_creation_an_inspector_answers_charges_nothing_it_did_not_start() {
+fn test_a_creation_an_inspector_answers_keeps_what_its_start_was_charged() {
     let deployment = Deployment::new(deploying(&runtime(1)));
     let opcode = KEYLESS_DEPLOY_OVERHEAD_GAS + create_regular(deploying(&runtime(1)).len());
     for gas_limit in GAS_LIMITS {
@@ -199,7 +202,7 @@ fn test_a_creation_an_inspector_answers_charges_nothing_it_did_not_start() {
             beyond(&outcome, &reference(deployment.call_data(LARGE_OVERRIDE), gas_limit));
         assert_eq!(
             [total, regular, state, history_gas, history_bytes],
-            [opcode, opcode, 0, 0, 0],
+            [opcode + 2 * record(), opcode, 0, 2 * record(), 0],
             "at {gas_limit}",
         );
         assert_eq!(
@@ -385,10 +388,13 @@ fn test_a_revived_keyless_creation_a_limit_stopped_answers_address_mismatch() {
         let KeylessDeployError::ExecutionReverted { output, .. } = failure(&plain) else {
             panic!("the creation did not revert: {:?}", plain.result);
         };
+        // The creation's budget: 98% of what the call has left, which the log crosses with the
+        // transaction's limit.
+        let budget = (limit - body) * 98 / 100;
         assert_eq!(
             MegaLimitExceeded::abi_decode(&output).expect("a limit stop"),
-            MegaLimitExceeded { kind: LimitKind::DataSize.as_u8(), limit },
-            "at {gas_limit}: the constructor's log crossed the transaction's limit"
+            MegaLimitExceeded { kind: LimitKind::DataSize.as_u8(), limit: budget },
+            "at {gas_limit}: the constructor's log crossed the creation's budget"
         );
         assert_eq!(nonce(&plain, deployment.signer), 1, "the plain run spends the nonce");
 
@@ -416,5 +422,78 @@ fn test_an_inspector_sees_an_empty_code_deployment_end_as_a_revert() {
             recorder.events.iter().filter(|event| matches!(event, Event::CreateEnd(..))).collect();
         let end = Event::CreateEnd(InstructionResult::Revert, Some(deployment.address));
         assert_eq!(ends, [&end], "at {gas_limit}");
+    }
+}
+
+/// Halts the `keylessDeploy` call's frame whenever it is handed to the inspector, in
+/// `initialize_interp` or in a `step`, and counts the times it was.
+#[derive(Default)]
+struct HaltsTheCall {
+    handed: usize,
+}
+
+impl HaltsTheCall {
+    fn halt(&mut self, interp: &mut Interpreter<EthInterpreter>) {
+        if interp.input.target_address == KEYLESS_DEPLOY_ADDRESS {
+            self.handed += 1;
+            interp.halt(InstructionResult::OutOfGas);
+        }
+    }
+}
+
+impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for HaltsTheCall {
+    fn initialize_interp(
+        &mut self,
+        interp: &mut Interpreter<EthInterpreter>,
+        _: &mut MegaContext<DB>,
+    ) {
+        self.halt(interp);
+    }
+
+    fn step(&mut self, interp: &mut Interpreter<EthInterpreter>, _: &mut MegaContext<DB>) {
+        self.halt(interp);
+    }
+}
+
+/// The actions the engine sets on the call's frame — the creation it starts, the answer once the
+/// creation returned, and the stop of a call its creation's nonce record left over the frame's
+/// budget — are the frame's own: revm hands a frame built with an action to no
+/// `initialize_interp`, and returns an action set before a run without a `step`. So an inspector
+/// that would halt the call's frame there is never handed it, and the run is the plain run, in a
+/// debug build and a release build alike.
+#[test]
+fn test_an_inspector_that_would_halt_the_calls_frame_is_never_handed_it() {
+    let deployment = Deployment::new(deploying(&runtime(1)));
+    let over_the_budget = EvmTxRuntimeLimits::no_limits().with_frame_data_size_limit(39);
+    for gas_limit in GAS_LIMITS {
+        for limits in [None, Some(over_the_budget)] {
+            let case = format!("{limits:?} at {gas_limit}");
+            let context = || match limits {
+                Some(limits) => context(system_db()).with_tx_runtime_limits(limits),
+                None => context(system_db()),
+            };
+            let tx = keyless_tx(deployment.call_data(LARGE_OVERRIDE), gas_limit);
+            let plain = MegaEvm::new(context()).execute_transaction(tx.clone()).expect("valid");
+            if limits.is_none() {
+                assert_eq!(returned(&plain).deployedAddress, deployment.address, "{case}");
+            } else {
+                // The call's first action started its creation, which returned into it, leaving
+                // the call over its budget: the call returns the stop on its resume.
+                assert!(plain.limit_exceeded.is_some(), "{case}: the call returns the stop");
+                let mut evm = MegaEvm::new(context()).with_inspector(Recorder::default());
+                evm.execute_transaction(tx.clone()).expect("valid");
+                let events = &evm.inspector().events;
+                let started = events.iter().any(|event| matches!(event, Event::Create(..)));
+                let returned = events.iter().any(|event| matches!(event, Event::CreateEnd(..)));
+                assert!(started && returned, "{case}: the creation started and returned");
+            }
+            let mut evm = MegaEvm::new(context()).with_inspector(HaltsTheCall::default());
+            let halted = evm.execute_transaction(tx).expect("valid");
+            assert_eq!(evm.inspector().handed, 0, "{case}: the call's frame is never handed over");
+            assert_eq!(halted.result_and_state, plain.result_and_state, "{case}");
+            assert_eq!(halted.gas, plain.gas, "{case}");
+            assert_eq!(halted.usage, plain.usage, "{case}");
+            assert_eq!(halted.limit_exceeded, plain.limit_exceeded, "{case}");
+        }
     }
 }

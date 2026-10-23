@@ -38,18 +38,21 @@ use std::{
 };
 
 use mega_evm::{
+    alloy_evm::Database,
     alloy_op_evm::OpTx,
     op_revm::{constants::BASE_FEE_RECIPIENT, OpHaltReason, OpTransaction, OpTransactionError},
     revm::{
         context::{
-            result::{EVMError, ExecutionResult},
+            result::{EVMError, ExecutionResult, ResultAndState},
             BlockEnv, CfgEnv,
         },
         database::{EmptyDB, State},
-        inspector::{inspectors::TracerEip3155, InspectCommitEvm},
+        inspector::{inspectors::TracerEip3155, Inspector},
+        interpreter::interpreter::EthInterpreter,
         primitives::{Bytes, B256, KECCAK_EMPTY, U256},
-        ExecuteCommitEvm,
+        DatabaseCommit, ExecuteCommitEvm,
     },
+    EvmTxRuntimeLimits, MegaContext, MegaEvm,
 };
 use serde::{
     de::{Error as _, MapAccess, Visitor},
@@ -59,6 +62,7 @@ use walkdir::WalkDir;
 
 use crate::{
     deviations::{self, Deviation},
+    digest,
     exceptions::{self, Mismatch},
     mode::MAX_BLOBS_PER_TX,
     roots::{logs_hash, state_root},
@@ -80,9 +84,23 @@ pub struct Config {
     pub json_outcome: bool,
     /// Run each test under an EIP-3155 tracer writing to standard error.
     pub trace: bool,
+    /// Print the digest of every transaction's whole outcome to standard error, in this form.
+    pub digest: Option<DigestForm>,
+    /// Satin mode: the per-transaction limits the tests run under instead of the spec's, to reach
+    /// the limit-stop paths. Equivalence mode installs no limit and refuses these.
+    pub limits: Option<EvmTxRuntimeLimits>,
     /// The registry equivalence mode attributes failures to: [`deviations::DEVIATIONS`] for the
     /// gate.
     pub deviations: &'static [Deviation],
+}
+
+/// How much of a transaction's digest a run prints.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DigestForm {
+    /// The test's identity and the hash of the canonical record.
+    Compact,
+    /// The same, with the canonical record itself.
+    Full,
 }
 
 /// Which test a result is about.
@@ -226,6 +244,11 @@ pub struct TestResult {
     pub id: TestId,
     /// What happened to it.
     pub outcome: Outcome,
+    /// The canonical record of what its transaction ended in ([`digest::canonical`]), for a test
+    /// whose transaction ran, whatever the verdict: a test that did not run, or panicked before
+    /// its transaction ended, has none.
+    #[serde(skip)]
+    pub record: Option<serde_json::Value>,
 }
 
 /// Every test a run was given, and what happened to each.
@@ -493,18 +516,28 @@ pub fn run_file(path: &Path, config: Config) -> Result<Vec<TestResult>, Failure>
                     entry,
                     indexes: (test.indexes.data, test.indexes.gas, test.indexes.value),
                 };
+                let mut executed = None;
                 let outcome = match skip {
                     Some(reason) => Outcome::Skipped { reason },
-                    None => catch_unwind(AssertUnwindSafe(|| run_test(config, unit, test)))
-                        .unwrap_or_else(|panic| {
-                            Outcome::Failed(Failure::new(FailureKind::Panic, panic_message(&panic)))
-                        }),
+                    None => catch_unwind(AssertUnwindSafe(|| {
+                        run_test(config, unit, test, &mut executed)
+                    }))
+                    .unwrap_or_else(|panic| {
+                        let message = panic_message(&panic);
+                        if let Some(form) = config.digest {
+                            print_digest(config, form, &id, "panic", &digest::panicked(&message));
+                        }
+                        Outcome::Failed(Failure::new(FailureKind::Panic, message))
+                    }),
                 };
+                if let (Some(form), Some(executed)) = (config.digest, &executed) {
+                    print_digest(config, form, &id, "outcome", executed);
+                }
                 let outcome = attribute(config, &id, outcome);
                 if config.json_outcome {
                     print_outcome(config, &id, &outcome);
                 }
-                results.push(TestResult { id, outcome });
+                results.push(TestResult { id, outcome, record: executed });
             }
         }
     }
@@ -561,6 +594,34 @@ fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
         .unwrap_or_else(|| "a panic without a message".into())
 }
 
+/// Prints the digest line of a test to standard error: the compact form names the test and the
+/// hash of its canonical record, the full form carries the record too. `row` is `outcome` for a
+/// transaction that ended and `panic` for a test that panicked, which a run compared by digest
+/// must not have.
+fn print_digest(
+    config: Config,
+    form: DigestForm,
+    id: &TestId,
+    row: &str,
+    record: &serde_json::Value,
+) {
+    let mut line = serde_json::json!({
+        "mode": config.mode,
+        "fork": config.fork,
+        "path": id.path,
+        "test": id.name,
+        "d": id.indexes.0,
+        "g": id.indexes.1,
+        "v": id.indexes.2,
+        "digest": digest::hash(record),
+        "row": row,
+    });
+    if form == DigestForm::Full {
+        line["record"] = record.clone();
+    }
+    eprintln!("{line}");
+}
+
 fn print_outcome(config: Config, id: &TestId, outcome: &Outcome) {
     let line = serde_json::json!({
         "mode": config.mode,
@@ -585,8 +646,16 @@ pub(crate) fn chain_id(unit: &TestUnit) -> Result<u64, Failure> {
 }
 
 /// Executes one entry and judges it against its fixture.
-fn run_test(config: Config, unit: &TestUnit, test: &Test) -> Outcome {
-    match execute_and_check(config, unit, test) {
+///
+/// `executed` receives the canonical record of what the transaction ended in as soon as it has
+/// ended, so a test that then fails its fixture, or panics while it is judged, still has one.
+fn run_test(
+    config: Config,
+    unit: &TestUnit,
+    test: &Test,
+    executed: &mut Option<serde_json::Value>,
+) -> Outcome {
+    match execute_and_check(config, unit, test, executed) {
         Ok(None) => Outcome::Passed,
         Ok(Some(reason)) => Outcome::Skipped { reason },
         Err(failure) => Outcome::Failed(failure),
@@ -597,6 +666,7 @@ fn execute_and_check(
     config: Config,
     unit: &TestUnit,
     test: &Test,
+    executed: &mut Option<serde_json::Value>,
 ) -> Result<Option<SkipReason>, Failure> {
     let Ready { chain_id, block, tx } = match prepare(config.fork, unit, test)? {
         Ok(ready) => ready,
@@ -606,19 +676,53 @@ fn execute_and_check(
     let basefee = block.basefee;
     let mut state =
         State::builder().with_cached_prestate(unit.state()).with_bundle_update().build();
-    let evm = config.mode.evm(config.fork, &mut state, block, chain_id);
+    let mut evm = config.mode.evm(config.fork, &mut state, block, chain_id);
+    if let Some(limits) = config.limits {
+        evm.set_tx_runtime_limits(limits);
+    }
     let result = if config.trace {
         let mut evm = evm.with_inspector(TracerEip3155::buffered(stderr()).without_summary());
-        evm.inspect_tx_commit(tx)
+        execute_and_commit(&mut evm, tx, executed)
     } else {
-        let mut evm = evm;
-        evm.transact_commit(tx)
+        execute_and_commit(&mut evm, tx, executed)
     };
     if let Ok(result) = &result {
         undo_fee_vault_credit(unit, &mut state, basefee, result.tx_gas_used());
     }
     check(config.fork, test, unit.out.as_ref(), &result, &state)?;
     Ok(None)
+}
+
+/// Executes `tx` on `evm` and commits what it produced, as `transact_commit` does, keeping the
+/// transaction's whole outcome: its canonical record goes to `executed`, and the result is what
+/// the fixture is judged on.
+fn execute_and_commit<DB, INSP>(
+    evm: &mut MegaEvm<DB, INSP>,
+    tx: OpTx,
+    executed: &mut Option<serde_json::Value>,
+) -> Result<ExecutionResult<OpHaltReason>, EVMError<DB::Error, OpTransactionError>>
+where
+    DB: Database + DatabaseCommit,
+    INSP: Inspector<MegaContext<DB>, EthInterpreter>,
+{
+    match evm.execute_transaction(tx) {
+        Ok(outcome) => {
+            *executed = Some(digest::canonical(Ok(&outcome)));
+            let ResultAndState { result, state } = outcome.result_and_state;
+            evm.commit(state);
+            Ok(result)
+        }
+        Err(error) => {
+            *executed = Some(digest::canonical(Err(&format!("{error:?}"))));
+            Err(match error {
+                EVMError::Transaction(error) => EVMError::Transaction(error.0),
+                EVMError::Header(error) => EVMError::Header(error),
+                EVMError::Database(error) => EVMError::Database(error),
+                EVMError::Custom(error) => EVMError::Custom(error),
+                EVMError::CustomAny(error) => EVMError::CustomAny(error),
+            })
+        }
+    }
 }
 
 /// An entry ready to run: its chain id, block and transaction.

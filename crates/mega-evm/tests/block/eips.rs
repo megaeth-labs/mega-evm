@@ -5,8 +5,8 @@
 //! make leaves that state alone. A call that does not succeed refuses the block, and its state is
 //! never committed: neither a commit hook nor the database sees it.
 //!
-//! Each call runs on the pre-block budget: the block's gas limit, and never less than 30M, of
-//! which at most 30M is regular gas and the rest the call's state-gas reservoir.
+//! Each call runs on the pre-block budget, `PRE_BLOCK_CALL_GAS_LIMIT`, whatever the block's gas
+//! limit: 30M of regular gas and the rest the call's state-gas reservoir.
 
 use alloy_eips::{
     eip2935::{HISTORY_STORAGE_ADDRESS, HISTORY_STORAGE_CODE},
@@ -20,16 +20,14 @@ use alloy_hardforks::{EthereumHardfork, ForkCondition};
 use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
 use alloy_primitives::{Address, Bytes, B256, U256};
 use mega_evm::{
-    constants::SLOT_STATE_GAS,
-    pre_block_call_gas_limit,
+    constants::{PRE_BLOCK_CALL_GAS_LIMIT, SLOT_STATE_GAS},
     test_utils::{BytecodeBuilder, CommittedStates, ErrorInjectingDatabase, MemoryDatabase},
     BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutor, MegaEvmFactory, MegaHardforkConfig,
-    MegaSpecId,
+    MegaSpecId, SYSTEM_CALL_REGULAR_GAS_LIMIT,
 };
 use revm::{
-    bytecode::opcode::{CALLDATALOAD, MLOAD, SSTORE},
+    bytecode::opcode::{CALLDATALOAD, GAS, MLOAD, SSTORE},
     database::State,
-    handler::SYSTEM_CALL_REGULAR_GAS_LIMIT,
     Database,
 };
 
@@ -445,49 +443,72 @@ fn test_a_block_is_refused_when_its_beacon_root_call_halts() {
     assert_eq!(calls, [HISTORY_STORAGE_ADDRESS]);
 }
 
-/// The pre-block budget follows the block's gas limit, so a pre-block call that costs more than
-/// 30M in all still succeeds in a block that can hold it: 400 fresh slots are 39M of state gas,
-/// which the reservoir above 30M pays. In a block of 30M the call has no reservoir, the state
-/// gas spills onto the 30M of regular gas, and the call runs out of it.
+/// Code that writes `slots` fresh storage slots, then stores the regular gas it has left in the
+/// slot after them.
+fn fresh_writes_then_gas(slots: u16) -> Bytes {
+    (0..slots)
+        .fold(BytecodeBuilder::default(), |code, slot| code.sstore(U256::from(slot), U256::from(1)))
+        .append(GAS)
+        .push_number(slots)
+        .append(SSTORE)
+        .stop()
+        .build()
+}
+
+/// The pre-block budget is one constant, whatever the block's gas limit: in a block of 1M, of 30M
+/// and of 250M each pre-block call runs on [`PRE_BLOCK_CALL_GAS_LIMIT`], 30M of regular gas and
+/// a reservoir of sixteen fresh slots. Sixteen fresh writes run the same in each, the regular gas
+/// left after them included: the reservoir pays them in a small block too. A call that costs more
+/// than the budget in all — 400 fresh slots are 39M of state gas — runs out of gas in each and
+/// refuses the block, in a 250M block too.
 #[test]
-fn test_the_block_aware_budget_accepts_a_pre_block_call_above_30m() {
+fn test_the_pre_block_budget_does_not_follow_the_block() {
+    use revm::context::{ContextTr, Transaction};
+
+    const HELD: u16 = 16;
     const SLOTS: u16 = 400;
-    assert_eq!(pre_block_call_gas_limit(250_000_000), 250_000_000);
-    assert_eq!(pre_block_call_gas_limit(1_000_000), SYSTEM_CALL_REGULAR_GAS_LIMIT);
-    // The slot count is sized at Satin's own price; other byte prices move the 30M boundary.
+    let database = |code: Bytes| {
+        let mut db = common::database();
+        db.set_account_code(HISTORY_STORAGE_ADDRESS, code.clone());
+        db.set_account_code(BEACON_ROOTS_ADDRESS, code);
+        db
+    };
+    let gas_left = [1_000_000, 30_000_000, 250_000_000].map(|block_gas_limit| {
+        let mut state =
+            State::builder().with_database(database(fresh_writes_then_gas(HELD))).build();
+        let committed = CommittedStates::install(&mut state);
+        let mut executor =
+            executor_with_env(&mut state, ctx(), env_with_gas_limit(block_gas_limit));
+        executor.apply_pre_execution_changes().expect("the budget holds sixteen fresh writes");
+        assert_eq!(executor.evm().ctx().tx().gas_limit(), PRE_BLOCK_CALL_GAS_LIMIT);
+        let states = committed.states();
+        let stored = &states[0][&HISTORY_STORAGE_ADDRESS].storage;
+        assert_eq!(stored.len(), usize::from(HELD) + 1, "in a block of {block_gas_limit}");
+        stored[&U256::from(HELD)].present_value()
+    });
+    assert_eq!(gas_left[0], gas_left[2], "a 1M block runs the call as a 250M block does");
+    assert_eq!(gas_left[1], gas_left[2], "and so does a 30M block");
+
+    // The slot count is sized at Satin's own price; other byte prices move the budget's edge.
     if !mega_evm::active_satin_prices().is_constants() {
         return;
     }
-    assert!(u64::from(SLOTS) * SLOT_STATE_GAS > SYSTEM_CALL_REGULAR_GAS_LIMIT);
-
-    let database = || {
-        let mut db = common::database();
-        db.set_account_code(HISTORY_STORAGE_ADDRESS, fresh_writes(SLOTS));
-        db.set_account_code(BEACON_ROOTS_ADDRESS, fresh_writes(SLOTS));
-        db
-    };
-
-    let mut state = State::builder().with_database(database()).build();
-    let committed = CommittedStates::install(&mut state);
-    let mut executor = executor_with_env(&mut state, ctx(), env_with_gas_limit(250_000_000));
-    executor.apply_pre_execution_changes().expect("a 250M block holds both calls");
-    let states = committed.states();
-    assert_eq!(states[0][&HISTORY_STORAGE_ADDRESS].storage.len(), usize::from(SLOTS));
-    assert_eq!(states[1][&BEACON_ROOTS_ADDRESS].storage.len(), usize::from(SLOTS));
-    drop(executor);
-
-    let (calls, started) = start_block(database(), common::evm_env());
-    assert_eq!(common::BLOCK_GAS_LIMIT, SYSTEM_CALL_REGULAR_GAS_LIMIT);
-    let err = started.expect_err("a 30M block gives the call no reservoir");
-    assert!(
-        matches!(
-            &err,
-            BlockExecutionError::Validation(BlockValidationError::BlockHashContractCall { message })
-                if message.contains("OutOfGas")
-        ),
-        "{err}"
-    );
-    assert!(calls.is_empty(), "{calls:?}");
+    assert!(u64::from(SLOTS) * SLOT_STATE_GAS > PRE_BLOCK_CALL_GAS_LIMIT);
+    for block_gas_limit in [30_000_000, 250_000_000] {
+        let (calls, started) =
+            start_block(database(fresh_writes(SLOTS)), env_with_gas_limit(block_gas_limit));
+        let err = started.expect_err("no block's budget holds 400 fresh slots");
+        assert!(
+            matches!(
+                &err,
+                BlockExecutionError::Validation(BlockValidationError::BlockHashContractCall {
+                    message
+                }) if message.contains("OutOfGas")
+            ),
+            "{err}"
+        );
+        assert!(calls.is_empty(), "{calls:?}");
+    }
 }
 
 /// Starts a block at [`BLOCK_NUMBER`] over `db`.
@@ -531,28 +552,18 @@ fn test_a_database_error_in_the_beacon_root_call_is_internal() {
 }
 
 /// What the block commits for a pre-block call is the state op-revm's own system call produces
-/// for it: the same call from the same state, on the same configuration — the split
-/// switched on — and the same pre-block budget. The contract stores the regular gas it had, which
-/// is 30M of the 250M budget, and the word it was called with.
+/// for it: the same call from the same state, on the same configuration, with the same split of
+/// its gas ([`op_reference`](crate::op_reference)) and the same pre-block budget. The contract
+/// stores the regular gas it had, which is 30M of the budget, and the word it was called with.
 #[test]
 fn test_a_pre_block_call_commits_the_state_op_revm_produces() {
-    use op_revm::{handler::OpHandler, L1BlockInfo, OpEvm, OpSpecId, OpTransaction};
+    use crate::op_reference::{self, OpContext};
+    use op_revm::{OpEvm, OpSpecId};
     use revm::{
         bytecode::opcode::{GAS, PUSH0, PUSH1, STOP},
-        context::{result::EVMError, BlockEnv, CfgEnv, Context, ContextSetters, ContextTr, TxEnv},
-        handler::{EthFrame, ExecuteEvm, Handler, SystemCallTx},
+        context::ContextTr,
         inspector::NoOpInspector,
-        interpreter::interpreter::EthInterpreter,
-        Journal,
     };
-    type OpContext = Context<
-        BlockEnv,
-        OpTransaction<TxEnv>,
-        CfgEnv<OpSpecId>,
-        MemoryDatabase,
-        Journal<MemoryDatabase>,
-        L1BlockInfo,
-    >;
 
     let code = BytecodeBuilder::default()
         .append_many([GAS, PUSH0, SSTORE])
@@ -569,24 +580,22 @@ fn test_a_pre_block_call_commits_the_state_op_revm_produces() {
     let delivered = committed.states().into_iter().next().expect("a first step");
     assert!(delivered.contains_key(&HISTORY_STORAGE_ADDRESS), "the block hashes call is first");
     let (cfg, block) = (executor.evm().ctx().cfg().clone(), executor.evm().ctx().block().clone());
-    assert!(cfg.system_call_state_gas_margin_in_reservoir);
     drop(executor);
 
     let mut op = OpEvm::new(
         OpContext::new(db, OpSpecId::KARST).with_cfg(cfg).with_block(block),
         NoOpInspector,
     );
-    let mut tx = OpTransaction::<TxEnv>::new_system_tx_with_caller(
+    let outcome = op_reference::system_call(
+        &mut op,
         mega_evm::SYSTEM_ADDRESS,
         HISTORY_STORAGE_ADDRESS,
         PARENT_HASH.0.into(),
-    );
-    tx.base.gas_limit = pre_block_call_gas_limit(250_000_000);
-    op.0.ctx.set_tx(tx);
-    let result: Result<_, EVMError<core::convert::Infallible, op_revm::OpTransactionError>> =
-        OpHandler::<_, _, EthFrame<EthInterpreter>>::new().run_system_call(&mut op);
-    assert!(result.expect("op-revm runs the call").is_success());
-    let expected = op.finalize();
+        PRE_BLOCK_CALL_GAS_LIMIT,
+    )
+    .expect("op-revm runs the call");
+    assert!(outcome.result.is_success());
+    let expected = outcome.result_and_state.state;
 
     assert_eq!(delivered, expected, "the block commits op-revm's state");
     let stored = &delivered[&HISTORY_STORAGE_ADDRESS].storage;

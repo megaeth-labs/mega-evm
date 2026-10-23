@@ -1,8 +1,8 @@
 //! The order the two data-size counts are checked in, when one record crosses both at once.
 //!
 //! A record is counted on the transaction and on the frame that makes it: the transaction against
-//! its limit, the frame against its budget. The transaction is checked first, and the first count
-//! crossed is the one the stop names. Either reverts the frame that crossed it alone, and the
+//! its limit, the frame against its budget. The frame's budget is checked first, and the first
+//! count crossed is the one the stop names. Either reverts the frame that crossed it alone, and the
 //! caller goes on.
 
 use alloy_primitives::{address, Address, Bytes, U256};
@@ -25,7 +25,7 @@ const B: Address = address!("0000000000000000000000000000000000f20002");
 const GAS_LIMIT: u64 = 100_000_000;
 
 /// One record that crosses the transaction's data-size limit and its frame's budget at once is
-/// stopped with the transaction's limit, which is checked first.
+/// stopped with the frame's budget, which is checked first.
 ///
 /// [`A`] keeps two records, so the transaction has 310 + 2 × 40 = 390 bytes when [`B`] makes the
 /// record that crosses, which brings it to 430 bytes, and [`B`]'s own count to 40 bytes. `A`'s
@@ -34,20 +34,21 @@ const GAS_LIMIT: u64 = 100_000_000;
 /// gets 39. A transaction limit of 390 leaves `A` 80 bytes, and `B` none.
 ///
 /// Either way [`B`] reverts alone with `MegaLimitExceeded(kind, limit)` and [`A`] returns what it
-/// reverted with: the limit named is the one the order picks. The row that crosses the frame's
-/// budget alone shows that the count the first row ranks second is crossed.
+/// reverted with: the limit named is the one the order picks, `B`'s budget of none in the first
+/// row, where the transaction's limit is crossed too. The row that crosses the frame's budget alone
+/// shows the same budget rule with room left in the transaction.
 ///
 /// Rules: [S10.48], [S10.31], [S10.33], [S10.34], [S10]. Independence: constants — the usages and
 /// budgets are hand arithmetic from `TX_BODY_SIZE`, `WRITE_RECORD_SIZE` and the 98/100 share.
 #[test]
-fn test_a_record_crossing_both_counts_is_reported_for_the_transaction() {
+fn test_a_record_crossing_both_counts_names_the_frame_budget() {
     let unlimited = EvmTxRuntimeLimits::no_limits();
     let before = TX_BODY_SIZE + 2 * WRITE_RECORD_SIZE;
     let rows: [(&str, EvmTxRuntimeLimits, u64); 2] = [
         (
-            "the transaction's limit and the frame's budget: the transaction's limit",
+            "the transaction's limit and the frame's budget: the frame's budget",
             unlimited.with_tx_data_size_limit(before).with_frame_data_size_limit(120),
-            before,
+            0,
         ),
         ("the frame's budget alone", unlimited.with_frame_data_size_limit(120), 39),
     ];
@@ -76,8 +77,8 @@ fn test_a_record_crossing_both_counts_is_reported_for_the_transaction() {
         assert_eq!(outcome.limit_exceeded, None, "{row}: no stop of the transaction's own frame");
         assert_eq!(
             outcome.usage,
-            LimitUsage { data_size: before, write_records: 2 },
-            "{row}: A's two records, none of B's"
+            LimitUsage { data_size: before, write_records: 2, state_growth: 2 },
+            "{row}: A's two records and two new slots, none of B's"
         );
     }
 }

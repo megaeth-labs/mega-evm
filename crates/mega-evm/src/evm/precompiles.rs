@@ -52,14 +52,17 @@ use alloy_evm::{
     precompiles::{DynPrecompile, Precompile as _, PrecompilesMap},
     Database,
 };
+use op_revm::{L1BlockInfo, OpSpecId};
 use revm::{
+    context::{BlockEnv, CfgEnv},
     handler::PrecompileProvider,
     interpreter::{CallInputs, InterpreterResult},
     precompile::Precompiles,
     primitives::{Address, AddressSet, HashMap, OnceLock},
+    Context, Journal,
 };
 
-use crate::{ExternalEnvTypes, MegaContext, MegaInnerContext, MegaSpecId};
+use crate::{ExternalEnvTypes, MegaContext, MegaSpecId, MegaTransaction};
 
 /// The Satin precompile set: op-revm's Karst set with `MegaETH`'s KZG price.
 pub fn satin_precompiles() -> &'static Precompiles {
@@ -185,10 +188,16 @@ pub mod kzg_point_evaluation {
             .with_required_gas(required_gas);
 }
 
-/// Runs the Satin precompile set on a [`MegaContext`].
-///
-/// alloy-evm implements the provider for revm's plain context; every method here hands it the
-/// context [`MegaContext`] wraps, which is that context.
+/// The context [`MegaContext`] wraps: op-revm's context shape over revm's own journal, the one
+/// alloy-evm implements the provider for.
+type InnerContext<DB> =
+    Context<BlockEnv, MegaTransaction, CfgEnv<OpSpecId>, DB, Journal<DB>, L1BlockInfo>;
+
+/// Runs the Satin precompile set on a [`MegaContext`], as alloy-evm runs it on the context
+/// [`MegaContext`] wraps: the precompile gets the call's input and an
+/// [`EvmInternals`](alloy_evm::EvmInternals) over revm's journal, and its output is turned into
+/// the call's result the way revm turns any precompile's. A precompile's writes through the
+/// internals reach the journal as any tool's do, and count none of the transaction's bytes.
 impl<DB: Database, ExtEnvs: ExternalEnvTypes> PrecompileProvider<MegaContext<DB, ExtEnvs>>
     for PrecompilesMap
 {
@@ -197,7 +206,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> PrecompileProvider<MegaContext<DB,
     /// The table is already the Satin one; the engine has a single spec, so nothing can change
     /// it. Rebuilding from the base spec would drop the `MegaETH` entries and a node's own.
     #[inline]
-    fn set_spec(&mut self, _spec: op_revm::OpSpecId) -> bool {
+    fn set_spec(&mut self, _spec: OpSpecId) -> bool {
         false
     }
 
@@ -207,17 +216,19 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> PrecompileProvider<MegaContext<DB,
         context: &mut MegaContext<DB, ExtEnvs>,
         inputs: &CallInputs,
     ) -> Result<Option<Self::Output>, String> {
-        PrecompileProvider::<MegaInnerContext<DB>>::run(self, &mut context.inner, inputs)
+        PrecompileProvider::<InnerContext<DB>>::run(self, &mut context.inner, inputs)
     }
 
+    /// The addresses of the set, as alloy-evm's provider answers them.
     #[inline]
     fn warm_addresses(&self) -> &AddressSet {
-        PrecompileProvider::<MegaInnerContext<DB>>::warm_addresses(self)
+        PrecompileProvider::<InnerContext<DB>>::warm_addresses(self)
     }
 
+    /// Whether the set holds `address`, as alloy-evm's provider answers it.
     #[inline]
     fn contains(&self, address: &Address) -> bool {
-        PrecompileProvider::<MegaInnerContext<DB>>::contains(self, address)
+        PrecompileProvider::<InnerContext<DB>>::contains(self, address)
     }
 }
 
@@ -273,6 +284,9 @@ mod tests {
             scheme: CallScheme::Call,
             is_static: false,
             charged_new_account_state_gas: false,
+            charged_start: Default::default(),
+            pool_shares: revm::interpreter::PoolAmounts::UNLIMITED,
+            history_allowance: 0,
         }
     }
 

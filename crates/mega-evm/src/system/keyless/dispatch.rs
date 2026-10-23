@@ -9,9 +9,12 @@ use alloy_evm::Database;
 use alloy_primitives::{Address, Bytes, U256};
 use alloy_sol_types::SolCall;
 use revm::{
-    context::{Cfg, ContextError, ContextTr, JournalTr, Transaction},
+    context::{Cfg, ContextError, ContextTr, JournalTr},
     context_interface::{
-        cfg::{GasId, StateGasCharge, StateGasSite},
+        cfg::{
+            gas::{PoolAmounts, StartCharge},
+            GasId, StateGasCharge, StateGasSite,
+        },
         Host,
     },
     handler::{EthFrame, FrameResult},
@@ -24,33 +27,20 @@ use revm::{
 };
 
 use crate::{
-    charge_write_records_history,
-    limit::FrameStartRecords,
-    synthetic_call_result,
+    charge_write_records_history, synthetic_call_result,
     system::{
         intercept::peek_selector,
         keyless::{
             calculate_keyless_deploy_address, decode_keyless_tx, encode_error_result,
-            recover_signer, settle, IKeylessDeploy, KeylessDeployError, KEYLESS_DEPLOY_ADDRESS,
+            recover_signer, IKeylessDeploy, KeylessDeployError, KEYLESS_DEPLOY_ADDRESS,
             KEYLESS_DEPLOY_CODE, KEYLESS_DEPLOY_CODE_HASH, KEYLESS_DEPLOY_OVERHEAD_GAS,
         },
     },
     untouched_call_gas, ExternalEnvTypes, MegaContext, VolatileDataAccess,
 };
 
-/// Where a `keylessDeploy` call's frame stands, from its start to its answer: what its first run
-/// and its resume need of each other, kept on the context while the frame is on revm's stack.
-#[derive(Debug)]
-pub(crate) enum KeylessFrame {
-    /// revm built the call's frame, which has not run.
-    Built,
-    /// The call's first run started its creation, which runs.
-    Deploying(Started),
-    /// The creation returned into the call, which answers on its resume.
-    Returned(settle::Returned),
-}
-
-/// What a `keylessDeploy` call's creation is settled into the call with.
+/// What a `keylessDeploy` call's creation is settled into the call with, kept on the context while
+/// the creation runs.
 #[derive(Debug)]
 pub(crate) struct Started {
     /// The address the creation deploys at.
@@ -61,13 +51,12 @@ pub(crate) struct Started {
     /// What the call was charged for the signer's account, which the creation's start creates:
     /// zero when the signer had one.
     pub(super) signer_account_charge: u64,
-    /// The history the call paid for the signer's nonce record: zero when the signer is the
-    /// transaction's sender, which makes no record, or when the transaction pays no history.
+    /// The history the call paid for the signer's nonce record: zero when the transaction had
+    /// changed the signer's account already — the transaction's sender among them — which makes
+    /// no record, or when the transaction pays no history.
     pub(super) signer_record_charge: u64,
-    /// Whether the creation moves value out of the signer's account.
-    pub(super) moves_value: bool,
     /// Whether the deposit of empty code at the deploy address was refused, which reverts the
-    /// creation ([`refuses_empty_deposit`](settle::refuses_empty_deposit)).
+    /// creation ([`refuses_empty_deposit`](super::settle::refuses_empty_deposit)).
     pub(super) empty_deposit_refused: bool,
 }
 
@@ -102,9 +91,10 @@ pub(crate) fn is_dispatched<DB: Database, ExtEnvs: ExternalEnvTypes>(
 /// would be.
 ///
 /// Any other call is built as a call to the contract, whose code it never runs: its actions are
-/// made by [`run`]. The dispatch is by address and selector, whatever the address holds, so where
-/// the state holds no contract code the frame is built on the contract's own. A chain Satin runs
-/// on holds it, as Rex2 deployed it, and Satin's activation block checks it.
+/// made by hand, its first by [`start`]. The dispatch is by address and selector, whatever the
+/// address holds, so where the state holds no contract code the frame is built on the contract's
+/// own. A chain Satin runs on holds it, as Rex2 deployed it, and Satin's activation block checks
+/// it.
 #[inline(never)]
 pub(crate) fn ready<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
@@ -119,45 +109,19 @@ pub(crate) fn ready<DB: Database, ExtEnvs: ExternalEnvTypes>(
         return Ok(None);
     }
     let mut gas = untouched_call_gas(inputs);
-    ctx.detention.hold(&mut gas);
+    ctx.detention.hold(gas.tracker_mut());
     let Err(refusal) = prepare(ctx, inputs, &mut gas)? else {
         unreachable!("a call carrying value is refused at rule 2")
     };
     Ok(Some(refusal.answer(inputs, gas)))
 }
 
-/// Whether `frame` is a `keylessDeploy` call's, whose actions [`run`] makes in place of an
-/// interpreter: the transaction's own frame, while the dispatch keeps its state.
-#[inline]
-pub(crate) fn runs<DB: Database, ExtEnvs: ExternalEnvTypes>(
-    ctx: &MegaContext<DB, ExtEnvs>,
-    frame: &EthFrame<EthInterpreter>,
-) -> bool {
-    frame.depth == 0 && ctx.keyless_frame.is_some()
-}
-
-/// The next action of a `keylessDeploy` call's frame, made by hand: on its first run, the refusal
-/// or the creation [`start`] makes; on its resume, once its creation returned into it, its answer
-/// ([`settle::answer`]).
-///
-/// A frame with a stop to return — a limit the nonce record a failed creation leaves the call
-/// crosses — returns it before this runs, as any frame does.
-#[inline(never)]
-pub(crate) fn run<DB: Database, ExtEnvs: ExternalEnvTypes>(
-    ctx: &mut MegaContext<DB, ExtEnvs>,
-    frame: &mut EthFrame<EthInterpreter>,
-) -> Result<InterpreterAction, ContextError<DB::Error>> {
-    match ctx.keyless_frame.take() {
-        Some(KeylessFrame::Built) => start(ctx, frame),
-        Some(KeylessFrame::Returned(returned)) => {
-            Ok(settle::answer(ctx, &returned, frame.interpreter.gas))
-        }
-        state => unreachable!("a keylessDeploy call runs when built or returned into: {state:?}"),
-    }
-}
-
-/// The first run of a `keylessDeploy` call's frame: charges its gas and holds it to the rules, in
-/// the order below, then starts the creation it stands for.
+/// The first action of a `keylessDeploy` call's frame, which runs no instruction: charges its gas
+/// and holds it to the rules, in the order below, then starts the creation it stands for. It is
+/// made once revm built the frame and gas detention held it for its first run: a refusal ends the
+/// frame before it runs, and the creation is set on the frame's interpreter, which returns it when
+/// the frame runs. The call's answer is made when the creation returned into it
+/// ([`answer`](super::settle::answer)).
 ///
 /// # What the call pays, and what it is held to
 ///
@@ -206,11 +170,13 @@ pub(crate) fn run<DB: Database, ExtEnvs: ExternalEnvTypes>(
 /// # The creation
 ///
 /// The creation is started as the signer's, at the signer's Nick's-Method address
-/// (`CreateScheme::Custom`), as the call's child: its share of the data-size budget, its records,
-/// its forward and the reservoir it inherits. The call's lane runs as the signer, whose
-/// nonce the creation's start writes. The call's journal checkpoint was taken when revm built its
+/// (`CreateScheme::Custom`), as the call's child, on its forward and on its share of the reservoir
+/// the call's charges left and of each of the call's pools, from which the call drew nothing.
+/// The call's frame runs as the signer, whose nonce the creation's start writes; the record of
+/// that nonce is the call's, counted once the creation returned
+/// ([`settle`](super::settle::settle)). The call's journal checkpoint was taken when revm built its
 /// frame, so a call that is stopped takes that write back with the rest.
-fn start<DB: Database, ExtEnvs: ExternalEnvTypes>(
+pub(crate) fn start<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
     frame: &mut EthFrame<EthInterpreter>,
 ) -> Result<InterpreterAction, ContextError<DB::Error>> {
@@ -225,29 +191,30 @@ fn start<DB: Database, ExtEnvs: ExternalEnvTypes>(
             return Ok(InterpreterAction::new_return(result, output, *gas));
         }
     };
-    ctx.additional_limit.set_frame_creator(deployment.signer);
-    if let Some((on_lane, caller)) = deployment.record_charges {
-        ctx.additional_limit.stage_frame_charge(deployment.records, on_lane, caller);
-    }
+    // The creation's shares of the call's reservoir and pools are taken out of the call, as a
+    // `CREATE` opcode's are: the creation's return adds what it left back to what the call kept.
+    let shares = gas.tracker_mut().forward_to_child(ctx.gas_params());
     let mut create = CreateInputs::new(
         deployment.signer,
         CreateScheme::Custom { address: deployment.deploy_address },
         deployment.value,
         deployment.init_code,
         deployment.gas_limit,
-        gas.reservoir(),
+        shares.reservoir,
     );
     create.set_charged_create_state_gas(deployment.charged_create_state_gas);
     create.set_charged_state_gas_address(deployment.deploy_address);
-    ctx.keyless_frame = Some(KeylessFrame::Deploying(Started {
+    let (on_frame, signer_record) = deployment.record_charges.unwrap_or((0, 0));
+    create.set_charged_start(StartCharge::new(on_frame, PoolAmounts::ZERO));
+    create.set_pool_shares(shares.pools);
+    ctx.keyless_creation = Some(Started {
         deploy_address: deployment.deploy_address,
         signer: deployment.signer,
         signer_nonce: deployment.signer_nonce,
         signer_account_charge: deployment.signer_account_charge,
-        signer_record_charge: deployment.record_charges.map_or(0, |(_, caller)| caller),
-        moves_value: !deployment.value.is_zero(),
+        signer_record_charge: signer_record,
         empty_deposit_refused: false,
-    }));
+    });
     Ok(InterpreterAction::NewFrame(FrameInput::Create(Box::new(create))))
 }
 
@@ -264,10 +231,8 @@ struct Deployment {
     gas_limit: u64,
     /// Whether the call was charged the created account.
     charged_create_state_gas: bool,
-    /// The records the creation's start makes.
-    records: FrameStartRecords,
-    /// What the call paid for them: the created account's, and the signer's. `None` when the
-    /// transaction pays no history.
+    /// What the call paid for the records the creation's start makes: the created account's, and
+    /// the signer's nonce. `None` when the transaction pays no history.
     record_charges: Option<(u64, u64)>,
 }
 
@@ -381,7 +346,7 @@ fn prepare<DB: Database, ExtEnvs: ExternalEnvTypes>(
     // in a frame of it, which a read of the account started. The call is the transaction's own
     // frame, at depth 0.
     if signer == ctx.block().beneficiary {
-        ctx.detention.read_by_frame(VolatileDataAccess::BENEFICIARY_BALANCE, gas, 0);
+        ctx.detention.read_by_frame(VolatileDataAccess::BENEFICIARY_BALANCE, gas);
     }
     if signer_info.nonce > 1 {
         refuse!(KeylessDeployError::SignerNonceTooHigh { signer_nonce: signer_info.nonce });
@@ -428,12 +393,12 @@ fn prepare<DB: Database, ExtEnvs: ExternalEnvTypes>(
             return Ok(Err(Refusal::OutOfGas));
         }
     }
-    let records = FrameStartRecords { on_lane: 1, caller: signer != ctx.tx().caller() };
+    let records = ctx.accounts().creation_records(signer, Some(deploy_address), tx.value);
     let record_charges = if ctx.prices_history() {
         let charged = charge_write_records_history(
             gas.tracker_mut(),
-            records.on_lane,
-            u64::from(records.caller),
+            records.on_frame().added,
+            u64::from(records.creator),
         );
         if charged.is_none() {
             return Ok(Err(Refusal::OutOfGas));
@@ -458,7 +423,6 @@ fn prepare<DB: Database, ExtEnvs: ExternalEnvTypes>(
         init_code: tx.input.clone(),
         gas_limit,
         charged_create_state_gas,
-        records,
         record_charges,
     }))
 }

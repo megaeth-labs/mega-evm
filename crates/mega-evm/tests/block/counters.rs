@@ -193,11 +193,11 @@ fn test_a_block_reports_the_bytes_its_history_gas_does_not_cover() {
     // Each transaction: its body, the transfer's two records and the receiver's event.
     let per_tx = mega_evm::TX_BODY_SIZE +
         2 * mega_evm::WRITE_RECORD_SIZE +
-        mega_evm::STORAGE_CALL_STIPEND_BYTES;
+        mega_evm::HISTORY_ALLOWANCE_BYTES;
     assert_eq!(counters.history_bytes, 2 * per_tx);
     assert_eq!(
         counters.history_bytes * mega_evm::constants::COST_PER_HISTORY_BYTE - counters.history,
-        2 * mega_evm::storage_call_stipend(),
+        2 * mega_evm::history_allowance_gas(),
         "the allowances paid for both events, and no gas ledger has them",
     );
 
@@ -312,4 +312,53 @@ fn test_an_out_of_gas_before_the_first_frame_bills_the_whole_gas_limit_to_the_bl
     let recipients_after: U256 = fee_recipients.iter().map(|a| balance(&mut state, *a)).sum();
     assert_eq!(recipients_after - recipients_before, paid, "the fee recipients are credited it");
     assert_eq!(balance(&mut state, FRESH), U256::ZERO, "the recipient was not created");
+}
+
+/// The pre-block calls are the protocol's own work, and no transaction of the block: what they
+/// write is counted towards none of the block's budgets. The EIP-2935 call stores the parent's
+/// hash and the EIP-4788 call the block's timestamp and its beacon root, each in a fresh slot, a
+/// write record and a unit of state growth were a transaction to make it, and the block's usage
+/// stays zero.
+#[test]
+fn test_the_pre_block_calls_count_towards_no_block_budget() {
+    use alloy_eips::{
+        eip2935::{HISTORY_STORAGE_ADDRESS, HISTORY_STORAGE_CODE},
+        eip4788::{BEACON_ROOTS_ADDRESS, BEACON_ROOTS_CODE},
+    };
+    use alloy_primitives::B256;
+    use revm::Database as _;
+
+    // The ring buffers both contracts store in.
+    const BUFFER: u64 = 8_191;
+    let (parent, root) = (B256::repeat_byte(0x11), B256::repeat_byte(0x22));
+    let mut db = common::database();
+    db.set_account_code(HISTORY_STORAGE_ADDRESS, HISTORY_STORAGE_CODE.clone());
+    db.set_account_code(BEACON_ROOTS_ADDRESS, BEACON_ROOTS_CODE.clone());
+    let mut state = State::builder().with_database(db).build();
+    let slots = [
+        (HISTORY_STORAGE_ADDRESS, U256::from((common::BLOCK_NUMBER - 1) % BUFFER), parent.into()),
+        (
+            BEACON_ROOTS_ADDRESS,
+            U256::from(common::BLOCK_TIMESTAMP % BUFFER),
+            U256::from(common::BLOCK_TIMESTAMP),
+        ),
+        (BEACON_ROOTS_ADDRESS, U256::from(common::BLOCK_TIMESTAMP % BUFFER + BUFFER), root.into()),
+    ];
+    for (address, slot, _) in slots {
+        assert_eq!(state.storage(address, slot).unwrap(), U256::ZERO, "a fresh slot");
+    }
+    let ctx = mega_evm::MegaBlockExecutionCtx::new(
+        parent,
+        Some(root),
+        Bytes::new(),
+        mega_evm::BlockLimits::no_limits(),
+    );
+    let mut executor = executor(&mut state, ctx);
+    executor.apply_pre_execution_changes().expect("the block starts");
+    assert_eq!(executor.limiter().usage, mega_evm::LimitUsage::default());
+    assert_eq!(*executor.gas(), BlockGasCounters::default());
+    drop(executor);
+    for (address, slot, value) in slots {
+        assert_eq!(state.storage(address, slot).unwrap(), value, "the pre-block call stored it");
+    }
 }

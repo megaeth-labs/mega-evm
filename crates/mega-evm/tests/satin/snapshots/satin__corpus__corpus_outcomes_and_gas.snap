@@ -56,7 +56,7 @@ expression: gas
   "selfdestruct_created_in_same_tx_to_existing_account": [
     {
       "outcome": "success",
-      "gas_used": 372085
+      "gas_used": 184965
     }
   ],
   "sstore_set_spills": [
