@@ -12,7 +12,7 @@
 //!   detention's caps, with no building policy on top (`BlockLimits::default()`);
 //! - from a fresh `State` over that database, as a node starts each block.
 //!
-//! Two workloads of `N` transactions each, whose per-transaction work beyond the transaction
+//! Three workloads of `N` transactions each, whose per-transaction work beyond the transaction
 //! itself is the executor's own: the admission checks, the size estimates, the limits, the
 //! counters, the receipt and the commit.
 //!
@@ -21,6 +21,10 @@
 //! - `storage_writes`: calls to a contract that writes the slot the transaction names in its
 //!   calldata, so every transaction changes storage and carries a write record through the
 //!   counters, with a log-free receipt.
+//! - `erc20_transfers`: ERC-20 `transfer`s, each from a sender of its own to a recipient of its own
+//!   that already holds tokens, on the token `contracts/Token.sol` builds: a block of the commonest
+//!   contract call there is. Each reads and writes two balances and emits one `Transfer` log, so it
+//!   carries two write records and a log through the counters.
 //!
 //! The measurement runs `apply_pre_execution_changes`, the transactions and `finish` — the whole
 //! block a node executes — and hands the state back, so dropping it is not measured. One more arm,
@@ -35,7 +39,7 @@ use alloy_eips::{
 };
 use alloy_evm::{block::BlockExecutor, EvmEnv, EvmFactory};
 use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
-use alloy_primitives::{address, Address, Bytes, Signature, TxKind, B256, U256};
+use alloy_primitives::{address, hex, keccak256, Address, Bytes, Signature, TxKind, B256, U256};
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use mega_evm::{
     system::{MEGA_SYSTEM_ADDRESS, SEQUENCER_REGISTRY_ADDRESS},
@@ -73,6 +77,16 @@ const PARENT_BEACON_ROOT: B256 = B256::repeat_byte(0xcd);
 const SENDER: Address = address!("0x2000000000000000000000000000000000000002");
 const RECIPIENT: Address = address!("0x3000000000000000000000000000000000000003");
 const WRITER: Address = address!("0x1000000000000000000000000000000000000001");
+const TOKEN: Address = address!("0x4000000000000000000000000000000000000004");
+
+/// The runtime code of `contracts/Token.sol`, compiled with solc 0.8.30:
+/// `solc --optimize --optimize-runs 200 --metadata-hash none --bin-runtime Token.sol`.
+const TOKEN_CODE: [u8; 492] = hex!("608060405234801561000f575f5ffd5b5060043610610034575f3560e01c806370a0823114610038578063a9059cbb1461006a575b5f5ffd5b610057610046366004610178565b5f6020819052908152604090205481565b6040519081526020015b60405180910390f35b61007d610078366004610198565b61008d565b6040519015158152602001610061565b335f90815260208190526040812054828110156100da5760405162461bcd60e51b815260206004820152600760248201526662616c616e636560c81b604482015260640160405180910390fd5b335f9081526020819052604080822085840390556001600160a01b03861682528120805485929061010c9084906101c0565b90915550506040518381526001600160a01b0385169033907fddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef9060200160405180910390a360019150505b92915050565b80356001600160a01b0381168114610173575f5ffd5b919050565b5f60208284031215610188575f5ffd5b6101918261015d565b9392505050565b5f5f604083850312156101a9575f5ffd5b6101b28361015d565b946020939093013593505050565b8082018082111561015757634e487b7160e01b5f52601160045260245ffdfea164736f6c634300081e000a");
+
+/// The first of the `N` accounts the ERC-20 transfers are sent from, and the first of the `N`
+/// accounts they pay, each one per transaction.
+const TOKEN_SENDER_BASE: u64 = 0x60_0000;
+const TOKEN_HOLDER_BASE: u64 = 0x70_0000;
 
 /// Code that writes 1 to the slot its first calldata word names, so every call that names a slot
 /// of its own changes storage and leaves a write record behind.
@@ -92,13 +106,43 @@ fn slot_calldata(nonce: u64) -> Bytes {
     Bytes::from(U256::from(nonce + 1).to_be_bytes::<32>())
 }
 
+/// The `index`-th account of the run of accounts that starts at `base`.
+fn nth_account(base: u64, index: u64) -> Address {
+    Address::from_word(B256::from(U256::from(base + index)))
+}
+
+/// The slot of the token's `balanceOf` mapping, its first, that holds `owner`'s balance.
+fn token_balance_slot(owner: Address) -> U256 {
+    let mut word = [0_u8; 64];
+    word[12..32].copy_from_slice(owner.as_slice());
+    U256::from_be_bytes(keccak256(word).0)
+}
+
+/// The calldata of `transfer(to, value)`.
+fn token_transfer_calldata(to: Address, value: u64) -> Bytes {
+    let mut data = Vec::with_capacity(68);
+    data.extend_from_slice(&hex!("a9059cbb"));
+    data.extend_from_slice(&to.into_word().0);
+    data.extend_from_slice(&U256::from(value).to_be_bytes::<32>());
+    Bytes::from(data)
+}
+
 /// The accounts the workloads use, the EIP-2935 and EIP-4788 contracts' code, and the seven
-/// predeploys as a chain that ran Rex6 holds them.
+/// predeploys as a chain that ran Rex6 holds them. Every ERC-20 sender holds ether and tokens,
+/// and every ERC-20 recipient holds tokens already, so no transfer adds a slot.
 fn database() -> MemoryDatabase {
     let mut db = MemoryDatabase::default().rex6_predeploys(MEGA_SYSTEM_ADDRESS);
     db.set_account_code(WRITER, writer_code());
     db.set_account_code(RECIPIENT, Bytes::new());
     db.set_account_balance(SENDER, U256::from(1_000_000_000_000_000_u64));
+    db.set_account_code(TOKEN, Bytes::from_static(&TOKEN_CODE));
+    for index in 0..N {
+        let sender = nth_account(TOKEN_SENDER_BASE, index);
+        db.set_account_balance(sender, U256::from(1_000_000_000_000_000_u64));
+        db.set_account_storage(TOKEN, token_balance_slot(sender), U256::from(1_000_000_u64));
+        let holder = nth_account(TOKEN_HOLDER_BASE, index);
+        db.set_account_storage(TOKEN, token_balance_slot(holder), U256::from(1_u64));
+    }
     db.set_account_code(HISTORY_STORAGE_ADDRESS, HISTORY_STORAGE_CODE.clone());
     db.set_account_code(BEACON_ROOTS_ADDRESS, BEACON_ROOTS_CODE.clone());
     db
@@ -135,27 +179,46 @@ fn block_ctx() -> MegaBlockExecutionCtx {
     )
 }
 
-/// `N` transactions to `to`, one per nonce, each carrying the input `input` builds for it.
+/// A legacy call from `sender` at `nonce` to `to`, carrying `value` and `input`.
+fn transaction(
+    sender: Address,
+    nonce: u64,
+    to: Address,
+    value: u64,
+    gas_limit: u64,
+    input: Bytes,
+) -> Recovered<MegaTxEnvelope> {
+    let tx = TxLegacy {
+        chain_id: Some(CHAIN_ID),
+        nonce,
+        gas_price: 0,
+        gas_limit,
+        to: TxKind::Call(to),
+        value: U256::from(value),
+        input,
+    };
+    let signed = Signed::new_unchecked(tx, Signature::test_signature(), B256::repeat_byte(1));
+    Recovered::new_unchecked(MegaTxEnvelope::Legacy(signed), sender)
+}
+
+/// `N` transactions from `SENDER` to `to`, one per nonce, each carrying the input `input` builds
+/// for it.
 fn transactions(
     to: Address,
     value: u64,
     gas_limit: u64,
     input: impl Fn(u64) -> Bytes,
 ) -> Vec<Recovered<MegaTxEnvelope>> {
+    (0..N).map(|nonce| transaction(SENDER, nonce, to, value, gas_limit, input(nonce))).collect()
+}
+
+/// `N` ERC-20 transfers of one token, the `i`-th from the `i`-th sender to the `i`-th holder.
+fn token_transfers() -> Vec<Recovered<MegaTxEnvelope>> {
     (0..N)
-        .map(|nonce| {
-            let tx = TxLegacy {
-                chain_id: Some(CHAIN_ID),
-                nonce,
-                gas_price: 0,
-                gas_limit,
-                to: TxKind::Call(to),
-                value: U256::from(value),
-                input: input(nonce),
-            };
-            let signed =
-                Signed::new_unchecked(tx, Signature::test_signature(), B256::repeat_byte(1));
-            Recovered::new_unchecked(MegaTxEnvelope::Legacy(signed), SENDER)
+        .map(|index| {
+            let sender = nth_account(TOKEN_SENDER_BASE, index);
+            let input = token_transfer_calldata(nth_account(TOKEN_HOLDER_BASE, index), 1);
+            transaction(sender, 0, TOKEN, 0, 300_000, input)
         })
         .collect()
 }
@@ -226,15 +289,18 @@ fn bench_block(c: &mut Criterion) {
     // Checked once before measurement, so a block that is not a steady one is not measured as one.
     assert_steady_pre_block(&steady);
 
+    // Each workload with the write records each of its transactions keeps.
     let workloads = [
-        // Both budgets clear the state gas the Satin gas table charges: a transfer to an account
+        // The budgets clear the state gas the Satin gas table charges: a transfer to an account
         // that does not exist yet pays for the new account, a storage write pays for the slot.
-        ("transfers", transactions(RECIPIENT, 1, 300_000, |_| Bytes::new())),
-        ("storage_writes", transactions(WRITER, 0, 300_000, slot_calldata)),
+        ("transfers", transactions(RECIPIENT, 1, 300_000, |_| Bytes::new()), 1),
+        ("storage_writes", transactions(WRITER, 0, 300_000, slot_calldata), 1),
+        // The sender's balance and the recipient's.
+        ("erc20_transfers", token_transfers(), 2),
     ];
 
     let mut group = c.benchmark_group("block");
-    for (name, txs) in &workloads {
+    for (name, txs, records) in &workloads {
         // The workload runs once outside the measurement, so a block that does not execute — or
         // one whose transactions keep nothing — is caught here rather than being measured.
         {
@@ -248,16 +314,16 @@ fn bench_block(c: &mut Criterion) {
                     executor.execute_transaction_without_commit(tx).expect("the transaction runs");
                 assert!(outcome.result.is_success(), "{:?}", outcome.result);
                 assert_eq!(outcome.limit_exceeded, None, "no limit stops the workload");
-                assert!(
-                    outcome.usage.write_records > 0,
-                    "every transaction of the workload keeps a write record"
+                assert_eq!(
+                    outcome.usage.write_records, *records,
+                    "every transaction of the workload keeps its write records"
                 );
                 executor.commit_transaction(outcome);
             }
             let (_, result) = executor.finish_with_counters().expect("the block finishes");
             assert_eq!(result.receipts().len(), N as usize);
             assert!(result.gas.execution > 0);
-            assert_eq!(result.usage.write_records, N, "one record per transaction, at least");
+            assert_eq!(result.usage.write_records, N * records);
         }
 
         group.bench_function(*name, |b| {
