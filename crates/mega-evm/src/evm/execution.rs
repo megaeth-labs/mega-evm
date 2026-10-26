@@ -1263,8 +1263,12 @@ fn fork_figures(result: &FrameResult) -> crate::limit::Returning {
 }
 
 /// Has the start ledger adopt what a precompile's provider drew on the pools of `answer`, revm's
-/// answer to the start on top: the net draws its gas holds. A start revm refused, or answered
-/// without a provider, drew nothing. The engine's provider draws no pool, so the draws are none.
+/// answer to the start on top. A start revm refused, or answered without a provider, drew nothing.
+///
+/// The fork adopts the provider's draws before the engine sees the answer, so they are read back
+/// off the answer's gas: each pool's net, and, for a pool whose crossing the adoption set, a draw
+/// past the share, which the adoption capped at it. The engine's provider draws no pool, so the
+/// draws are none.
 #[cfg(debug_assertions)]
 fn adopt_provider_draws<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
@@ -1272,7 +1276,17 @@ fn adopt_provider_draws<DB: Database, ExtEnvs: ExternalEnvTypes>(
 ) {
     let FrameResult::Call(outcome) = answer else { return };
     if outcome.was_precompile_called {
-        let draws = PoolId::ALL.map(|pool| outcome.result.gas.pool_spent(pool));
+        let gas = outcome.result.gas.tracker();
+        let draws =
+            PoolId::ALL.map(
+                |pool| {
+                    if gas.pool_crossing(pool) {
+                        i64::MAX
+                    } else {
+                        gas.pool_spent(pool)
+                    }
+                },
+            );
         ctx.additional_limit.ledger_mut().adopt_provider_draws(draws);
     }
 }
@@ -2249,6 +2263,46 @@ mod tests {
                     assert_eq!(held, (inputs.pool_shares, caller_pools), "{case}");
                 }
             }
+        }
+    }
+
+    /// A precompile's draws reach the start ledger as the provider made them, though the fork
+    /// adopted them first: a draw within the share as its net, and a draw past it, which the
+    /// adoption capped at the share and marked with the pool's crossing, as a draw past the
+    /// share. The ledger then holds the pool as the fork's adoption left it — share 10 and a
+    /// draw of 11 included.
+    #[test]
+    #[cfg(debug_assertions)]
+    fn test_a_precompiles_draws_reach_the_start_ledger_as_the_provider_made_them() {
+        use crate::limit::{Parked, DATA_SIZE_POOL};
+        use revm::interpreter::CallOutcome;
+        let shares = PoolAmounts::UNLIMITED.with(DATA_SIZE_POOL, 10);
+        for drawn in [0_i64, 4, 10, 11, 25, -3] {
+            let mut ctx = MegaContext::new(MemoryDatabase::default(), MegaSpecId::SATIN);
+            let ledger = ctx.additional_limit.ledger_mut();
+            ledger.park_transaction(Some(Parked::transaction(shares, 0)));
+            ledger.split(1, None, 0);
+            ledger.park(0, 0, 0, 0);
+            ledger.split(2, Some(1), 1);
+
+            let mut gas = Gas::new(100_000);
+            gas.tracker_mut().set_pool_spent(DATA_SIZE_POOL, drawn);
+            gas.tracker_mut().adopt_pool_shares(shares);
+            let mut answer = CallOutcome::new(
+                InterpreterResult::new(InstructionResult::Return, Bytes::new(), gas),
+                0..0,
+            );
+            answer.was_precompile_called = true;
+            adopt_provider_draws(&mut ctx, &FrameResult::Call(answer));
+            let tracker = gas.tracker();
+            let fork = PoolId::ALL.map(|pool| {
+                (
+                    tracker.pool_remaining(pool),
+                    tracker.pool_spent(pool),
+                    tracker.pool_crossing(pool),
+                )
+            });
+            assert_eq!(ctx.additional_limit.ledger_mut().top_pools(), fork, "drawn {drawn}");
         }
     }
 

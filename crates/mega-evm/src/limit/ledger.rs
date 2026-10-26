@@ -639,6 +639,16 @@ impl StartLedger {
         }
     }
 
+    /// Each pool of the start on top: what it may still draw, its net and its crossing.
+    #[cfg(test)]
+    pub(crate) fn top_pools(&self) -> [(u64, i64, bool); PoolId::COUNT] {
+        let pools = self.entries.last().expect("a start is open").pools;
+        PoolId::ALL.map(|pool| {
+            let index = pool.index();
+            (pools.remaining.get(pool), pools.net[index], pools.crossings[index])
+        })
+    }
+
     /// The shares the start on top started with and the pools of the start below it.
     #[cfg(test)]
     pub(crate) fn top_shares_and_caller_pools(&self) -> (PoolAmounts, PoolAmounts) {
