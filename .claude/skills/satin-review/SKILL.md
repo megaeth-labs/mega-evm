@@ -32,7 +32,7 @@ The guide describes the code at `cz/feat/satin-w2` with #407 merged into it and 
   Satin is a new spec: simpler semantics win over parity with the legacy engine.
 - Out of scope: the legacy engine (`main`, frozen), which runs every block before Satin activates.
   Satin never executes or decodes legacy-era data, so "Satin cannot handle legacy data" is not a defect, and code kept only for that purpose is dead code.
-- Fork code: the `megaeth-labs/revm` fork at `fd230a3427d1b96c88e0b581bab8a7763c8ec298` and the `megaeth-labs/op-revm` fork at `2ecb7dceed1c458a2b59ca4d8993a073968cb111`, which the patch blocks pin by `rev`, are pinned dependencies with their own review: megaeth-labs/revm#76, stacked on megaeth-labs/revm#75, and megaeth-labs/op-revm#8.
+- Fork code: the `megaeth-labs/revm` fork at `b370b53852507dfedd342e062e96dba896cb30df` and the `megaeth-labs/op-revm` fork at `589c5078569d93d1e7293ae0d33c59efa87b1089`, which the patch blocks pin by `rev`, are pinned dependencies with their own review: megaeth-labs/revm#76, stacked on megaeth-labs/revm#75, and megaeth-labs/op-revm#8.
   Their diff is not part of this pull request.
   A finding about a fork function is about how mega-evm uses it, unless it shows the fork breaking its own documented default behaviour.
   The fork functions the engine relies on are listed in [`AGENTS.md`, "Dependencies on the forks"](../../../AGENTS.md#dependencies-on-the-forks).
