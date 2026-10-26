@@ -313,27 +313,44 @@ pub(crate) fn first_frame_pools(limits: &EvmTxRuntimeLimits, tx: &MegaTransactio
         .with(PoolId::new(2), limits.tx_state_growth_limit)
 }
 
+/// The share of each of `caller`'s pools a frame it starts begins with: 98/100 of each, rounded
+/// down.
+#[cfg(debug_assertions)]
+pub(crate) fn frame_shares(caller: PoolAmounts) -> PoolAmounts {
+    let share = |amount: u64| {
+        let share = u128::from(amount) * u128::from(mega_evm::FRAME_DATA_SHARE_NUMERATOR) /
+            u128::from(mega_evm::FRAME_DATA_SHARE_DENOMINATOR);
+        u64::try_from(share).expect("a share is less than the pool")
+    };
+    PoolId::ALL.into_iter().fold(caller, |shares, pool| shares.with(pool, share(caller.get(pool))))
+}
+
 /// What a debug build's start ledger records where an inspector answered start `start`, at
-/// `depth`, on gas that carries the shares its input was forwarded, as the engine's
+/// `depth`, on gas that carries the shares its input was forwarded, `shares`, as the engine's
 /// `untouched_call_gas` and `untouched_create_gas` build it: an answer with pools the inspector
-/// set, which the owner accepted as an API removal. The fork returns the shares to the caller,
-/// which then holds what it held before the start, `caller`; the ledger settles an inspector's
-/// answer at unlimited pools. A pool the caller held unlimited parts nowhere.
+/// set, which the owner accepted as an API removal. The ledger settles an inspector's answer at
+/// unlimited pools, so it parts from the fork on the answer's own pools wherever a share is
+/// limited, and on its caller's once it settled, wherever the caller, which the fork gives back
+/// the shares and so leaves with what it held before the start, `caller`, is limited.
 #[cfg(debug_assertions)]
 pub(crate) fn answered_on_its_shares(
     start: u32,
     depth: usize,
     caller: PoolAmounts,
+    shares: PoolAmounts,
 ) -> Vec<LedgerDivergence> {
-    PoolId::ALL
-        .into_iter()
-        .filter(|pool| caller.get(*pool) != u64::MAX)
-        .map(|pool| LedgerDivergence {
-            start,
-            depth,
-            figure: LedgerFigure::PoolRemaining(pool),
-            ledger: u64::MAX.into(),
-            fork: caller.get(pool).into(),
-        })
+    let parts = |amounts: PoolAmounts, figure: fn(PoolId) -> LedgerFigure| {
+        PoolId::ALL.into_iter().filter(move |pool| amounts.get(*pool) != u64::MAX).map(
+            move |pool| LedgerDivergence {
+                start,
+                depth,
+                figure: figure(pool),
+                ledger: u64::MAX.into(),
+                fork: amounts.get(pool).into(),
+            },
+        )
+    };
+    parts(shares, LedgerFigure::FrameRemaining)
+        .chain(parts(caller, LedgerFigure::CallerRemaining))
         .collect()
 }

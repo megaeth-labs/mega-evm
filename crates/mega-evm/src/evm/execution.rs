@@ -1259,7 +1259,7 @@ fn take_back_a_stopped_answer<DB: Database, ExtEnvs: ExternalEnvTypes>(
 #[cfg(debug_assertions)]
 fn fork_figures(result: &FrameResult) -> crate::limit::Returning {
     let refund = result.refundable_start_charge().map_or(0, |charge| charge.history);
-    crate::limit::Returning::new(refund, result.gas().history_allowance())
+    crate::limit::Returning::of(result.gas().tracker(), refund)
 }
 
 /// Has the start ledger adopt what a precompile's provider drew on the pools of `answer`, revm's

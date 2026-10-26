@@ -82,12 +82,19 @@ use super::Counted;
 /// A figure of a settled start the ledger compares with the fork's.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LedgerFigure {
+    /// What the started frame may still draw on a pool, as its result returns it.
+    FrameRemaining(PoolId),
+    /// The started frame's net draw on a pool, as its result returns it.
+    FrameNet(PoolId),
+    /// Whether a draw on the started frame's pool was refused (`1`) or not (`0`), as its result
+    /// returns it.
+    FrameCrossing(PoolId),
     /// What the start's caller may still draw on a pool, once the start settled into it.
-    PoolRemaining(PoolId),
+    CallerRemaining(PoolId),
     /// The caller's net draw on a pool, once the start settled into it.
-    PoolNet(PoolId),
+    CallerNet(PoolId),
     /// Whether a draw on the caller's pool was refused (`1`) or not (`0`).
-    PoolCrossing(PoolId),
+    CallerCrossing(PoolId),
     /// The part of its reservoir the caller kept while the start ran.
     KeptReservoir,
     /// The history gas the start's settlement gave back to its caller.
@@ -95,6 +102,9 @@ pub enum LedgerFigure {
     /// What the frame returned of its history allowance.
     Allowance,
 }
+
+/// One of a pool's figures, named by the pool.
+type PoolFigure = fn(PoolId) -> LedgerFigure;
 
 /// A figure of a settled start in which the ledger and the fork differ.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -312,6 +322,8 @@ impl From<&FrameSettle> for Settlement {
 /// The fork's figures of the result about to settle, read before revm consumes it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Returning {
+    /// The frame's pools as its result's gas holds them.
+    pools: Pools,
     /// The history the fork gives back to the caller for the start.
     refund: u64,
     /// What the result's gas holds of the frame's history allowance.
@@ -319,10 +331,10 @@ pub(crate) struct Returning {
 }
 
 impl Returning {
-    /// `refund`, the history of the start charge the fork gives back, and `allowance`, what the
-    /// result's gas holds of the frame's history allowance.
-    pub(crate) const fn new(refund: u64, allowance: u64) -> Self {
-        Self { refund, allowance }
+    /// The figures of a result whose gas is `gas`: its pools and what it holds of its frame's
+    /// history allowance; and `refund`, the history of the start charge the fork gives back.
+    pub(crate) fn of(gas: &GasTracker, refund: u64) -> Self {
+        Self { pools: Pools::on(gas), refund, allowance: gas.history_allowance() }
     }
 }
 
@@ -540,21 +552,35 @@ impl StartLedger {
         let on_gas = Pools::on(gas);
 
         let mut differences = Vec::new();
-        for pool in PoolId::ALL {
-            let index = pool.index();
-            differences.extend([
-                (
-                    LedgerFigure::PoolRemaining(pool),
-                    i128::from(ledger.remaining.get(pool)),
-                    i128::from(on_gas.remaining.get(pool)),
-                ),
-                (LedgerFigure::PoolNet(pool), ledger.net[index].into(), on_gas.net[index].into()),
-                (
-                    LedgerFigure::PoolCrossing(pool),
-                    ledger.crossings[index].into(),
-                    on_gas.crossings[index].into(),
-                ),
-            ]);
+        let figures: [(Pools, Pools, [PoolFigure; 3]); 2] = [
+            (
+                pools,
+                fork.pools,
+                [LedgerFigure::FrameRemaining, LedgerFigure::FrameNet, LedgerFigure::FrameCrossing],
+            ),
+            (
+                ledger,
+                on_gas,
+                [
+                    LedgerFigure::CallerRemaining,
+                    LedgerFigure::CallerNet,
+                    LedgerFigure::CallerCrossing,
+                ],
+            ),
+        ];
+        for (ledger, fork, [remaining, net, crossing]) in figures {
+            for pool in PoolId::ALL {
+                let index = pool.index();
+                differences.extend([
+                    (
+                        remaining(pool),
+                        i128::from(ledger.remaining.get(pool)),
+                        i128::from(fork.remaining.get(pool)),
+                    ),
+                    (net(pool), ledger.net[index].into(), fork.net[index].into()),
+                    (crossing(pool), ledger.crossings[index].into(), fork.crossings[index].into()),
+                ]);
+            }
         }
         differences.extend([
             (
@@ -578,9 +604,9 @@ impl StartLedger {
         let pools_differ = differences.iter().any(|(figure, ..)| {
             matches!(
                 figure,
-                LedgerFigure::PoolRemaining(_) |
-                    LedgerFigure::PoolNet(_) |
-                    LedgerFigure::PoolCrossing(_)
+                LedgerFigure::CallerRemaining(_) |
+                    LedgerFigure::CallerNet(_) |
+                    LedgerFigure::CallerCrossing(_)
             )
         });
         let Some(recorded) = &mut self.divergences else {
@@ -766,8 +792,8 @@ mod tests {
                 assert!(child.record_pool(pool, child_draw.added.get(pool)));
             }
             assert_eq!(top(&ledger), Pools::on(&child), "{case}: the child's draws");
+            ledger.returning(Returning::of(&child, 0));
             handle_reservoir_remaining_gas(result, &mut caller, &mut child);
-            ledger.returning(Returning::new(0, 0));
             ledger.settle(&settled(2, 1, status_of(result), 0), &caller);
             assert_eq!(top(&ledger), Pools::on(&caller), "{case}: the caller's");
         }
@@ -795,7 +821,7 @@ mod tests {
             ledger.tolerate_divergences();
             ledger.park(KEPT, 0, 123, 0);
             ledger.split(2, Some(1), 1);
-            ledger.returning(Returning::new(0, 0));
+            ledger.returning(Returning::of(&tracker(PoolAmounts::UNLIMITED, 0), 0));
             let settlement = Settlement {
                 created,
                 inspector_answer,
@@ -832,8 +858,8 @@ mod tests {
                 assert!(child.record_pool(pool, ledger.entries[1].pools.net[pool.index()] as u64));
             }
             let mut returned = if outcome_rebuilt { child } else { GasTracker::new(0, 0, 0) };
+            ledger.returning(Returning::of(&returned, 0));
             handle_reservoir_remaining_gas(InstructionResult::Stop, &mut caller, &mut returned);
-            ledger.returning(Returning::new(0, 0));
             let settlement = Settlement {
                 inspector_answer,
                 gas_replaced,
@@ -890,9 +916,15 @@ mod tests {
             assert_eq!(ledger.draw_allowance(30), 0, "within it");
             assert_eq!(ledger.draw_allowance(80), 10, "past it");
             assert_eq!(ledger.draw_allowance(5), 5, "spent");
-            ledger.returning(Returning::new(0, 1));
+            let mut returned = tracker(PoolAmounts::UNLIMITED, 0);
+            returned.set_history_allowance(1);
+            ledger.returning(Returning::of(&returned, 0));
             ledger.settle(&settled(2, 1, SettleStatus::Ok, 0), &tracker(PoolAmounts::UNLIMITED, 0));
-            let divergences = ledger.take_divergences().unwrap_or_default();
+            let allowance = ledger
+                .take_divergences()
+                .unwrap_or_default()
+                .into_iter()
+                .find(|divergence| divergence.figure == LedgerFigure::Allowance);
             let expected = built.then_some(LedgerDivergence {
                 start: 2,
                 depth: 1,
@@ -900,7 +932,7 @@ mod tests {
                 ledger: 0,
                 fork: 1,
             });
-            assert_eq!(divergences.first().copied(), expected, "built {built}");
+            assert_eq!(allowance, expected, "built {built}");
         }
     }
 
@@ -920,9 +952,9 @@ mod tests {
         ledger.park(KEPT, 0, 0, 0);
         ledger.split(1, None, 0);
         assert_eq!(ledger.entries.len(), 1, "a transaction's start resets");
-        ledger.returning(Returning::new(0, 0));
         let mut transaction = tracker(PoolAmounts::UNLIMITED, 0);
         let mut frame = tracker(transaction.forward_all_to_child().pools, 0);
+        ledger.returning(Returning::of(&frame, 0));
         handle_reservoir_remaining_gas(InstructionResult::Stop, &mut transaction, &mut frame);
         ledger.settle(&settled(1, 0, SettleStatus::Ok, 0), &transaction);
         ledger.end(true);
@@ -950,7 +982,7 @@ mod tests {
         let mut ledger = opened(POOLS);
         ledger.park(KEPT, 1_000, 0, 0);
         ledger.split(2, Some(1), 1);
-        ledger.returning(Returning::new(0, 0));
+        ledger.returning(Returning::of(&tracker(ledger.entries[1].shares, 0), 0));
         ledger.settle(&settled(2, 1, SettleStatus::Ok, 0), &tracker(POOLS, 0));
     }
 
@@ -962,15 +994,19 @@ mod tests {
         ledger.tolerate_divergences();
         ledger.park(KEPT, 1_000, 0, 0);
         ledger.split(2, Some(1), 1);
-        ledger.returning(Returning::new(5, 0));
+        let shares = ledger.entries[1].shares;
+        let returned = tracker(shares.with(KV_UPDATE_POOL, 7), 0);
+        ledger.returning(Returning::of(&returned, 5));
         let fork = tracker(POOLS.with(DATA_SIZE_POOL, 1), 0);
         ledger.settle(&settled(2, 1, SettleStatus::Ok, 0), &fork);
         let at =
             |figure, ledger, fork| LedgerDivergence { start: 2, depth: 1, figure, ledger, fork };
+        let shared = i128::from(shares.get(KV_UPDATE_POOL));
         assert_eq!(
             ledger.take_divergences(),
             Some(std::vec![
-                at(LedgerFigure::PoolRemaining(DATA_SIZE_POOL), 10_000, 1),
+                at(LedgerFigure::FrameRemaining(KV_UPDATE_POOL), shared, 7),
+                at(LedgerFigure::CallerRemaining(DATA_SIZE_POOL), 10_000, 1),
                 at(LedgerFigure::KeptReservoir, 20, 0),
                 at(LedgerFigure::StartChargeRefund, 0, 5),
             ])

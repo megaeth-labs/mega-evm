@@ -330,7 +330,7 @@ fn test_pause_and_resume_gas_metering_hold_the_gas() {
             let net = |pool, drawn: u64| LedgerDivergence {
                 start: 3,
                 depth: 1,
-                figure: LedgerFigure::PoolNet(PoolId::new(pool)),
+                figure: LedgerFigure::CallerNet(PoolId::new(pool)),
                 ledger: drawn.into(),
                 fork: 0,
             };

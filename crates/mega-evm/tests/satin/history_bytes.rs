@@ -45,7 +45,7 @@ use revm::{
 };
 
 #[cfg(debug_assertions)]
-use crate::common::{answered_on_its_shares, first_frame_pools};
+use crate::common::{answered_on_its_shares, first_frame_pools, frame_shares};
 use crate::common::{call, call_with_data, context, create, execute, runs_at_measurement_prices};
 #[cfg(debug_assertions)]
 use mega_evm::test_utils::{take_start_ledger_divergences, tolerate_start_ledger_divergences};
@@ -265,10 +265,11 @@ fn test_a_creation_answered_without_running_appends_no_code() {
         // inspector table, where a debug build's start ledger, which settles an inspector's answer
         // at unlimited pools, parts from the fork.
         #[cfg(debug_assertions)]
-        assert_eq!(
-            take_start_ledger_divergences(evm.ctx_mut()),
-            answered_on_its_shares(2, 1, first_frame_pools(&EvmTxRuntimeLimits::default(), &tx)),
-        );
+        {
+            let caller = first_frame_pools(&EvmTxRuntimeLimits::default(), &tx);
+            let expected = answered_on_its_shares(2, 1, caller, frame_shares(caller));
+            assert_eq!(take_start_ledger_divergences(evm.ctx_mut()), expected);
+        }
 
         assert!(outcome.result.is_success(), "{:?}", outcome.result);
         assert_eq!(outcome.usage.write_records, 0, "no bump, no record");

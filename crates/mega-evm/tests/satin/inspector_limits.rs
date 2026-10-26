@@ -30,7 +30,7 @@ use revm::{
 };
 
 #[cfg(debug_assertions)]
-use crate::common::{answered_on_its_shares, first_frame_pools};
+use crate::common::{answered_on_its_shares, first_frame_pools, frame_shares};
 use crate::common::{body_history, call, context, reservoir_share};
 #[cfg(debug_assertions)]
 use mega_evm::test_utils::{take_start_ledger_divergences, tolerate_start_ledger_divergences};
@@ -409,7 +409,8 @@ fn test_an_answer_settles_on_the_gas_it_is_built_on() {
                 let expected = match gas {
                     AnswerGas::Fresh => Vec::new(),
                     AnswerGas::Untouched | AnswerGas::Charged => {
-                        answered_on_its_shares(2, 1, first_frame_pools(&limits, &tx))
+                        let caller = first_frame_pools(&limits, &tx);
+                        answered_on_its_shares(2, 1, caller, frame_shares(caller))
                     }
                 };
                 let divergences = take_start_ledger_divergences(evm.ctx_mut());

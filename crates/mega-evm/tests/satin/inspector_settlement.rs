@@ -39,7 +39,7 @@ use revm::{
 };
 
 #[cfg(debug_assertions)]
-use crate::common::{answered_on_its_shares, first_frame_pools};
+use crate::common::{answered_on_its_shares, first_frame_pools, frame_shares};
 use crate::salt::{
     create_with, crowded_account, db, entry, minimal_envs, salt_context, tx_with_gas, value_call,
     SaltEnvs, CALLER, CONTRACT, EMPTY,
@@ -152,15 +152,15 @@ where
     tolerate_start_ledger_divergences(evm.ctx_mut());
     let outcome = evm.execute_transaction(tx.clone()).expect("a valid transaction");
     #[cfg(debug_assertions)]
-    assert_eq!(
-        take_start_ledger_divergences(evm.ctx_mut()),
-        answered_on_its_shares(
-            start,
-            depth,
-            first_frame_pools(&EvmTxRuntimeLimits::default(), &tx)
-        ),
-        "start {start} at depth {depth}"
-    );
+    {
+        let caller = first_frame_pools(&EvmTxRuntimeLimits::default(), &tx);
+        let shares = if depth == 0 { caller } else { frame_shares(caller) };
+        assert_eq!(
+            take_start_ledger_divergences(evm.ctx_mut()),
+            answered_on_its_shares(start, depth, caller, shares),
+            "start {start} at depth {depth}"
+        );
+    }
     #[cfg(not(debug_assertions))]
     let _ = (start, depth);
     outcome
