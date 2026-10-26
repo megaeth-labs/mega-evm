@@ -960,6 +960,45 @@ mod tests {
         );
     }
 
+    /// A frame budget admits a count that uses exactly what the pool holds and stops one more:
+    /// the boundary is the pool's remaining amount, in each counted pool, with the transaction's
+    /// limit out of the way so only the frame's budget decides.
+    #[test]
+    fn test_a_count_equal_to_the_pools_remaining_is_within_the_frame_budget() {
+        let remaining = 6_u64;
+        for pool in PoolId::ALL {
+            for (added, within) in
+                [(remaining - 1, true), (remaining, true), (remaining + 1, false)]
+            {
+                let mut layer = AdditionalLimit::new(EvmTxRuntimeLimits::no_limits());
+                layer.begin_transaction(TxClass::Ordinary, 0);
+                let mut gas = GasTracker::new(1_000, 1_000, 0);
+                gas.set_pools_remaining(PoolAmounts::ZERO.with(pool, remaining));
+                let mut counted = Counted::NONE;
+                counted.added.set(pool, added);
+                let verdict = layer.draw(&mut gas, &counted);
+                let case = format!("{pool:?}, adds {added} to {remaining}");
+                if within {
+                    assert_eq!(verdict, LimitCheck::WithinLimit, "{case}");
+                    assert_eq!(gas.pool_remaining(pool), remaining - added, "{case}");
+                    assert_eq!(
+                        layer.kept.net[pool.index()],
+                        i64::try_from(added).unwrap(),
+                        "{case}"
+                    );
+                } else {
+                    assert!(verdict.exceeded_limit(), "{case}");
+                    assert!(
+                        matches!(verdict, LimitCheck::ExceedsLimit { frame_local: true, .. }),
+                        "{case}: {verdict:?}"
+                    );
+                    assert_eq!(gas.pool_remaining(pool), remaining, "{case}: nothing drawn");
+                    assert_eq!(layer.kept.net[pool.index()], 0, "{case}: nothing counted");
+                }
+            }
+        }
+    }
+
     /// `draw` as it was before it learned to leave alone the pools a count does not touch: every
     /// pool's budget and every dimension's limit checked off a snapshot of the pools, and every
     /// pool drawn, refilled and counted. The reference [`draw`](AdditionalLimit::draw) is held to.
