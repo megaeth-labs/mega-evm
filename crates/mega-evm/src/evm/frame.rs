@@ -25,7 +25,7 @@ use revm::{
     handler::FrameResult,
     interpreter::{
         CallInputs, CallOutcome, CreateInputs, CreateOutcome, FrameInput, Gas, InstructionResult,
-        InterpreterResult,
+        InterpreterResult, OutcomeMark,
     },
 };
 
@@ -66,6 +66,7 @@ pub fn synthetic_frame_result(
             charged_create_state_gas: inputs.charged_create_state_gas(),
             charged_state_gas_address: inputs.charged_state_gas_address(),
             charged_start: inputs.charged_start(),
+            start_mark: OutcomeMark::NONE,
         }),
         FrameInput::Empty => unreachable!("a frame input always names a call or a creation"),
     }
@@ -87,6 +88,7 @@ pub fn synthetic_call_result(
         charged_new_account_state_gas: inputs.charged_new_account_state_gas,
         charged_state_gas_address: inputs.target_address,
         charged_start: inputs.charged_start,
+        start_mark: OutcomeMark::NONE,
     })
 }
 
