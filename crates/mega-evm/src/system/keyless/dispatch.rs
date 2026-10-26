@@ -191,11 +191,7 @@ pub(crate) fn start<DB: Database, ExtEnvs: ExternalEnvTypes>(
     // The creation's shares of the call's reservoir and pools are taken out of the call, as a
     // `CREATE` opcode's are: the creation's return adds what it left back to what the call kept.
     #[cfg(debug_assertions)]
-    {
-        let (kept, reservoir) = (ctx.frame_kept_percent(), gas.reservoir());
-        let charge = deployment.on_frame_record_charge;
-        ctx.additional_limit.ledger_mut().park(kept, reservoir, charge, 0);
-    }
+    ctx.park_owed(gas.reservoir(), deployment.on_frame_record_charge, 0);
     let shares = gas.tracker_mut().forward_to_child(ctx.gas_params());
     let mut create = CreateInputs::new(
         deployment.signer,

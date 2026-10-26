@@ -320,7 +320,7 @@ fn test_pause_and_resume_gas_metering_hold_the_gas() {
         assert!(outcome.result.is_success(), "{:?}", outcome.result);
         // The paused region's slot is drawn on the frame's pools, and the snapshot `step` puts
         // back before the next instruction takes the draw back off the frame's gas: a tracker
-        // restored from a snapshot, a behaviour change of the inspector table. A debug build's
+        // restored from a snapshot, which cannot restore a figure kept off it. A debug build's
         // start ledger keeps the pools off the tracker and keeps the record's draw, and parts from
         // the fork in `TEST`'s nets where the call to `resumeGasMetering`, start 3, settles; the
         // pools themselves both read unlimited, the cheatcode's answer on `Gas::new` having

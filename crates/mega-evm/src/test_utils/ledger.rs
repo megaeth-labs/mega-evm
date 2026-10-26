@@ -7,6 +7,10 @@
 //! fork's figures where the ledger, which keeps them off the tracker, does not follow: a test that
 //! runs one tolerates the differences, then asserts each of them.
 
+#[cfg(not(feature = "std"))]
+use alloc as std;
+use std::vec::Vec;
+
 use crate::{ExternalEnvTypes, MegaContext};
 use revm::Database;
 

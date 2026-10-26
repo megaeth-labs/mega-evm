@@ -132,8 +132,8 @@ where
 }
 
 /// [`inspected`] under `inspector`, which answers start `start`, at `depth`, on the gas its input
-/// carries, the shares of its caller's pools included: an answer with pools the inspector set, an
-/// API removal of the inspector table. A debug build's start ledger, which settles an inspector's
+/// carries, the shares of its caller's pools included: an answer with pools the inspector set,
+/// which a debug build's start ledger does not take. The ledger, which settles an inspector's
 /// answer at unlimited pools, records where it parts from the fork, and each part is asserted
 /// ([`answered_on_its_shares`]): the caller is the transaction's own frame, or the transaction,
 /// which holds its first frame's pools when the start is made.

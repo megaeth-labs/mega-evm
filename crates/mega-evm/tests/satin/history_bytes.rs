@@ -261,9 +261,9 @@ fn test_a_creation_answered_without_running_appends_no_code() {
         #[cfg(debug_assertions)]
         tolerate_start_ledger_divergences(evm.ctx_mut());
         let outcome = evm.execute_transaction(tx.clone()).expect("the transaction is valid");
-        // The answer carries the creation's shares, pools the inspector set: an API removal of the
-        // inspector table, where a debug build's start ledger, which settles an inspector's answer
-        // at unlimited pools, parts from the fork.
+        // The answer carries the creation's shares, pools the inspector set, which a debug build's
+        // start ledger does not take: it settles an inspector's answer at unlimited pools, and
+        // parts from the fork.
         #[cfg(debug_assertions)]
         {
             let caller = first_frame_pools(&EvmTxRuntimeLimits::default(), &tx);

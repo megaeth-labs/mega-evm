@@ -401,9 +401,8 @@ fn test_an_answer_settles_on_the_gas_it_is_built_on() {
             tolerate_start_ledger_divergences(evm.ctx_mut());
             let outcome = evm.execute_transaction(tx.clone()).expect("a valid transaction");
             // An answer on `Gas::new` carries unlimited pools, as the start ledger settles an
-            // inspector's answer; one on the call's shares carries pools the inspector set, an API
-            // removal of the inspector table, and the ledger parts from the fork where `A`'s pool
-            // is limited.
+            // inspector's answer; one on the call's shares carries pools the inspector set, which
+            // the ledger does not take, and it parts from the fork where `A`'s pool is limited.
             #[cfg(debug_assertions)]
             {
                 let expected = match gas {

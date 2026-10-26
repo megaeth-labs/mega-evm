@@ -58,15 +58,15 @@
 //! replaced, the allowance the frame returns. At the lifecycle's successful end the ledger holds no
 //! entry.
 //!
-//! A difference is a panic. The inspector shapes whose figures the owner accepted to change when
-//! the ledger becomes what the engine reads differ by design: a tracker restored from a snapshot,
-//! an interpreter replaced, an answer, an input or a result built with pools, an allowance or a
-//! charge an inspector set, a tracker or an outcome copied from another start. A test that runs
-//! one has the context record the differences instead, and asserts each
-//! (`test_utils::tolerate_start_ledger_divergences`). After a recorded difference in a caller's
-//! pools the ledger takes the fork's, so what it records is where the two part, not what follows.
-
-#![cfg_attr(not(any(test, feature = "test-utils")), allow(unreachable_pub))]
+//! A difference is a panic. Some inspector shapes differ by design, because they move a figure
+//! the ledger keeps off the tracker, which a tracker copy or a field an inspector writes cannot
+//! reach: a tracker restored from a snapshot, an interpreter replaced, an answer, an input or a
+//! result built with pools, an allowance or a charge an inspector set, a tracker or an outcome
+//! copied from another start. Once the engine reads its ledger, those figures are the ledger's, and
+//! such an inspector's values are not taken. A test that runs one has the context record the
+//! differences instead, and asserts each (`test_utils::tolerate_start_ledger_divergences`). After a
+//! recorded difference in a caller's pools the ledger takes the fork's, so what it records is where
+//! the two part, not what follows.
 
 #[cfg(not(feature = "std"))]
 use alloc as std;
@@ -80,7 +80,11 @@ use revm::context_interface::{
 use super::Counted;
 
 /// A figure of a settled start the ledger compares with the fork's.
+///
+/// Public to the test tools, which record and assert a difference; a debug build without them
+/// reaches it only through the ledger's panic.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(any(test, feature = "test-utils")), allow(unreachable_pub))]
 pub enum LedgerFigure {
     /// What the started frame may still draw on a pool, as its result returns it.
     FrameRemaining(PoolId),
@@ -107,7 +111,10 @@ pub enum LedgerFigure {
 type PoolFigure = fn(PoolId) -> LedgerFigure;
 
 /// A figure of a settled start in which the ledger and the fork differ.
+///
+/// Public to the test tools, as [`LedgerFigure`] is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(any(test, feature = "test-utils")), allow(unreachable_pub))]
 pub struct LedgerDivergence {
     /// The identity revm gave the start.
     pub start: u32,
@@ -151,7 +158,8 @@ const STAND_IN: Parked = Parked::transaction(PoolAmounts::UNLIMITED, 0);
 
 /// What a start owes when an inspector consumed an input it built itself, which no start parked
 /// anything for: nothing, and no pool.
-const UNPARKED: Parked = Parked::transaction(PoolAmounts::ZERO, 0);
+const UNPARKED: Parked =
+    Parked { shares: PoolAmounts::ZERO, kept_reservoir: 0, charge: 0, allowance: 0 };
 
 /// A frame's three pools as the engine keeps them: what it may still draw, its signed net draw,
 /// and whether a draw it could not pay was refused.
@@ -291,7 +299,8 @@ impl Entry {
     }
 }
 
-/// A start's settlement as revm reports it ([`FrameSettle`]), in the ledger's own terms.
+/// A start's settlement as revm reports it: the fields of [`FrameSettle`], which only revm's record
+/// can build, so the ledger's unit tests can settle a start without one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Settlement {
     id: u32,
@@ -895,7 +904,11 @@ mod tests {
         ledger.adopt_provider_draws([11, 0, 0]);
         let pools = top(&ledger);
         assert_eq!(
-            (pools.remaining.get(DATA_SIZE_POOL), pools.net[0], pools.crossings[0]),
+            (
+                pools.remaining.get(DATA_SIZE_POOL),
+                pools.net[DATA_SIZE_POOL.index()],
+                pools.crossings[DATA_SIZE_POOL.index()],
+            ),
             (0, 10, true),
             "share 10, draw 11"
         );

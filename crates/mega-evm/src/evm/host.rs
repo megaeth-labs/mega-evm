@@ -367,6 +367,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
             if appended != 0 {
                 let Some(cost) = history_gas(appended) else { return WriteVerdict::OutOfGas };
                 let cost = if from_allowance {
+                    // The ledger draws its own allowance; the settlement compares what is left.
                     #[cfg(debug_assertions)]
                     let _ = self.additional_limit.ledger_mut().draw_allowance(cost);
                     gas.draw_history_allowance(cost)
@@ -488,6 +489,17 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         let value_call = matches!(start.kind, FrameStartKind::Call | FrameStartKind::CallCode) &&
             !start.value.is_zero();
         let allowance = if value_call { self.value_call_allowance() } else { 0 };
+        self.park_owed(reservoir, charge, allowance);
+    }
+
+    /// Parks on the start ledger what the start the running frame is making owes: the shares of
+    /// the frame's pools and the part of `reservoir`, what it holds once the start's charges are
+    /// made, the frame keeps, by the engine's rule
+    /// ([`frame_kept_percent`](Self::frame_kept_percent)); the start's `charge`; and the
+    /// child's `allowance`. The frame-start hook parks an instruction's start, and a
+    /// `keylessDeploy` call's builder its creation.
+    #[cfg(debug_assertions)]
+    pub(crate) fn park_owed(&mut self, reservoir: u64, charge: u64, allowance: u64) {
         let kept = self.frame_kept_percent();
         self.additional_limit.ledger_mut().park(kept, reservoir, charge, allowance);
     }

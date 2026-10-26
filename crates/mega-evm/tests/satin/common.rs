@@ -328,7 +328,8 @@ pub(crate) fn frame_shares(caller: PoolAmounts) -> PoolAmounts {
 /// What a debug build's start ledger records where an inspector answered start `start`, at
 /// `depth`, on gas that carries the shares its input was forwarded, `shares`, as the engine's
 /// `untouched_call_gas` and `untouched_create_gas` build it: an answer with pools the inspector
-/// set, which the owner accepted as an API removal. The ledger settles an inspector's answer at
+/// set, whose pools stop being taken once the engine reads its ledger, the pool fields leaving the
+/// frame's input and gas. The ledger settles an inspector's answer at
 /// unlimited pools, so it parts from the fork on the answer's own pools wherever a share is
 /// limited, and on its caller's once it settled, wherever the caller, which the fork gives back
 /// the shares and so leaves with what it held before the start, `caller`, is limited.

@@ -2191,11 +2191,13 @@ mod tests {
     fn test_the_start_ledger_holds_a_childs_shares_as_cap_the_shares_does() {
         use crate::{
             evm::FRAME_KEPT_PERCENT,
-            limit::{Counted, Parked, StartLedger, DATA_SIZE_POOL},
+            limit::{
+                Counted, Parked, StartLedger, DATA_SIZE_POOL, KV_UPDATE_POOL, STATE_GROWTH_POOL,
+            },
             satin_gas_params,
         };
         let pools = [
-            PoolAmounts::ZERO.with(PoolId::new(0), 10_000).with(PoolId::new(1), 250),
+            PoolAmounts::ZERO.with(DATA_SIZE_POOL, 10_000).with(KV_UPDATE_POOL, 250),
             PoolAmounts::UNLIMITED,
             PoolAmounts::ZERO,
         ];
@@ -2208,14 +2210,14 @@ mod tests {
                     let case = format!("{pools:?}, drawn {drawn}, taken {taken}, cap {cap}");
                     let counted = Counted {
                         added: PoolAmounts::ZERO
-                            .with(PoolId::new(0), drawn)
-                            .with(PoolId::new(1), drawn.min(pools.get(PoolId::new(1))))
-                            .with(PoolId::new(2), drawn.min(pools.get(PoolId::new(2)))),
-                        taken: PoolAmounts::ZERO.with(PoolId::new(0), taken),
+                            .with(DATA_SIZE_POOL, drawn)
+                            .with(KV_UPDATE_POOL, drawn.min(pools.get(KV_UPDATE_POOL)))
+                            .with(STATE_GROWTH_POOL, drawn.min(pools.get(STATE_GROWTH_POOL))),
+                        taken: PoolAmounts::ZERO.with(DATA_SIZE_POOL, taken),
                         transfer_log: false,
                     };
-                    if counted.added.get(PoolId::new(0)) >
-                        pools.get(PoolId::new(0)).saturating_add(taken)
+                    if counted.added.get(DATA_SIZE_POOL) >
+                        pools.get(DATA_SIZE_POOL).saturating_add(taken)
                     {
                         continue;
                     }
