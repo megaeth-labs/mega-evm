@@ -347,6 +347,11 @@ where
             None => repriced(),
         };
         let charge = StartCharge::new(history, PoolAmounts::ZERO);
+        #[cfg(debug_assertions)]
+        let owed = crate::limit::Parked::transaction(
+            evm.ctx_ref().additional_limit.first_frame_pools(),
+            history,
+        );
         gas.set_pools_remaining(evm.ctx_ref().additional_limit.first_frame_pools());
         let Some(mut frame) = self.op.first_frame_input(evm, gas)? else {
             // The runtime gas phase could not pay for the first frame's start: EIP-2780's charge
@@ -358,8 +363,12 @@ where
             // rebuilding the transaction's gas from its intrinsic cost, the history charged for
             // the first frame's write record included, which no frame carries back.
             evm.ctx_mut().additional_limit.take_back_authorities();
+            #[cfg(debug_assertions)]
+            evm.ctx_mut().additional_limit.ledger_mut().park_transaction(None);
             return Ok(None);
         };
+        #[cfg(debug_assertions)]
+        evm.ctx_mut().additional_limit.ledger_mut().park_transaction(Some(owed));
         match &mut frame.frame_input {
             FrameInput::Call(inputs) => inputs.charged_start = charge,
             FrameInput::Create(inputs) => inputs.set_charged_start(charge),
@@ -392,6 +401,8 @@ where
         let layer = &mut evm.ctx_mut().additional_limit;
         layer.close_start(0, frame_result.instruction_result().is_ok());
         layer.take_frame_stop(frame_result, true);
+        #[cfg(debug_assertions)]
+        layer.ledger_mut().returning(fork_figures(frame_result));
         self.op.last_frame_result(evm, frame_result, parent_gas)?;
         let priced = evm.ctx_ref().prices_history();
         let history = 0_u64.saturating_add_signed(frame_result.gas().history_gas_spent());
@@ -649,6 +660,8 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
         };
         let ctx = &mut self.inner.ctx;
         let Some(mut result) = decided else {
+            #[cfg(debug_assertions)]
+            ctx.additional_limit.ledger_mut().built();
             ctx.additional_limit.open_start(depth, start.creator);
             let frame = self.inner.frame_stack.get();
             let verdict = start.count(ctx, frame.interpreter.gas.tracker_mut());
@@ -672,6 +685,8 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
             return Ok(ItemOrResult::Item(self.inner.frame_stack.get()));
         };
         debug_assert!(!keyless, "revm builds a keylessDeploy call's frame");
+        #[cfg(debug_assertions)]
+        adopt_provider_draws(ctx, &result);
         if let PrecompileHold::Clamped(withheld) = hold {
             Detention::restore_forward(result.interpreter_result_mut(), withheld);
         }
@@ -769,6 +784,8 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
         }
         layer.take_frame_stop(&result, outermost);
         let creation = keyless::returning(&self.inner.ctx, &mut self.inner.frame_stack, &result);
+        #[cfg(debug_assertions)]
+        self.inner.ctx.additional_limit.ledger_mut().returning(fork_figures(&result));
         let returned = self.inner.frame_return_result(result)?;
         if returned.is_some() {
             return Ok(returned);
@@ -861,6 +878,11 @@ fn suspend<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx.detention.on_frame_suspend(&caller.interpreter.gas, caller.depth, stipend);
     let caps = ctx.additional_limit.frame_caps();
     cap_the_shares(ctx.gas_params(), caps, &mut caller.interpreter.gas, child);
+    #[cfg(debug_assertions)]
+    {
+        let kept = ctx.frame_kept_percent();
+        ctx.additional_limit.ledger_mut().cap_child(caps, kept);
+    }
 }
 
 /// The action of `frame` that stops it at the limit `verdict` names before it runs another
@@ -1231,6 +1253,30 @@ fn take_back_a_stopped_answer<DB: Database, ExtEnvs: ExternalEnvTypes>(
     }
 }
 
+/// The fork's figures of `result`, about to settle into its caller, for the start ledger: the
+/// history of the start charge it gives back, and what the result holds of its frame's history
+/// allowance.
+#[cfg(debug_assertions)]
+fn fork_figures(result: &FrameResult) -> crate::limit::Returning {
+    let refund = result.refundable_start_charge().map_or(0, |charge| charge.history);
+    crate::limit::Returning::new(refund, result.gas().history_allowance())
+}
+
+/// Has the start ledger adopt what a precompile's provider drew on the pools of `answer`, revm's
+/// answer to the start on top: the net draws its gas holds. A start revm refused, or answered
+/// without a provider, drew nothing. The engine's provider draws no pool, so the draws are none.
+#[cfg(debug_assertions)]
+fn adopt_provider_draws<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    ctx: &mut MegaContext<DB, ExtEnvs>,
+    answer: &FrameResult,
+) {
+    let FrameResult::Call(outcome) = answer else { return };
+    if outcome.was_precompile_called {
+        let draws = PoolId::ALL.map(|pool| outcome.result.gas.pool_spent(pool));
+        ctx.additional_limit.ledger_mut().adopt_provider_draws(draws);
+    }
+}
+
 /// Whether revm's start of the frame `input` asks for leaves the accounts it starts on as the
 /// transaction held them and journals no transfer log, so that reading them before and after the
 /// start ([`FrameStart::of`], [`FrameStart::count`]) would find no write record, no new account and
@@ -1412,6 +1458,8 @@ fn stop_the_answer_at<DB: Database, ExtEnvs: ExternalEnvTypes>(
     if verdict.exceeded_limit() {
         let output = ctx.additional_limit.note_frame_stop(&verdict);
         stop_the_answer(answer, start, output);
+        #[cfg(debug_assertions)]
+        ctx.additional_limit.ledger_mut().rebuild_on_shares();
     }
 }
 
@@ -2129,6 +2177,75 @@ mod tests {
                     DEFAULT_RESERVOIR,
                     "{case}: the system call's own reservoir, not the transaction's"
                 );
+            }
+        }
+    }
+
+    /// The start ledger holds a child's shares as the engine's `cap_the_shares` holds them, on the
+    /// fork's forward: to the frame cap, and, for a caller whose net is negative, to the share of
+    /// the caller's budget, the excess given back to the caller. Each case runs both on the same
+    /// caller: pools limited, unlimited or empty; a net of nothing, positive or negative; and a
+    /// data-size cap above, at or below the share, or none.
+    #[test]
+    #[cfg(debug_assertions)]
+    fn test_the_start_ledger_holds_a_childs_shares_as_cap_the_shares_does() {
+        use crate::{
+            evm::FRAME_KEPT_PERCENT,
+            limit::{Counted, Parked, StartLedger, DATA_SIZE_POOL},
+            satin_gas_params,
+        };
+        let pools = [
+            PoolAmounts::ZERO.with(PoolId::new(0), 10_000).with(PoolId::new(1), 250),
+            PoolAmounts::UNLIMITED,
+            PoolAmounts::ZERO,
+        ];
+        // What the caller draws and takes back before the start, on every pool.
+        let moves = [(0, 0), (100, 0), (0, 4_000), (100, 37)];
+        let caps = [u64::MAX, 9_800, 5_000, 0];
+        for pools in pools {
+            for (drawn, taken) in moves {
+                for cap in caps {
+                    let case = format!("{pools:?}, drawn {drawn}, taken {taken}, cap {cap}");
+                    let counted = Counted {
+                        added: PoolAmounts::ZERO
+                            .with(PoolId::new(0), drawn)
+                            .with(PoolId::new(1), drawn.min(pools.get(PoolId::new(1))))
+                            .with(PoolId::new(2), drawn.min(pools.get(PoolId::new(2)))),
+                        taken: PoolAmounts::ZERO.with(PoolId::new(0), taken),
+                        transfer_log: false,
+                    };
+                    if counted.added.get(PoolId::new(0)) >
+                        pools.get(PoolId::new(0)).saturating_add(taken)
+                    {
+                        continue;
+                    }
+                    let mut caller = Gas::new_with_regular_gas_and_reservoir(1_000_000, 0);
+                    caller.tracker_mut().set_pools_remaining(pools);
+                    for pool in PoolId::ALL {
+                        caller.tracker_mut().refill_pool(pool, counted.taken.get(pool));
+                        assert!(caller.tracker_mut().record_pool(pool, counted.added.get(pool)));
+                    }
+                    let mut ledger = StartLedger::default();
+                    ledger.park_transaction(Some(Parked::transaction(pools, 0)));
+                    ledger.split(1, None, 0);
+                    ledger.draw(&counted);
+
+                    let shares = caller.tracker_mut().forward_to_child(&satin_gas_params()).pools;
+                    ledger.park(FRAME_KEPT_PERCENT, 0, 0, 0);
+                    ledger.split(2, Some(1), 1);
+                    let mut child = static_call(TARGET, &[], 100_000);
+                    child.depth = 1;
+                    let FrameInput::Call(inputs) = &mut child.frame_input else { unreachable!() };
+                    inputs.pool_shares = shares;
+                    let caps = PoolAmounts::UNLIMITED.with(DATA_SIZE_POOL, cap);
+                    cap_the_shares(&satin_gas_params(), caps, &mut caller, &mut child);
+                    ledger.cap_child(caps, FRAME_KEPT_PERCENT);
+
+                    let FrameInput::Call(inputs) = &child.frame_input else { unreachable!() };
+                    let caller_pools = caller.tracker().pools_remaining();
+                    let held = ledger.top_shares_and_caller_pools();
+                    assert_eq!(held, (inputs.pool_shares, caller_pools), "{case}");
+                }
             }
         }
     }

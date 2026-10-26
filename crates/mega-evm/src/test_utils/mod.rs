@@ -4,6 +4,8 @@ mod bytes;
 mod database;
 mod evm;
 mod inspectors;
+#[cfg(debug_assertions)]
+mod ledger;
 mod logs;
 mod neutral;
 mod opcode_gen;
@@ -16,6 +18,8 @@ pub use bytes::*;
 pub use database::*;
 pub use evm::*;
 pub use inspectors::*;
+#[cfg(debug_assertions)]
+pub use ledger::*;
 pub use logs::*;
 pub use neutral::*;
 pub use opcode_gen::*;

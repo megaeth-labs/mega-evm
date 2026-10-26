@@ -3,12 +3,16 @@
 use alloy_evm::Evm;
 use alloy_op_evm::OpTx;
 use alloy_primitives::{Address, Bytes, TxKind, B256, U256};
+#[cfg(debug_assertions)]
+use mega_evm::test_utils::{LedgerDivergence, LedgerFigure};
 use mega_evm::{
     active_satin_prices,
     test_utils::{note_price_guard, op_transaction, zero_fee_l1_block_info, BytecodeBuilder},
     EvmTxRuntimeLimits, LimitUsage, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
     MegaTransaction, MegaTransactionOutcome,
 };
+#[cfg(debug_assertions)]
+use revm::interpreter::{PoolAmounts, PoolId};
 use revm::{
     bytecode::opcode::{PUSH0, RETURN},
     context::{result::ResultAndState, BlockEnv, TxEnv},
@@ -295,4 +299,41 @@ pub(crate) const fn records_and_moves(records: u64, moves: u64) -> LimitUsage {
 /// bytes, and one byte per byte of calldata.
 pub(crate) fn body_history(calldata_len: u64) -> u64 {
     history(mega_evm::TX_BODY_SIZE + calldata_len)
+}
+
+/// The pools the transaction's own frame starts with under `limits` when `tx` counts nothing
+/// before it but its body: what each limit leaves once the body is counted, the data size under the
+/// frame cap.
+#[cfg(debug_assertions)]
+pub(crate) fn first_frame_pools(limits: &EvmTxRuntimeLimits, tx: &MegaTransaction) -> PoolAmounts {
+    let data_size = limits.tx_data_size_limit.saturating_sub(mega_evm::transaction_body_bytes(tx));
+    PoolAmounts::ZERO
+        .with(PoolId::new(0), data_size.min(limits.frame_data_size_limit))
+        .with(PoolId::new(1), limits.tx_kv_update_limit)
+        .with(PoolId::new(2), limits.tx_state_growth_limit)
+}
+
+/// What a debug build's start ledger records where an inspector answered start `start`, at
+/// `depth`, on gas that carries the shares its input was forwarded, as the engine's
+/// `untouched_call_gas` and `untouched_create_gas` build it: an answer with pools the inspector
+/// set, which the owner accepted as an API removal. The fork returns the shares to the caller,
+/// which then holds what it held before the start, `caller`; the ledger settles an inspector's
+/// answer at unlimited pools. A pool the caller held unlimited parts nowhere.
+#[cfg(debug_assertions)]
+pub(crate) fn answered_on_its_shares(
+    start: u32,
+    depth: usize,
+    caller: PoolAmounts,
+) -> Vec<LedgerDivergence> {
+    PoolId::ALL
+        .into_iter()
+        .filter(|pool| caller.get(*pool) != u64::MAX)
+        .map(|pool| LedgerDivergence {
+            start,
+            depth,
+            figure: LedgerFigure::PoolRemaining(pool),
+            ledger: u64::MAX.into(),
+            fork: caller.get(pool).into(),
+        })
+        .collect()
 }

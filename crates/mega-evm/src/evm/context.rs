@@ -496,6 +496,34 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         !self.runs_neutral() && self.system_call
     }
 
+    /// The part of its pools and of its EIP-8037 reservoir, in per cent, a caller keeps when it
+    /// starts a frame, by the engine's own rule: [`FRAME_KEPT_PERCENT`] on the spec's
+    /// configuration, and nothing on the neutral one, which forwards the whole of each as Ethereum
+    /// does. A debug build's start ledger computes a start's shares by it.
+    ///
+    /// [`FRAME_KEPT_PERCENT`]: crate::evm::schedule::FRAME_KEPT_PERCENT
+    #[cfg(debug_assertions)]
+    pub(crate) const fn frame_kept_percent(&self) -> u64 {
+        if self.runs_neutral() {
+            0
+        } else {
+            super::schedule::FRAME_KEPT_PERCENT
+        }
+    }
+
+    /// The history allowance a value-transferring `CALL` or `CALLCODE` gives the frame it starts,
+    /// by the engine's own rule: [`history_allowance_gas`](crate::history_allowance_gas) on the
+    /// spec's configuration, and none on the neutral one, which prices no history. A debug build's
+    /// start ledger keeps it.
+    #[cfg(debug_assertions)]
+    pub(crate) fn value_call_allowance(&self) -> u64 {
+        if self.runs_neutral() {
+            0
+        } else {
+            super::history::history_allowance_gas()
+        }
+    }
+
     /// Whether the destruction table prices state gas: a destruction of an account created in the
     /// transaction gives back the state gas of the parts the transaction made, and from that mark
     /// the account keeps no further state gas. The spec's configuration does: it always charges

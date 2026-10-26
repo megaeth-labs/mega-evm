@@ -70,7 +70,9 @@
 //! # The start lifecycle
 //!
 //! The three lifecycle hooks — a start revm opened, one it settled, the lifecycle's end — reach the
-//! inner context in a debug build, whose mirror checks their order over every engine path. A release
+//! inner context in a debug build, whose mirror checks their order over every engine path, and
+//! drive the engine's start ledger, which keeps what each start owes and holds beside the fork's
+//! figures and compares the two at every settlement (the `limit` module's `ledger`). A release
 //! build takes the trait's defaults, which do nothing.
 //!
 //! Every other Host method delegates to op-revm's context.
@@ -96,7 +98,7 @@ use revm::{
 };
 
 #[cfg(debug_assertions)]
-use revm::context_interface::host::{FrameSettle, FrameSplit, LifecycleEnd};
+use revm::context_interface::host::{FrameSettle, FrameSplit, FrameStartKind, LifecycleEnd};
 
 use crate::{
     charge_write_records_history, history_gas,
@@ -364,7 +366,13 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
             }
             if appended != 0 {
                 let Some(cost) = history_gas(appended) else { return WriteVerdict::OutOfGas };
-                let cost = if from_allowance { gas.draw_history_allowance(cost) } else { cost };
+                let cost = if from_allowance {
+                    #[cfg(debug_assertions)]
+                    let _ = self.additional_limit.ledger_mut().draw_allowance(cost);
+                    gas.draw_history_allowance(cost)
+                } else {
+                    cost
+                };
                 if !gas.record_history_cost(cost) {
                     return WriteVerdict::OutOfGas;
                 }
@@ -439,30 +447,51 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
             0
         };
         start.charge = StartCharge::new(charge, PoolAmounts::ZERO);
+        #[cfg(debug_assertions)]
+        self.park_start(start, gas.reservoir(), charge);
         true
     }
 
-    /// Hands the inner context the start revm opened, so its debug mirror checks the lifecycle's
-    /// order over the engine.
+    /// Hands the inner context, whose debug mirror checks the lifecycle's order, the start revm
+    /// opened, and opens it on the start ledger with what was parked for it.
     #[cfg(debug_assertions)]
     fn frame_split(&mut self, split: &FrameSplit) {
         self.inner.frame_split(split);
+        self.additional_limit.ledger_mut().split(split.id, split.parent, split.depth);
     }
 
-    /// Hands the inner context the start revm settled into `gas`, its caller's.
+    /// Hands the inner context the start revm settled into `gas`, its caller's, and settles it on
+    /// the start ledger, which compares its figures with the fork's.
     #[cfg(debug_assertions)]
     fn frame_settle(&mut self, settle: &FrameSettle, gas: &mut GasTracker) {
         self.inner.frame_settle(settle, gas);
+        self.additional_limit.ledger_mut().settle(&settle.into(), gas);
     }
 
-    /// Hands the inner context the lifecycle's end.
+    /// Hands the inner context the lifecycle's end, and ends the start ledger with it: every start
+    /// settled, or what is open discarded.
     #[cfg(debug_assertions)]
     fn frame_lifecycle_end(&mut self, end: LifecycleEnd) {
         self.inner.frame_lifecycle_end(end);
+        self.additional_limit.ledger_mut().end(end == LifecycleEnd::Settled);
     }
 }
 
 impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
+    /// Parks on the start ledger what the start the running frame is making owes, as the
+    /// frame-start hook decided it: the shares of the frame's pools and the part of its reservoir,
+    /// `reservoir` once the hook charged it, the frame keeps, by the engine's rule
+    /// ([`frame_kept_percent`](Self::frame_kept_percent)); the start `charge` the hook declared;
+    /// and the allowance a value-transferring `CALL` or `CALLCODE` gives its frame.
+    #[cfg(debug_assertions)]
+    fn park_start(&mut self, start: &FrameStart, reservoir: u64, charge: u64) {
+        let value_call = matches!(start.kind, FrameStartKind::Call | FrameStartKind::CallCode) &&
+            !start.value.is_zero();
+        let allowance = if value_call { self.value_call_allowance() } else { 0 };
+        let kept = self.frame_kept_percent();
+        self.additional_limit.ledger_mut().park(kept, reservoir, charge, allowance);
+    }
+
     /// Prices one EIP-8037 state gas unit `id` at `site`, scaling the schedule's entry by the SALT
     /// bucket capacity of the account — or, for a slot-scoped entry, of the storage slot — the
     /// charge lands on.

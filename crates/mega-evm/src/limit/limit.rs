@@ -11,6 +11,8 @@ use revm::{
 use alloc as std;
 use std::vec::Vec;
 
+#[cfg(debug_assertions)]
+use super::StartLedger;
 use super::{
     CreatorBefore, EvmTxRuntimeLimits, LimitCheck, LimitKind, LimitUsage, COUNTED, DATA_SIZE_POOL,
     KV_UPDATE_POOL, STATE_GROWTH_POOL, TRANSFER_LOG_SIZE, WRITE_RECORD_SIZE,
@@ -120,6 +122,11 @@ pub struct AdditionalLimit {
     /// The EIP-8037 reservoir the settled transaction or system call left unspent: none from where
     /// an execution builds its gas until it reports what it settled with.
     reservoir_remaining: Option<u64>,
+    /// In a debug build, the engine's own ledger of what each open start owes and holds, checked
+    /// against the fork's figures at every settlement. It is not begun with the transaction: the
+    /// start lifecycle drives it, from the transaction's start to the lifecycle's end.
+    #[cfg(debug_assertions)]
+    ledger: StartLedger,
 }
 
 /// What the running execution is, decided when the layer begins it from what the transaction is
@@ -621,6 +628,8 @@ impl AdditionalLimit {
         }
         Self::apply(gas, counted);
         self.count(counted);
+        #[cfg(debug_assertions)]
+        self.ledger.draw(counted);
         LimitCheck::WithinLimit
     }
 
@@ -713,6 +722,8 @@ impl AdditionalLimit {
         }
         Self::apply(gas, counted);
         self.count(counted);
+        #[cfg(debug_assertions)]
+        self.ledger.draw(counted);
         if let Some(start) = self.decided.last_mut() {
             start.credit = credit;
         }
@@ -825,6 +836,15 @@ impl AdditionalLimit {
         if matches!(self.class, TxClass::Ordinary) {
             self.class = TxClass::Neutral;
         }
+    }
+
+    /* The start ledger */
+
+    /// The engine's own ledger of what each open start owes and holds, which a debug build keeps
+    /// beside the fork's figures and checks against them.
+    #[cfg(debug_assertions)]
+    pub(crate) const fn ledger_mut(&mut self) -> &mut StartLedger {
+        &mut self.ledger
     }
 
     /* What the settled transaction reports */

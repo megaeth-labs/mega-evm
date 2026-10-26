@@ -42,6 +42,13 @@ use crate::{
     common::{body_history, call, context, reservoir_share},
     salt::entry,
 };
+#[cfg(debug_assertions)]
+use mega_evm::test_utils::{
+    take_start_ledger_divergences, tolerate_start_ledger_divergences, LedgerDivergence,
+    LedgerFigure,
+};
+#[cfg(debug_assertions)]
+use revm::interpreter::PoolId;
 
 sol! {
     /// The cheatcodes these tests drive, as Foundry's `Vm` interface declares them.
@@ -304,7 +311,36 @@ fn test_pause_and_resume_gas_metering_hold_the_gas() {
     };
     let db = |code: Bytes| MemoryDatabase::default().account_code(TEST, code);
 
-    let (worked, answered) = run(db(paused(true)), true);
+    let (worked, answered) = {
+        let tx = call(CALLER, TEST, U256::ZERO, GAS_LIMIT);
+        let mut evm = MegaEvm::new(context(db(paused(true)))).with_inspector(Cheatcodes::default());
+        #[cfg(debug_assertions)]
+        tolerate_start_ledger_divergences(evm.ctx_mut());
+        let outcome = evm.execute_transaction(tx).expect("valid");
+        assert!(outcome.result.is_success(), "{:?}", outcome.result);
+        // The paused region's slot is drawn on the frame's pools, and the snapshot `step` puts
+        // back before the next instruction takes the draw back off the frame's gas: a tracker
+        // restored from a snapshot, a behaviour change of the inspector table. A debug build's
+        // start ledger keeps the pools off the tracker and keeps the record's draw, and parts from
+        // the fork in `TEST`'s nets where the call to `resumeGasMetering`, start 3, settles; the
+        // pools themselves both read unlimited, the cheatcode's answer on `Gas::new` having
+        // carried unlimited pools back to `TEST` at the pause.
+        #[cfg(debug_assertions)]
+        {
+            let net = |pool, drawn: u64| LedgerDivergence {
+                start: 3,
+                depth: 1,
+                figure: LedgerFigure::PoolNet(PoolId::new(pool)),
+                ledger: drawn.into(),
+                fork: 0,
+            };
+            assert_eq!(
+                take_start_ledger_divergences(evm.ctx_mut()),
+                [net(0, WRITE_RECORD_SIZE), net(1, 1), net(2, 1)]
+            );
+        }
+        (outcome, evm.inspector().answered)
+    };
     assert_eq!(answered, 2);
     let (idle, _) = run(db(paused(false)), true);
     assert_eq!(slot(&worked, TEST, 9), U256::from(1), "the slot was written");

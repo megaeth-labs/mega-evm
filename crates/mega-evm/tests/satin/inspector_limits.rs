@@ -29,7 +29,11 @@ use revm::{
     Database, Inspector,
 };
 
+#[cfg(debug_assertions)]
+use crate::common::{answered_on_its_shares, first_frame_pools};
 use crate::common::{body_history, call, context, reservoir_share};
+#[cfg(debug_assertions)]
+use mega_evm::test_utils::{take_start_ledger_divergences, tolerate_start_ledger_divergences};
 
 const CALLER: Address = address!("0000000000000000000000000000000000e00000");
 const A: Address = address!("0000000000000000000000000000000000e00001");
@@ -390,7 +394,28 @@ fn test_an_answer_settles_on_the_gas_it_is_built_on() {
     {
         let answer = |gas| {
             let inspector = AnswersB { result, gas };
-            run(a_calls_b(), limits, gas_limit, Some(inspector)).0
+            let tx = call(CALLER, A, U256::ZERO, gas_limit);
+            let mut evm = MegaEvm::new(context(a_calls_b()).with_tx_runtime_limits(limits))
+                .with_inspector(inspector);
+            #[cfg(debug_assertions)]
+            tolerate_start_ledger_divergences(evm.ctx_mut());
+            let outcome = evm.execute_transaction(tx.clone()).expect("a valid transaction");
+            // An answer on `Gas::new` carries unlimited pools, as the start ledger settles an
+            // inspector's answer; one on the call's shares carries pools the inspector set, an API
+            // removal of the inspector table, and the ledger parts from the fork where `A`'s pool
+            // is limited.
+            #[cfg(debug_assertions)]
+            {
+                let expected = match gas {
+                    AnswerGas::Fresh => Vec::new(),
+                    AnswerGas::Untouched | AnswerGas::Charged => {
+                        answered_on_its_shares(2, 1, first_frame_pools(&limits, &tx))
+                    }
+                };
+                let divergences = take_start_ledger_divergences(evm.ctx_mut());
+                assert_eq!(divergences, expected, "{result:?}, {gas:?}");
+            }
+            outcome
         };
         let untouched = answer(AnswerGas::Untouched);
         assert!(untouched.result.is_success(), "{result:?}: `A` ignores the answer");

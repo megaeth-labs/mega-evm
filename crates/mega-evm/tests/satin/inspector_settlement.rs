@@ -38,10 +38,14 @@ use revm::{
     Inspector,
 };
 
+#[cfg(debug_assertions)]
+use crate::common::{answered_on_its_shares, first_frame_pools};
 use crate::salt::{
     create_with, crowded_account, db, entry, minimal_envs, salt_context, tx_with_gas, value_call,
     SaltEnvs, CALLER, CONTRACT, EMPTY,
 };
+#[cfg(debug_assertions)]
+use mega_evm::test_utils::{take_start_ledger_divergences, tolerate_start_ledger_divergences};
 
 /// A contract `CONTRACT` calls.
 const CALLEE: Address = address!("0000000000000000000000000000000000c00010");
@@ -125,6 +129,41 @@ where
         .with_inspector(inspector)
         .execute_transaction(tx)
         .expect("a valid transaction")
+}
+
+/// [`inspected`] under `inspector`, which answers start `start`, at `depth`, on the gas its input
+/// carries, the shares of its caller's pools included: an answer with pools the inspector set, an
+/// API removal of the inspector table. A debug build's start ledger, which settles an inspector's
+/// answer at unlimited pools, records where it parts from the fork, and each part is asserted
+/// ([`answered_on_its_shares`]): the caller is the transaction's own frame, or the transaction,
+/// which holds its first frame's pools when the start is made.
+fn answered<I>(
+    db: MemoryDatabase,
+    envs: SaltEnvs,
+    tx: MegaTransaction,
+    inspector: I,
+    (start, depth): (u32, usize),
+) -> MegaTransactionOutcome
+where
+    I: Inspector<MegaContext<MemoryDatabase, SaltEnvs>, EthInterpreter>,
+{
+    let mut evm = MegaEvm::new(salt_context(db, envs)).with_inspector(inspector);
+    #[cfg(debug_assertions)]
+    tolerate_start_ledger_divergences(evm.ctx_mut());
+    let outcome = evm.execute_transaction(tx.clone()).expect("a valid transaction");
+    #[cfg(debug_assertions)]
+    assert_eq!(
+        take_start_ledger_divergences(evm.ctx_mut()),
+        answered_on_its_shares(
+            start,
+            depth,
+            first_frame_pools(&EvmTxRuntimeLimits::default(), &tx)
+        ),
+        "start {start} at depth {depth}"
+    );
+    #[cfg(not(debug_assertions))]
+    let _ = (start, depth);
+    outcome
 }
 
 /// A call from `CALLER` to `to` carrying `value` and `data`, at `gas_limit`.
@@ -377,8 +416,8 @@ fn test_a_value_call_an_inspector_answers_keeps_what_its_opcode_was_charged() {
             [InstructionResult::Stop, InstructionResult::Revert, InstructionResult::OutOfGas]
         {
             let case = format!("answered with {result:?}, gas limit {gas_limit}");
-            let answered =
-                inspected(db(caller()), envs(), tx.clone(), Answers::call(EMPTY, result));
+            let answers = Answers::call(EMPTY, result);
+            let answered = answered(db(caller()), envs(), tx.clone(), answers, (2, 1));
             assert!(answered.result.is_success(), "{case}: {:?}", answered.result);
             assert!(!holds_something(&answered, EMPTY), "{case}: no account");
             assert_bills_as(&case, &answered, &ran);
@@ -401,8 +440,8 @@ fn test_the_transactions_own_value_transfer_an_inspector_answers_keeps_its_charg
 
         for result in [InstructionResult::Stop, InstructionResult::Revert] {
             let case = format!("answered with {result:?}, gas limit {gas_limit}");
-            let answered =
-                inspected(db(Bytes::new()), envs(), tx.clone(), Answers::call(EMPTY, result));
+            let answers = Answers::call(EMPTY, result);
+            let answered = answered(db(Bytes::new()), envs(), tx.clone(), answers, (1, 0));
             assert_eq!(answered.result.is_success(), result.is_ok(), "{case}: the answer");
             assert!(!holds_something(&answered, EMPTY), "{case}: no account");
             assert_bills_as(&case, &answered, &ran);
@@ -436,7 +475,7 @@ fn test_a_creation_an_inspector_answers_keeps_what_its_opcode_was_charged() {
         .map(|(result, address)| {
             let case = format!("answered with {result:?}, gas limit {gas_limit}");
             let answers = Answers::creation(result, address);
-            let answered = inspected(db(caller()), envs(), tx.clone(), answers);
+            let answered = answered(db(caller()), envs(), tx.clone(), answers, (2, 1));
             assert!(answered.result.is_success(), "{case}: {:?}", answered.result);
             assert!(!holds_something(&answered, created), "{case}: no account");
             assert_eq!(answered.state[&CONTRACT].info.nonce, nonce - 1, "{case}: no bump");
@@ -469,7 +508,7 @@ fn test_the_transactions_own_creation_an_inspector_answers_keeps_its_charges() {
         ] {
             let case = format!("answered with {result:?}, gas limit {gas_limit}");
             let answers = Answers::creation(result, address);
-            let answered = inspected(db(Bytes::new()), envs(), tx.clone(), answers);
+            let answered = answered(db(Bytes::new()), envs(), tx.clone(), answers, (1, 0));
             assert_eq!(answered.result.is_success(), result.is_ok(), "{case}: the answer");
             assert!(!holds_something(&answered, created), "{case}: no account");
             assert_bills_as(&case, &answered, &ran);
@@ -540,7 +579,7 @@ fn test_a_retargeted_value_calls_upfront_charge_comes_back_at_the_new_targets_pr
             let case = format!("m {account_m}/{retarget_m}, gas limit {gas_limit}");
             let answer = Some(InstructionResult::Stop);
             let inspector = Retargets { from: EMPTY, code: reverts.clone(), answer };
-            let answered = inspected(db(), envs(), tx.clone(), inspector);
+            let answered = answered(db(), envs(), tx.clone(), inspector, (2, 1));
             assert!(answered.result.is_success(), "{case}: {:?}", answered.result);
             assert_eq!(answered.gas.state, account_m * account, "{case}: answered, kept whole");
 
