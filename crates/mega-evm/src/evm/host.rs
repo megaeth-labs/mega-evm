@@ -67,6 +67,12 @@
 //! destroyed it. A database that answers an empty account for an address it holds none for gives
 //! that leaf back to no destruction: an empty account is a leaf the state holds.
 //!
+//! # The start lifecycle
+//!
+//! The three lifecycle hooks — a start revm opened, one it settled, the lifecycle's end — reach the
+//! inner context in a debug build, whose mirror checks their order over every engine path. A release
+//! build takes the trait's defaults, which do nothing.
+//!
 //! Every other Host method delegates to op-revm's context.
 
 #[cfg(not(feature = "std"))]
@@ -88,6 +94,9 @@ use revm::{
     primitives::{Address, Log, StorageKey, StorageValue, B256, U256},
     Database,
 };
+
+#[cfg(debug_assertions)]
+use revm::context_interface::host::{FrameSettle, FrameSplit, LifecycleEnd};
 
 use crate::{
     charge_write_records_history, history_gas,
@@ -431,6 +440,25 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
         };
         start.charge = StartCharge::new(charge, PoolAmounts::ZERO);
         true
+    }
+
+    /// Hands the inner context the start revm opened, so its debug mirror checks the lifecycle's
+    /// order over the engine.
+    #[cfg(debug_assertions)]
+    fn frame_split(&mut self, split: &FrameSplit) {
+        self.inner.frame_split(split);
+    }
+
+    /// Hands the inner context the start revm settled into `gas`, its caller's.
+    #[cfg(debug_assertions)]
+    fn frame_settle(&mut self, settle: &FrameSettle, gas: &mut GasTracker) {
+        self.inner.frame_settle(settle, gas);
+    }
+
+    /// Hands the inner context the lifecycle's end.
+    #[cfg(debug_assertions)]
+    fn frame_lifecycle_end(&mut self, end: LifecycleEnd) {
+        self.inner.frame_lifecycle_end(end);
     }
 }
 
