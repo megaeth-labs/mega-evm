@@ -590,14 +590,12 @@ impl AdditionalLimit {
                 continue;
             }
             let rise = counted.rise(pool);
-            if rise > 0 {
-                let remaining = gas.pool_remaining(pool);
-                if rise > remaining as i128 {
-                    let spent = gas.pool_spent(pool);
-                    let check = self.budget_crossed(kind, remaining, spent, rise as u64);
-                    if check.exceeded_limit() {
-                        return check;
-                    }
+            let remaining = gas.pool_remaining(pool);
+            if rise > remaining as i128 {
+                let spent = gas.pool_spent(pool);
+                let check = self.budget_crossed(kind, remaining, spent, rise as u64);
+                if check.exceeded_limit() {
+                    return check;
                 }
             }
             let check = self.transaction_crossed(kind, counted, held);
