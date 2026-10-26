@@ -49,6 +49,9 @@ mod schedule;
 #[path = "../shared/snapshot.rs"]
 mod snapshot;
 mod spec_numbers;
+// The start ledger runs in a debug build alone.
+#[cfg(debug_assertions)]
+mod start_ledger;
 mod state;
 mod state_growth;
 mod static_callee;
