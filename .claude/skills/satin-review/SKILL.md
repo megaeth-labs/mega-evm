@@ -69,6 +69,12 @@ Each change is stated here in plain words with its reason; the specification has
   revm's frame run returns an action set on a frame before it runs, without running an instruction or calling the inspector's `step`, and its inspected frame start hands a frame built with one to no `initialize_interp`: a `keylessDeploy` call's creation and answer, and the stop of a caller a child left over a limit, come back through revm's own run.
   The run-result hook (`EvmTr::frame_run_result`) is called once a frame's run returns, before the inspector's `call_end`, `create_end` and `frame_end` and before `frame_return_result`; gas detention turns a crossing into the stop there, so inspectors and tracers see the stop the caller gets.
   Why: both are points in the middle of revm's own loop that mega-evm cannot reach from outside, which is what the fork is for, and with them the engine has no frame run of its own.
+- **A debug build keeps its own ledger of every frame start and checks it against the fork's figures.**
+  The fork carries four figures of a start on the frame's gas: the three pools with their nets and crossings, the part of the reservoir the caller keeps, the start charge and the history allowance.
+  The engine keeps the same four in an entry per start (`src/limit/ledger.rs`), computed by its own rules and driven only by the fork's start lifecycle hooks (`frame_split`, `frame_settle`, `frame_lifecycle_end`), and compares them with the fork's at every settlement, panicking on a difference; every result still reads the fork's figures, and a release build carries none of it.
+  A test of an inspector that answers or rewrites with pools or a start charge it set, or restores a snapshot of a running tracker, records the differences and asserts each, since those figures are accepted to change once the engine reads its own ledger.
+  This was added after #407 merged.
+  Why: the figures are to leave the fork for the engine, and the ledger that will replace them is proved against them, on every engine path, before anything reads it.
 - **Writes and frame starts are metered in the fork's instruction hooks.**
   `SSTORE`, `LOG0`–`LOG4` and `SELFDESTRUCT` call `write_completed` once the write is in the journal and every charge the opcode makes is made.
   The four calls and the two creations call `frame_starting` once the forward is taken: the caller is charged the history of the start's records out of what it kept, and the frame's own part is declared on the start (`FrameStart::charge`) for the fork to refund when the frame fails.
@@ -232,7 +238,7 @@ For each module: where it is, what to check, the spec sections, and the `AGENTS.
 
 ### Limits: data size, KV updates, state growth, the stop
 
-- **Where:** `src/limit/` (the byte table, `LimitKind`, `LimitCheck`, `MegaLimitExceeded` and `EvmTxRuntimeLimits` in `mod.rs`; the write records and the state growth a write and a frame start make in `record.rs`; `AdditionalLimit` in `limit.rs`), `src/block/limit.rs` (`ProtocolLimits::for_spec`, `BlockLimits`, `BlockLimiter`), `src/constants.rs`.
+- **Where:** `src/limit/` (the byte table, `LimitKind`, `LimitCheck`, `MegaLimitExceeded` and `EvmTxRuntimeLimits` in `mod.rs`; the write records and the state growth a write and a frame start make in `record.rs`; `AdditionalLimit` in `limit.rs`; the debug build's start ledger in `ledger.rs`), `src/block/limit.rs` (`ProtocolLimits::for_spec`, `BlockLimits`, `BlockLimiter`), `src/constants.rs`.
 - **Read first:** the module doc of `src/limit/mod.rs` and the doc of `AdditionalLimit` in `src/limit/limit.rs`.
 - **Check:**
   - A count is drawn where it is made, on the pool of the frame that makes it (`AdditionalLimit::draw`), and a failed frame's draws go back with its gas.
@@ -354,6 +360,7 @@ For each module: where it is, what to check, the spec sections, and the `AGENTS.
   - A start an inspector rewrites after its opcode is not charged again: what the opcode charged stands, its declared part coming back only as for any start whose frame keeps nothing (a frame that fails, or a start revm refuses before it bumps a nonce or moves a value), and its records are those revm then made.
   - A pre-block system call runs on the plain system-call path, with no callback.
   - `test_utils::ReadOnlyObserver` checks, in debug builds, that an inspector a test declares an observer writes nothing back: a tripwire for tests, not a proof.
+  - A debug build's start ledger settles an inspector's answer and a replaced tracker at unlimited pools, and gives no start charge back for an answer or a rebuilt outcome; a test whose inspector builds an answer or a result with pools or a charge of its own, or restores a snapshot of a running tracker, records the ledger's differences from the fork and asserts each, and every other test fails on any difference.
 - **Detail:** [`AGENTS.md`, "Contracts of the common execution layer"](../../../AGENTS.md#contracts-of-the-common-execution-layer), the entries on inspectors.
 
 ### Node surface, validation and the stateless witness
