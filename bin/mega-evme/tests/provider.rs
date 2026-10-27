@@ -145,11 +145,18 @@ async fn test_build_provider_with_cache_names_file_from_fetched_chain_id() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_build_provider_invalid_url() {
-    let args = RpcArgs::parse_from(["mega-evme", "--rpc", "not a url", "--rpc.cache-size", "0"]);
+    let args = RpcArgs::parse_from([
+        "mega-evme",
+        "--rpc",
+        "http://bad host/path-secret?key=query-secret",
+        "--rpc.cache-size",
+        "0",
+    ]);
     let err = args.build_provider().await.expect_err("build_provider should fail");
     match err {
         EvmeError::RpcError(msg) => {
-            assert!(msg.contains("not a url"), "error must echo the original input, got: {msg}");
+            assert!(msg.contains("Invalid RPC URL '<redacted RPC URL>'"), "{msg}");
+            assert!(!msg.contains("path-secret") && !msg.contains("query-secret"), "{msg}");
         }
         other => panic!("expected EvmeError::RpcError, got {other:?}"),
     }

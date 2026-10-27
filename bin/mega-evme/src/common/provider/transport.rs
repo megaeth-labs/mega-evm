@@ -20,6 +20,116 @@ use serde::{Deserialize, Serialize};
 
 use crate::common::{EvmeError, Result};
 
+/// HTTP with the same RPC/status handling as alloy's transport, but without URL-bearing
+/// tracing spans or reqwest errors. Endpoint paths and queries commonly hold credentials.
+#[derive(Clone)]
+pub(super) struct RpcHttp {
+    client: alloy_transport_http::reqwest::Client,
+    url: alloy_transport_http::reqwest::Url,
+}
+
+impl std::fmt::Debug for RpcHttp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RpcHttp")
+            .field("origin", &super::display_rpc_url(self.url.as_str()))
+            .finish()
+    }
+}
+
+impl RpcHttp {
+    pub(super) fn new(url: alloy_transport_http::reqwest::Url) -> Self {
+        Self { client: alloy_transport_http::reqwest::Client::new(), url }
+    }
+}
+
+impl tower::Service<RequestPacket> for RpcHttp {
+    type Response = ResponsePacket;
+    type Error = TransportError;
+    type Future = TransportFut<'static>;
+
+    fn poll_ready(
+        &mut self,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::result::Result<(), Self::Error>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, req: RequestPacket) -> Self::Future {
+        let this = self.clone();
+        Box::pin(async move {
+            let response = this
+                .client
+                .post(this.url)
+                .json(&req)
+                .headers(req.headers())
+                .send()
+                .await
+                .map_err(|e| TransportErrorKind::custom(e.without_url()))?;
+            let status = response.status();
+            let body =
+                response.bytes().await.map_err(|e| TransportErrorKind::custom(e.without_url()))?;
+            let parsed = serde_json::from_slice::<ResponsePacket>(&body);
+            if !status.is_success() && !parsed.as_ref().is_ok_and(ResponsePacket::is_error) {
+                return Err(TransportErrorKind::http_error(
+                    status.as_u16(),
+                    "<redacted HTTP response body>".to_string(),
+                ));
+            }
+            let mut parsed = parsed.map_err(|error| {
+                TransportError::deser_err(
+                    // A serde error can quote an offending JSON string, including its URL.
+                    serde_json::Error::io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!(
+                            "invalid RPC response at line {}, column {}",
+                            error.line(),
+                            error.column()
+                        ),
+                    )),
+                    "<redacted HTTP response body>",
+                )
+            })?;
+            // Preserve successful results verbatim; only errors are displayed as diagnostics.
+            match &mut parsed {
+                ResponsePacket::Single(response) => redact_error(response),
+                ResponsePacket::Batch(responses) => responses.iter_mut().for_each(redact_error),
+            }
+            Ok(parsed)
+        })
+    }
+}
+
+fn redact_error(response: &mut alloy_json_rpc::Response) {
+    if let alloy_json_rpc::ResponsePayload::Failure(error) = &mut response.payload {
+        error.message = super::redact_rpc_urls_in_text(&error.message).into();
+        if let Some(data) = error.data.take() {
+            // RawValue accepts values (large numbers or deep nesting) Value cannot represent.
+            // Omit data we cannot inspect, rather than panic or echo it without redaction.
+            if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(data.get()) {
+                redact_error_data(&mut value);
+                error.data = serde_json::value::to_raw_value(&value).ok();
+            }
+        }
+    }
+}
+
+fn redact_error_data(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::String(text) => *text = super::redact_rpc_urls_in_text(text),
+        serde_json::Value::Array(values) => values.iter_mut().for_each(redact_error_data),
+        serde_json::Value::Object(values) => {
+            *values = std::mem::take(values)
+                .into_iter()
+                .map(|(key, mut value)| {
+                    redact_error_data(&mut value);
+                    (super::redact_rpc_urls_in_text(&key), value)
+                })
+                .collect();
+        }
+        _ => {}
+    }
+}
+
 /// A single entry in the transport-level cache.
 #[derive(Debug, Serialize, Deserialize)]
 struct TransportCacheEntry {
@@ -263,6 +373,27 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+
+    #[test]
+    fn test_rpc_error_data_that_cannot_be_inspected_is_omitted() {
+        for data in ["1e400".to_string(), format!("{}0{}", "[".repeat(200), "]".repeat(200))] {
+            let mut response = alloy_json_rpc::Response {
+                id: alloy_json_rpc::Id::Number(0),
+                payload: alloy_json_rpc::ResponsePayload::Failure(alloy_json_rpc::ErrorPayload {
+                    code: -32603,
+                    message: "upstream error".into(),
+                    data: Some(serde_json::value::RawValue::from_string(data).unwrap()),
+                }),
+            };
+            redact_error(&mut response);
+            let alloy_json_rpc::ResponsePayload::Failure(error) = response.payload else {
+                panic!("error")
+            };
+            assert_eq!(error.code, -32603);
+            assert_eq!(error.message, "upstream error");
+            assert!(error.data.is_none());
+        }
+    }
 
     /// The replay transport is always ready.
     /// Single-request cache misses return a descriptive Custom error (safe because

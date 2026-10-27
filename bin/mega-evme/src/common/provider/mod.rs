@@ -35,7 +35,7 @@ use tracing::{debug, info, warn};
 pub use self::cache_store::{ExternalEnvSnapshot, RpcCacheStore};
 use self::{
     cache_store::CacheFileEnvelope,
-    transport::{CachingTransport, ReplayTransport, TransportCache},
+    transport::{CachingTransport, ReplayTransport, RpcHttp, TransportCache},
 };
 use super::{EvmeError, Result};
 
@@ -166,7 +166,7 @@ impl RpcArgs {
             }
             let provider = build_bare_op_provider(self.build_retry_client(url));
             info!(
-                rpc_url = %redact_rpc_url(rpc_url_str),
+                rpc_url = %display_rpc_url(rpc_url_str),
                 max_retries = self.max_retries,
                 backoff_ms = self.backoff_ms,
                 "Built RPC provider (cache disabled)",
@@ -226,7 +226,7 @@ impl RpcArgs {
             .connect_client(client);
 
         info!(
-            rpc_url = %redact_rpc_url(rpc_url_str),
+            rpc_url = %display_rpc_url(rpc_url_str),
             cache_size = self.cache_size,
             max_retries = self.max_retries,
             backoff_ms = self.backoff_ms,
@@ -338,7 +338,7 @@ impl RpcArgs {
         // envelope first, a stale eth_chainId entry would short-circuit the
         // cross-chain validation.
         let transport_cache = TransportCache::new();
-        let http = alloy_transport_http::Http::new(url.clone());
+        let http = RpcHttp::new(url.clone());
         let caching = CachingTransport::new(http, transport_cache.clone());
         let client = self.build_client(caching, &url);
         let provider = ProviderBuilder::new()
@@ -350,7 +350,7 @@ impl RpcArgs {
         let chain_id = provider.get_chain_id().await.map_err(|e| {
             EvmeError::RpcError(format!(
                 "Failed to fetch chain ID from '{}': {e}",
-                redact_rpc_url(rpc_url_str)
+                display_rpc_url(rpc_url_str)
             ))
         })?;
 
@@ -372,7 +372,7 @@ impl RpcArgs {
         }
 
         info!(
-            rpc_url = %redact_rpc_url(rpc_url_str),
+            rpc_url = %display_rpc_url(rpc_url_str),
             path = %path.display(),
             chain_id,
             "Built RPC provider (capture to cache file)",
@@ -390,7 +390,7 @@ impl RpcArgs {
 
     /// Build an `RpcClient` over HTTP, wired with the configured retry layer.
     fn build_retry_client(&self, url: alloy_transport_http::reqwest::Url) -> RpcClient {
-        self.build_client(alloy_transport_http::Http::new(url.clone()), &url)
+        self.build_client(RpcHttp::new(url.clone()), &url)
     }
 
     /// Build an `RpcClient` over an arbitrary transport, wired with the configured
@@ -422,7 +422,7 @@ impl RpcArgs {
     /// Resolve the chain ID by issuing `eth_chainId` against a throwaway
     /// cache-less provider using the configured retry policy.
     async fn resolve_chain_id(&self, url: alloy_transport_http::reqwest::Url) -> Result<u64> {
-        let url_str = redact_rpc_url(url.as_str());
+        let url_str = display_rpc_url(url.as_str());
         let bare = build_bare_op_provider(self.build_retry_client(url));
         bare.get_chain_id().await.map_err(|e| {
             EvmeError::RpcError(format!("Failed to fetch chain ID from '{}': {e}", url_str))
@@ -461,7 +461,7 @@ fn build_bare_op_provider(client: RpcClient) -> OpProvider {
     )
 }
 
-/// The URL with any userinfo removed, for a log line, an error, or a cache file name.
+/// The normalized endpoint identity used for cache file names, with any userinfo removed.
 ///
 /// Userinfo is the part of the authority before its last `@`, as the URL standard reads it, so a
 /// password holding an `@` goes whole. It is removed from the text itself, so it holds for a URL
@@ -484,16 +484,47 @@ fn normalized(raw: &str) -> String {
         .map_or_else(|_| raw.to_string(), |u| u.to_string())
 }
 
+/// The public origin of an RPC URL, without userinfo, path, query or fragment.
+///
+/// This is for logs and errors only: cache keys keep the whole endpoint identity through
+/// `redact_rpc_url`. An unparseable URL is hidden whole rather than guessed at.
+pub(crate) fn display_rpc_url(raw: &str) -> String {
+    raw.parse::<alloy_transport_http::reqwest::Url>()
+        .ok()
+        .filter(|url| url.host_str().is_some())
+        .map_or_else(|| "<redacted RPC URL>".to_string(), |url| url.origin().ascii_serialization())
+}
+
+/// Redacts URLs echoed by RPC errors, without changing successful RPC results.
+fn redact_rpc_urls_in_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(colon) = rest.find("://") {
+        let start = rest[..colon]
+            .rfind(|c: char| !c.is_ascii_alphanumeric() && !matches!(c, '+' | '-' | '.'))
+            .map_or(0, |at| at + rest[at..].chars().next().expect("a character").len_utf8());
+        // Punctuation can be part of a credential-bearing path or query. Consume the whole
+        // non-whitespace token, including surrounding punctuation if present, to fail closed.
+        let end =
+            rest[colon + 3..].find(char::is_whitespace).map_or(rest.len(), |at| colon + 3 + at);
+        out.push_str(&rest[..start]);
+        out.push_str(&display_rpc_url(&rest[start..end]));
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Parses `--rpc`. The transport speaks HTTP, so any other scheme is refused here, before the URL
 /// reaches a library whose error text would repeat it whole.
 fn parse_rpc_url(raw: &str) -> Result<alloy_transport_http::reqwest::Url> {
     let url: alloy_transport_http::reqwest::Url = raw.parse().map_err(|e| {
-        EvmeError::RpcError(format!("Invalid RPC URL '{}': {e}", redact_rpc_url(raw)))
+        EvmeError::RpcError(format!("Invalid RPC URL '{}': {e}", display_rpc_url(raw)))
     })?;
     if !matches!(url.scheme(), "http" | "https") {
         return Err(EvmeError::InvalidInput(format!(
             "Invalid RPC URL '{}': it has to start with http:// or https://",
-            redact_rpc_url(raw)
+            display_rpc_url(raw)
         )));
     }
     Ok(url)
@@ -554,6 +585,55 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+
+    #[test]
+    fn test_display_rpc_url_hides_every_credential_location() {
+        for url in [
+            "https://alice:secret@rpc.example:8443/v2/path-secret?key=query-secret#fragment-secret",
+            "https://rpc.example:8443/another-secret",
+        ] {
+            assert_eq!(display_rpc_url(url), "https://rpc.example:8443");
+        }
+        for url in ["alice:secret@rpc.example/path-secret", "http://bad host/path-secret"] {
+            assert_eq!(display_rpc_url(url), "<redacted RPC URL>");
+        }
+    }
+
+    #[test]
+    fn test_display_redaction_does_not_merge_cache_endpoints() {
+        let first = "https://rpc.example/key-one?key=one";
+        assert_eq!(rpc_cache_file_name(4326, first), "rpc-cache-4326-4b33965d.json");
+        assert_eq!(display_rpc_url(first), display_rpc_url("https://rpc.example/key-two?key=two"));
+        assert_ne!(
+            rpc_cache_file_name(4326, first),
+            rpc_cache_file_name(4326, "https://rpc.example/key-two?key=one")
+        );
+        assert_ne!(
+            rpc_cache_file_name(4326, first),
+            rpc_cache_file_name(4326, "https://rpc.example/key-one?key=two")
+        );
+        assert_eq!(
+            rpc_cache_file_name(4326, "http://example.com/rpc"),
+            "rpc-cache-4326-e2afa302.json"
+        );
+    }
+
+    #[test]
+    fn test_urls_echoed_in_error_text_are_redacted_through_punctuation() {
+        for text in [
+            "request failed for https://rpc.example/v2/(secret-key)",
+            "request failed for https://rpc.example/v2/key'with'apostrophes?key=secret-key",
+            "request failed for https://rpc.example/v2/%28secret-key%29?key=secret-key",
+            "{\"url\":\"https://rpc.example/v2/secret-key\"}",
+        ] {
+            let safe = redact_rpc_urls_in_text(text);
+            assert!(!safe.contains("secret-key"), "{safe}");
+            assert!(
+                safe.starts_with("request failed for ") || safe.starts_with("{\"url\":\""),
+                "{safe}"
+            );
+        }
+    }
 
     /// Explicit `--rpc.cache-dir` is used verbatim. The file names the chain and a hash of the
     /// endpoint, and the hash does not change when only the userinfo does.
