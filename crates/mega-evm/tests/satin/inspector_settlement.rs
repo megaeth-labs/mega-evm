@@ -1146,22 +1146,22 @@ fn test_a_refused_creation_holds_an_empty_pool_to_nothing() {
 
 /* ---------- a halt an inspector returns more reservoir from ---------- */
 
-/// How an inspector hands back more reservoir than a frame inherited, in the shapes revm settles
-/// as given.
+/// Where an inspector puts the extra reservoir it hands back from a frame, in the shapes revm
+/// settles as given.
 #[derive(Clone, Copy, Debug)]
 enum MoreReservoir {
     /// `call` adds one to the input's reservoir, which the frame starts with and, halting, gives
     /// back.
-    OnTheInput,
+    Input,
     /// `call_end` adds one to the result's reservoir, in place.
-    OnTheResult,
+    ResultInPlace,
     /// `call_end` puts a tracker built with a constructor in the result's place: spent, with one
     /// more reservoir than the result's.
-    OnABuiltTracker,
+    BuiltTracker,
 }
 
 impl MoreReservoir {
-    const ALL: [Self; 3] = [Self::OnTheInput, Self::OnTheResult, Self::OnABuiltTracker];
+    const ALL: [Self; 3] = [Self::Input, Self::ResultInPlace, Self::BuiltTracker];
 }
 
 /// Requires `handed` — `ran` with an inspector handing back one more reservoir than a frame
@@ -1188,7 +1188,7 @@ struct AddsReservoir {
 
 impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for AddsReservoir {
     fn call(&mut self, _: &mut CTX, inputs: &mut CallInputs) -> Option<CallOutcome> {
-        if inputs.target_address == self.target && matches!(self.how, MoreReservoir::OnTheInput) {
+        if inputs.target_address == self.target && matches!(self.how, MoreReservoir::Input) {
             inputs.reservoir += 1;
         }
         None
@@ -1200,9 +1200,9 @@ impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for AddsReservoir {
         }
         let gas = &mut outcome.result.gas;
         match self.how {
-            MoreReservoir::OnTheInput => {}
-            MoreReservoir::OnTheResult => gas.set_reservoir(gas.reservoir() + 1),
-            MoreReservoir::OnABuiltTracker => {
+            MoreReservoir::Input => {}
+            MoreReservoir::ResultInPlace => gas.set_reservoir(gas.reservoir() + 1),
+            MoreReservoir::BuiltTracker => {
                 *gas = Gas::new_spent_with_reservoir(gas.limit(), gas.reservoir() + 1);
             }
         }
