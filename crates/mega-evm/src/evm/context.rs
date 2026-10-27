@@ -152,6 +152,12 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     ///   exemption: every transaction runs `cfg`'s schedule.
     /// - A system call's gas is not split: its whole gas limit is regular gas, as revm's own runner
     ///   has it.
+    /// - A frame start forwards the whole of its caller's EIP-8037 reservoir and of each of its
+    ///   data-size, KV-update and state-growth budgets, as Ethereum forwards the reservoir,
+    ///   whatever schedule `cfg` carries: the share a caller keeps is the engine's, not the
+    ///   schedule's, and the neutral configuration keeps none (`MegaContext::frame_kept_percent`).
+    ///   A value call's frame gets no history allowance, which no transaction draws here anyway,
+    ///   none paying history.
     /// - SALT pricing needs nothing here: without a SALT environment every bucket is minimal, and
     ///   the multiplier is one.
     /// - Gas detention is not part of the configuration: its caps are runtime limits, which the
