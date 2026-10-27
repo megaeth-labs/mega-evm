@@ -184,7 +184,7 @@ mod ledger;
 mod limit;
 mod record;
 
-pub(crate) use ledger::{reservoir_share, Parked, ProviderDraw, StartLedger};
+pub(crate) use ledger::{reservoir_share, Parked, StartLedger};
 #[cfg(any(test, feature = "test-utils"))]
 pub use ledger::{LedgerPools, LedgerSettlement};
 pub use limit::AdditionalLimit;

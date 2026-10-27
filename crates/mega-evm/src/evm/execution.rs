@@ -26,10 +26,7 @@ use revm::{
         ContextError, ContextTr, FrameStack, Journal, JournalTr, Transaction,
     },
     context_interface::{
-        cfg::{
-            gas::{GasTracker, PoolId},
-            GasId, StateGasCharge, StateGasSite,
-        },
+        cfg::{gas::GasTracker, GasId, StateGasCharge, StateGasSite},
         journaled_state::{entry::JournalEntry, JournalCheckpoint},
         Host, LocalContextTr,
     },
@@ -691,7 +688,6 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
             return Ok(ItemOrResult::Item(self.inner.frame_stack.get()));
         };
         debug_assert!(!keyless, "revm builds a keylessDeploy call's frame");
-        adopt_provider_draws(ctx, &result);
         if let PrecompileHold::Clamped(withheld) = hold {
             Detention::restore_forward(result.interpreter_result_mut(), withheld);
         }
@@ -1207,32 +1203,6 @@ fn take_back_a_stopped_answer<DB: Database, ExtEnvs: ExternalEnvTypes>(
     }
 }
 
-/// Has the start ledger adopt what a precompile's provider drew on the pools of `answer`, revm's
-/// answer to the start on top. A start revm refused, or answered without a provider, drew nothing.
-///
-/// The fork adopts the provider's draws before the engine sees the answer, so they are read back
-/// off the answer's gas: each pool's net, and, for a pool whose crossing the adoption set, that
-/// the provider drew past the share, which the adoption capped its net at. The engine's provider
-/// draws no pool, so the draws are none.
-///
-/// It runs before the start's records are counted on the answer: the adoption replaces the
-/// entry's pools.
-#[inline]
-fn adopt_provider_draws<DB: Database, ExtEnvs: ExternalEnvTypes>(
-    ctx: &mut MegaContext<DB, ExtEnvs>,
-    answer: &FrameResult,
-) {
-    let FrameResult::Call(outcome) = answer else { return };
-    if outcome.was_precompile_called {
-        let gas = outcome.result.gas.tracker();
-        let draws = PoolId::ALL.map(|pool| crate::limit::ProviderDraw {
-            net: gas.pool_spent(pool),
-            past_a_share: gas.pool_crossing(pool),
-        });
-        ctx.additional_limit.ledger_mut().adopt_provider_draws(draws);
-    }
-}
-
 /// Whether revm's start of the frame `input` asks for leaves the accounts it starts on as the
 /// transaction held them and journals no transfer log, so that reading them before and after the
 /// start ([`FrameStart::of`], [`FrameStart::count`]) would find no write record, no new account and
@@ -1695,7 +1665,7 @@ mod tests {
         context_interface::journaled_state::account::JournaledAccountTr,
         interpreter::{
             gas::WithheldCrossing, CallInput, CallInputs, CallValue, CreateInputs, CreateScheme,
-            PoolAmounts, SharedMemory,
+            PoolAmounts, PoolId, SharedMemory,
         },
     };
     use std::boxed::Box;
@@ -2230,49 +2200,6 @@ mod tests {
                     assert_eq!(held, (inputs.pool_shares, caller_pools), "{case}");
                 }
             }
-        }
-    }
-
-    /// A precompile's draws reach the start ledger as the provider made them on its answer's gas:
-    /// a draw within the ledger's share as its net, and a draw past it, capped at the share. revm
-    /// adopts the draws on the answer's gas first, at the shares the input carries, which revm
-    /// forwards whole; when a share the input carries capped them — an inspector set the caller's
-    /// pools — the pool's crossing says the provider drew past a share, which the ledger adopts as
-    /// a draw past its own. Share 10 and a draw of 11 included.
-    #[test]
-    fn test_a_precompiles_draws_reach_the_start_ledger_as_the_provider_made_them() {
-        use crate::limit::{Parked, DATA_SIZE_POOL};
-        use revm::interpreter::CallOutcome;
-        let shares = PoolAmounts::UNLIMITED.with(DATA_SIZE_POOL, 10);
-        for (input_shares, drawn, expected) in [
-            (PoolAmounts::UNLIMITED, 0_i64, (10, 0)),
-            (PoolAmounts::UNLIMITED, 4, (6, 4)),
-            (PoolAmounts::UNLIMITED, 10, (0, 10)),
-            (PoolAmounts::UNLIMITED, 11, (0, 10)),
-            (PoolAmounts::UNLIMITED, 25, (0, 10)),
-            (PoolAmounts::UNLIMITED, -3, (13, -3)),
-            (shares, 11, (0, 10)),
-            (PoolAmounts::UNLIMITED.with(DATA_SIZE_POOL, 3), 4, (0, 10)),
-        ] {
-            let case = format!("{input_shares:?}, drawn {drawn}");
-            let mut ctx = MegaContext::new(MemoryDatabase::default(), MegaSpecId::SATIN);
-            let ledger = ctx.additional_limit.ledger_mut();
-            ledger.park_transaction(Some(Parked::transaction(shares, 0)));
-            ledger.split(1, None, 0);
-            ledger.park(0, 0, 0);
-            ledger.split(2, Some(1), 1);
-
-            let mut gas = Gas::new(100_000);
-            gas.tracker_mut().set_pool_spent(DATA_SIZE_POOL, drawn);
-            gas.tracker_mut().adopt_pool_shares(input_shares);
-            let mut answer = CallOutcome::new(
-                InterpreterResult::new(InstructionResult::Return, Bytes::new(), gas),
-                0..0,
-            );
-            answer.was_precompile_called = true;
-            adopt_provider_draws(&mut ctx, &FrameResult::Call(answer));
-            let pools = ctx.additional_limit.ledger().top_pools();
-            assert_eq!(pools[DATA_SIZE_POOL.index()], expected, "{case}");
         }
     }
 

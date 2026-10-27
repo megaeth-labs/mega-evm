@@ -97,7 +97,12 @@ const UNPARKED: Parked = Parked { shares: PoolAmounts::ZERO, charge: 0, allowanc
 
 /// What a precompile's provider drew on one pool of its answer: its signed `net` draw, and whether
 /// it drew past a share it was held to, which the net alone cannot tell once that share capped it.
+///
+/// No provider the engine runs draws a pool, so nothing but the ledger's tests builds one; a
+/// provider that draws hands its draws to the ledger's adoption
+/// ([`adopt_provider_draws`](StartLedger::adopt_provider_draws)) when it answers.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct ProviderDraw {
     /// The net draw.
     pub(crate) net: i64,
@@ -446,6 +451,10 @@ impl StartLedger {
     /// The adoption replaces the entry's pools with the share less the provider's draw, so it runs
     /// before anything else is drawn on the answer: the start's own records, which the frame start
     /// counts on the answer once it was adopted, would otherwise be overwritten.
+    ///
+    /// No provider the engine runs draws a pool, so nothing calls it but the ledger's tests: it is
+    /// the rule a provider that draws on its answer is adopted by.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn adopt_provider_draws(&mut self, draws: [ProviderDraw; PoolId::COUNT]) {
         let Some(entry) = self.entries.last_mut() else { return };
         for pool in PoolId::ALL {
