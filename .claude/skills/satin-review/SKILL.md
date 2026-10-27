@@ -73,7 +73,6 @@ Each change is stated here in plain words with its reason; the specification has
   The fork carries four figures of a start on the frame's gas: the three pools with their nets and crossings, the part of the reservoir the caller keeps, the start charge and the history allowance.
   The engine keeps the same four in an entry per start (`src/limit/ledger.rs`), computed by its own rules and driven only by the fork's start lifecycle hooks (`frame_split`, `frame_settle`, `frame_lifecycle_end`), and compares them with the fork's at every settlement, panicking on a difference; every result still reads the fork's figures, and a release build carries none of it.
   A test of an inspector that answers or rewrites with pools or a start charge it set, or restores a snapshot of a running tracker, records the differences and asserts each, since those figures are accepted to change once the engine reads its own ledger.
-  This was added after #407 merged.
   Why: the figures are to leave the fork for the engine, and the ledger that will replace them is proved against them, on every engine path, before anything reads it.
 - **Writes and frame starts are metered in the fork's instruction hooks.**
   `SSTORE`, `LOG0`–`LOG4` and `SELFDESTRUCT` call `write_completed` once the write is in the journal and every charge the opcode makes is made.
