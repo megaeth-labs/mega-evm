@@ -125,7 +125,7 @@ pub(crate) type MegaInnerEvm<DB, INSP, ExtEnvs> = revm::context::Evm<
 /// # Reuse after an error
 ///
 /// A call that fails with an error — a read the database could not serve, a transaction
-/// validation refuses — leaves nothing of itself in the EVM, whichever entry point ran it: the
+/// validation refuses — leaves nothing the next call depends on, whichever entry point ran it: the
 /// handler's fatal cleanup ([`MegaHandler`]'s `catch_error`) drops the error a load recorded and
 /// nothing took, takes back the call's journal transaction — its nonce bump and fee, and the writes
 /// of its frames, those that completed before the error included — and clears the per-transaction
@@ -134,12 +134,14 @@ pub(crate) type MegaInnerEvm<DB, INSP, ExtEnvs> = revm::context::Evm<
 /// fresh EVM over the same database.
 ///
 /// Every entry point that takes the state off the journal on a success does so on an error too:
-/// [`execute_transaction`](Self::execute_transaction), `transact`, `transact_many`, `replay`, the
-/// `inspect` methods, the `_commit` variants, the system calls that return state, alloy-evm's
-/// methods and the pre-block calls. The `_one` entry points leave the journal to the caller on both
-/// outcomes, so the calls before a failed one stay in it for the caller to finalize, and none of
-/// the failed call's writes do. A failed deposit is a result, not an error: its nonce bump and mint
-/// stay.
+/// [`execute_transaction`](Self::execute_transaction), `transact`, `replay`, the `inspect` methods,
+/// the `_commit` variants, the system calls that return state, alloy-evm's methods and the
+/// pre-block calls; `transact_many`, which leaves a success's state in the journal, finalizes it
+/// on an error. The `_one` entry points leave the journal to the caller on both outcomes, so the
+/// calls before a failed one stay in it for the caller to finalize and none of the failed call's
+/// writes do; what the failed call loaded stays as untouched entries, which a later transaction
+/// takes up afresh, as it does what an earlier one loaded. A failed deposit is a result, not an
+/// error: its nonce bump and mint stay.
 ///
 /// A caller of the handler's `run_without_catch_error` that drops an error makes the same cleanup
 /// first, through `catch_error`. A panic unwinds past the cleanup: an EVM a panic unwound out of is
@@ -436,8 +438,8 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> SystemCallEvm for MegaEvm<DB
     }
 
     /// Runs a system call and finalizes the journal whether or not it succeeded (see
-    /// [`MegaEvm`] on the entry points and the journal). The trait's own returns before it
-    /// finalizes on an error.
+    /// [`MegaEvm`] on the entry points and the journal). The trait's provided method returns
+    /// before it finalizes on an error.
     fn system_call_with_caller(
         &mut self,
         caller: Address,

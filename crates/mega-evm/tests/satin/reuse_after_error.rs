@@ -57,6 +57,8 @@ const READS_BENEFICIARY: Address = address!("0000000000000000000000000000000000e
 const WRITES: Address = address!("0000000000000000000000000000000000e10007");
 const BENEFICIARY: Address = address!("0000000000000000000000000000000000e1bef0");
 const GAS_LIMIT: u64 = 100_000_000;
+/// What each sender holds before the test.
+const FUNDS: u128 = 10u128.pow(18);
 
 /// A block whose beneficiary is [`BENEFICIARY`].
 fn block_with_beneficiary() -> BlockEnv {
@@ -77,15 +79,15 @@ fn writer() -> Bytes {
 fn database() -> MemoryDatabase {
     let child = BytecodeBuilder::default().push_number(1_u64).append(SLOAD).append(POP).stop();
     MemoryDatabase::default()
-        .account_balance(SENDER, U256::from(10u64.pow(18)))
-        .account_balance(EARLIER_SENDER, U256::from(10u64.pow(18)))
+        .account_balance(SENDER, U256::from(FUNDS))
+        .account_balance(EARLIER_SENDER, U256::from(FUNDS))
         .account_code(WRITER, writer())
         .account_code(CHILD, child.build())
         .account_code(KEPT, BytecodeBuilder::default().sstore(U256::ZERO, U256::ONE).stop().build())
 }
 
 /// A Satin EVM over `db`, in a block whose beneficiary is [`BENEFICIARY`].
-fn evm(db: ErrorInjectingDatabase) -> Evm {
+fn evm_over(db: ErrorInjectingDatabase) -> Evm {
     MegaEvm::new(context(db).with_block(block_with_beneficiary()))
 }
 
@@ -116,7 +118,7 @@ fn test_an_error_post_execution_preempts_does_not_fail_the_next_transaction() {
         let db = || database().account_code(READS, reads.clone());
         let mut armed = ErrorInjectingDatabase::new(db());
         armed.fail_on_account = Some(account);
-        let mut evm = evm(armed);
+        let mut evm = evm_over(armed);
 
         let error = evm
             .execute_transaction(call(SENDER, READS, U256::ZERO, GAS_LIMIT))
@@ -127,7 +129,7 @@ fn test_an_error_post_execution_preempts_does_not_fail_the_next_transaction() {
         evm.ctx_mut().db_mut().fail_on_account = None;
         let next = call(SENDER, KEPT, U256::ZERO, GAS_LIMIT);
         let reused = evm.execute_transaction(next.clone()).expect("the next transaction is valid");
-        let fresh = self::evm(ErrorInjectingDatabase::new(db()))
+        let fresh = evm_over(ErrorInjectingDatabase::new(db()))
             .execute_transaction(next)
             .expect("the next transaction is valid");
         assert!(fresh.result.is_success(), "{row}: {:?}", fresh.result);
@@ -143,7 +145,7 @@ fn test_an_error_post_execution_preempts_does_not_fail_the_next_transaction() {
 fn test_a_failed_transact_one_keeps_the_transaction_before_it_and_none_of_its_own_writes() {
     let mut db = ErrorInjectingDatabase::new(database());
     db.fail_on_storage = Some((CHILD, U256::ONE));
-    let mut evm = evm(db);
+    let mut evm = evm_over(db);
     let earlier = evm
         .transact_one(call(EARLIER_SENDER, KEPT, U256::ZERO, GAS_LIMIT))
         .expect("the earlier transaction is valid");
@@ -158,7 +160,7 @@ fn test_a_failed_transact_one_keeps_the_transaction_before_it_and_none_of_its_ow
     let sender = &state[&SENDER];
     assert_eq!(
         (sender.info.nonce, sender.info.balance),
-        (0, U256::from(10u64.pow(18))),
+        (0, U256::from(FUNDS)),
         "the failed transaction's nonce bump and fee"
     );
     assert!(!sender.is_touched(), "the failed transaction's sender is touched by nothing kept");
@@ -176,7 +178,7 @@ fn test_a_failed_transact_one_keeps_the_transaction_before_it_and_none_of_its_ow
 fn test_a_failed_deposit_through_transact_one_keeps_its_nonce_bump_and_mint() {
     const MINT: u128 = 7;
     let limits = EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(TX_BODY_SIZE - 1);
-    let mut evm = evm(ErrorInjectingDatabase::new(database())).with_tx_runtime_limits(limits);
+    let mut evm = evm_over(ErrorInjectingDatabase::new(database())).with_tx_runtime_limits(limits);
     let result =
         evm.transact_one(over_the_limit_deposit(SENDER, MINT)).expect("the deposit is included");
     assert!(
@@ -186,7 +188,7 @@ fn test_a_failed_deposit_through_transact_one_keeps_its_nonce_bump_and_mint() {
     let state = evm.finalize();
     let sender = &state[&SENDER].info;
     assert_eq!(sender.nonce, 1, "the failed deposit's nonce bump");
-    assert_eq!(sender.balance, U256::from(10u64.pow(18)) + U256::from(MINT), "its mint");
+    assert_eq!(sender.balance, U256::from(FUNDS + MINT), "its mint");
 }
 
 /// A deposit from `sender` minting `mint`, whose body is over a data-size limit of one byte below
@@ -218,7 +220,7 @@ fn test_an_error_in_the_failed_deposit_recovery_leaves_the_evm_clean() {
     let limits = EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(TX_BODY_SIZE - 1);
     let mut db = ErrorInjectingDatabase::new(database());
     db.fail_on_account = Some(SENDER);
-    let mut evm = evm(db).with_tx_runtime_limits(limits);
+    let mut evm = evm_over(db).with_tx_runtime_limits(limits);
     evm.ctx_mut().chain_mut().tx_l1_cost = Some(U256::from(1_000));
     evm.ctx_mut().local_mut().shared_memory_buffer().borrow_mut().resize(64, 0xff);
     evm.ctx_mut().local_mut().set_precompile_error_context("left behind".into());
@@ -245,7 +247,7 @@ fn test_an_error_in_the_failed_deposit_recovery_leaves_the_evm_clean() {
     evm.set_tx_runtime_limits(EvmTxRuntimeLimits::default());
     let next = call(SENDER, KEPT, U256::ZERO, GAS_LIMIT);
     let reused = evm.execute_transaction(next.clone()).expect("the next transaction is valid");
-    let fresh = self::evm(ErrorInjectingDatabase::new(database()))
+    let fresh = evm_over(ErrorInjectingDatabase::new(database()))
         .execute_transaction(next)
         .expect("the next transaction is valid");
     assert_same_outcome(&reused, &fresh, "after the recovery's error");
@@ -269,7 +271,7 @@ fn table_database() -> MemoryDatabase {
 
 /// An EVM over `db` for the entry-point table, with inspection enabled when `inspect`.
 fn table_evm(db: ErrorInjectingDatabase, inspect: bool) -> Evm {
-    let evm = evm(db);
+    let evm = evm_over(db);
     if inspect {
         evm.with_inspector(NoOpInspector)
     } else {
@@ -305,20 +307,28 @@ impl Site {
         }
     }
 
-    /// Makes `db` fail the read the site's call fails on, or serve it again.
-    fn arm(self, db: &mut ErrorInjectingDatabase, armed: bool) {
+    /// Makes `db` fail the read the site's call fails on.
+    const fn arm(self, db: &mut ErrorInjectingDatabase) {
         match self {
-            Self::Nested => db.fail_on_storage = armed.then_some((CHILD, U256::ONE)),
-            Self::Preempted => db.fail_on_account = armed.then_some(BENEFICIARY),
-            Self::PostExecution => db.fail_on_account = armed.then_some(BASE_FEE_RECIPIENT),
+            Self::Nested => db.fail_on_storage = Some((CHILD, U256::ONE)),
+            Self::Preempted => db.fail_on_account = Some(BENEFICIARY),
+            Self::PostExecution => db.fail_on_account = Some(BASE_FEE_RECIPIENT),
         }
+    }
+
+    /// Makes `db` serve every read again.
+    const fn disarm(db: &mut ErrorInjectingDatabase) {
+        db.fail_on_storage = None;
+        db.fail_on_account = None;
     }
 }
 
 /// Every public way to run a transaction or a system call on a `MegaEvm`: the inherent method,
 /// the required and provided methods of every execution trait it implements, revm's and
-/// alloy-evm's, and the pre-block calls. The deprecated aliases are still callable and route
-/// through the provided methods.
+/// alloy-evm's `Evm`, and the pre-block calls. The deprecated aliases are still callable and route
+/// through the provided methods. alloy-evm's `EvmExt` replays compose `transact` and
+/// `transact_commit`, which are rows. [`EntryPoint::kind`] classifies every variant without a
+/// wildcard, so a new variant does not compile until it is classified; it runs once `ALL` lists it.
 #[derive(Clone, Copy, Debug)]
 enum EntryPoint {
     ExecuteTransaction,
@@ -403,50 +413,59 @@ impl EntryPoint {
         Self::InspectOneSystemCallWithInspectorAndCaller,
     ];
 
-    /// Whether the entry point takes the state off the journal, on a success and on an error. The
-    /// `_one` ones leave it to the caller on both, so several calls can share one journal.
-    const fn finalizes(self) -> bool {
-        !matches!(
-            self,
-            Self::TransactOne |
-                Self::InspectOneTx |
-                Self::InspectOne |
-                Self::SystemCallOne |
-                Self::SystemCallOneWithCaller |
-                Self::DeprecatedTransactSystemCall |
-                Self::DeprecatedTransactSystemCallWithCaller |
-                Self::InspectOneSystemCall |
-                Self::InspectOneSystemCallWithCaller |
-                Self::InspectOneSystemCallWithInspector |
-                Self::InspectOneSystemCallWithInspectorAndCaller
-        )
+    /// Whether the entry point takes the state off the journal on an error, and whether it runs a
+    /// system call rather than a transaction. The `_one` entry points leave the journal to the
+    /// caller on both outcomes, so several calls can share one journal; `transact_many` takes it
+    /// off on an error only, leaving a success's state to the caller as they do.
+    const fn kind(self) -> (bool, bool) {
+        match self {
+            Self::ExecuteTransaction |
+            Self::Transact |
+            Self::TransactMany |
+            Self::TransactManyFinalize |
+            Self::Replay |
+            Self::TransactCommit |
+            Self::TransactManyCommit |
+            Self::ReplayCommit |
+            Self::InspectTx |
+            Self::Inspect |
+            Self::InspectTxCommit |
+            Self::InspectCommit |
+            Self::AlloyTransact |
+            Self::AlloyTransactRaw |
+            Self::AlloyTransactCommit => (true, false),
+            Self::TransactOne | Self::InspectOneTx | Self::InspectOne => (false, false),
+            Self::SystemCall |
+            Self::SystemCallWithCaller |
+            Self::DeprecatedTransactSystemCallFinalize |
+            Self::DeprecatedTransactSystemCallWithCallerFinalize |
+            Self::AlloyTransactSystemCall |
+            Self::InspectSystemCall |
+            Self::InspectSystemCallWithCaller |
+            Self::InspectSystemCallWithInspector |
+            Self::InspectSystemCallWithInspectorAndCaller |
+            Self::BlockHashesPreBlockCall |
+            Self::BeaconRootPreBlockCall |
+            Self::ApplyPendingChangesPreBlockCall => (true, true),
+            Self::SystemCallOne |
+            Self::SystemCallOneWithCaller |
+            Self::DeprecatedTransactSystemCall |
+            Self::DeprecatedTransactSystemCallWithCaller |
+            Self::InspectOneSystemCall |
+            Self::InspectOneSystemCallWithCaller |
+            Self::InspectOneSystemCallWithInspector |
+            Self::InspectOneSystemCallWithInspectorAndCaller => (false, true),
+        }
     }
 
-    /// Whether the entry point runs a system call rather than a transaction.
+    /// Whether the entry point takes the state off the journal on an error ([`kind`](Self::kind)).
+    const fn finalizes(self) -> bool {
+        self.kind().0
+    }
+
+    /// Whether the entry point runs a system call ([`kind`](Self::kind)).
     const fn is_system_call(self) -> bool {
-        matches!(
-            self,
-            Self::SystemCall |
-                Self::SystemCallWithCaller |
-                Self::DeprecatedTransactSystemCallFinalize |
-                Self::DeprecatedTransactSystemCallWithCallerFinalize |
-                Self::AlloyTransactSystemCall |
-                Self::InspectSystemCall |
-                Self::InspectSystemCallWithCaller |
-                Self::InspectSystemCallWithInspector |
-                Self::InspectSystemCallWithInspectorAndCaller |
-                Self::BlockHashesPreBlockCall |
-                Self::BeaconRootPreBlockCall |
-                Self::ApplyPendingChangesPreBlockCall |
-                Self::SystemCallOne |
-                Self::SystemCallOneWithCaller |
-                Self::DeprecatedTransactSystemCall |
-                Self::DeprecatedTransactSystemCallWithCaller |
-                Self::InspectOneSystemCall |
-                Self::InspectOneSystemCallWithCaller |
-                Self::InspectOneSystemCallWithInspector |
-                Self::InspectOneSystemCallWithInspectorAndCaller
-        )
+        self.kind().1
     }
 
     /// The contract the call runs: a pre-block call's own, and otherwise the site's.
@@ -463,7 +482,6 @@ impl EntryPoint {
     /// call, from [`SENDER`] where the entry point takes a caller — and answers its result or its
     /// error. The state an entry point hands back is committed to the database; what a `_one`
     /// entry point leaves in the journal stays there.
-    #[allow(deprecated)]
     fn run(self, evm: &mut Evm, site: Site) -> Result<ExecutionResult<MegaHaltReason>, String> {
         let (result, state) = self.run_handing_back(evm, site)?;
         if let Some(state) = state {
@@ -481,14 +499,12 @@ impl EntryPoint {
     ) -> Result<(ExecutionResult<MegaHaltReason>, Option<EvmState>), String> {
         let to = self.target(site);
         let tx = || call(SENDER, to, U256::ZERO, GAS_LIMIT);
-        let data = Bytes::new;
-        let hardforks = mainnet_hardforks;
-        fn handed<E: core::fmt::Debug>(
+        fn handing_back<E: core::fmt::Debug>(
             ran: Result<ExecResultAndState<ExecutionResult<MegaHaltReason>, EvmState>, E>,
         ) -> Result<(ExecutionResult<MegaHaltReason>, Option<EvmState>), String> {
             ran.map(|ran| (ran.result, Some(ran.state))).map_err(|error| format!("{error:?}"))
         }
-        fn kept<E: core::fmt::Debug>(
+        fn handing_back_nothing<E: core::fmt::Debug>(
             ran: Result<ExecutionResult<MegaHaltReason>, E>,
         ) -> Result<(ExecutionResult<MegaHaltReason>, Option<EvmState>), String> {
             ran.map(|result| (result, None)).map_err(|error| format!("{error:?}"))
@@ -498,99 +514,112 @@ impl EntryPoint {
         };
         match self {
             Self::ExecuteTransaction => {
-                handed(evm.execute_transaction(tx()).map(|outcome| outcome.result_and_state))
+                handing_back(evm.execute_transaction(tx()).map(|outcome| outcome.result_and_state))
             }
-            Self::Transact => handed(ExecuteEvm::transact(evm, tx())),
+            Self::Transact => handing_back(ExecuteEvm::transact(evm, tx())),
             Self::TransactMany => {
                 // The journal holds a success until the caller finalizes it.
-                let results = kept(evm.transact_many(core::iter::once(tx())).map(first))?;
+                let results =
+                    handing_back_nothing(evm.transact_many(core::iter::once(tx())).map(first))?;
                 Ok((results.0, Some(evm.finalize())))
             }
-            Self::TransactManyFinalize => handed(
+            Self::TransactManyFinalize => handing_back(
                 evm.transact_many_finalize(core::iter::once(tx()))
                     .map(|ran| ExecResultAndState::new(first(ran.result), ran.state)),
             ),
             Self::Replay => {
                 evm.ctx_mut().set_tx(tx());
-                handed(ExecuteEvm::replay(evm))
+                handing_back(ExecuteEvm::replay(evm))
             }
-            Self::TransactCommit => kept(ExecuteCommitEvm::transact_commit(evm, tx())),
+            Self::TransactCommit => {
+                handing_back_nothing(ExecuteCommitEvm::transact_commit(evm, tx()))
+            }
             Self::TransactManyCommit => {
-                kept(evm.transact_many_commit(core::iter::once(tx())).map(first))
+                handing_back_nothing(evm.transact_many_commit(core::iter::once(tx())).map(first))
             }
             Self::ReplayCommit => {
                 evm.ctx_mut().set_tx(tx());
-                kept(evm.replay_commit())
+                handing_back_nothing(evm.replay_commit())
             }
-            Self::InspectTx => handed(evm.inspect_tx(tx())),
-            Self::Inspect => handed(InspectEvm::inspect(evm, tx(), NoOpInspector)),
-            Self::InspectTxCommit => kept(evm.inspect_tx_commit(tx())),
-            Self::InspectCommit => kept(evm.inspect_commit(tx(), NoOpInspector)),
-            Self::AlloyTransact => handed(alloy_evm::Evm::transact(evm, tx())),
-            Self::AlloyTransactRaw => handed(alloy_evm::Evm::transact_raw(evm, tx())),
-            Self::AlloyTransactCommit => kept(alloy_evm::Evm::transact_commit(evm, tx())),
-            Self::TransactOne => kept(evm.transact_one(tx())),
-            Self::InspectOneTx => kept(evm.inspect_one_tx(tx())),
-            Self::InspectOne => kept(evm.inspect_one(tx(), NoOpInspector)),
-            Self::SystemCall => handed(evm.system_call(to, data())),
+            Self::InspectTx => handing_back(evm.inspect_tx(tx())),
+            Self::Inspect => handing_back(InspectEvm::inspect(evm, tx(), NoOpInspector)),
+            Self::InspectTxCommit => handing_back_nothing(evm.inspect_tx_commit(tx())),
+            Self::InspectCommit => handing_back_nothing(evm.inspect_commit(tx(), NoOpInspector)),
+            Self::AlloyTransact => handing_back(alloy_evm::Evm::transact(evm, tx())),
+            Self::AlloyTransactRaw => handing_back(alloy_evm::Evm::transact_raw(evm, tx())),
+            Self::AlloyTransactCommit => {
+                handing_back_nothing(alloy_evm::Evm::transact_commit(evm, tx()))
+            }
+            Self::TransactOne => handing_back_nothing(evm.transact_one(tx())),
+            Self::InspectOneTx => handing_back_nothing(evm.inspect_one_tx(tx())),
+            Self::InspectOne => handing_back_nothing(evm.inspect_one(tx(), NoOpInspector)),
+            Self::SystemCall => handing_back(evm.system_call(to, Bytes::new())),
             Self::SystemCallWithCaller => {
-                handed(SystemCallEvm::system_call_with_caller(evm, SENDER, to, data()))
+                handing_back(SystemCallEvm::system_call_with_caller(evm, SENDER, to, Bytes::new()))
             }
             Self::DeprecatedTransactSystemCallFinalize => {
-                handed(evm.transact_system_call_finalize(to, data()))
+                handing_back(evm.transact_system_call_finalize(to, Bytes::new()))
             }
-            Self::DeprecatedTransactSystemCallWithCallerFinalize => {
-                handed(evm.transact_system_call_with_caller_finalize(SENDER, to, data()))
-            }
+            Self::DeprecatedTransactSystemCallWithCallerFinalize => handing_back(
+                evm.transact_system_call_with_caller_finalize(SENDER, to, Bytes::new()),
+            ),
             Self::AlloyTransactSystemCall => {
-                handed(alloy_evm::Evm::transact_system_call(evm, SENDER, to, data()))
+                handing_back(alloy_evm::Evm::transact_system_call(evm, SENDER, to, Bytes::new()))
             }
-            Self::InspectSystemCall => handed(evm.inspect_system_call(to, data())),
+            Self::InspectSystemCall => handing_back(evm.inspect_system_call(to, Bytes::new())),
             Self::InspectSystemCallWithCaller => {
-                handed(evm.inspect_system_call_with_caller(SENDER, to, data()))
+                handing_back(evm.inspect_system_call_with_caller(SENDER, to, Bytes::new()))
             }
-            Self::InspectSystemCallWithInspector => {
-                handed(evm.inspect_system_call_with_inspector(to, data(), NoOpInspector))
-            }
+            Self::InspectSystemCallWithInspector => handing_back(
+                evm.inspect_system_call_with_inspector(to, Bytes::new(), NoOpInspector),
+            ),
             Self::InspectSystemCallWithInspectorAndCaller => {
-                handed(evm.inspect_system_call_with_inspector_and_caller(
+                handing_back(evm.inspect_system_call_with_inspector_and_caller(
                     SENDER,
                     to,
-                    data(),
+                    Bytes::new(),
                     NoOpInspector,
                 ))
             }
-            Self::BlockHashesPreBlockCall => handed(
-                transact_blockhashes_contract_call(hardforks(), B256::repeat_byte(1), evm)
+            Self::BlockHashesPreBlockCall => handing_back(
+                transact_blockhashes_contract_call(mainnet_hardforks(), B256::repeat_byte(1), evm)
                     .map(|ran| ran.expect("Prague is active")),
             ),
-            Self::BeaconRootPreBlockCall => handed(
-                transact_beacon_root_contract_call(hardforks(), Some(B256::repeat_byte(2)), evm)
-                    .map(|ran| ran.expect("Cancun is active")),
+            Self::BeaconRootPreBlockCall => handing_back(
+                transact_beacon_root_contract_call(
+                    mainnet_hardforks(),
+                    Some(B256::repeat_byte(2)),
+                    evm,
+                )
+                .map(|ran| ran.expect("Cancun is active")),
             ),
-            Self::ApplyPendingChangesPreBlockCall => handed(transact_apply_pending_changes(evm)),
-            Self::SystemCallOne => kept(evm.system_call_one(to, data())),
+            Self::ApplyPendingChangesPreBlockCall => {
+                handing_back(transact_apply_pending_changes(evm))
+            }
+            Self::SystemCallOne => handing_back_nothing(evm.system_call_one(to, Bytes::new())),
             Self::SystemCallOneWithCaller => {
-                kept(evm.system_call_one_with_caller(SENDER, to, data()))
+                handing_back_nothing(evm.system_call_one_with_caller(SENDER, to, Bytes::new()))
             }
             Self::DeprecatedTransactSystemCall => {
-                kept(SystemCallEvm::transact_system_call(evm, to, data()))
+                handing_back_nothing(SystemCallEvm::transact_system_call(evm, to, Bytes::new()))
             }
             Self::DeprecatedTransactSystemCallWithCaller => {
-                kept(evm.transact_system_call_with_caller(SENDER, to, data()))
+                handing_back_nothing(evm.transact_system_call_with_caller(SENDER, to, Bytes::new()))
             }
-            Self::InspectOneSystemCall => kept(evm.inspect_one_system_call(to, data())),
-            Self::InspectOneSystemCallWithCaller => {
-                kept(evm.inspect_one_system_call_with_caller(SENDER, to, data()))
+            Self::InspectOneSystemCall => {
+                handing_back_nothing(evm.inspect_one_system_call(to, Bytes::new()))
             }
-            Self::InspectOneSystemCallWithInspector => {
-                kept(evm.inspect_one_system_call_with_inspector(to, data(), NoOpInspector))
-            }
+            Self::InspectOneSystemCallWithCaller => handing_back_nothing(
+                evm.inspect_one_system_call_with_caller(SENDER, to, Bytes::new()),
+            ),
+            Self::InspectOneSystemCallWithInspector => handing_back_nothing(
+                evm.inspect_one_system_call_with_inspector(to, Bytes::new(), NoOpInspector),
+            ),
             Self::InspectOneSystemCallWithInspectorAndCaller => {
-                kept(evm.inspect_one_system_call_with_inspector_and_caller(
+                handing_back_nothing(evm.inspect_one_system_call_with_inspector_and_caller(
                     SENDER,
                     to,
-                    data(),
+                    Bytes::new(),
                     NoOpInspector,
                 ))
             }
@@ -611,8 +640,8 @@ fn committed(evm: &Evm) -> BTreeMap<Address, (u64, U256, B256, BTreeMap<U256, U2
         .collect()
 }
 
-/// A call that fails with an error leaves the EVM as a fresh one is, whichever public entry point
-/// ran it and wherever the error came from: the error slot is empty, and an entry point that
+/// A call that fails with an error leaves nothing the next call depends on, whichever public entry
+/// point ran it and wherever the error came from: the error slot is empty, and an entry point that
 /// finalizes the journal on a success hands it back empty on an error too, while a `_one` entry
 /// point leaves a journal that holds the call before the failed one and none of the failed call's
 /// writes. The same call run again on the same EVM, the database serving again, has the result a
@@ -622,22 +651,16 @@ fn committed(evm: &Evm) -> BTreeMap<Address, (u64, U256, B256, BTreeMap<U256, U2
 /// are the transactions'.
 #[test]
 fn test_every_entry_point_leaves_nothing_of_a_failed_call() {
-    let (mut rows, mut skipped) = (0, 0);
     for inspect in [false, true] {
         for site in Site::ALL {
             for entry in EntryPoint::ALL {
                 if entry.is_system_call() && !matches!(site, Site::Nested) {
-                    skipped += 1;
                     continue;
                 }
-                rows += 1;
                 assert_a_failed_call_leaves_nothing(entry, site, inspect);
             }
         }
     }
-    let system_calls = EntryPoint::ALL.iter().filter(|entry| entry.is_system_call()).count();
-    assert_eq!(skipped, 2 * 2 * system_calls);
-    assert_eq!(rows + skipped, 2 * Site::ALL.len() * EntryPoint::ALL.len());
 }
 
 fn assert_a_failed_call_leaves_nothing(entry: EntryPoint, site: Site, inspect: bool) {
@@ -655,10 +678,10 @@ fn assert_a_failed_call_leaves_nothing(entry: EntryPoint, site: Site, inspect: b
 
     let mut evm = table_evm(ErrorInjectingDatabase::new(table_database()), inspect);
     earlier(&mut evm);
-    site.arm(evm.ctx_mut().db_mut(), true);
+    site.arm(evm.ctx_mut().db_mut());
     let failed = entry.run(&mut evm, site);
     assert!(matches!(&failed, Err(error) if error.contains("injected")), "{row}: {failed:?}");
-    site.arm(evm.ctx_mut().db_mut(), false);
+    Site::disarm(evm.ctx_mut().db_mut());
     assert!(evm.ctx_mut().error().is_ok(), "{row}: the error slot");
     if entry.finalizes() {
         assert!(evm.finalize().is_empty(), "{row}: the journal is handed back empty");
