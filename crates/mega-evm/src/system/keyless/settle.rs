@@ -170,7 +170,7 @@ pub(crate) fn settle<DB: Database, ExtEnvs: ExternalEnvTypes>(
     if started.signer_nonce > 0 && nonce == started.signer_nonce + 1 {
         take_back_bump(ctx, gas, &started)?;
     }
-    let stop = bumped.and_then(|signer| hold_creator(ctx, gas.tracker_mut(), &signer));
+    let stop = bumped.and_then(|signer| hold_creator(ctx, &signer));
     Ok((Returned { started, creation }, stop))
 }
 

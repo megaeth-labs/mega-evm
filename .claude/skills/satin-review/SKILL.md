@@ -60,26 +60,42 @@ Each change is stated here in plain words with its reason; the specification has
 
 ### Where the engine meets revm
 
-- **Inspectors run on revm's own inspected lifecycle, and the engine has no inspector-specific code.**
+- **Inspectors run on revm's own inspected lifecycle, and the engine has no separate inspected lifecycle.**
   The engine's inspected copies of the frame lifecycle, its step guard and `src/evm/inspector.rs` are gone: every per-frame mechanism sits in the frame start, run result and return (`frame_init`, `frame_run_result`, `frame_return_result`) that revm's plain and inspected loops share.
   A result an inspector rewrites is settled by the caller as revm settles it, with no correction of the engine's, and an answer it gives in place of a frame never reaches the engine's frame start, so the depth guard, the interceptors and gas detention see none of it.
+  What the engine decides for an inspector is the start ledger's settlement of an inspector's answer, a replaced tracker and a rebuilt outcome, read off revm's flags.
   Block execution admits any inspector.
   Why: a second copy of the lifecycle had to be kept in step with revm's and made an inspected run differ from a plain one, and which inspectors run on block production is the node's choice.
 - **The fork's loop hooks.**
   revm's frame run returns an action set on a frame before it runs, without running an instruction or calling the inspector's `step`, and its inspected frame start hands a frame built with one to no `initialize_interp`: a `keylessDeploy` call's creation and answer, and the stop of a caller a child left over a limit, come back through revm's own run.
   The run-result hook (`EvmTr::frame_run_result`) is called once a frame's run returns, before the inspector's `call_end`, `create_end` and `frame_end` and before `frame_return_result`; gas detention turns a crossing into the stop there, so inspectors and tracers see the stop the caller gets.
   Why: both are points in the middle of revm's own loop that mega-evm cannot reach from outside, which is what the fork is for, and with them the engine has no frame run of its own.
+- **The engine decides the four figures of a frame start, and the fork forwards whole.**
+  The fork carries four figures of a start on the frame's gas: the three pools with their nets, the part of the reservoir the caller keeps, the start charge and the history allowance.
+  The engine now decides all four itself, in every build: the budgets, the start charge and the allowance on its start ledger (`src/limit/ledger.rs`), an entry per start driven only by the fork's start lifecycle hooks (`frame_split`, `frame_settle`, `frame_lifecycle_end`), and the reservoir's share where the start is made (`MegaContext::forward_start`, named to revm on `FrameStart::reservoir`).
+  The fork's figures are inert: the Satin schedule keeps Amsterdam's zero in `pool_kept_percent`, `reservoir_kept_percent` and `call_history_allowance`, so revm forwards every pool and the reservoir whole and grants no allowance; the engine declares no start charge on a start or on the first frame's input, puts no pool on a tracker and draws none; its synthetic answers carry neither pools nor a charge.
+  A limit check reads the running frame's budget off the ledger's top entry; `frame_settle` gives a failed start's charge back to the caller's gas, as history, and after a halt of the transaction's own frame burns the transaction's regular gas, as revm's settlement did after its own refund, so regular gas an inspector's extra reservoir unwound is not kept; a log's history draws the entry's allowance first; the frame cap is the ledger's (`cap_child`, which replaced `cap_the_shares` and is held to it by a unit test).
+  The ledger is not checked against the fork's figures, which do not mean the same once the fork forwards whole.
+  The inspector shapes whose results change, each accepted: an answer built on gas whose pools the inspector set, or with the input's start charge copied, settles at unlimited budgets with no charge back; a tracker an inspector restores from a snapshot leaves the ledger's draws and the allowance where they were; and an inspector that replaces a value call's interpreter leaves the frame its allowance, where the fresh gas of the replaced interpreter held none while the allowance was on the frame's gas.
+  A test reads what the ledger settled (`test_utils::record_start_ledger_settlements`).
+  Why: the figures are the engine's decisions, and the fork carries them only until they leave it.
 - **Writes and frame starts are metered in the fork's instruction hooks.**
   `SSTORE`, `LOG0`–`LOG4` and `SELFDESTRUCT` call `write_completed` once the write is in the journal and every charge the opcode makes is made.
-  The four calls and the two creations call `frame_starting` once the forward is taken: the caller is charged the history of the start's records out of what it kept, and the frame's own part is declared on the start (`FrameStart::charge`) for the fork to refund when the frame fails.
+  The four calls and the two creations call `frame_starting` once the forward is taken: the caller is charged the history of the start's records out of what it kept, the frame's own part is parked on the start ledger as the start's charge, which its settlement gives back when the frame fails, and the frame's share of the caller's reservoir is taken and named on the start (`FrameStart::reservoir`).
   Why: a write the opcode's own failure takes back is never counted, and the engine no longer rebuilds revm's state from outside with instruction wrappers.
+- **An error leaves nothing the next call depends on.**
+  Made after #407 merged: the handler's fatal cleanup (`MegaHandler::catch_error`), which every entry point reaches, empties the error slot before op-revm's cleanup runs, discards the failed call's journal transaction on every error, and clears the cached L1 cost, the local context and the frame stack after op-revm; `replay`, `SystemCallEvm::system_call_with_caller` (with the deprecated aliases and alloy-evm's `transact_system_call` that route through it) and the pre-block calls finalize the journal on an error as they do on a success.
+  Before, an error a Host load recorded in the transaction's own frame, which post-execution preempted by failing first on a read of its own, stayed in the slot and failed the next transaction on the same EVM; and a `_one` entry point, `replay`, a system call returning state and a pre-block call left the failed call's writes, nonce bump, warm set and transaction id in the journal for the next call.
+  A failed deposit is a result: its nonce bump and mint stay; the calls a `_one` journal holds before the failed one stay too.
+  An embedder reuses an EVM after an error as after a success; a caller of `run_without_catch_error` that drops an error calls `catch_error` first, and an EVM a panic unwound out of is not reused.
+  Why: op-revm discards the journal only for a failed deposit, revm takes the recorded error only once post-execution succeeded, and op-revm's own clearing is skipped when its failed-deposit recovery errors; the boundary every entry point reaches is the engine's, so the repair is made there and the forks are unchanged.
 
 ### What is counted
 
-- **Data size, KV updates and state growth are pools on revm's gas tracker.**
-  Each is a pool on every frame's `GasTracker`, which the fork forwards to a child at a start and settles on the child's return as it settles the EIP-8037 reservoir; the transaction's limits are held beside the pools, on what the transaction keeps.
-  The engine's per-frame record lanes, its journal wrapper and its ledger are gone, and the context's journal is revm's own.
-  Why: a frame's budget then fails and succeeds with the frame's own gas, by revm's settlement, instead of a second account kept beside the journal.
+- **Data size, KV updates and state growth are pools on each frame start, settled with revm's start lifecycle.**
+  Each is a pool on the frame's entry of the engine's start ledger, which a child's start takes its share of where it is made and which merges into the caller's when revm settles the start, as revm settles the EIP-8037 reservoir; the transaction's limits are held beside the pools, on what the transaction keeps.
+  The engine's per-frame record lanes and its journal wrapper are gone, and the context's journal is revm's own.
+  Why: a frame's budget then fails and succeeds with the frame's start, paired by revm, instead of a second account kept beside the journal.
 - **Write records follow the net change.**
   An account's record exists while its nonce, balance or code differs from what the transaction loaded, and a slot's while its value differs from its original.
   The per-frame deduplication is gone, a `SELFDESTRUCT` records the account it clears as well as its beneficiary, and a creation is charged exactly the records it makes.
@@ -132,7 +148,7 @@ Each change is stated here in plain words with its reason; the specification has
   The three pools give a child `remaining × 98 / 100`, rounded down, so the two formulas differ at some values.
   Why: the regular forward is Rex6's, and the reservoir share keeps a caller's own work within reach of what it calls, since state and history gas draw the reservoir first; EIP-8037 passes the reservoir whole, which would let a callee spend all of it.
 - **The history allowance replaces the storage-gas stipend.**
-  A value `CALL` or `CALLCODE` below the transaction's own frame gives the frame it starts 160 bytes of history (`HISTORY_ALLOWANCE_BYTES`, 14,080 gas at the cost per history byte, the schedule's `call_history_allowance`), on which only a log's history charge draws.
+  A value `CALL` or `CALLCODE` below the transaction's own frame gives the frame it starts 160 bytes of history (`HISTORY_ALLOWANCE_BYTES`, 14,080 gas at the cost per history byte, kept on the start's entry of the start ledger), on which only a log's history charge draws.
   It never enters the frame's gas and is on no ledger.
   Why: a `receive()` reached through Solidity's `transfer()` can still emit one event, and an allowance that is not gas leaves nothing to burn on return.
 - **One fixed gas budget for the pre-block calls.**
@@ -215,13 +231,13 @@ A test name or a line count is not a reason to trust the code: read the code aga
 - **System-originated** (spec §19, `originates_from_the_protocol` in `src/system/tx.rs`), decided from the transaction's own fields:
   an MST before or after promotion; any transaction whose caller is the pre-block caller; any deposit carrying the source hash the promotion stamps, `keccak256("MEGA_SYSTEM_TRANSACTION")`, whoever sends it.
   Such work is exempt from history gas, every per-transaction limit and frame budget, and detention, and priced at the minimum bucket; its usage is still counted.
-- **Pool**: a frame's budget in data size, KV updates or state growth, held on its `GasTracker`; the fork forwards a child its share at the start and settles the child's pools on its return, as it does the reservoir.
+- **Pool**: a frame's budget in data size, KV updates or state growth, held on its start's entry of the engine's start ledger (`src/limit/ledger.rs`); the frame-start hook parks a child's share, revm's split of the start opens the child's entry with it, and revm's settlement of the start merges the child's pools into its caller's, as revm settles the reservoir.
 - **Write record**: one per account or storage slot the transaction keeps changed, by the net change; 40 bytes of data size and of history; the KV count.
 - **State growth**: the net count of new accounts and new slots the transaction keeps.
 - **Stop**: what a limit does.
   The frame that crosses it reverts with `MegaLimitExceeded(kind, limit)`, and its caller resumes and may catch it.
 - **Answered frame**: a frame that gets a result without running (a precompile, a call to an account with no code, an interceptor, the engine, an inspector's hook).
-- **Start charge**: the history gas a frame start charges its caller for the records the started frame makes, declared on the start and refunded by the fork when the frame fails.
+- **Start charge**: the history gas a frame start charges its caller for the records the started frame makes, kept on the start's entry of the start ledger and given back to the caller when the frame fails.
 - **Failed-charge record**: the regular gas a frame had before a charge that failed, which the fork keeps, so the engine knows exactly what a halting frame burned.
 - **Byte-price grid**: the CI job that runs the suite at other costs per state and history byte, because the prices are provisional.
 
@@ -232,17 +248,17 @@ For each module: where it is, what to check, the spec sections, and the `AGENTS.
 
 ### Limits: data size, KV updates, state growth, the stop
 
-- **Where:** `src/limit/` (the byte table, `LimitKind`, `LimitCheck`, `MegaLimitExceeded` and `EvmTxRuntimeLimits` in `mod.rs`; the write records and the state growth a write and a frame start make in `record.rs`; `AdditionalLimit` in `limit.rs`), `src/block/limit.rs` (`ProtocolLimits::for_spec`, `BlockLimits`, `BlockLimiter`), `src/constants.rs`.
+- **Where:** `src/limit/` (the byte table, `LimitKind`, `LimitCheck`, `MegaLimitExceeded` and `EvmTxRuntimeLimits` in `mod.rs`; the write records and the state growth a write and a frame start make in `record.rs`; `AdditionalLimit` in `limit.rs`; the start ledger in `ledger.rs`), `src/block/limit.rs` (`ProtocolLimits::for_spec`, `BlockLimits`, `BlockLimiter`), `src/constants.rs`.
 - **Read first:** the module doc of `src/limit/mod.rs` and the doc of `AdditionalLimit` in `src/limit/limit.rs`.
 - **Check:**
-  - A count is drawn where it is made, on the pool of the frame that makes it (`AdditionalLimit::draw`), and a failed frame's draws go back with its gas.
+  - A count is drawn where it is made, on the pool of the frame that makes it (`AdditionalLimit::draw`), and a failed frame's draws go back when its start settles.
   - The transaction's limits are held beside the pools, on what the transaction keeps (`AdditionalLimit::usage`): the body, the hints, the authorities' records and the accounts they created, a deposit's created caller, and what the frames keep, restored when a start's frame keeps nothing (`AdditionalLimit::close_start`).
   - A completed write and a decided start are held in one function (`AdditionalLimit::check`, through `draw` and `count_start`): in the order data size, KV updates, state growth (`limit::COUNTED`), the frame budget, then the transaction limit; a hint, the authorization list and a caller's hold at a child's return check the same limits directly.
   - The stop names the budget when the budget is crossed, and the transaction limit only when it is not, which a framed write reaches only in data size, after Oracle hints used what the transaction had left; a start names it too when a deposit-like transaction's created caller stands on a state-growth limit of nothing, which only a tool's limit sets.
   - Every stop comes from `AdditionalLimit::crossed`, which also applies the exemption of system-originated work and system calls.
   - A write record follows the net change: an account's while its nonce, balance or code differs from what the transaction loaded, a slot's while its value differs from its original; the sender's account and the fee credits the settlement makes are the body's, not records.
   - A creator's nonce record is counted on the creator when the creation returns with the nonce bumped, held to the creator's budget, and survives the creation's failure; the creation's budget is the share taken at the opcode, before it.
-  - State growth rises by one at each EIP-8037 account-leaf or fresh-slot charge site and for the caller a failed deposit creates, and a slot written from an original zero back to zero falls by one; a frame's net is signed, a negative net never enlarges a child's budget (`cap_the_shares` in `src/evm/execution.rs`), and a transaction reports `max(net, 0)`.
+  - State growth rises by one at each EIP-8037 account-leaf or fresh-slot charge site and for the caller a failed deposit creates, and a slot written from an original zero back to zero falls by one; a frame's net is signed, a negative net never enlarges a child's budget (`StartLedger::cap_child` in `src/limit/ledger.rs`), and a transaction reports `max(net, 0)`.
   - The first effective `SELFDESTRUCT` of an account created in the transaction applies the destruction table: each part absent at the transaction's start (a slot by its original in the transaction, a leaf by no account standing there) and present before the destruction is refilled at the price it was charged, to the destroying frame, the leaf and each such slot lower state growth by one and lose their write records, and the code's data size and history gas are taken back; from the mark the account adds no further state growth, state gas or write record, and a failure of the destroying frame, or of a frame that contains it, discards it all.
   - A caller resumed after its child's crossing is held to what the transaction has left, and stops in turn if a count or a charge of its own crosses again; a caller a failure below it left over the transaction's data-size limit, a hint having filled room a take-back freed, returns the transaction's stop before its next instruction (`AdditionalLimit::hold_caller`).
   - `LimitKind` keeps Rex6's encoding: data size 0, KV updates 1, compute gas 2, state growth 3.
@@ -260,7 +276,9 @@ For each module: where it is, what to check, the spec sections, and the `AGENTS.
 - **Check:**
   - A write is counted in the Host's completed-write hook (`write_completed`), which revm calls only once the opcode made every charge, so a failed opcode counts nothing; the Host's write methods count nothing, whoever calls them.
   - A completed write's record is held to the limits before its history is charged, so a record a limit refuses is not charged; at a frame start the order is the other way round, the caller paying at its opcode before revm decides the start and its records are held.
-  - The frame-start hook (`frame_starting`) charges the caller the history of the start's records after the forward is taken, out of what the caller kept, and declares the frame's own part on the fork's start (`FrameStart::charge`); a caller that cannot pay gets the forward back, the halt's record re-written, and starts no frame.
+  - The frame-start hook (`frame_starting`) charges the caller the history of the start's records after the forward is taken, out of what the caller kept, parks the frame's own part as the start's charge on the start ledger with the frame's budget shares and allowance, and takes the frame's reservoir share out of the caller (`forward_start`); a caller that cannot pay gets the forward back, the halt's record re-written, and starts no frame.
+  - Every budget a limit check reads, and every draw, is the start ledger's top entry, the running frame's start (`StartLedger::budget`, `draw`); with no start open there is no frame budget.
+  - The start charge comes back in `frame_settle`, by the settlement's status, `created` and revm's inspector flags.
   - A start's records, state growth and transfer log are read off what revm did: its accounts before revm decides the start and again once it did (`FrameStart::of` and `FrameStart::count` in `src/evm/execution.rs`, `Accounts::start_before` and `start_made` in `src/limit/record.rs`), but for a call that moves no value and runs no precompile, which writes nothing on them (`start_writes_nothing`), counted on the started frame's pools (`AdditionalLimit::count_start`) for a frame revm built or a call it answered with a success; an answer that failed counts nothing and is held to no records limit, and a precompile gas detention answers from its price counts nothing and is held to the price alone; a start revm refuses on its caller's account counts nothing and is charged nothing.
   - A frame revm built whose start crossed a limit ends with the stop before its first instruction (`end_before_it_runs`); a success revm gave without building a frame gives way to the stop on its untouched forward, its value move and log taken back to the start's journal mark (`stop_the_answer_at`, `take_back_a_stopped_answer`); an answer that failed is revm's result, held to nothing.
   - Pre-frame charges (a deposit's caller account, EIP-7702 authorities, pre-frame records) either succeed or leave an included out-of-gas halt without a frame, with the journal unwound as revm unwinds it (a creation keeps its nonce bump).
@@ -268,6 +286,7 @@ For each module: where it is, what to check, the spec sections, and the `AGENTS.
   - The forwards: regular gas `remaining − remaining × 2 / 100`, plus a value call's stipend after the cap; the reservoir by the same subtraction, the transaction's own frame and a system call's outermost frame taking the whole; each pool `remaining × 98 / 100`, rounded down.
   - `spec_cfg` fixes the configuration whatever the caller passes (Satin schedule, EIP-8037, EIP-2780, execution cap 200,000,000, EIP-7708, chain-id check on, the contract size limit at 512 KiB and the initcode size limit at 1 MiB, the fork's legacy journal semantics off).
   - Per-transaction state resets with the transaction; a system call has its own entry point, and the handler splits its gas (`MegaHandler::tx_gas`).
+  - An execution that fails with an error leaves nothing the next one on the same EVM reads: `MegaHandler::catch_error` empties the error slot before op-revm runs, discards the journal transaction on an error (a failed deposit's commit stays), and clears the L1 cost, the local context and the frame stack after op-revm; every entry point that takes the state off the journal on a success does so on an error, and a `_one` entry point keeps the calls before the failed one (`tests/satin/reuse_after_error.rs`, every public entry point, plain and inspected).
   - A fact about the transaction's start is read with what the journal records of the transaction (its original info, its entries, its transaction id), never off an account flag revm sets once per journal alone, so on a journal that runs several transactions unfinalized the engine's counts follow what revm charges there.
 - **Spec:** §3, §4, §5, §9, §10, §11, §14, §21.
 - **Detail:** [`AGENTS.md`, "How Satin executes today"](../../../AGENTS.md#how-satin-executes-today).
@@ -332,12 +351,12 @@ For each module: where it is, what to check, the spec sections, and the `AGENTS.
 - **Where:** `src/evm/schedule.rs`, `src/evm/prices.rs`, `src/evm/history.rs`, `src/evm/precompiles.rs`, `src/external/` (SALT pricing), `state_gas_price` in `src/evm/host.rs`, the Amsterdam opcode activation in `src/evm/instructions.rs`.
 - **Check:**
   - Every regular entry is Amsterdam's; state creation is paid once, in state gas.
-  - The forwards are schedule entries: `call_stipend_reduction` = 50 (the regular-gas cap), `reservoir_kept_percent` = 2, and `pool_kept_percent` = 2 for each of the three pools; the neutral configuration keeps EIP-150's 63/64 and forwards the whole reservoir.
+  - The regular-gas forward is a schedule entry, `call_stipend_reduction` = 50; the shares of the reservoir and the three budgets are the engine's (`FRAME_KEPT_PERCENT` = 2), and the schedule's `reservoir_kept_percent` and `pool_kept_percent` are Amsterdam's zero; the neutral configuration keeps EIP-150's 63/64 and forwards the whole reservoir and budgets, whatever schedule it is given.
   - State gas = schedule entry × bucket multiplier `m`; regular gas never scales.
     A failed capacity lookup is a node fault: the transaction gets no outcome and is not settled, and the node reports an internal error with the cause.
   - History gas uses the limit layer's byte table, so a record's history bytes are its data size; the three sites where the totals part are in the `src/limit/mod.rs` module doc, "The byte table".
   - A deposit, a protocol-produced transaction and a system call pay no history gas.
-  - The history allowance (`HISTORY_ALLOWANCE_BYTES`, 160 bytes; `history_allowance_gas()` in `src/evm/history.rs`, the schedule's `call_history_allowance`) draws only on a log's charge.
+  - The history allowance (`HISTORY_ALLOWANCE_BYTES`, 160 bytes; `history_allowance_gas()` in `src/evm/history.rs`, kept on the start ledger, the schedule's `call_history_allowance` being zero) draws only on a log's charge.
   - The EIP-7623 floor is still computed and validated.
   - The constants are provisional; a build with `satin-price-override` must never reach a node.
 - **Spec:** §2, §4, §5, §6, §7, §8, §9.
@@ -354,6 +373,7 @@ For each module: where it is, what to check, the spec sections, and the `AGENTS.
   - A start an inspector rewrites after its opcode is not charged again: what the opcode charged stands, its declared part coming back only as for any start whose frame keeps nothing (a frame that fails, or a start revm refuses before it bumps a nonce or moves a value), and its records are those revm then made.
   - A pre-block system call runs on the plain system-call path, with no callback.
   - `test_utils::ReadOnlyObserver` checks, in debug builds, that an inspector a test declares an observer writes nothing back: a tripwire for tests, not a proof.
+  - The start ledger settles an inspector's answer and a replaced tracker at unlimited budgets, and gives no start charge back for an answer or a rebuilt outcome; the pools, charge and allowance fields an inspector writes on an input, an answer or a result are not read, a restored tracker snapshot leaves the ledger's draws standing, and a replaced interpreter leaves the frame its allowance; the tests of such inspectors read what the ledger settled.
 - **Detail:** [`AGENTS.md`, "Contracts of the common execution layer"](../../../AGENTS.md#contracts-of-the-common-execution-layer), the entries on inspectors.
 
 ### Node surface, validation and the stateless witness
@@ -406,7 +426,7 @@ For each module: where it is, what to check, the spec sections, and the `AGENTS.
 Read this before rating a finding that says a failure reverts where it should halt, or halts where it should revert.
 
 A refusal the protocol imposes reverts; an execution fault halts.
-Every limit stop — the transaction's data-size, KV-update and state-growth limits, a frame's budget in those three, gas detention's compute limit — reverts the frame that crosses it with `MegaLimitExceeded(uint8 kind, uint64 limit)` on the frame's own gas, so the unspent gas goes back to the caller, its reservoir and pools included, and the caller resumes and may catch the stop.
+Every limit stop — the transaction's data-size, KV-update and state-growth limits, a frame's budget in those three, gas detention's compute limit — reverts the frame that crosses it with `MegaLimitExceeded(uint8 kind, uint64 limit)` on the frame's own gas, so the unspent gas goes back to the caller, its reservoir included, the frame's budgets go back to the caller's when its start settles, and the caller resumes and may catch the stop.
 An execution fault — a real out-of-gas, a precompile given less than its price, an invalid opcode, a charge the frame cannot pay — halts and consumes the frame's gas, as in revm.
 One ABI serves every kind of stop, and there is no third ending: the halt reasons are op-revm's (`MegaHaltReason`), and the engine makes no halt of its own.
 An operation that crosses several counted dimensions at one site stops on the first of data size (kind 0), KV updates (kind 1) and state growth (kind 3); compute (kind 2) is decided at the regular charge, before the write is counted.

@@ -27,13 +27,21 @@ use mega_evm::{
     test_utils::{
         is_transfer_log, note_price_guard, transfer_log, BytecodeBuilder, MemoryDatabase,
     },
-    EvmTxRuntimeLimits, LimitKind, MegaEvm, MegaTransaction, MegaTransactionOutcome,
+    EvmTxRuntimeLimits, LimitKind, MegaContext, MegaEvm, MegaTransaction, MegaTransactionOutcome,
     HISTORY_ALLOWANCE_BYTES, LOG_BASE_SIZE, LOG_TOPIC_SIZE, TRANSFER_LOG_SIZE, TX_BODY_SIZE,
     WRITE_RECORD_SIZE,
 };
-use revm::bytecode::opcode::{
-    ADDRESS, CALL, CALLCODE, CALLDATASIZE, DELEGATECALL, DUP1, GAS, ISZERO, JUMPDEST, JUMPI, LOG3,
-    POP, PUSH0, PUSH1, PUSH2, SSTORE, STATICCALL, STOP, SUB, SWAP1,
+use revm::{
+    bytecode::opcode::{
+        ADDRESS, CALL, CALLCODE, CALLDATASIZE, DELEGATECALL, DUP1, GAS, ISZERO, JUMPDEST, JUMPI,
+        LOG3, POP, PUSH0, PUSH1, PUSH2, SSTORE, STATICCALL, STOP, SUB, SWAP1,
+    },
+    interpreter::{
+        interpreter::{EthInterpreter, ExtBytecode},
+        interpreter_types::InputsTr,
+        Interpreter,
+    },
+    Inspector,
 };
 
 use crate::common::{
@@ -638,7 +646,7 @@ fn test_an_unspent_allowance_does_not_return_to_the_caller() {
 /// A chain of value transfers grants each frame its own allowance, and one frame's spending is
 /// not another's: three frames each emit their event and the transaction pays for none of them.
 ///
-/// An allowance is on the gas tracker of the frame it was granted to, and a child is granted its
+/// An allowance is on the start of the frame it was granted to, and a child is granted its
 /// own rather than handed its caller's, so a chain cannot draw on an allowance granted further up.
 #[test]
 fn test_a_chain_of_transfers_grants_each_frame_its_own_allowance() {
@@ -848,4 +856,64 @@ fn test_a_transfer_forwarding_no_gas_still_buys_its_event() {
     assert!(outcome.result.is_success(), "{:?}", outcome.result);
     assert_eq!(events(&outcome).len(), 1, "the hook emitted its event");
     assert_eq!(outcome.gas.history, body() + 2 * record());
+}
+
+/* ---------- an inspector that replaces the interpreter ---------- */
+
+/// Replaces the interpreter of every frame running `target`'s code, as revm initialises it, with
+/// one built afresh on the same memory, code and input, and a fresh gas of the same limit.
+struct ReplacesTheInterpreter {
+    target: Address,
+    replaced: usize,
+}
+
+impl Inspector<MegaContext<MemoryDatabase>, EthInterpreter> for ReplacesTheInterpreter {
+    fn initialize_interp(
+        &mut self,
+        interp: &mut Interpreter<EthInterpreter>,
+        _: &mut MegaContext<MemoryDatabase>,
+    ) {
+        if interp.input.target_address() != self.target {
+            return;
+        }
+        self.replaced += 1;
+        *interp = Interpreter::new(
+            interp.memory.clone(),
+            ExtBytecode::new(interp.bytecode.clone()),
+            interp.input.clone(),
+            interp.runtime_flag.is_static,
+            interp.runtime_flag.spec_id,
+            interp.gas.limit(),
+        );
+    }
+}
+
+/// An inspector that replaces a value call's interpreter leaves the frame its history allowance:
+/// the allowance is on the frame's start, which the replacement does not touch, as a tracker an
+/// inspector restores from a snapshot leaves it. The event the receiver emits is paid for by the
+/// allowance, and the transaction pays the history of its body and the transfer's two records
+/// alone, as without the inspector.
+///
+/// This is a change for such an inspector: when the allowance was on the frame's gas, the fresh
+/// gas of the replaced interpreter held none, so the event paid its own bytes. At the spec's byte
+/// prices the transaction's history gas was 48,400, and is 34,320.
+#[test]
+fn test_a_replaced_interpreter_keeps_its_frames_allowance() {
+    let sender =
+        BytecodeBuilder::default().call(RECEIVER, U256::from(1)).append(POP).stop().build();
+    let receiver = event().append(STOP).build();
+    let mut evm = MegaEvm::new(context(db(sender, receiver)))
+        .with_inspector(ReplacesTheInterpreter { target: RECEIVER, replaced: 0 });
+    let outcome = evm
+        .execute_transaction(call(CALLER, SENDER, U256::ZERO, GAS_LIMIT))
+        .expect("the transaction is valid");
+
+    assert_eq!(evm.inspector().replaced, 1, "the receiver's interpreter was replaced");
+    assert!(outcome.result.is_success(), "{:?}", outcome.result);
+    assert_eq!(events(&outcome).len(), 1, "the receiver emitted its event");
+    assert_eq!(
+        outcome.gas.history,
+        history(TX_BODY_SIZE + 2 * WRITE_RECORD_SIZE),
+        "the body and the transfer's two records; the event's bytes the allowance paid for",
+    );
 }

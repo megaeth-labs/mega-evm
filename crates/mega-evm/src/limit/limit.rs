@@ -2,7 +2,7 @@
 
 use alloy_primitives::Bytes;
 use revm::{
-    context_interface::cfg::gas::{GasTracker, PoolAmounts, PoolId},
+    context_interface::cfg::gas::{PoolAmounts, PoolId},
     handler::FrameResult,
     interpreter::InstructionResult,
 };
@@ -12,8 +12,8 @@ use alloc as std;
 use std::vec::Vec;
 
 use super::{
-    CreatorBefore, EvmTxRuntimeLimits, LimitCheck, LimitKind, LimitUsage, COUNTED, DATA_SIZE_POOL,
-    KV_UPDATE_POOL, STATE_GROWTH_POOL, TRANSFER_LOG_SIZE, WRITE_RECORD_SIZE,
+    CreatorBefore, EvmTxRuntimeLimits, LimitCheck, LimitKind, LimitUsage, StartLedger, COUNTED,
+    DATA_SIZE_POOL, KV_UPDATE_POOL, STATE_GROWTH_POOL, TRANSFER_LOG_SIZE, WRITE_RECORD_SIZE,
 };
 
 /// What the common execution layer tracks for the running transaction: what it keeps of the
@@ -27,18 +27,18 @@ use super::{
 /// # The three counted dimensions
 ///
 /// Data size, KV updates (write records) and state growth are each limited per transaction and
-/// per frame ([`COUNTED`]). A frame's budget in a dimension is a pool on its gas tracker
-/// ([`LimitKind::pool`]), which the revm fork forwards and settles as it does the reservoir: the
-/// transaction's own frame gets what the transaction has left once its body and the counts made
-/// before it are counted ([`first_frame_pools`](Self::first_frame_pools)), every child the
-/// schedule's share of what its caller has left (98/100: the caller keeps
-/// `GasId::pool_kept_percent`) under the frame cap, a failing frame's draws go back to its pool and
-/// a successful one hands its signed net to its caller. A count is drawn where it is made, on the
-/// pool of the frame that makes it ([`draw`](Self::draw)): a completed write's record or log, a
-/// frame start's records and transfer log on the started frame, deployed code on the creating
-/// frame. A creator's nonce record is the creating frame's own, drawn on its pools once the
-/// creation returned into it with the nonce bumped ([`close_start`](Self::close_start) hands back
-/// what tells): the creation's budgets were taken before it.
+/// per frame ([`COUNTED`]). A frame's budget in a dimension is a pool on its start's entry of the
+/// start ledger ([`LimitKind::pool`]), which settles when revm settles the start: the transaction's
+/// own frame gets what the transaction has left once its body and the counts made before it are
+/// counted ([`first_frame_pools`](Self::first_frame_pools)), every child its share of what its
+/// caller has left (98/100, the caller keeping `FRAME_KEPT_PERCENT`) under the frame cap, a failing
+/// frame's draws go back to its pool and a successful one hands its signed net to its caller. A
+/// count is drawn where it is made, on the pool of the frame that makes it ([`draw`](Self::draw)):
+/// a completed write's record or log, a frame start's records and transfer log on the started
+/// frame, deployed code on the creating frame. A creator's nonce record is the creating frame's
+/// own, drawn on its pools once the creation returned into it with the nonce bumped
+/// ([`close_start`](Self::close_start) hands back what tells): the creation's budgets were taken
+/// before it.
 ///
 /// The transaction's limits are held beside the pools, on what the transaction keeps
 /// ([`usage`](Self::usage)): its body, its Oracle hints, the records of its applied authorities,
@@ -120,6 +120,10 @@ pub struct AdditionalLimit {
     /// The EIP-8037 reservoir the settled transaction or system call left unspent: none from where
     /// an execution builds its gas until it reports what it settled with.
     reservoir_remaining: Option<u64>,
+    /// The engine's ledger of what each open start owes and holds: the frame budgets, the start
+    /// charges and the history allowances. It is not begun with the transaction: the start
+    /// lifecycle drives it, from the transaction's start to the lifecycle's end.
+    ledger: StartLedger,
 }
 
 /// What the running execution is, decided when the layer begins it from what the transaction is
@@ -574,12 +578,12 @@ impl AdditionalLimit {
         LimitCheck::WithinLimit
     }
 
-    /// The verdict on `counted` kept on a frame whose pools `gas` holds: in each counted dimension
-    /// in order, the frame's budget, then the transaction's limit; the first crossing is the
-    /// verdict. `held` holds the transaction to its limits whatever `counted` adds; otherwise a
-    /// dimension `counted` leaves alone crosses nothing and is not looked at
-    /// ([`Counted::touches`]).
-    fn check(&self, gas: &GasTracker, counted: &Counted, held: bool) -> LimitCheck {
+    /// The verdict on `counted` kept on the running frame, whose budgets are the start ledger's top
+    /// entry: in each counted dimension in order, the frame's budget, then the transaction's limit;
+    /// the first crossing is the verdict. `held` holds the transaction to its limits whatever
+    /// `counted` adds; otherwise a dimension `counted` leaves alone crosses nothing and is not
+    /// looked at ([`Counted::touches`]).
+    fn check(&self, counted: &Counted, held: bool) -> LimitCheck {
         for kind in COUNTED {
             let Some(pool) = kind.pool() else { continue };
             if !held && !counted.touches(pool) {
@@ -590,9 +594,8 @@ impl AdditionalLimit {
                 continue;
             }
             let rise = counted.rise(pool);
-            let remaining = gas.pool_remaining(pool);
+            let (remaining, spent) = self.ledger.budget(pool);
             if rise > remaining as i128 {
-                let spent = gas.pool_spent(pool);
                 let check = self.budget_crossed(kind, remaining, spent, rise as u64);
                 if check.exceeded_limit() {
                     return check;
@@ -606,41 +609,23 @@ impl AdditionalLimit {
         LimitCheck::WithinLimit
     }
 
-    /// Counts what the frame whose pools `gas` holds keeps of `counted`, held to the frame's
-    /// budgets and the transaction's limits in the order [`check`](Self::check) holds them: the
-    /// amounts `counted` takes back go back to each pool first, and the amounts it adds are drawn.
-    /// A crossing counts nothing and draws nothing, and is the stop the frame reverts with. A
-    /// count that adds nothing and takes nothing holds nothing.
-    pub(crate) fn draw(&mut self, gas: &mut GasTracker, counted: &Counted) -> LimitCheck {
+    /// Counts what the running frame keeps of `counted`, held to the frame's budgets and the
+    /// transaction's limits in the order [`check`](Self::check) holds them, and draws it on the
+    /// frame's budgets, the start ledger's top entry: the amounts `counted` takes back go back to
+    /// each pool first, and the amounts it adds are drawn. A crossing counts nothing and draws
+    /// nothing, and is the stop the frame reverts with. A count that adds nothing and takes nothing
+    /// holds nothing.
+    pub(crate) fn draw(&mut self, counted: &Counted) -> LimitCheck {
         if counted.is_none() {
             return LimitCheck::WithinLimit;
         }
-        let check = self.check(gas, counted, false);
+        let check = self.check(counted, false);
         if check.exceeded_limit() {
             return check;
         }
-        Self::apply(gas, counted);
+        self.ledger.draw(counted);
         self.count(counted);
         LimitCheck::WithinLimit
-    }
-
-    /// Draws `counted` on the pools `gas` holds, which the checks made sure can pay it; a pool it
-    /// leaves alone is not visited.
-    fn apply(gas: &mut GasTracker, counted: &Counted) {
-        for pool in PoolId::ALL {
-            if !counted.touches(pool) {
-                continue;
-            }
-            gas.refill_pool(pool, counted.taken.get(pool));
-            let drew = gas.record_pool(pool, counted.added.get(pool));
-            debug_assert!(
-                drew || gas.pool_remaining(pool) == u64::MAX,
-                "the checks admit the draw"
-            );
-            if !drew {
-                gas.clear_pool_crossing(pool);
-            }
-        }
     }
 
     /// Adds `counted` to what the frames keep.
@@ -690,8 +675,8 @@ impl AdditionalLimit {
     }
 
     /// Holds the start revm just decided — a frame it built, or a call it answered with a success —
-    /// whose frame's pools `gas` holds, to the limits, and counts `counted`, the records, state
-    /// growth and transfer log it made, read off the journal, on those pools
+    /// whose budgets are the start ledger's top entry, to the limits, and counts `counted`, the
+    /// records, state growth and transfer log it made, read off the journal, on those budgets
     /// ([`draw`](Self::draw)): the verdict is the stop the frame returns before it runs, or the
     /// one its answer gives way to. An answer that failed kept nothing and is not held. `credit` is
     /// what the start's caller gets back once the frame returned with its start kept.
@@ -701,17 +686,12 @@ impl AdditionalLimit {
     /// ([`hold_caller`](Self::hold_caller)), and the caller a deposit-like transaction created is
     /// counted unchecked ([`count_created_caller`](Self::count_created_caller)); a start is where
     /// a frame first meets it.
-    pub(crate) fn count_start(
-        &mut self,
-        gas: &mut GasTracker,
-        counted: &Counted,
-        credit: u64,
-    ) -> LimitCheck {
-        let check = self.check(gas, counted, true);
+    pub(crate) fn count_start(&mut self, counted: &Counted, credit: u64) -> LimitCheck {
+        let check = self.check(counted, true);
         if check.exceeded_limit() {
             return check;
         }
-        Self::apply(gas, counted);
+        self.ledger.draw(counted);
         self.count(counted);
         if let Some(start) = self.decided.last_mut() {
             start.credit = credit;
@@ -730,9 +710,9 @@ impl AdditionalLimit {
     /// is counted after the creation's own counts are closed, and outlives the creation's failure.
     ///
     /// A result revm did not decide the start of — the depth guard's, an interceptor's, an
-    /// inspector's — has no start to close, and no creator: revm bumped no nonce for it. The depth
-    /// guard's and an interceptor's carry the start charge their input declared, which revm gives
-    /// back; an inspector's carries what the inspector built it with.
+    /// inspector's — has no start to close, and no creator: revm bumped no nonce for it. The start
+    /// charge of each comes back where revm settles its start, from the start ledger: by its status
+    /// for the depth guard's and an interceptor's, never for an inspector's.
     pub(crate) fn close_start(&mut self, depth: usize, kept: bool) -> (u64, Option<CreatorBefore>) {
         let Some(&start) = self.decided.last().filter(|start| start.depth == depth) else {
             return (0, None);
@@ -825,6 +805,19 @@ impl AdditionalLimit {
         if matches!(self.class, TxClass::Ordinary) {
             self.class = TxClass::Neutral;
         }
+    }
+
+    /* The start ledger */
+
+    /// The engine's ledger of what each open start owes and holds.
+    pub(crate) const fn ledger(&self) -> &StartLedger {
+        &self.ledger
+    }
+
+    /// The engine's ledger of what each open start owes and holds, for the start lifecycle and the
+    /// sites that park, cap and settle a start.
+    pub(crate) const fn ledger_mut(&mut self) -> &mut StartLedger {
+        &mut self.ledger
     }
 
     /* What the settled transaction reports */
@@ -958,6 +951,16 @@ mod tests {
         );
     }
 
+    /// A layer whose running frame, the transaction's own, starts with `pools` on the start ledger.
+    fn running(limits: EvmTxRuntimeLimits, class: TxClass, pools: PoolAmounts) -> AdditionalLimit {
+        let mut layer = AdditionalLimit::new(limits);
+        layer.begin_transaction(class, 0);
+        let ledger = layer.ledger_mut();
+        ledger.park_transaction(Some(crate::limit::Parked::transaction(pools, 0)));
+        ledger.split(1, None, 0);
+        layer
+    }
+
     /// A frame budget admits a count that uses exactly what the pool holds and stops one more:
     /// the boundary is the pool's remaining amount, in each counted pool, with the transaction's
     /// limit out of the way so only the frame's budget decides.
@@ -968,17 +971,16 @@ mod tests {
             for (added, within) in
                 [(remaining - 1, true), (remaining, true), (remaining + 1, false)]
             {
-                let mut layer = AdditionalLimit::new(EvmTxRuntimeLimits::no_limits());
-                layer.begin_transaction(TxClass::Ordinary, 0);
-                let mut gas = GasTracker::new(1_000, 1_000, 0);
-                gas.set_pools_remaining(PoolAmounts::ZERO.with(pool, remaining));
+                let pools = PoolAmounts::ZERO.with(pool, remaining);
+                let mut layer = running(EvmTxRuntimeLimits::no_limits(), TxClass::Ordinary, pools);
                 let mut counted = Counted::NONE;
                 counted.added.set(pool, added);
-                let verdict = layer.draw(&mut gas, &counted);
+                let verdict = layer.draw(&counted);
                 let case = format!("{pool:?}, adds {added} to {remaining}");
+                let left = layer.ledger().budget(pool).0;
                 if within {
                     assert_eq!(verdict, LimitCheck::WithinLimit, "{case}");
-                    assert_eq!(gas.pool_remaining(pool), remaining - added, "{case}");
+                    assert_eq!(left, remaining - added, "{case}");
                     assert_eq!(
                         layer.kept.net[pool.index()],
                         i64::try_from(added).unwrap(),
@@ -990,26 +992,35 @@ mod tests {
                         matches!(verdict, LimitCheck::ExceedsLimit { frame_local: true, .. }),
                         "{case}: {verdict:?}"
                     );
-                    assert_eq!(gas.pool_remaining(pool), remaining, "{case}: nothing drawn");
+                    assert_eq!(left, remaining, "{case}: nothing drawn");
                     assert_eq!(layer.kept.net[pool.index()], 0, "{case}: nothing counted");
                 }
             }
         }
     }
 
+    /// The running frame's budgets, each pool's remaining and net.
+    fn budgets(layer: &AdditionalLimit) -> [(u64, i64); PoolId::COUNT] {
+        PoolId::ALL.map(|pool| layer.ledger().budget(pool))
+    }
+
     /// `draw` as it was before it learned to leave alone the pools a count does not touch: every
-    /// pool's budget and every dimension's limit checked off a snapshot of the pools, and every
-    /// pool drawn, refilled and counted. The reference [`draw`](AdditionalLimit::draw) is held to.
+    /// pool's budget and every dimension's limit checked off a snapshot of the budgets, and every
+    /// pool drawn, refilled and counted, on a copy of the budgets it answers. The reference
+    /// [`draw`](AdditionalLimit::draw) is held to.
     fn draw_by_every_pool(
         limit: &mut AdditionalLimit,
-        gas: &mut GasTracker,
         counted: &Counted,
-    ) -> LimitCheck {
+    ) -> (LimitCheck, [(u64, i64); PoolId::COUNT]) {
+        let mut pools = budgets(limit);
         if counted.is_none() {
-            return LimitCheck::WithinLimit;
+            return (LimitCheck::WithinLimit, pools);
         }
-        let remaining = gas.pools_remaining();
-        let spent = PoolId::ALL.map(|pool| gas.pool_spent(pool));
+        let remaining = PoolAmounts::ZERO
+            .with(DATA_SIZE_POOL, pools[DATA_SIZE_POOL.index()].0)
+            .with(KV_UPDATE_POOL, pools[KV_UPDATE_POOL.index()].0)
+            .with(STATE_GROWTH_POOL, pools[STATE_GROWTH_POOL.index()].0);
+        let spent = pools.map(|(_, net)| net);
         for kind in COUNTED {
             let Some(pool) = kind.pool() else { continue };
             let rise = counted.rise(pool);
@@ -1021,18 +1032,22 @@ mod tests {
                     rise as u64,
                 );
                 if check.exceeded_limit() {
-                    return check;
+                    return (check, pools);
                 }
             }
             let check = limit.transaction_crossed(kind, counted, false);
             if check.exceeded_limit() {
-                return check;
+                return (check, pools);
             }
         }
         for pool in PoolId::ALL {
-            gas.refill_pool(pool, counted.taken.get(pool));
-            if !gas.record_pool(pool, counted.added.get(pool)) {
-                gas.clear_pool_crossing(pool);
+            let (left, net) = &mut pools[pool.index()];
+            let (added, taken) = (counted.added.get(pool), counted.taken.get(pool));
+            *left = left.saturating_add(taken);
+            *net = net.saturating_sub_unsigned(taken);
+            if let Some(after) = left.checked_sub(added) {
+                *left = after;
+                *net = net.saturating_add_unsigned(added);
             }
             let net = &mut limit.kept.net[pool.index()];
             *net = net
@@ -1040,7 +1055,7 @@ mod tests {
                 .saturating_sub_unsigned(counted.taken.get(pool));
         }
         limit.kept.transfer_logs += u64::from(counted.transfer_log);
-        LimitCheck::WithinLimit
+        (LimitCheck::WithinLimit, pools)
     }
 
     /// A draw that visits only the pools its count touches decides, draws and counts exactly as
@@ -1100,26 +1115,27 @@ mod tests {
                                                     continue;
                                                 }
                                                 // Two drawn already, so a frame's net is not zero.
-                                                let mut gas = GasTracker::new(1_000, 1_000, 0);
-                                                gas.set_pools_remaining(
+                                                let mut layer = layer.clone();
+                                                let ledger = layer.ledger_mut();
+                                                let start = crate::limit::Parked::transaction(
                                                     PoolAmounts::ZERO
                                                         .with(DATA_SIZE_POOL, pa + 2)
                                                         .with(KV_UPDATE_POOL, pb + 2)
                                                         .with(STATE_GROWTH_POOL, pc + 2),
+                                                    0,
                                                 );
+                                                ledger.park_transaction(Some(start));
+                                                ledger.split(1, None, 0);
+                                                let mut two = Counted::NONE;
                                                 for pool in PoolId::ALL {
-                                                    assert!(gas.record_pool(pool, 2));
+                                                    two.added.set(pool, 2);
                                                 }
+                                                ledger.draw(&two);
                                                 let (mut by_touched, mut by_every) =
                                                     (layer.clone(), layer.clone());
-                                                let (mut gas_touched, mut gas_every) = (gas, gas);
-                                                let verdict =
-                                                    by_touched.draw(&mut gas_touched, &counted);
-                                                let reference = draw_by_every_pool(
-                                                    &mut by_every,
-                                                    &mut gas_every,
-                                                    &counted,
-                                                );
+                                                let verdict = by_touched.draw(&counted);
+                                                let (reference, pools) =
+                                                    draw_by_every_pool(&mut by_every, &counted);
                                                 let case = format!(
                                                     "{class:?}, limit {tx_limit}, kept {kept}, \
                                                      {counted:?}, pools {pa}/{pb}/{pc}"
@@ -1129,24 +1145,7 @@ mod tests {
                                                     by_touched.kept, by_every.kept,
                                                     "{case}"
                                                 );
-                                                assert_eq!(
-                                                    gas_touched.pools_remaining(),
-                                                    gas_every.pools_remaining(),
-                                                    "{case}"
-                                                );
-                                                for pool in PoolId::ALL {
-                                                    assert_eq!(
-                                                        (
-                                                            gas_touched.pool_spent(pool),
-                                                            gas_touched.pool_crossing(pool)
-                                                        ),
-                                                        (
-                                                            gas_every.pool_spent(pool),
-                                                            gas_every.pool_crossing(pool)
-                                                        ),
-                                                        "{case}"
-                                                    );
-                                                }
+                                                assert_eq!(budgets(&by_touched), pools, "{case}");
                                                 cases += 1;
                                             }
                                         }

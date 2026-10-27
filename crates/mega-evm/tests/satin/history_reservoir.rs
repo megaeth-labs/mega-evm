@@ -28,7 +28,9 @@ use mega_evm::{
     test_utils::{BytecodeBuilder, MemoryDatabase},
     LimitUsage, MegaTransactionOutcome, TX_BODY_SIZE, WRITE_RECORD_SIZE,
 };
-use revm::bytecode::opcode::{CALL, CREATE, GAS, MSTORE, POP, PUSH0, PUSH1, RETURN, REVERT, STOP};
+use revm::bytecode::opcode::{
+    CALL, CREATE, GAS, INVALID, MSTORE, POP, PUSH0, PUSH1, RETURN, REVERT, STOP,
+};
 
 use crate::{
     common::{
@@ -190,6 +192,46 @@ fn test_a_reverting_child_gives_its_records_back_to_the_reservoir() {
         outcome.usage,
         LimitUsage { data_size: mega_evm::TX_BODY_SIZE, write_records: 0, state_growth: 0 },
         "the reverted transfer kept nothing but the body"
+    );
+    assert_eq!(outcome.gas.history, BODY, "the body alone");
+    assert_eq!(
+        outcome.gas.reservoir_remaining,
+        RESERVOIR - BODY,
+        "the transfer's records cost the reservoir nothing in the end",
+    );
+}
+
+/// A child that halts keeps none of the records its caller paid for either, as one that reverts:
+/// the charge goes back once, to the reservoir it came from, while the halt burns the gas the child
+/// was forwarded, a fixed forward here, so the two tiers burn the same. The net history is the body
+/// alone.
+#[test]
+fn test_a_halting_child_gives_its_records_back_as_a_reverting_one_does() {
+    if runs_at_measurement_prices() {
+        return;
+    }
+    let code = BytecodeBuilder::default()
+        .append_many([PUSH0, PUSH0, PUSH0, PUSH0])
+        .append(PUSH1)
+        .append(1u8)
+        .push_address(CONTRACT)
+        .push_number(100_000u64)
+        .append(CALL)
+        .append(POP)
+        .append(STOP)
+        .build();
+    let outcome =
+        assert_the_reservoir_pays_what_regular_gas_pays("a value call whose child halts", || {
+            funded()
+                .account_code(CALLEE, code.clone())
+                .account_code(CONTRACT, Bytes::from_static(&[INVALID]))
+        });
+
+    assert!(outcome.result.is_success(), "the caller survives its child's halt");
+    assert_eq!(
+        outcome.usage,
+        LimitUsage { data_size: mega_evm::TX_BODY_SIZE, write_records: 0, state_growth: 0 },
+        "the halted transfer kept nothing but the body"
     );
     assert_eq!(outcome.gas.history, BODY, "the body alone");
     assert_eq!(

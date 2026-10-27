@@ -44,7 +44,11 @@ use revm::{
     Inspector,
 };
 
-use crate::common::{call, call_with_data, context, create, execute, runs_at_measurement_prices};
+use crate::common::{
+    assert_answered_at_unlimited_budgets, call, call_with_data, context, create, execute,
+    runs_at_measurement_prices,
+};
+use mega_evm::test_utils::{record_start_ledger_settlements, take_start_ledger_settlements};
 
 const CALLER: Address = address!("0000000000000000000000000000000000a00000");
 const CALLEE: Address = address!("0000000000000000000000000000000000a00001");
@@ -252,10 +256,13 @@ fn test_a_creation_answered_without_running_appends_no_code() {
     }
     for gas_limit in GAS_LIMITS {
         let db = callee_running(creating(BytecodeBuilder::default(), &deploying()));
-        let outcome = MegaEvm::new(context(db))
-            .with_inspector(AnswersCreations)
-            .execute_transaction(call(CALLER, CALLEE, U256::ZERO, gas_limit))
-            .expect("the transaction is valid");
+        let tx = call(CALLER, CALLEE, U256::ZERO, gas_limit);
+        let mut evm = MegaEvm::new(context(db)).with_inspector(AnswersCreations);
+        record_start_ledger_settlements(evm.ctx_mut());
+        let outcome = evm.execute_transaction(tx.clone()).expect("the transaction is valid");
+        // The answer is built on the engine's untouched gas, and the start ledger settles an
+        // inspector's answer at unlimited budgets, which its caller is left with.
+        assert_answered_at_unlimited_budgets(&take_start_ledger_settlements(evm.ctx_mut()), 2, 1);
 
         assert!(outcome.result.is_success(), "{:?}", outcome.result);
         assert_eq!(outcome.usage.write_records, 0, "no bump, no record");

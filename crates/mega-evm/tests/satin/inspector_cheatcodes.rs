@@ -42,6 +42,7 @@ use crate::{
     common::{body_history, call, context, reservoir_share},
     salt::entry,
 };
+use mega_evm::test_utils::{record_start_ledger_settlements, take_start_ledger_settlements};
 
 sol! {
     /// The cheatcodes these tests drive, as Foundry's `Vm` interface declares them.
@@ -304,7 +305,25 @@ fn test_pause_and_resume_gas_metering_hold_the_gas() {
     };
     let db = |code: Bytes| MemoryDatabase::default().account_code(TEST, code);
 
-    let (worked, answered) = run(db(paused(true)), true);
+    let (worked, answered) = {
+        let tx = call(CALLER, TEST, U256::ZERO, GAS_LIMIT);
+        let mut evm = MegaEvm::new(context(db(paused(true)))).with_inspector(Cheatcodes::default());
+        record_start_ledger_settlements(evm.ctx_mut());
+        let outcome = evm.execute_transaction(tx).expect("valid");
+        assert!(outcome.result.is_success(), "{:?}", outcome.result);
+        // The paused region's slot is drawn on `TEST`'s budgets, and the snapshot `step` puts
+        // back before the next instruction restores the frame's gas: a tracker restored from a
+        // snapshot, which cannot restore a figure kept off it. The start ledger keeps the budgets
+        // off the tracker and keeps the record's draw, which `TEST`'s nets hold where the call to
+        // `resumeGasMetering`, start 3, settles into them: one record of data size, one KV update
+        // and one new slot. The budgets themselves read unlimited, the cheatcode's answer at the
+        // pause having left `TEST` with unlimited budgets.
+        let settlements = take_start_ledger_settlements(evm.ctx_mut());
+        let resumed = crate::common::ledger_settled(&settlements, 3);
+        assert_eq!((resumed.depth, resumed.caller.net), (1, [WRITE_RECORD_SIZE as i64, 1, 1]));
+        assert_eq!(resumed.caller.remaining, revm::interpreter::PoolAmounts::UNLIMITED);
+        (outcome, evm.inspector().answered)
+    };
     assert_eq!(answered, 2);
     let (idle, _) = run(db(paused(false)), true);
     assert_eq!(slot(&worked, TEST, 9), U256::from(1), "the slot was written");

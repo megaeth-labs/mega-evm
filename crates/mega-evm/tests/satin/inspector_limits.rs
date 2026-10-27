@@ -29,7 +29,10 @@ use revm::{
     Database, Inspector,
 };
 
-use crate::common::{body_history, call, context, reservoir_share};
+use crate::common::{
+    assert_answered_at_unlimited_budgets, body_history, call, context, reservoir_share,
+};
+use mega_evm::test_utils::{record_start_ledger_settlements, take_start_ledger_settlements};
 
 const CALLER: Address = address!("0000000000000000000000000000000000e00000");
 const A: Address = address!("0000000000000000000000000000000000e00001");
@@ -390,7 +393,17 @@ fn test_an_answer_settles_on_the_gas_it_is_built_on() {
     {
         let answer = |gas| {
             let inspector = AnswersB { result, gas };
-            run(a_calls_b(), limits, gas_limit, Some(inspector)).0
+            let tx = call(CALLER, A, U256::ZERO, gas_limit);
+            let mut evm = MegaEvm::new(context(a_calls_b()).with_tx_runtime_limits(limits))
+                .with_inspector(inspector);
+            record_start_ledger_settlements(evm.ctx_mut());
+            let outcome = evm.execute_transaction(tx).expect("a valid transaction");
+            // The start ledger settles an inspector's answer at unlimited budgets whatever pools
+            // its gas carries — none on `Gas::new`, the call's shares set on it — and leaves `A`
+            // with unlimited budgets.
+            let settlements = take_start_ledger_settlements(evm.ctx_mut());
+            assert_answered_at_unlimited_budgets(&settlements, 2, 1);
+            outcome
         };
         let untouched = answer(AnswerGas::Untouched);
         assert!(untouched.result.is_success(), "{result:?}: `A` ignores the answer");

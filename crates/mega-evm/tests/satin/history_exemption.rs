@@ -395,8 +395,10 @@ fn test_a_context_switched_back_from_the_neutral_configuration_prices_no_history
             ctx.with_neutral_cfg(neutral_cfg(EthSpecId::OSAKA).expect("Osaka has a configuration"))
                 .with_cfg(CfgEnv::new_with_spec(MegaSpecId::SATIN))
         } else {
-            // The neutral configuration on the spec's own fields: on this call, it differs from
-            // the spec's in the history it prices alone.
+            // The neutral configuration on the spec's own fields: on this call, which starts no
+            // frame below its own, it differs from the spec's in the history it prices alone. A
+            // frame it started would also take the whole of its caller's reservoir and budgets,
+            // which the neutral configuration forwards whole whatever schedule it is given.
             ctx.with_neutral_cfg(spec_cfg(CfgEnv::new_with_spec(MegaSpecId::SATIN)))
         };
         let mut call = MegaTransaction::new_system_tx_with_caller(CALLER, STORER, Bytes::new());
