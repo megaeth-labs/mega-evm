@@ -179,16 +179,14 @@
 //!   recipient is the block beneficiary or a fee vault pays a record the body already bound. It is
 //!   an over-charge, never an under-charge.
 
-#[cfg(debug_assertions)]
 mod ledger;
 #[allow(clippy::module_inception)]
 mod limit;
 mod record;
 
-#[cfg(all(debug_assertions, any(test, feature = "test-utils")))]
-pub use ledger::{LedgerDivergence, LedgerFigure};
-#[cfg(debug_assertions)]
-pub(crate) use ledger::{Parked, ProviderDraw, Returning, StartLedger};
+pub(crate) use ledger::{reservoir_share, Parked, ProviderDraw, StartLedger};
+#[cfg(any(test, feature = "test-utils"))]
+pub use ledger::{LedgerPools, LedgerSettlement};
 pub use limit::AdditionalLimit;
 pub(crate) use limit::{Counted, TxClass};
 #[cfg(test)]

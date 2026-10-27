@@ -38,14 +38,14 @@ use revm::{
     Inspector,
 };
 
-#[cfg(debug_assertions)]
-use crate::common::{answered_on_its_shares, first_frame_pools, frame_shares};
-use crate::salt::{
-    create_with, crowded_account, db, entry, minimal_envs, salt_context, tx_with_gas, value_call,
-    SaltEnvs, CALLER, CONTRACT, EMPTY,
+use crate::{
+    common::assert_answered_at_unlimited_budgets,
+    salt::{
+        create_with, crowded_account, db, entry, minimal_envs, salt_context, tx_with_gas,
+        value_call, SaltEnvs, CALLER, CONTRACT, EMPTY,
+    },
 };
-#[cfg(debug_assertions)]
-use mega_evm::test_utils::{take_start_ledger_divergences, tolerate_start_ledger_divergences};
+use mega_evm::test_utils::{record_start_ledger_settlements, take_start_ledger_settlements};
 
 /// A contract `CONTRACT` calls.
 const CALLEE: Address = address!("0000000000000000000000000000000000c00010");
@@ -132,11 +132,9 @@ where
 }
 
 /// [`inspected`] under `inspector`, which answers start `start`, at `depth`, on the gas its input
-/// carries, the shares of its caller's pools included: an answer with pools the inspector set,
-/// which a debug build's start ledger does not take. The ledger, which settles an inspector's
-/// answer at unlimited pools, records where it parts from the fork, and each part is asserted
-/// ([`answered_on_its_shares`]): the caller is the transaction's own frame, or the transaction,
-/// which holds its first frame's pools when the start is made.
+/// carries: the start ledger settles an inspector's answer at unlimited budgets, whatever pools
+/// its gas carries, and leaves its caller — the transaction's own frame, or the transaction —
+/// with unlimited budgets ([`assert_answered_at_unlimited_budgets`]).
 fn answered<I>(
     db: MemoryDatabase,
     envs: SaltEnvs,
@@ -148,21 +146,13 @@ where
     I: Inspector<MegaContext<MemoryDatabase, SaltEnvs>, EthInterpreter>,
 {
     let mut evm = MegaEvm::new(salt_context(db, envs)).with_inspector(inspector);
-    #[cfg(debug_assertions)]
-    tolerate_start_ledger_divergences(evm.ctx_mut());
-    let outcome = evm.execute_transaction(tx.clone()).expect("a valid transaction");
-    #[cfg(debug_assertions)]
-    {
-        let caller = first_frame_pools(&EvmTxRuntimeLimits::default(), &tx);
-        let shares = if depth == 0 { caller } else { frame_shares(caller) };
-        assert_eq!(
-            take_start_ledger_divergences(evm.ctx_mut()),
-            answered_on_its_shares(start, depth, caller, shares),
-            "start {start} at depth {depth}"
-        );
-    }
-    #[cfg(not(debug_assertions))]
-    let _ = (start, depth);
+    record_start_ledger_settlements(evm.ctx_mut());
+    let outcome = evm.execute_transaction(tx).expect("a valid transaction");
+    assert_answered_at_unlimited_budgets(
+        &take_start_ledger_settlements(evm.ctx_mut()),
+        start,
+        depth,
+    );
     outcome
 }
 

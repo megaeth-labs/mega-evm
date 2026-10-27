@@ -42,13 +42,7 @@ use crate::{
     common::{body_history, call, context, reservoir_share},
     salt::entry,
 };
-#[cfg(debug_assertions)]
-use mega_evm::test_utils::{
-    take_start_ledger_divergences, tolerate_start_ledger_divergences, LedgerDivergence,
-    LedgerFigure,
-};
-#[cfg(debug_assertions)]
-use revm::interpreter::PoolId;
+use mega_evm::test_utils::{record_start_ledger_settlements, take_start_ledger_settlements};
 
 sol! {
     /// The cheatcodes these tests drive, as Foundry's `Vm` interface declares them.
@@ -314,31 +308,20 @@ fn test_pause_and_resume_gas_metering_hold_the_gas() {
     let (worked, answered) = {
         let tx = call(CALLER, TEST, U256::ZERO, GAS_LIMIT);
         let mut evm = MegaEvm::new(context(db(paused(true)))).with_inspector(Cheatcodes::default());
-        #[cfg(debug_assertions)]
-        tolerate_start_ledger_divergences(evm.ctx_mut());
+        record_start_ledger_settlements(evm.ctx_mut());
         let outcome = evm.execute_transaction(tx).expect("valid");
         assert!(outcome.result.is_success(), "{:?}", outcome.result);
-        // The paused region's slot is drawn on the frame's pools, and the snapshot `step` puts
-        // back before the next instruction takes the draw back off the frame's gas: a tracker
-        // restored from a snapshot, which cannot restore a figure kept off it. A debug build's
-        // start ledger keeps the pools off the tracker and keeps the record's draw, and parts from
-        // the fork in `TEST`'s nets where the call to `resumeGasMetering`, start 3, settles; the
-        // pools themselves both read unlimited, the cheatcode's answer on `Gas::new` having
-        // carried unlimited pools back to `TEST` at the pause.
-        #[cfg(debug_assertions)]
-        {
-            let net = |pool, drawn: u64| LedgerDivergence {
-                start: 3,
-                depth: 1,
-                figure: LedgerFigure::CallerNet(PoolId::new(pool)),
-                ledger: drawn.into(),
-                fork: 0,
-            };
-            assert_eq!(
-                take_start_ledger_divergences(evm.ctx_mut()),
-                [net(0, WRITE_RECORD_SIZE), net(1, 1), net(2, 1)]
-            );
-        }
+        // The paused region's slot is drawn on `TEST`'s budgets, and the snapshot `step` puts
+        // back before the next instruction restores the frame's gas: a tracker restored from a
+        // snapshot, which cannot restore a figure kept off it. The start ledger keeps the budgets
+        // off the tracker and keeps the record's draw, which `TEST`'s nets hold where the call to
+        // `resumeGasMetering`, start 3, settles into them: one record of data size, one KV update
+        // and one new slot. The budgets themselves read unlimited, the cheatcode's answer at the
+        // pause having left `TEST` with unlimited budgets.
+        let settlements = take_start_ledger_settlements(evm.ctx_mut());
+        let resumed = settlements.iter().find(|settled| settled.start == 3).expect("settled");
+        assert_eq!((resumed.depth, resumed.caller.net), (1, [WRITE_RECORD_SIZE as i64, 1, 1]));
+        assert_eq!(resumed.caller.remaining, revm::interpreter::PoolAmounts::UNLIMITED);
         (outcome, evm.inspector().answered)
     };
     assert_eq!(answered, 2);

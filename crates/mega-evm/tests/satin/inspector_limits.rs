@@ -29,11 +29,10 @@ use revm::{
     Database, Inspector,
 };
 
-#[cfg(debug_assertions)]
-use crate::common::{answered_on_its_shares, first_frame_pools, frame_shares};
-use crate::common::{body_history, call, context, reservoir_share};
-#[cfg(debug_assertions)]
-use mega_evm::test_utils::{take_start_ledger_divergences, tolerate_start_ledger_divergences};
+use crate::common::{
+    assert_answered_at_unlimited_budgets, body_history, call, context, reservoir_share,
+};
+use mega_evm::test_utils::{record_start_ledger_settlements, take_start_ledger_settlements};
 
 const CALLER: Address = address!("0000000000000000000000000000000000e00000");
 const A: Address = address!("0000000000000000000000000000000000e00001");
@@ -397,24 +396,13 @@ fn test_an_answer_settles_on_the_gas_it_is_built_on() {
             let tx = call(CALLER, A, U256::ZERO, gas_limit);
             let mut evm = MegaEvm::new(context(a_calls_b()).with_tx_runtime_limits(limits))
                 .with_inspector(inspector);
-            #[cfg(debug_assertions)]
-            tolerate_start_ledger_divergences(evm.ctx_mut());
-            let outcome = evm.execute_transaction(tx.clone()).expect("a valid transaction");
-            // An answer on `Gas::new` carries unlimited pools, as the start ledger settles an
-            // inspector's answer; one on the call's shares carries pools the inspector set, which
-            // the ledger does not take, and it parts from the fork where `A`'s pool is limited.
-            #[cfg(debug_assertions)]
-            {
-                let expected = match gas {
-                    AnswerGas::Fresh => Vec::new(),
-                    AnswerGas::Untouched | AnswerGas::Charged => {
-                        let caller = first_frame_pools(&limits, &tx);
-                        answered_on_its_shares(2, 1, caller, frame_shares(caller))
-                    }
-                };
-                let divergences = take_start_ledger_divergences(evm.ctx_mut());
-                assert_eq!(divergences, expected, "{result:?}, {gas:?}");
-            }
+            record_start_ledger_settlements(evm.ctx_mut());
+            let outcome = evm.execute_transaction(tx).expect("a valid transaction");
+            // The start ledger settles an inspector's answer at unlimited budgets whatever pools
+            // its gas carries — none on `Gas::new`, the call's shares set on it — and leaves `A`
+            // with unlimited budgets.
+            let settlements = take_start_ledger_settlements(evm.ctx_mut());
+            assert_answered_at_unlimited_budgets(&settlements, 2, 1);
             outcome
         };
         let untouched = answer(AnswerGas::Untouched);

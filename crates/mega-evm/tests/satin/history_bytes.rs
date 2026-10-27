@@ -44,11 +44,11 @@ use revm::{
     Inspector,
 };
 
-#[cfg(debug_assertions)]
-use crate::common::{answered_on_its_shares, first_frame_pools, frame_shares};
-use crate::common::{call, call_with_data, context, create, execute, runs_at_measurement_prices};
-#[cfg(debug_assertions)]
-use mega_evm::test_utils::{take_start_ledger_divergences, tolerate_start_ledger_divergences};
+use crate::common::{
+    assert_answered_at_unlimited_budgets, call, call_with_data, context, create, execute,
+    runs_at_measurement_prices,
+};
+use mega_evm::test_utils::{record_start_ledger_settlements, take_start_ledger_settlements};
 
 const CALLER: Address = address!("0000000000000000000000000000000000a00000");
 const CALLEE: Address = address!("0000000000000000000000000000000000a00001");
@@ -258,18 +258,11 @@ fn test_a_creation_answered_without_running_appends_no_code() {
         let db = callee_running(creating(BytecodeBuilder::default(), &deploying()));
         let tx = call(CALLER, CALLEE, U256::ZERO, gas_limit);
         let mut evm = MegaEvm::new(context(db)).with_inspector(AnswersCreations);
-        #[cfg(debug_assertions)]
-        tolerate_start_ledger_divergences(evm.ctx_mut());
+        record_start_ledger_settlements(evm.ctx_mut());
         let outcome = evm.execute_transaction(tx.clone()).expect("the transaction is valid");
-        // The answer carries the creation's shares, pools the inspector set, which a debug build's
-        // start ledger does not take: it settles an inspector's answer at unlimited pools, and
-        // parts from the fork.
-        #[cfg(debug_assertions)]
-        {
-            let caller = first_frame_pools(&EvmTxRuntimeLimits::default(), &tx);
-            let expected = answered_on_its_shares(2, 1, caller, frame_shares(caller));
-            assert_eq!(take_start_ledger_divergences(evm.ctx_mut()), expected);
-        }
+        // The answer is built on the engine's untouched gas, and the start ledger settles an
+        // inspector's answer at unlimited budgets, which its caller is left with.
+        assert_answered_at_unlimited_budgets(&take_start_ledger_settlements(evm.ctx_mut()), 2, 1);
 
         assert!(outcome.result.is_success(), "{:?}", outcome.result);
         assert_eq!(outcome.usage.write_records, 0, "no bump, no record");

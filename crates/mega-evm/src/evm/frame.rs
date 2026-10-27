@@ -7,18 +7,19 @@
 //!
 //! 1. an upfront state-gas charge the calling opcode made for the frame (a new account, a creation)
 //!    is priced for refund when the frame failed;
-//! 2. the frame's gas merges into the caller's: unused regular gas back on success and revert, the
-//!    frame's reservoir added to what the caller kept, and the frame's pools absorbed into the
-//!    caller's;
-//! 3. the refund is refilled into the caller's reservoir, and the start charge the frame carries —
-//!    what its caller paid for the records its start makes — is given back when it failed.
+//! 2. the frame's gas merges into the caller's: unused regular gas back on success and revert, and
+//!    the frame's reservoir added to what the caller kept;
+//! 3. the refund is refilled into the caller's reservoir;
+//! 4. revm settles the frame's start, and the engine's start ledger merges the frame's budgets into
+//!    its caller's and gives back the start charge — what its caller paid for the records its start
+//!    makes — when it failed, by the result's status, as for a frame revm ran.
 //!
 //! The contract for a synthetic result is that it settles exactly like revm's own: its gas carries
-//! the reservoir and the shares of the pools the frame inherited ([`untouched_call_gas`],
-//! [`untouched_create_gas`]), never `Gas::new(limit)`, which would carry no reservoir and
-//! unlimited pools, billing the sender for the whole reservoir and lifting the caller's budgets;
-//! and it carries the calling opcode's upfront-charge flags and start charge, so step 1 and step 3
-//! refund them. [`synthetic_frame_result`] builds one.
+//! the reservoir the frame inherited ([`untouched_call_gas`], [`untouched_create_gas`]), never
+//! `Gas::new(limit)`, which would carry no reservoir, billing the sender for the whole reservoir;
+//! and it carries the calling opcode's upfront-charge flags, so step 1 refunds them. The budgets
+//! and the start charge are the start ledger's, which the engine's own answers settle on by
+//! status, so nothing of them is carried. [`synthetic_frame_result`] builds one.
 
 use alloy_primitives::Bytes;
 use revm::{
@@ -30,29 +31,22 @@ use revm::{
 };
 
 /// The gas of a call result built without running the callee: the call's whole gas limit
-/// unspent, the reservoir the call inherited, and the shares of its caller's pools it was given,
-/// undrawn.
+/// unspent, and the reservoir the call inherited.
 #[inline]
 pub const fn untouched_call_gas(inputs: &CallInputs) -> Gas {
-    let mut gas = Gas::new_with_regular_gas_and_reservoir(inputs.gas_limit, inputs.reservoir);
-    gas.tracker_mut().set_pools_remaining(inputs.pool_shares);
-    gas
+    Gas::new_with_regular_gas_and_reservoir(inputs.gas_limit, inputs.reservoir)
 }
 
 /// The gas of a creation result built without running the init code: its whole gas limit
-/// unspent, the reservoir the creation inherited, and the shares of its creator's pools it was
-/// given, undrawn.
+/// unspent, and the reservoir the creation inherited.
 #[inline]
 pub const fn untouched_create_gas(inputs: &CreateInputs) -> Gas {
-    let mut gas = Gas::new_with_regular_gas_and_reservoir(inputs.gas_limit(), inputs.reservoir());
-    gas.tracker_mut().set_pools_remaining(inputs.pool_shares());
-    gas
+    Gas::new_with_regular_gas_and_reservoir(inputs.gas_limit(), inputs.reservoir())
 }
 
 /// A result for the frame `input` would start, built without running it: `result` with
-/// `output`, the frame's gas untouched, the inherited reservoir and pool shares carried, and the
-/// calling opcode's upfront state-gas flags and start charge, as revm builds the results of the
-/// frames it answers itself.
+/// `output`, the frame's gas untouched, the inherited reservoir carried, and the calling opcode's
+/// upfront state-gas flags, as revm builds the results of the frames it answers itself.
 pub fn synthetic_frame_result(
     input: &FrameInput,
     result: InstructionResult,
@@ -65,7 +59,7 @@ pub fn synthetic_frame_result(
             address: None,
             charged_create_state_gas: inputs.charged_create_state_gas(),
             charged_state_gas_address: inputs.charged_state_gas_address(),
-            charged_start: inputs.charged_start(),
+            charged_start: Default::default(),
             start_mark: OutcomeMark::NONE,
         }),
         FrameInput::Empty => unreachable!("a frame input always names a call or a creation"),
@@ -87,7 +81,7 @@ pub fn synthetic_call_result(
         precompile_call_logs: Default::default(),
         charged_new_account_state_gas: inputs.charged_new_account_state_gas,
         charged_state_gas_address: inputs.target_address,
-        charged_start: inputs.charged_start,
+        charged_start: Default::default(),
         start_mark: OutcomeMark::NONE,
     })
 }

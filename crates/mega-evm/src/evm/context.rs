@@ -499,10 +499,9 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// The part of its pools and of its EIP-8037 reservoir, in per cent, a caller keeps when it
     /// starts a frame, by the engine's own rule: [`FRAME_KEPT_PERCENT`] on the spec's
     /// configuration, and nothing on the neutral one, which forwards the whole of each as Ethereum
-    /// does. A debug build's start ledger computes a start's shares by it.
+    /// does, whatever schedule it was given. A start's shares are computed by it.
     ///
     /// [`FRAME_KEPT_PERCENT`]: crate::evm::schedule::FRAME_KEPT_PERCENT
-    #[cfg(debug_assertions)]
     pub(crate) const fn frame_kept_percent(&self) -> u64 {
         if self.runs_neutral() {
             0
@@ -513,9 +512,8 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
 
     /// The history allowance a value-transferring `CALL` or `CALLCODE` gives the frame it starts,
     /// by the engine's own rule: [`history_allowance_gas`](crate::history_allowance_gas) on the
-    /// spec's configuration, and none on the neutral one, which prices no history. A debug build's
-    /// start ledger keeps it.
-    #[cfg(debug_assertions)]
+    /// spec's configuration, and none on the neutral one, which prices no history. The start
+    /// ledger keeps it, and a log the frame emits draws it first.
     pub(crate) fn value_call_allowance(&self) -> u64 {
         if self.runs_neutral() {
             0
@@ -729,11 +727,13 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> ContextTr for MegaContext<DB, ExtE
     }
 
     /// Holds the code a creation deposits to the data-size limit, and counts its bytes, on the
-    /// creating frame's pool, `gas`, once `return_create` made every charge for the deposit and
-    /// before it commits the creation. A crossing refuses the deposit with the stop's revert data:
+    /// creating frame's budget — the start ledger's top entry, the creation's own start, which
+    /// settles only once the creation returns; the creating frame's tracker revm lends is not
+    /// drawn — once `return_create` made every charge for the deposit and before it commits the
+    /// creation. A crossing draws nothing and refuses the deposit with the stop's revert data:
     /// `return_create` reverts the creation's checkpoint, so the code is not written, puts the
-    /// frame's gas back to what it had before the deposit's charges, the draw included, and ends
-    /// the creation as a revert carrying the stop.
+    /// frame's gas back to what it had before the deposit's charges, and ends the creation as a
+    /// revert carrying the stop.
     ///
     /// A creation `return_create` fails itself is never offered: a revert or a halt of the init
     /// code, code it refuses — starting with `0xEF`, or over the code-size limit — and a creation
@@ -748,7 +748,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> ContextTr for MegaContext<DB, ExtE
     fn admit_code_deposit(
         &mut self,
         deposit: &CodeDeposit<'_>,
-        gas: &mut GasTracker,
+        _gas: &mut GasTracker,
     ) -> Result<(), Bytes> {
         // Destroyed in this transaction: the flag revm keeps for the whole journal may stand from
         // an earlier transaction on it.
@@ -756,7 +756,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> ContextTr for MegaContext<DB, ExtE
         if keyless::refuses_empty_deposit(&mut self.keyless_creation, deposit, destroyed) {
             return Err(Bytes::new());
         }
-        let check = self.additional_limit.draw(gas, &Counted::bytes(deposit.code.len() as u64));
+        let check = self.additional_limit.draw(&Counted::bytes(deposit.code.len() as u64));
         if check.exceeded_limit() {
             return Err(self.additional_limit.note_frame_stop(&check));
         }

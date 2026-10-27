@@ -3,19 +3,18 @@
 use alloy_evm::Evm;
 use alloy_op_evm::OpTx;
 use alloy_primitives::{Address, Bytes, TxKind, B256, U256};
-#[cfg(debug_assertions)]
-use mega_evm::test_utils::{LedgerDivergence, LedgerFigure};
 use mega_evm::{
     active_satin_prices,
-    test_utils::{note_price_guard, op_transaction, zero_fee_l1_block_info, BytecodeBuilder},
+    test_utils::{
+        note_price_guard, op_transaction, zero_fee_l1_block_info, BytecodeBuilder, LedgerSettlement,
+    },
     EvmTxRuntimeLimits, LimitUsage, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
     MegaTransaction, MegaTransactionOutcome,
 };
-#[cfg(debug_assertions)]
-use revm::interpreter::{PoolAmounts, PoolId};
 use revm::{
     bytecode::opcode::{PUSH0, RETURN},
     context::{result::ResultAndState, BlockEnv, TxEnv},
+    interpreter::{PoolAmounts, PoolId},
     Database,
 };
 
@@ -301,57 +300,23 @@ pub(crate) fn body_history(calldata_len: u64) -> u64 {
     history(mega_evm::TX_BODY_SIZE + calldata_len)
 }
 
-/// The pools the transaction's own frame starts with under `limits` when `tx` counts nothing
-/// before it but its body: what each limit leaves once the body is counted, the data size under the
-/// frame cap.
-#[cfg(debug_assertions)]
-pub(crate) fn first_frame_pools(limits: &EvmTxRuntimeLimits, tx: &MegaTransaction) -> PoolAmounts {
-    let data_size = limits.tx_data_size_limit.saturating_sub(mega_evm::transaction_body_bytes(tx));
-    PoolAmounts::ZERO
-        .with(PoolId::new(0), data_size.min(limits.frame_data_size_limit))
-        .with(PoolId::new(1), limits.tx_kv_update_limit)
-        .with(PoolId::new(2), limits.tx_state_growth_limit)
-}
-
-/// The share of each of `caller`'s pools a frame it starts begins with: 98/100 of each, rounded
-/// down.
-#[cfg(debug_assertions)]
-pub(crate) fn frame_shares(caller: PoolAmounts) -> PoolAmounts {
-    let share = |amount: u64| {
-        let share = u128::from(amount) * u128::from(mega_evm::FRAME_DATA_SHARE_NUMERATOR) /
-            u128::from(mega_evm::FRAME_DATA_SHARE_DENOMINATOR);
-        u64::try_from(share).expect("a share is less than the pool")
-    };
-    PoolId::ALL.into_iter().fold(caller, |shares, pool| shares.with(pool, share(caller.get(pool))))
-}
-
-/// What a debug build's start ledger records where an inspector answered start `start`, at
-/// `depth`, on gas that carries the shares its input was forwarded, `shares`, as the engine's
-/// `untouched_call_gas` and `untouched_create_gas` build it: an answer with pools the inspector
-/// set, whose pools stop being taken once the engine reads its ledger, the pool fields leaving the
-/// frame's input and gas. The ledger settles an inspector's answer at
-/// unlimited pools, so it parts from the fork on the answer's own pools wherever a share is
-/// limited, and on its caller's once it settled, wherever the caller, which the fork gives back
-/// the shares and so leaves with what it held before the start, `caller`, is limited.
-#[cfg(debug_assertions)]
-pub(crate) fn answered_on_its_shares(
+/// Asserts that the start ledger settled start `start`, at `depth`, an inspector's answer, at
+/// unlimited budgets, whatever pools the inspector's gas carried — the engine's own
+/// `untouched_call_gas` and `untouched_create_gas` included, which carry none of the start's
+/// budgets — and left the answer's caller with unlimited budgets: the frame's pools as it settled
+/// and its caller's once it settled into them, all three unlimited, with no net drawn on the
+/// answer.
+pub(crate) fn assert_answered_at_unlimited_budgets(
+    settlements: &[LedgerSettlement],
     start: u32,
     depth: usize,
-    caller: PoolAmounts,
-    shares: PoolAmounts,
-) -> Vec<LedgerDivergence> {
-    let parts = |amounts: PoolAmounts, figure: fn(PoolId) -> LedgerFigure| {
-        PoolId::ALL.into_iter().filter(move |pool| amounts.get(*pool) != u64::MAX).map(
-            move |pool| LedgerDivergence {
-                start,
-                depth,
-                figure: figure(pool),
-                ledger: u64::MAX.into(),
-                fork: amounts.get(pool).into(),
-            },
-        )
-    };
-    parts(shares, LedgerFigure::FrameRemaining)
-        .chain(parts(caller, LedgerFigure::CallerRemaining))
-        .collect()
+) {
+    let settled = settlements
+        .iter()
+        .find(|settled| settled.start == start)
+        .unwrap_or_else(|| panic!("start {start} settled: {settlements:?}"));
+    assert_eq!(settled.depth, depth, "start {start}");
+    assert_eq!(settled.frame.remaining, PoolAmounts::UNLIMITED, "start {start}: the answer's");
+    assert_eq!(settled.frame.net, [0; PoolId::COUNT], "start {start}: the answer's");
+    assert_eq!(settled.caller.remaining, PoolAmounts::UNLIMITED, "start {start}: its caller's");
 }

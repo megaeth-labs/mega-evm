@@ -27,8 +27,8 @@ use revm::{
     },
     context_interface::{
         cfg::{
-            gas::{GasTracker, PoolAmounts, PoolId, StartCharge},
-            GasId, GasParams, StateGasCharge, StateGasSite,
+            gas::{GasTracker, PoolId},
+            GasId, StateGasCharge, StateGasSite,
         },
         journaled_state::{entry::JournalEntry, JournalCheckpoint},
         Host,
@@ -316,17 +316,18 @@ where
         gas
     }
 
-    /// revm's first frame, on the transaction's pool, carrying as its start charge the history
-    /// charged before execution for the write record it makes, as pre-execution kept it
+    /// revm's first frame, with what the transaction's start owes parked on the start ledger for
+    /// revm's split of it to take: its budgets, and as its start charge the history charged before
+    /// execution for the write record it makes, as pre-execution kept it
     /// (`charge_records_made_outside_a_frame`); with a read of the block beneficiary's account
     /// marked for gas detention when the transaction's recipient delegates to the beneficiary:
     /// revm resolves that delegate through the journal, where the Host does not see it.
     ///
-    /// The pools are what the transaction has left of its data-size, KV-update and state-growth
+    /// The budgets are what the transaction has left of its data-size, KV-update and state-growth
     /// limits once its body, the records of the authorities it applied, the accounts they created
     /// and a deposit's created caller are counted, the data size under the frame cap
-    /// ([`AdditionalLimit::first_frame_pools`](crate::AdditionalLimit)); revm hands the frame the
-    /// whole of each.
+    /// ([`AdditionalLimit::first_frame_pools`](crate::AdditionalLimit)). Nothing is put on the
+    /// frame's input or on the transaction's gas for the fork to carry.
     fn first_frame_input(
         &mut self,
         evm: &mut Self::Evm,
@@ -346,14 +347,11 @@ where
             }
             None => repriced(),
         };
-        let charge = StartCharge::new(history, PoolAmounts::ZERO);
-        #[cfg(debug_assertions)]
         let owed = crate::limit::Parked::transaction(
             evm.ctx_ref().additional_limit.first_frame_pools(),
             history,
         );
-        gas.set_pools_remaining(evm.ctx_ref().additional_limit.first_frame_pools());
-        let Some(mut frame) = self.op.first_frame_input(evm, gas)? else {
+        let Some(frame) = self.op.first_frame_input(evm, gas)? else {
             // The runtime gas phase could not pay for the first frame's start: EIP-2780's charge
             // for the account the frame adds, a call's recipient or a creation's account, or the
             // access to the code a delegated recipient runs, warm or cold. A price of that account
@@ -363,17 +361,10 @@ where
             // rebuilding the transaction's gas from its intrinsic cost, the history charged for
             // the first frame's write record included, which no frame carries back.
             evm.ctx_mut().additional_limit.take_back_authorities();
-            #[cfg(debug_assertions)]
             evm.ctx_mut().additional_limit.ledger_mut().park_transaction(None);
             return Ok(None);
         };
-        #[cfg(debug_assertions)]
         evm.ctx_mut().additional_limit.ledger_mut().park_transaction(Some(owed));
-        match &mut frame.frame_input {
-            FrameInput::Call(inputs) => inputs.charged_start = charge,
-            FrameInput::Create(inputs) => inputs.set_charged_start(charge),
-            FrameInput::Empty => {}
-        }
         evm.ctx_mut().mark_beneficiary_delegate();
         Ok(Some(frame))
     }
@@ -382,12 +373,12 @@ where
     /// revm's settlement, so revm's never runs here): a transaction whose own frame a limit stopped
     /// settles like an EIP-8037 revert, its unspent regular gas and reservoir back to the sender.
     ///
-    /// The write record the transaction's own frame makes was charged before execution and rides
-    /// on the frame's input as its start charge, which the settlement gives back when the frame
-    /// did not succeed, the way EIP-8037 gives back the state gas of the account that frame would
-    /// have created. A frame answered without returning through
-    /// [`frame_return_result`](EvmTr::frame_return_result) — revm's answer to the first frame, an
-    /// interceptor's, an inspector's — closes its start and gives up its stop here.
+    /// The write record the transaction's own frame makes was charged before execution and is the
+    /// transaction's start charge on the start ledger, which revm's settlement of the start gives
+    /// back when the frame did not succeed (`Host::frame_settle`), the way EIP-8037 gives back the
+    /// state gas of the account that frame would have created. A frame answered without returning
+    /// through [`frame_return_result`](EvmTr::frame_return_result) — revm's answer to the first
+    /// frame, an interceptor's, an inspector's — closes its start and gives up its stop here.
     ///
     /// Keeps the history gas the transaction spent, which its gas holds once the frame settled into
     /// it: what the body was charged, and what the frames charged net of what they gave back; and
@@ -401,8 +392,6 @@ where
         let layer = &mut evm.ctx_mut().additional_limit;
         layer.close_start(0, frame_result.instruction_result().is_ok());
         layer.take_frame_stop(frame_result, true);
-        #[cfg(debug_assertions)]
-        layer.ledger_mut().returning(fork_figures(frame_result));
         self.op.last_frame_result(evm, frame_result, parent_gas)?;
         let priced = evm.ctx_ref().prices_history();
         let history = 0_u64.saturating_add_signed(frame_result.gas().history_gas_spent());
@@ -613,7 +602,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
     ) -> Result<FrameInitResult<'_, Self::Frame>, ContextDbError<Self::Context>> {
         // The frame on top of the stack, if any, is the caller, which suspends on this start.
         if self.inner.frame_stack.index().is_some() {
-            suspend(&mut self.inner.ctx, self.inner.frame_stack.get(), &mut frame_init);
+            suspend(&mut self.inner.ctx, self.inner.frame_stack.get(), &frame_init);
         }
         if let Some(result) = call_too_deep(&frame_init) {
             return Ok(ItemOrResult::Result(result));
@@ -660,11 +649,9 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
         };
         let ctx = &mut self.inner.ctx;
         let Some(mut result) = decided else {
-            #[cfg(debug_assertions)]
-            ctx.additional_limit.ledger_mut().built();
             ctx.additional_limit.open_start(depth, start.creator);
             let frame = self.inner.frame_stack.get();
-            let verdict = start.count(ctx, frame.interpreter.gas.tracker_mut());
+            let verdict = start.count(ctx);
             ctx.detention.on_frame_run(&mut frame.interpreter.gas, depth);
             let first = if verdict.exceeded_limit() {
                 Some(stop_action(ctx, frame, &verdict))
@@ -685,7 +672,6 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
             return Ok(ItemOrResult::Item(self.inner.frame_stack.get()));
         };
         debug_assert!(!keyless, "revm builds a keylessDeploy call's frame");
-        #[cfg(debug_assertions)]
         adopt_provider_draws(ctx, &result);
         if let PrecompileHold::Clamped(withheld) = hold {
             Detention::restore_forward(result.interpreter_result_mut(), withheld);
@@ -699,7 +685,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
         // success is held to the records its start made, which revm committed.
         ctx.additional_limit.open_start(depth, start.creator);
         if succeeded && matches!(result, FrameResult::Call(_)) {
-            let verdict = start.count(ctx, result.gas_mut().tracker_mut());
+            let verdict = start.count(ctx);
             stop_the_answer_at(ctx, &start, &mut result, verdict);
         }
         settle_answer(ctx, depth, gas_limit, &mut result);
@@ -784,8 +770,6 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
         }
         layer.take_frame_stop(&result, outermost);
         let creation = keyless::returning(&self.inner.ctx, &mut self.inner.frame_stack, &result);
-        #[cfg(debug_assertions)]
-        self.inner.ctx.additional_limit.ledger_mut().returning(fork_figures(&result));
         let returned = self.inner.frame_return_result(result)?;
         if returned.is_some() {
             return Ok(returned);
@@ -800,8 +784,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
             }
             None => {
                 let bumped = creator.filter(|creator| ctx.accounts().bumped(creator));
-                let gas = caller.interpreter.gas.tracker_mut();
-                (bumped.and_then(|creator| hold_creator(ctx, gas, &creator)), None)
+                (bumped.and_then(|creator| hold_creator(ctx, &creator)), None)
             }
         };
         let stop = stop.or_else(|| ctx.additional_limit.hold_caller());
@@ -862,8 +845,9 @@ where
 /// Settles `caller`, the frame on top of the stack, which suspends to start `child`: gas detention
 /// keeps its compute for the child's start to add to the transaction's, with the stipend revm
 /// gives a value call's child, which the caller did not forward
-/// ([`on_frame_suspend`](Detention::on_frame_suspend)), and the share of its pool the child starts
-/// with is held to the frame cap ([`cap_the_shares`]).
+/// ([`on_frame_suspend`](Detention::on_frame_suspend)), and the share of each of its pools the
+/// child starts with is held to the frame cap and, for a caller whose net is negative, to the share
+/// of the caller's budget, on the start ledger (`StartLedger::cap_child`).
 ///
 /// It runs where the start reaches [`EvmTr::frame_init`]: under an inspector, after the
 /// inspector's `frame_start` saw the start. A start the inspector answers itself settles nothing:
@@ -871,18 +855,14 @@ where
 #[inline]
 fn suspend<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
-    caller: &mut EthFrame<EthInterpreter>,
-    child: &mut FrameInit,
+    caller: &EthFrame<EthInterpreter>,
+    child: &FrameInit,
 ) {
     let stipend = value_call_stipend(&child.frame_input, ctx.gas_params().call_stipend());
     ctx.detention.on_frame_suspend(&caller.interpreter.gas, caller.depth, stipend);
     let caps = ctx.additional_limit.frame_caps();
-    cap_the_shares(ctx.gas_params(), caps, &mut caller.interpreter.gas, child);
-    #[cfg(debug_assertions)]
-    {
-        let kept = ctx.frame_kept_percent();
-        ctx.additional_limit.ledger_mut().cap_child(caps, kept);
-    }
+    let kept = ctx.frame_kept_percent();
+    ctx.additional_limit.ledger_mut().cap_child(caps, kept);
 }
 
 /// The action of `frame` that stops it at the limit `verdict` names before it runs another
@@ -946,9 +926,9 @@ fn end_frame<DB: Database, ExtEnvs: ExternalEnvTypes>(
     }
 }
 
-/// Counts on a creator whose pools `gas` holds, once a creation it started returned into it, what
-/// the nonce bump revm made for the creation made of it ([`Accounts::creator_counted`]) — `before`
-/// is the creator as it stood before revm decided the creation — and answers the stop the creator
+/// Counts on a creator, the running frame, once a creation it started returned into it, what the
+/// nonce bump revm made for the creation made of it ([`Accounts::creator_counted`]) — `before` is
+/// the creator as it stood before revm decided the creation — and answers the stop the creator
 /// returns before it runs on, if the count crossed a limit: the record is held to the creator's
 /// budget, then to the transaction's limit, as any count the creator makes
 /// ([`draw`](crate::AdditionalLimit)). The creation's budget was taken before the record, at its
@@ -958,56 +938,11 @@ fn end_frame<DB: Database, ExtEnvs: ExternalEnvTypes>(
 /// [`Accounts::creator_counted`]: crate::limit::Accounts
 pub(crate) fn hold_creator<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
-    gas: &mut GasTracker,
     before: &CreatorBefore,
 ) -> Option<LimitCheck> {
     let counted = ctx.accounts().creator_counted(before);
-    let check = ctx.additional_limit.draw(gas, &counted);
+    let check = ctx.additional_limit.draw(&counted);
     check.exceeded_limit().then_some(check)
-}
-
-/// Holds the share of each of its caller's pools the frame `child` starts with to the share of what
-/// the caller has left, its remaining clamped to its budget, and to that pool's frame cap in
-/// `caps`, and gives what it forwarded above that back to the caller, whose pools `caller` holds.
-///
-/// A frame's remaining is `min(budget, max(0, budget − net))`: a frame whose net is negative — it
-/// took back a record or removed state a frame above it made — holds more in its pool than the
-/// budget it was given, and the share it forwards is of that budget, not of the pool, so a negative
-/// net never enlarges a child's budget. The fork forwarded the schedule's share of the pool the
-/// opcode found ([`GasParams::pool_forward_share`]); the caller had that pool and the share
-/// together, and its budget is that less its net draw.
-#[inline]
-fn cap_the_shares(params: &GasParams, caps: PoolAmounts, caller: &mut Gas, child: &mut FrameInit) {
-    let mut shares = match &child.frame_input {
-        FrameInput::Call(inputs) => inputs.pool_shares,
-        FrameInput::Create(inputs) => inputs.pool_shares(),
-        FrameInput::Empty => return,
-    };
-    let mut capped = false;
-    for pool in PoolId::ALL {
-        let share = shares.get(pool);
-        let mut allowed = caps.get(pool);
-        let spent = caller.pool_spent(pool);
-        if spent < 0 {
-            let had = caller.pool_remaining(pool).saturating_add(share);
-            let budget = had.saturating_add_signed(spent);
-            allowed = allowed.min(params.pool_forward_share(pool, budget));
-        }
-        let Some(excess) = share.checked_sub(allowed).filter(|excess| *excess != 0) else {
-            continue;
-        };
-        caller.set_pool_remaining(pool, caller.pool_remaining(pool).saturating_add(excess));
-        shares.set(pool, allowed);
-        capped = true;
-    }
-    if !capped {
-        return;
-    }
-    match &mut child.frame_input {
-        FrameInput::Call(inputs) => inputs.pool_shares = shares,
-        FrameInput::Create(inputs) => inputs.set_pool_shares(shares),
-        FrameInput::Empty => {}
-    }
 }
 
 /// Holds a frame answered without running to the compute limit: the answer to a frame of
@@ -1253,15 +1188,6 @@ fn take_back_a_stopped_answer<DB: Database, ExtEnvs: ExternalEnvTypes>(
     }
 }
 
-/// The fork's figures of `result`, about to settle into its caller, for the start ledger: the
-/// history of the start charge it gives back, and what the result holds of its frame's history
-/// allowance.
-#[cfg(debug_assertions)]
-fn fork_figures(result: &FrameResult) -> crate::limit::Returning {
-    let refund = result.refundable_start_charge().map_or(0, |charge| charge.history);
-    crate::limit::Returning::of(result.gas().tracker(), refund)
-}
-
 /// Has the start ledger adopt what a precompile's provider drew on the pools of `answer`, revm's
 /// answer to the start on top. A start revm refused, or answered without a provider, drew nothing.
 ///
@@ -1272,7 +1198,7 @@ fn fork_figures(result: &FrameResult) -> crate::limit::Returning {
 ///
 /// It runs before the start's records are counted on the answer: the adoption replaces the
 /// entry's pools.
-#[cfg(debug_assertions)]
+#[inline]
 fn adopt_provider_draws<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
     answer: &FrameResult,
@@ -1333,14 +1259,13 @@ struct FrameStart {
     /// skipped, which [`count`](Self::count) makes after all and asserts find nothing.
     #[cfg(debug_assertions)]
     skipped: Option<StartBefore>,
-    /// The history gas the start's caller paid at its opcode for the records on the frame.
+    /// The history gas the start's caller paid at its opcode for the records on the frame: the
+    /// start's charge on the start ledger.
     charged: u64,
     /// The gas limit the frame's caller forwarded, before gas detention held a precompile to less.
     gas_limit: u64,
     /// The reservoir the frame inherits.
     reservoir: u64,
-    /// The shares of its caller's pools the frame starts with: its budgets.
-    shares: PoolAmounts,
     /// For a creation a frame makes, its creator as it stands before revm decides the start, which
     /// tells once the creation returned what revm's nonce bump made of it. The transaction's own
     /// creation has none: its sender's account is the transaction body's.
@@ -1355,6 +1280,9 @@ impl FrameStart {
     /// is the creator's, counted from the bump once the creation returned. The accounts are not
     /// read for a start that `writes_nothing` on them ([`start_writes_nothing`]).
     ///
+    /// revm opened the start before it handed `frame_init` here, so the start ledger's top entry
+    /// is the start's, which holds what its caller paid at its opcode.
+    ///
     /// [`Accounts::start_before`]: crate::limit::Accounts
     fn of<DB: Database, ExtEnvs: ExternalEnvTypes>(
         ctx: &mut MegaContext<DB, ExtEnvs>,
@@ -1362,14 +1290,10 @@ impl FrameStart {
         writes_nothing: bool,
     ) -> Result<Self, ContextError<DB::Error>> {
         let mut creator = None;
-        let (account, other, charged, reservoir, shares) = match &frame_init.frame_input {
-            FrameInput::Call(inputs) => (
-                inputs.caller,
-                Some(inputs.target_address),
-                inputs.charged_start.history,
-                inputs.reservoir,
-                inputs.pool_shares,
-            ),
+        let (account, other, reservoir) = match &frame_init.frame_input {
+            FrameInput::Call(inputs) => {
+                (inputs.caller, Some(inputs.target_address), inputs.reservoir)
+            }
             FrameInput::Create(inputs) => {
                 // A creation's creator and address are loaded before revm decides the start, as
                 // revm loads them itself, outside the creation's checkpoint, once it decides it:
@@ -1388,13 +1312,7 @@ impl FrameStart {
                 if frame_init.depth > 0 {
                     creator = Some(ctx.accounts().creator_before(inputs.caller()));
                 }
-                (
-                    created,
-                    None,
-                    inputs.charged_start().history,
-                    inputs.reservoir(),
-                    inputs.pool_shares(),
-                )
+                (created, None, inputs.reservoir())
             }
             FrameInput::Empty => unreachable!(
                 "a frame input always names a call or a creation, as revm's frame init asserts"
@@ -1411,26 +1329,24 @@ impl FrameStart {
             #[cfg(debug_assertions)]
             skipped: writes_nothing.then(read),
             mark,
-            charged,
+            charged: ctx.additional_limit.ledger().charge(),
             gas_limit: input_gas_limit(&frame_init.frame_input),
             reservoir,
-            shares,
             creator,
         })
     }
 
-    /// Holds the start, which revm just decided, to the limits on the pools of its frame, which
-    /// `gas` holds, and counts there what it made, read off the journal — its records and their
-    /// bytes, its state growth and its transfer log ([`Accounts::start_made`]) — with what its
-    /// caller gets back once the frame returned with its start kept: what it paid for the records
-    /// on the frame, less the price of those the start made, and the price of those it took back
-    /// ([`AdditionalLimit::count_start`](crate::AdditionalLimit)).
+    /// Holds the start, which revm just decided, to the limits on the budgets of its frame, the
+    /// start ledger's top entry, and counts there what it made, read off the journal — its records
+    /// and their bytes, its state growth and its transfer log ([`Accounts::start_made`]) — with
+    /// what its caller gets back once the frame returned with its start kept: what it paid for
+    /// the records on the frame, less the price of those the start made, and the price of those
+    /// it took back ([`AdditionalLimit::count_start`](crate::AdditionalLimit)).
     ///
     /// [`Accounts::start_made`]: crate::limit::Accounts
     fn count<DB: Database, ExtEnvs: ExternalEnvTypes>(
         &self,
         ctx: &mut MegaContext<DB, ExtEnvs>,
-        gas: &mut GasTracker,
     ) -> LimitCheck {
         let (records, counted) = match &self.before {
             Some(before) => ctx.accounts().start_made(before),
@@ -1452,7 +1368,7 @@ impl FrameStart {
         } else {
             0
         };
-        ctx.additional_limit.count_start(gas, &counted, credit)
+        ctx.additional_limit.count_start(&counted, credit)
     }
 }
 
@@ -1469,24 +1385,22 @@ fn stop_the_answer_at<DB: Database, ExtEnvs: ExternalEnvTypes>(
     if verdict.exceeded_limit() {
         let output = ctx.additional_limit.note_frame_stop(&verdict);
         stop_the_answer(answer, start, output);
-        #[cfg(debug_assertions)]
         ctx.additional_limit.ledger_mut().rebuild_on_shares();
     }
 }
 
 /// Rewrites `answer`, to the call `start` began, into the stop `output`: a revert on the gas the
-/// call's caller forwarded, untouched, with the reservoir and the pools the call inherited, and no
-/// precompile output, as [`synthetic_frame_result`] answers a frame that never started.
+/// call's caller forwarded, untouched, with the reservoir the call inherited, and no precompile
+/// output, as [`synthetic_frame_result`] answers a frame that never started. Its budgets go back
+/// to the shares the call started with on the start ledger
+/// (`StartLedger::rebuild_on_shares`).
 #[cold]
 #[inline(never)]
 fn stop_the_answer(answer: &mut FrameResult, start: &FrameStart, output: Bytes) {
     let FrameResult::Call(outcome) = answer else {
         unreachable!("only a call is held to the limits once revm answered it")
     };
-    let mut gas = Gas::new_with_regular_gas_and_reservoir(start.gas_limit, start.reservoir);
-    gas.tracker_mut().set_pools_remaining(start.shares);
-    let allowance = outcome.result.gas.history_allowance();
-    gas.set_history_allowance(allowance);
+    let gas = Gas::new_with_regular_gas_and_reservoir(start.gas_limit, start.reservoir);
     outcome.result = InterpreterResult::new(InstructionResult::Revert, output, gas);
     outcome.was_precompile_called = false;
     outcome.precompile_call_logs.clear();
@@ -1762,7 +1676,7 @@ mod tests {
         context_interface::journaled_state::account::JournaledAccountTr,
         interpreter::{
             gas::WithheldCrossing, CallInput, CallInputs, CallValue, CreateInputs, CreateScheme,
-            SharedMemory,
+            PoolAmounts, SharedMemory,
         },
     };
     use std::boxed::Box;
@@ -2192,14 +2106,46 @@ mod tests {
         }
     }
 
-    /// The start ledger holds a child's shares as the engine's `cap_the_shares` holds them, on the
-    /// fork's forward: to the frame cap, and, for a caller whose net is negative, to the share of
-    /// the caller's budget, the excess given back to the caller. Each case runs both on the same
-    /// caller: pools limited, unlimited or empty; a net of nothing, positive or negative; and a
-    /// data-size cap above, at or below the share, or none.
+    /// The engine's earlier holding of a child's shares, which ran on the fork's figures: the
+    /// shares revm forwarded on the input, `child`'s, held to `caps` and, for a caller whose net
+    /// is negative, to the share of the caller's budget by `params`, the excess given back to the
+    /// caller's pools, which `caller` holds. The start ledger's [`StartLedger::cap_child`] took its
+    /// place and is held to it.
+    ///
+    /// [`StartLedger::cap_child`]: crate::limit::StartLedger
+    fn cap_the_shares(
+        params: &revm::context_interface::cfg::GasParams,
+        caps: PoolAmounts,
+        caller: &mut Gas,
+        child: &mut FrameInit,
+    ) {
+        let FrameInput::Call(inputs) = &mut child.frame_input else { unreachable!() };
+        for pool in PoolId::ALL {
+            let share = inputs.pool_shares.get(pool);
+            let mut allowed = caps.get(pool);
+            let spent = caller.pool_spent(pool);
+            if spent < 0 {
+                let had = caller.pool_remaining(pool).saturating_add(share);
+                let budget = had.saturating_add_signed(spent);
+                allowed = allowed.min(params.pool_forward_share(pool, budget));
+            }
+            let Some(excess) = share.checked_sub(allowed).filter(|excess| *excess != 0) else {
+                continue;
+            };
+            caller.set_pool_remaining(pool, caller.pool_remaining(pool).saturating_add(excess));
+            inputs.pool_shares.set(pool, allowed);
+        }
+    }
+
+    /// The start ledger holds a child's shares as the engine held them on the fork's figures
+    /// before the ledger decided them ([`cap_the_shares`], on a schedule that keeps 2 per cent of
+    /// each pool from a child, as the Satin schedule did): to the frame cap, and, for a caller
+    /// whose net is negative, to the share of the caller's budget, the excess given back to the
+    /// caller. Each case runs both on the same caller: pools limited, unlimited or empty; a net
+    /// of nothing, positive or negative; and a data-size cap above, at or below the share, or
+    /// none.
     #[test]
-    #[cfg(debug_assertions)]
-    fn test_the_start_ledger_holds_a_childs_shares_as_cap_the_shares_does() {
+    fn test_the_start_ledger_holds_a_childs_shares_as_the_engine_held_them_on_the_forks() {
         use crate::{
             evm::FRAME_KEPT_PERCENT,
             limit::{
@@ -2207,6 +2153,11 @@ mod tests {
             },
             satin_gas_params,
         };
+        let mut params = satin_gas_params();
+        params.override_gas(
+            [DATA_SIZE_POOL, KV_UPDATE_POOL, STATE_GROWTH_POOL]
+                .map(|pool| (GasId::pool_kept_percent(pool), FRAME_KEPT_PERCENT)),
+        );
         let pools = [
             PoolAmounts::ZERO.with(DATA_SIZE_POOL, 10_000).with(KV_UPDATE_POOL, 250),
             PoolAmounts::UNLIMITED,
@@ -2243,15 +2194,15 @@ mod tests {
                     ledger.split(1, None, 0);
                     ledger.draw(&counted);
 
-                    let shares = caller.tracker_mut().forward_to_child(&satin_gas_params()).pools;
-                    ledger.park(FRAME_KEPT_PERCENT, 0, 0, 0);
+                    let shares = caller.tracker_mut().forward_to_child(&params).pools;
+                    ledger.park(FRAME_KEPT_PERCENT, 0, 0);
                     ledger.split(2, Some(1), 1);
                     let mut child = static_call(TARGET, &[], 100_000);
                     child.depth = 1;
                     let FrameInput::Call(inputs) = &mut child.frame_input else { unreachable!() };
                     inputs.pool_shares = shares;
                     let caps = PoolAmounts::UNLIMITED.with(DATA_SIZE_POOL, cap);
-                    cap_the_shares(&satin_gas_params(), caps, &mut caller, &mut child);
+                    cap_the_shares(&params, caps, &mut caller, &mut child);
                     ledger.cap_child(caps, FRAME_KEPT_PERCENT);
 
                     let FrameInput::Call(inputs) = &child.frame_input else { unreachable!() };
@@ -2263,43 +2214,46 @@ mod tests {
         }
     }
 
-    /// A precompile's draws reach the start ledger as the provider made them, though the fork
-    /// adopted them first: a draw within the share as its net, and a draw past it, which the
-    /// adoption capped at the share and marked with the pool's crossing, as a draw past the
-    /// share. The ledger then holds the pool as the fork's adoption left it — share 10 and a
-    /// draw of 11 included.
+    /// A precompile's draws reach the start ledger as the provider made them on its answer's gas:
+    /// a draw within the ledger's share as its net, and a draw past it, capped at the share. revm
+    /// adopts the draws on the answer's gas first, at the shares the input carries, which revm
+    /// forwards whole; when a share the input carries capped them — an inspector set the caller's
+    /// pools — the pool's crossing says the provider drew past a share, which the ledger adopts as
+    /// a draw past its own. Share 10 and a draw of 11 included.
     #[test]
-    #[cfg(debug_assertions)]
     fn test_a_precompiles_draws_reach_the_start_ledger_as_the_provider_made_them() {
         use crate::limit::{Parked, DATA_SIZE_POOL};
         use revm::interpreter::CallOutcome;
         let shares = PoolAmounts::UNLIMITED.with(DATA_SIZE_POOL, 10);
-        for drawn in [0_i64, 4, 10, 11, 25, -3] {
+        for (input_shares, drawn, expected) in [
+            (PoolAmounts::UNLIMITED, 0_i64, (10, 0)),
+            (PoolAmounts::UNLIMITED, 4, (6, 4)),
+            (PoolAmounts::UNLIMITED, 10, (0, 10)),
+            (PoolAmounts::UNLIMITED, 11, (0, 10)),
+            (PoolAmounts::UNLIMITED, 25, (0, 10)),
+            (PoolAmounts::UNLIMITED, -3, (13, -3)),
+            (shares, 11, (0, 10)),
+            (PoolAmounts::UNLIMITED.with(DATA_SIZE_POOL, 3), 4, (0, 10)),
+        ] {
+            let case = format!("{input_shares:?}, drawn {drawn}");
             let mut ctx = MegaContext::new(MemoryDatabase::default(), MegaSpecId::SATIN);
             let ledger = ctx.additional_limit.ledger_mut();
             ledger.park_transaction(Some(Parked::transaction(shares, 0)));
             ledger.split(1, None, 0);
-            ledger.park(0, 0, 0, 0);
+            ledger.park(0, 0, 0);
             ledger.split(2, Some(1), 1);
 
             let mut gas = Gas::new(100_000);
             gas.tracker_mut().set_pool_spent(DATA_SIZE_POOL, drawn);
-            gas.tracker_mut().adopt_pool_shares(shares);
+            gas.tracker_mut().adopt_pool_shares(input_shares);
             let mut answer = CallOutcome::new(
                 InterpreterResult::new(InstructionResult::Return, Bytes::new(), gas),
                 0..0,
             );
             answer.was_precompile_called = true;
             adopt_provider_draws(&mut ctx, &FrameResult::Call(answer));
-            let tracker = gas.tracker();
-            let fork = PoolId::ALL.map(|pool| {
-                (
-                    tracker.pool_remaining(pool),
-                    tracker.pool_spent(pool),
-                    tracker.pool_crossing(pool),
-                )
-            });
-            assert_eq!(ctx.additional_limit.ledger_mut().top_pools(), fork, "drawn {drawn}");
+            let pools = ctx.additional_limit.ledger().top_pools();
+            assert_eq!(pools[DATA_SIZE_POOL.index()], expected, "{case}");
         }
     }
 

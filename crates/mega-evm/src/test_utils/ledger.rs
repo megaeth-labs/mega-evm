@@ -1,11 +1,12 @@
-//! The differences a debug build's start ledger finds between its figures and the fork's, for a
-//! test that runs an inspector shape whose figures are accepted to change.
+//! The start ledger's settlements, for a test that reads the frame budgets and start charges the
+//! engine settled.
 //!
-//! The start ledger panics on any difference. An inspector that restores a snapshot of a running
-//! tracker, replaces an interpreter, answers or rewrites with pools, an allowance or a start charge
-//! it set, copies a tracker or an outcome from another start, or builds an input itself, moves the
-//! fork's figures where the ledger, which keeps them off the tracker, does not follow: a test that
-//! runs one tolerates the differences, then asserts each of them.
+//! The engine keeps a frame's budgets, its start charge and its history allowance on its own start
+//! ledger, not on the frame's gas: a test reads them as the ledger settled each start, once the
+//! transaction ran. An inspector's answer and a result whose gas an inspector replaced settle as
+//! unlimited budgets whatever pools the inspector's gas carries, and a tracker an inspector
+//! restores from a snapshot leaves the ledger's draws where they were, which is what a test of
+//! such an inspector asserts.
 
 #[cfg(not(feature = "std"))]
 use alloc as std;
@@ -14,20 +15,20 @@ use std::vec::Vec;
 use crate::{ExternalEnvTypes, MegaContext};
 use revm::Database;
 
-pub use crate::limit::{LedgerDivergence, LedgerFigure};
+pub use crate::limit::{LedgerPools, LedgerSettlement};
 
-/// Has `ctx`'s start ledger record every difference from now on rather than panic on it, and take
-/// the fork's pools where a caller's differ.
-pub fn tolerate_start_ledger_divergences<DB: Database, ExtEnvs: ExternalEnvTypes>(
+/// Has `ctx`'s start ledger record every settlement from now on, across transactions, until they
+/// are taken.
+pub fn record_start_ledger_settlements<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
 ) {
-    ctx.additional_limit.ledger_mut().tolerate_divergences();
+    ctx.additional_limit.ledger_mut().record_settlements();
 }
 
-/// The differences `ctx`'s start ledger recorded since they were last taken, in the order it found
-/// them; none when it was not told to tolerate them.
-pub fn take_start_ledger_divergences<DB: Database, ExtEnvs: ExternalEnvTypes>(
+/// The settlements `ctx`'s start ledger recorded since they were last taken, in the order it made
+/// them, innermost first within a transaction; none when it was not told to record them.
+pub fn take_start_ledger_settlements<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
-) -> Vec<LedgerDivergence> {
-    ctx.additional_limit.ledger_mut().take_divergences().unwrap_or_default()
+) -> Vec<LedgerSettlement> {
+    ctx.additional_limit.ledger_mut().take_settlements().unwrap_or_default()
 }
