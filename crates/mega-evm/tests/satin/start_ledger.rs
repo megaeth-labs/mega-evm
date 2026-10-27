@@ -1,20 +1,21 @@
 //! The start ledger over the engine's paths no other test drives through a transaction's start
 //! lifecycle.
 //!
-//! A debug build keeps the engine's own ledger of what each frame start owes and holds beside the
-//! fork's figures, and compares the two at every settlement, panicking on a difference. Every test
-//! of the crate runs under it, so a path the suite drives is a path the comparison holds on. These
-//! tests drive the ones it does not: the depth guard's answer inside a running transaction, a
-//! fatal error with starts open and the reuse of the EVM after it, an EVM run inside an inspector's
-//! callback, an inspector's answer to the transaction's own frame, and the end-callback rewrites
-//! whose figures the ledger settles exactly. Each reads the starts revm settled off its debug
-//! mirror of the lifecycle, so the path is shown taken, and passes only if the ledger agreed with
-//! the fork at each of them.
+//! The engine keeps what each frame start owes and holds — its budgets, its start charge, its
+//! history allowance — on its own start ledger, driven by revm's start lifecycle. These tests drive
+//! the lifecycle's paths the rest of the suite does not: the depth guard's answer inside a running
+//! transaction, a fatal error with starts open and the reuse of the EVM after it, an EVM run inside
+//! an inspector's callback, an inspector's answer to the transaction's own frame, the end-callback
+//! rewrites the ledger settles by the new status and revm's flags, and a creation that takes no
+//! address. Each reads the starts revm settled off its debug mirror of the lifecycle, so the path
+//! is shown taken, and what the ledger settled for them (`take_start_ledger_settlements`).
 
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
     test_utils::{
-        neutral_cfg, neutralize_evm, BytecodeBuilder, ErrorInjectingDatabase, MemoryDatabase,
+        neutral_cfg, neutralize_evm, record_start_ledger_settlements,
+        take_start_ledger_settlements, BytecodeBuilder, ErrorInjectingDatabase, LedgerSettlement,
+        MemoryDatabase,
     },
     EthSpecId, EvmTxRuntimeLimits, MegaContext, MegaEvm, WRITE_RECORD_SIZE,
 };
@@ -28,7 +29,7 @@ use revm::{
     handler::FrameResult,
     interpreter::{
         interpreter::EthInterpreter, CallInputs, CallOutcome, CreateInputs, CreateOutcome,
-        FrameInput, Gas, InstructionResult, InterpreterResult,
+        FrameInput, Gas, InstructionResult, InterpreterResult, PoolAmounts,
     },
     primitives::CALL_STACK_LIMIT,
     Database, Inspector,
@@ -63,6 +64,14 @@ fn settlements<DB: Database>(ctx: &mut MegaContext<DB>) -> (Vec<FrameSettle>, Li
 /// `(start, depth, status)` of each settlement, innermost first.
 fn shape(settled: &[FrameSettle]) -> Vec<(u32, usize, SettleStatus)> {
     settled.iter().map(|settle| (settle.id, settle.depth, settle.status)).collect()
+}
+
+/// What the start ledger settled for `start`.
+fn ledger_settled(settlements: &[LedgerSettlement], start: u32) -> LedgerSettlement {
+    *settlements
+        .iter()
+        .find(|settled| settled.start == start)
+        .unwrap_or_else(|| panic!("start {start} settled on the ledger: {settlements:?}"))
 }
 
 /// `OUTER` sends one wei to `CHILD`, which writes a fresh slot and then returns or reverts as
@@ -130,12 +139,14 @@ fn test_a_fatal_error_with_starts_open_discards_the_ledger_and_the_evm_runs_on()
     let mut db = ErrorInjectingDatabase::new(db);
     db.fail_on_storage = Some((FAILS, key));
     let mut evm = MegaEvm::new(context(db));
+    record_start_ledger_settlements(evm.ctx_mut());
 
     let failing = call(CALLER, CALLS_FAILS, U256::ZERO, GAS_LIMIT);
     let error = evm.execute_transaction(failing).expect_err("the storage read fails");
     assert!(format!("{error:?}").contains("injected storage()"), "{error:?}");
     let (settled, end) = settlements(evm.ctx_mut());
     assert_eq!((settled.len(), end), (0, LifecycleEnd::Discarded), "both starts discarded");
+    assert_eq!(take_start_ledger_settlements(evm.ctx_mut()), [], "the ledger settled nothing");
 
     let outcome = evm
         .execute_transaction(call(CALLER, OUTER, U256::ZERO, GAS_LIMIT))
@@ -144,6 +155,12 @@ fn test_a_fatal_error_with_starts_open_discards_the_ledger_and_the_evm_runs_on()
     let (settled, end) = settlements(evm.ctx_mut());
     assert_eq!(end, LifecycleEnd::Settled);
     assert_eq!(shape(&settled), [(2, 1, SettleStatus::Ok), (1, 0, SettleStatus::Ok)]);
+    // The ledger started over at the transaction's start: its own two starts, the value call's
+    // charge kept by the call's success.
+    let ledger = take_start_ledger_settlements(evm.ctx_mut());
+    let starts: Vec<_> = ledger.iter().map(|settled| (settled.start, settled.depth)).collect();
+    assert_eq!(starts, [(2, 1), (1, 0)]);
+    assert!(ledger.iter().all(|settled| settled.refund == 0), "{ledger:?}");
 }
 
 /// Runs a transaction on an EVM of its own, over a copy of the state, in its `call` callback for
@@ -157,6 +174,7 @@ impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for Simulates {
     fn call(&mut self, _: &mut MegaContext<DB>, inputs: &mut CallInputs) -> Option<CallOutcome> {
         if inputs.target_address == CHILD {
             let mut nested = MegaEvm::new(context(self.db.clone()));
+            record_start_ledger_settlements(nested.ctx_mut());
             let outcome = nested
                 .execute_transaction(call(CALLER, OUTER, U256::from(1), GAS_LIMIT))
                 .expect("the simulation is valid");
@@ -164,6 +182,9 @@ impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for Simulates {
             let (settled, end) = settlements(nested.ctx_mut());
             assert_eq!(end, LifecycleEnd::Settled);
             assert_eq!(shape(&settled), [(2, 1, SettleStatus::Ok), (1, 0, SettleStatus::Ok)]);
+            let ledger = take_start_ledger_settlements(nested.ctx_mut());
+            let starts: Vec<_> = ledger.iter().map(|settled| settled.start).collect();
+            assert_eq!(starts, [2, 1], "the simulation's own starts, on its own ledger");
             self.simulated += 1;
         }
         None
@@ -179,6 +200,7 @@ fn test_an_evm_run_inside_a_callback_keeps_a_ledger_of_its_own() {
     let db = value_call_to_a_writer(false);
     let inspector = Simulates { db: db.clone(), simulated: 0 };
     let mut evm = MegaEvm::new(context(db)).with_inspector(inspector);
+    record_start_ledger_settlements(evm.ctx_mut());
     let outcome = evm
         .execute_transaction(call(CALLER, OUTER, U256::ZERO, GAS_LIMIT))
         .expect("the transaction is valid");
@@ -187,6 +209,9 @@ fn test_an_evm_run_inside_a_callback_keeps_a_ledger_of_its_own() {
     let (settled, end) = settlements(evm.ctx_mut());
     assert_eq!(end, LifecycleEnd::Settled);
     assert_eq!(shape(&settled), [(2, 1, SettleStatus::Ok), (1, 0, SettleStatus::Ok)]);
+    let ledger = take_start_ledger_settlements(evm.ctx_mut());
+    let starts: Vec<_> = ledger.iter().map(|settled| settled.start).collect();
+    assert_eq!(starts, [2, 1], "the outer transaction's own starts, none of the simulation's");
 }
 
 /// Answers the transaction's own frame on `Gas::new`, as Foundry answers a cheatcode: in
@@ -239,9 +264,9 @@ impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for AnswersTheTran
 }
 
 /// An inspector's answer to the transaction's own frame, on `Gas::new`, settles as the start
-/// ledger settles an inspector's answer — unlimited pools, no start charge back — and the fork
-/// settles it the same: a value transfer and a creation, answered with a success, a revert and a
-/// halt, in `frame_start` and in `call` or `create`.
+/// ledger settles an inspector's answer — unlimited budgets, which the transaction is left with,
+/// and no start charge back: a value transfer and a creation, answered with a success, a revert
+/// and a halt, in `frame_start` and in `call` or `create`.
 #[test]
 fn test_an_inspectors_answer_to_the_transactions_frame_settles_as_unlimited_pools() {
     let db = || MemoryDatabase::default().account_balance(CALLER, U256::from(10u64.pow(18)));
@@ -258,12 +283,17 @@ fn test_an_inspectors_answer_to_the_transactions_frame_settles_as_unlimited_pool
                 );
                 let inspector = AnswersTheTransaction { result, at_frame_start };
                 let mut evm = MegaEvm::new(context(db())).with_inspector(inspector);
+                record_start_ledger_settlements(evm.ctx_mut());
                 let outcome = evm.execute_transaction(transaction).expect("valid");
                 assert_eq!(outcome.result.is_success(), result.is_ok(), "{case}");
                 let (settled, end) = settlements(evm.ctx_mut());
                 assert_eq!(end, LifecycleEnd::Settled, "{case}");
                 assert_eq!(settled.len(), 1, "{case}");
                 assert!(settled[0].inspector_answer, "{case}: flagged");
+                let ledger = ledger_settled(&take_start_ledger_settlements(evm.ctx_mut()), 1);
+                assert_eq!(ledger.refund, 0, "{case}: no start charge back");
+                assert_eq!(ledger.frame.remaining, PoolAmounts::UNLIMITED, "{case}");
+                assert_eq!(ledger.caller.remaining, PoolAmounts::UNLIMITED, "{case}");
             }
         }
     }
@@ -309,20 +339,22 @@ impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for Rewrites {
     }
 }
 
-/// The end-callback rewrites the start ledger settles exactly settle as the fork settles them:
-/// a status rewritten either way settles by the new status; a tracker replaced with `Gas::new`
-/// settles as unlimited pools, and its start charge comes back by the status; an outcome rebuilt
-/// around the same result settles on the frame's pools and gives no start charge back, the
-/// constructor having dropped it; one rebuilt keeping the outcome is no rewrite at all. Each on a
-/// value call to a child that writes a fresh slot and then succeeds or reverts.
+/// The end-callback rewrites settle on the start ledger by the new status and revm's flags: a
+/// status rewritten either way settles by the new status, the start charge — the two write records
+/// of the value call's start — back on a failure; a tracker replaced with `Gas::new` settles as
+/// unlimited budgets, and its start charge comes back by the status; an outcome rebuilt around the
+/// same result settles on the frame's budgets and gives no start charge back, as the constructor's
+/// outcome carries none; one rebuilt keeping the outcome is no rewrite at all. Each on a value call
+/// to a child that writes a fresh slot and then succeeds or reverts.
 #[test]
-fn test_end_callback_rewrites_settle_as_the_fork_settles_them() {
+fn test_end_callback_rewrites_settle_by_the_new_status_and_the_flags() {
     for rewrite in [Rewrite::Status, Rewrite::Tracker, Rewrite::Outcome, Rewrite::KeepingTheOutcome]
     {
         for reverts in [false, true] {
             let case = format!("{rewrite:?}, the child reverts {reverts}");
             let mut evm = MegaEvm::new(context(value_call_to_a_writer(reverts)))
                 .with_inspector(Rewrites(rewrite));
+            record_start_ledger_settlements(evm.ctx_mut());
             let outcome = evm
                 .execute_transaction(call(CALLER, OUTER, U256::ZERO, GAS_LIMIT))
                 .expect("the transaction is valid");
@@ -339,6 +371,12 @@ fn test_end_callback_rewrites_settle_as_the_fork_settles_them() {
                 Rewrite::Outcome => (false, false, true),
             };
             assert_eq!(flags, expected, "{case}: the flags");
+            let ledger = ledger_settled(&take_start_ledger_settlements(evm.ctx_mut()), 2);
+            let charge = history(2 * WRITE_RECORD_SIZE);
+            let refunded = !ok && !matches!(rewrite, Rewrite::Outcome);
+            assert_eq!(ledger.refund, if refunded { charge } else { 0 }, "{case}: the refund");
+            let unlimited = ledger.frame.remaining == PoolAmounts::UNLIMITED;
+            assert_eq!(unlimited, matches!(rewrite, Rewrite::Tracker), "{case}: the budgets");
         }
     }
 }
@@ -418,6 +456,7 @@ fn test_a_creation_that_takes_no_address_settles_as_one() {
     for rewrite in [AddressRewrite::Cleared, AddressRewrite::AnsweredWithout] {
         let mut evm = MegaEvm::new(context(creates_an_empty_contract()))
             .with_inspector(CreationRewrites(rewrite));
+        record_start_ledger_settlements(evm.ctx_mut());
         let outcome = evm
             .execute_transaction(call(CALLER, OUTER, U256::ZERO, GAS_LIMIT))
             .expect("the transaction is valid");
@@ -436,5 +475,7 @@ fn test_a_creation_that_takes_no_address_settles_as_one() {
             AddressRewrite::AnsweredWithout => 0,
         };
         assert_eq!(outcome.gas.history, kept.gas.history - given_back, "{rewrite:?}");
+        let ledger = ledger_settled(&take_start_ledger_settlements(evm.ctx_mut()), 2);
+        assert_eq!(ledger.refund, given_back, "{rewrite:?}: the ledger's refund");
     }
 }

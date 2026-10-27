@@ -1016,6 +1016,53 @@ fn test_the_transactions_own_frame_that_halts_burns_its_regular_gas() {
     }
 }
 
+/// The transaction's own value transfer to a contract that halts keeps neither the value nor its
+/// recipient's write record, so the history charged before execution for that record is the
+/// transaction's start charge, given back when its start settles — as history, and nothing more:
+/// below the execution cap the charge spilled onto regular gas, and the halt burns the regular gas
+/// it gives back, so the sender gets back none of it; above the cap the charge came out of the
+/// reservoir, which the settlement hands back with the rest. Either way the transaction bills the
+/// history and the reservoir of the same call without value, which makes no record.
+#[test]
+fn test_the_transactions_own_value_transfer_that_halts_gives_its_record_back_as_history_alone() {
+    use revm::context::result::HaltReason;
+
+    for gas_limit in TIERS {
+        let run = |value: u64| {
+            let db = MemoryDatabase::default()
+                .account_balance(CALLER, U256::from(10u64.pow(18)))
+                .account_code(A, spin());
+            let outcome = MegaEvm::new(context(db).with_tx_runtime_limits(armed()))
+                .execute_transaction(call(CALLER, A, U256::from(value), gas_limit))
+                .expect("the transaction is valid");
+            assert!(
+                matches!(
+                    &outcome.result,
+                    ExecutionResult::Halt {
+                        reason: MegaHaltReason::Base(HaltReason::OutOfGas(_)),
+                        ..
+                    }
+                ),
+                "value {value}, gas limit {gas_limit}: {:?}",
+                outcome.result
+            );
+            assert_eq!(outcome.usage.write_records, 0, "value {value}: nothing kept");
+            assert_eq!(
+                outcome.gas.gas_used + outcome.gas.reservoir_remaining,
+                gas_limit,
+                "value {value}, gas limit {gas_limit}: the regular gas burned, the reservoir back"
+            );
+            outcome.gas
+        };
+        let (transfer, plain) = (run(1), run(0));
+        assert_eq!(transfer.history, plain.history, "gas limit {gas_limit}: the record's history");
+        assert_eq!(
+            transfer.reservoir_remaining, plain.reservoir_remaining,
+            "gas limit {gas_limit}: what the record's charge took from the reservoir comes back"
+        );
+    }
+}
+
 /* ---------- the legacy engine's rows ---------- */
 
 // The legacy engine halted a transaction a limit stopped, and gave back what detention withheld
