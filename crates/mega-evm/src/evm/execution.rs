@@ -1165,6 +1165,13 @@ where
         evm: &mut Self::Evm,
         error: Self::Error,
     ) -> Result<ExecutionResult<Self::HaltReason>, Self::Error> {
+        // A database error a load stashed in the context is taken only when the result is built,
+        // after post-execution. A run that fails before that, as when post-execution fails first
+        // with an error of its own, ends here with it still stashed, and the next transaction on
+        // this EVM would fail with it. The error this run reports is `error`; neither op-revm nor
+        // revm clears the slot here. Clear it before op-revm's failed-deposit handling, whose own
+        // errors would otherwise return before the clear.
+        *evm.ctx().error() = Ok(());
         let result = self.op.catch_error(evm, error);
         if result.is_err() {
             // op-revm reverts and commits a failed deposit itself, but leaves any other failed

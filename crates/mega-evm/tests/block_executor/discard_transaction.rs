@@ -958,6 +958,41 @@ fn test_error_path_leaves_nothing_behind_with_inspector() {
     assert_error_path_leaves_nothing_behind(true);
 }
 
+/// A database error that a load inside the transaction's frame stashes in the context is taken by
+/// the handler only when it builds the result, after post-execution. When post-execution then
+/// fails first with an error of its own, here reading the same beneficiary for the fee reward
+/// accounting, the run ends in `catch_error` with the error still stashed, and the next
+/// transaction would fail with it whatever it does. The error path clears the slot.
+fn assert_error_path_clears_a_stashed_context_error(inspect: bool) {
+    let mut state = State::builder().with_database(database()).build();
+    let mut executor = new_executor_with(&mut state, MegaSpecId::REX6, inspect);
+
+    executor.evm.db_mut().database.inner.fail_on_account = Some(BENEFICIARY);
+    let failing_tx = legacy_tx(PANICKING_SENDER, 0, READ_BENEFICIARY, Bytes::new());
+    executor.execute_mega_transaction(&failing_tx).expect_err("the beneficiary read fails");
+    executor.evm.db_mut().database.inner.fail_on_account = None;
+    assert!(
+        executor.evm.ctx.error().is_ok(),
+        "the in-frame error is left stashed (inspect: {inspect})"
+    );
+
+    let next_tx = next_tx(RETURN_MSIZE);
+    let outcome = executor
+        .execute_mega_transaction(&next_tx)
+        .unwrap_or_else(|err| panic!("next tx fails with {err:?} (inspect: {inspect})"));
+    assert_same_outcome(&outcome, &reference_outcome(MegaSpecId::REX6, &next_tx));
+}
+
+#[test]
+fn test_error_path_clears_a_stashed_context_error_without_inspector() {
+    assert_error_path_clears_a_stashed_context_error(false);
+}
+
+#[test]
+fn test_error_path_clears_a_stashed_context_error_with_inspector() {
+    assert_error_path_clears_a_stashed_context_error(true);
+}
+
 /// Panic recovery clears the whole journal, including successful transactions accumulated with
 /// `transact_one`. Only state already committed to the database survives.
 #[test]
