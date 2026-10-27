@@ -188,7 +188,7 @@ mod record;
 #[cfg(all(debug_assertions, any(test, feature = "test-utils")))]
 pub use ledger::{LedgerDivergence, LedgerFigure};
 #[cfg(debug_assertions)]
-pub(crate) use ledger::{Parked, Returning, StartLedger};
+pub(crate) use ledger::{Parked, ProviderDraw, Returning, StartLedger};
 pub use limit::AdditionalLimit;
 pub(crate) use limit::{Counted, TxClass};
 #[cfg(test)]

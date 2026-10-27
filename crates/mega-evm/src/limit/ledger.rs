@@ -259,6 +259,24 @@ const fn pool_share(remaining: u64, kept: u64) -> u64 {
     (remaining as u128 * (100 - kept) as u128 / 100) as u64
 }
 
+/// What a precompile's provider drew on one pool of its answer: its signed `net` draw, and whether
+/// it drew past a share it was held to, which the net alone cannot tell once that share capped it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ProviderDraw {
+    /// The net draw.
+    pub(crate) net: i64,
+    /// Whether the draw went past a share it was held to.
+    pub(crate) past_a_share: bool,
+}
+
+impl ProviderDraw {
+    /// A net draw of `net`, within any share it was held to.
+    #[cfg(test)]
+    pub(crate) const fn of(net: i64) -> Self {
+        Self { net, past_a_share: false }
+    }
+}
+
 /// One open start.
 #[derive(Clone, Copy, Debug)]
 struct Entry {
@@ -492,11 +510,16 @@ impl StartLedger {
     /// top, fail-closed: a draw within the share is drawn, and one past it empties the pool, caps
     /// the net at the share and sets the crossing. The answer's status is the provider's either
     /// way.
-    pub(crate) fn adopt_provider_draws(&mut self, draws: [i64; PoolId::COUNT]) {
+    ///
+    /// The adoption replaces the entry's pools with the share less the provider's draw, so it runs
+    /// before anything else is drawn on the answer: the start's own records, which the frame start
+    /// counts on the answer once it was adopted, would otherwise be overwritten.
+    pub(crate) fn adopt_provider_draws(&mut self, draws: [ProviderDraw; PoolId::COUNT]) {
         let Some(entry) = self.entries.last_mut() else { return };
         for pool in PoolId::ALL {
-            let (index, share, drawn) = (pool.index(), entry.shares.get(pool), draws[pool.index()]);
-            if drawn > 0 && drawn as u64 > share {
+            let (index, share) = (pool.index(), entry.shares.get(pool));
+            let ProviderDraw { net: drawn, past_a_share } = draws[index];
+            if past_a_share || (drawn > 0 && drawn as u64 > share) {
                 entry.pools.remaining.set(pool, 0);
                 entry.pools.net[index] = signed(share);
                 entry.pools.crossings[index] = true;
@@ -892,35 +915,45 @@ mod tests {
 
     /// A precompile's draws are adopted fail-closed, as the fork adopts them: within the share they
     /// are drawn, and past it the pool is emptied, the net capped at the share and the crossing
-    /// set — share 10, draw 11 — whatever the answer's status.
+    /// set — share 10, draw 11 — whatever the answer's status. A draw marked past a share is
+    /// adopted as one past the entry's, whatever its net: an unlimited share included, which no
+    /// net can pass.
     #[test]
     fn test_a_precompiles_draws_past_its_share_are_adopted_fail_closed() {
+        let none = ProviderDraw::default();
         for drawn in [0_i64, 4, 10, 11, -3] {
             let pools = PoolAmounts::ZERO.with(DATA_SIZE_POOL, 10);
             let mut ledger = opened(PoolAmounts::UNLIMITED);
             ledger.park(0, 0, 0, 0);
             ledger.split(2, Some(1), 1);
             ledger.entries[1].shares = pools;
-            ledger.adopt_provider_draws([drawn, 0, 0]);
+            ledger.adopt_provider_draws([ProviderDraw::of(drawn), none, none]);
             let mut answer = GasTracker::new(0, 0, 0);
             answer.set_pool_spent(DATA_SIZE_POOL, drawn);
             answer.adopt_pool_shares(pools);
             assert_eq!(top(&ledger), Pools::on(&answer), "drawn {drawn}");
         }
-        let mut ledger = opened(PoolAmounts::UNLIMITED);
-        ledger.park(0, 0, 0, 0);
-        ledger.split(2, Some(1), 1);
-        ledger.entries[1].shares = PoolAmounts::ZERO.with(DATA_SIZE_POOL, 10);
-        ledger.adopt_provider_draws([11, 0, 0]);
-        let pools = top(&ledger);
-        assert_eq!(
+        let past = |share: u64, net: i64, past_a_share: bool| {
+            let mut ledger = opened(PoolAmounts::UNLIMITED);
+            ledger.park(0, 0, 0, 0);
+            ledger.split(2, Some(1), 1);
+            ledger.entries[1].shares = PoolAmounts::UNLIMITED.with(DATA_SIZE_POOL, share);
+            ledger.adopt_provider_draws([ProviderDraw { net, past_a_share }, none, none]);
+            let pools = top(&ledger);
             (
                 pools.remaining.get(DATA_SIZE_POOL),
                 pools.net[DATA_SIZE_POOL.index()],
                 pools.crossings[DATA_SIZE_POOL.index()],
-            ),
-            (0, 10, true),
-            "share 10, draw 11"
+            )
+        };
+        assert_eq!(past(10, 11, false), (0, 10, true), "share 10, draw 11");
+        assert_eq!(past(10, 10, true), (0, 10, true), "a draw a share of 10 capped at it");
+        let unlimited = u64::MAX;
+        assert_eq!(past(unlimited, 7, false), (unlimited - 7, 7, false), "an unlimited share");
+        assert_eq!(
+            past(unlimited, i64::MAX, true),
+            (0, i64::MAX, true),
+            "an unlimited share, a draw marked past a share"
         );
     }
 

@@ -1266,9 +1266,12 @@ fn fork_figures(result: &FrameResult) -> crate::limit::Returning {
 /// answer to the start on top. A start revm refused, or answered without a provider, drew nothing.
 ///
 /// The fork adopts the provider's draws before the engine sees the answer, so they are read back
-/// off the answer's gas: each pool's net, and, for a pool whose crossing the adoption set, a draw
-/// past the share, which the adoption capped at it. The engine's provider draws no pool, so the
-/// draws are none.
+/// off the answer's gas: each pool's net, and, for a pool whose crossing the adoption set, that
+/// the provider drew past the share, which the adoption capped its net at. The engine's provider
+/// draws no pool, so the draws are none.
+///
+/// It runs before the start's records are counted on the answer: the adoption replaces the
+/// entry's pools.
 #[cfg(debug_assertions)]
 fn adopt_provider_draws<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
@@ -1277,16 +1280,10 @@ fn adopt_provider_draws<DB: Database, ExtEnvs: ExternalEnvTypes>(
     let FrameResult::Call(outcome) = answer else { return };
     if outcome.was_precompile_called {
         let gas = outcome.result.gas.tracker();
-        let draws =
-            PoolId::ALL.map(
-                |pool| {
-                    if gas.pool_crossing(pool) {
-                        i64::MAX
-                    } else {
-                        gas.pool_spent(pool)
-                    }
-                },
-            );
+        let draws = PoolId::ALL.map(|pool| crate::limit::ProviderDraw {
+            net: gas.pool_spent(pool),
+            past_a_share: gas.pool_crossing(pool),
+        });
         ctx.additional_limit.ledger_mut().adopt_provider_draws(draws);
     }
 }
