@@ -24,7 +24,8 @@
 //!   stops nothing in a frame that ends without an out-of-gas, and a later halt that records
 //!   nothing of its own is read off the record. An inspector that overwrites the interpreter's gas
 //!   overwrites gas detention's split with it, until detention next holds the frame; the frame's
-//!   budgets are on the start ledger, which a gas it restores does not reach.
+//!   budgets and its history allowance are on its start on the start ledger, which a gas it
+//!   restores, or an interpreter it replaces, does not reach.
 //! - **What an inspector sees.** A frame's end as the engine settled it: a frame that crossed gas
 //!   detention's compute limit ends with the stop, which the engine makes of its out-of-gas once
 //!   its run returns and before the inspector's `call_end`, `create_end` and `frame_end` see it, as

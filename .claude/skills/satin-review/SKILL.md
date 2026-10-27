@@ -60,9 +60,10 @@ Each change is stated here in plain words with its reason; the specification has
 
 ### Where the engine meets revm
 
-- **Inspectors run on revm's own inspected lifecycle, and the engine has no inspector-specific code.**
+- **Inspectors run on revm's own inspected lifecycle, and the engine has no separate inspected lifecycle.**
   The engine's inspected copies of the frame lifecycle, its step guard and `src/evm/inspector.rs` are gone: every per-frame mechanism sits in the frame start, run result and return (`frame_init`, `frame_run_result`, `frame_return_result`) that revm's plain and inspected loops share.
   A result an inspector rewrites is settled by the caller as revm settles it, with no correction of the engine's, and an answer it gives in place of a frame never reaches the engine's frame start, so the depth guard, the interceptors and gas detention see none of it.
+  What the engine decides for an inspector is the start ledger's settlement of an inspector's answer, a replaced tracker and a rebuilt outcome, read off revm's flags.
   Block execution admits any inspector.
   Why: a second copy of the lifecycle had to be kept in step with revm's and made an inspected run differ from a plain one, and which inspectors run on block production is the node's choice.
 - **The fork's loop hooks.**
@@ -75,7 +76,7 @@ Each change is stated here in plain words with its reason; the specification has
   The fork's figures are inert: the Satin schedule keeps Amsterdam's zero in `pool_kept_percent`, `reservoir_kept_percent` and `call_history_allowance`, so revm forwards every pool and the reservoir whole and grants no allowance; the engine declares no start charge on a start or on the first frame's input, puts no pool on a tracker and draws none; its synthetic answers carry neither pools nor a charge.
   A limit check reads the running frame's budget off the ledger's top entry; `frame_settle` gives a failed start's charge back to the caller's gas, as history; a log's history draws the entry's allowance first; the frame cap is the ledger's (`cap_child`, which replaced `cap_the_shares` and is held to it by a unit test).
   The ledger is not checked against the fork's figures, which do not mean the same once the fork forwards whole.
-  The inspector shapes whose results change: an answer built on gas whose pools the inspector set, or with the input's start charge copied, settles at unlimited budgets with no charge back; a tracker an inspector restores from a snapshot, or a replaced interpreter, leaves the ledger's draws and allowance where they were.
+  The inspector shapes whose results change, each accepted: an answer built on gas whose pools the inspector set, or with the input's start charge copied, settles at unlimited budgets with no charge back; a tracker an inspector restores from a snapshot leaves the ledger's draws and the allowance where they were; and an inspector that replaces a value call's interpreter leaves the frame its allowance, where the fresh gas of the replaced interpreter held none while the allowance was on the frame's gas.
   A test reads what the ledger settled (`test_utils::record_start_ledger_settlements`).
   Why: the figures are the engine's decisions, and the fork carries them only until they leave it.
 - **Writes and frame starts are metered in the fork's instruction hooks.**
@@ -365,7 +366,7 @@ For each module: where it is, what to check, the spec sections, and the `AGENTS.
   - A start an inspector rewrites after its opcode is not charged again: what the opcode charged stands, its declared part coming back only as for any start whose frame keeps nothing (a frame that fails, or a start revm refuses before it bumps a nonce or moves a value), and its records are those revm then made.
   - A pre-block system call runs on the plain system-call path, with no callback.
   - `test_utils::ReadOnlyObserver` checks, in debug builds, that an inspector a test declares an observer writes nothing back: a tripwire for tests, not a proof.
-  - The start ledger settles an inspector's answer and a replaced tracker at unlimited budgets, and gives no start charge back for an answer or a rebuilt outcome; the pools, charge and allowance fields an inspector writes on an input, an answer or a result are not read, and a restored tracker snapshot leaves the ledger's draws standing; the tests of such inspectors read what the ledger settled.
+  - The start ledger settles an inspector's answer and a replaced tracker at unlimited budgets, and gives no start charge back for an answer or a rebuilt outcome; the pools, charge and allowance fields an inspector writes on an input, an answer or a result are not read, a restored tracker snapshot leaves the ledger's draws standing, and a replaced interpreter leaves the frame its allowance; the tests of such inspectors read what the ledger settled.
 - **Detail:** [`AGENTS.md`, "Contracts of the common execution layer"](../../../AGENTS.md#contracts-of-the-common-execution-layer), the entries on inspectors.
 
 ### Node surface, validation and the stateless witness
