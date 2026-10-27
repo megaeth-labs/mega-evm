@@ -45,9 +45,10 @@
 //!   creating frame, a creator's nonce record on the creator once its creation returned
 //!   ([`draw`](StartLedger::draw)). With no start open, as for a frame a test drives by hand, there
 //!   is no frame budget.
-//! - **A precompile's draws are adopted when it answers**, fail-closed: a draw past the share
+//! - **A precompile's draws would be adopted when it answers**, fail-closed: a draw past the share
 //!   empties the pool and caps the net at the share, whatever the answer's status
-//!   ([`adopt_provider_draws`](StartLedger::adopt_provider_draws)).
+//!   ([`adopt_provider_draws`](StartLedger::adopt_provider_draws)). No provider the engine runs
+//!   draws a pool, so nothing adopts any today.
 //! - **A settlement** merges the child's entry into its caller's ([`settle`](StartLedger::settle)):
 //!   on success the child's remaining pools join what the caller kept and its nets the caller's; on
 //!   a revert or a halt its draws are undone, and its whole share comes back. The start charge
