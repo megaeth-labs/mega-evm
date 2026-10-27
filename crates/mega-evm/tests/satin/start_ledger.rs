@@ -16,10 +16,10 @@ use mega_evm::{
     test_utils::{
         neutral_cfg, neutralize_evm, BytecodeBuilder, ErrorInjectingDatabase, MemoryDatabase,
     },
-    EthSpecId, EvmTxRuntimeLimits, MegaContext, MegaEvm,
+    EthSpecId, EvmTxRuntimeLimits, MegaContext, MegaEvm, WRITE_RECORD_SIZE,
 };
 use revm::{
-    bytecode::opcode::{ADDRESS, CALL, GAS, POP, PUSH0, REVERT},
+    bytecode::opcode::{ADDRESS, CALL, GAS, POP, PUSH0, REVERT, STOP},
     context::{BlockEnv, ContextTr},
     context_interface::{
         host::{FrameSettle, LifecycleEnd, SettleStatus},
@@ -34,7 +34,7 @@ use revm::{
     Database, Inspector,
 };
 
-use crate::common::{block, call, context, create};
+use crate::common::{block, call, context, create, history};
 
 const CALLER: Address = address!("0000000000000000000000000000000000d00000");
 const OUTER: Address = address!("0000000000000000000000000000000000d00001");
@@ -340,5 +340,101 @@ fn test_end_callback_rewrites_settle_as_the_fork_settles_them() {
             };
             assert_eq!(flags, expected, "{case}: the flags");
         }
+    }
+}
+
+/// `OUTER` creates a contract whose init code stops, deploying no code, and stops. The creation's
+/// start makes one write record on the creation, the created account's, which its caller is
+/// charged for at the `CREATE` and which the creation's start charge gives back when it fails or
+/// takes no address; the creator's nonce record is charged there too and is not given back.
+fn creates_an_empty_contract() -> MemoryDatabase {
+    let outer = BytecodeBuilder::default().create(U256::ZERO, [STOP]).append(POP).stop().build();
+    MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(10u64.pow(18)))
+        .account_code(OUTER, outer)
+}
+
+/// How [`CreationRewrites`] takes the creation `OUTER` makes its address.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AddressRewrite {
+    /// `create_end` clears the address of the creation, which succeeded.
+    Cleared,
+    /// `create` answers the creation with a success that took no address, on `Gas::new`.
+    AnsweredWithout,
+}
+
+/// Takes the creation `OUTER` makes its address as its [`AddressRewrite`] says.
+struct CreationRewrites(AddressRewrite);
+
+impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for CreationRewrites {
+    fn create(
+        &mut self,
+        _: &mut MegaContext<DB>,
+        inputs: &mut CreateInputs,
+    ) -> Option<CreateOutcome> {
+        (self.0 == AddressRewrite::AnsweredWithout && inputs.caller() == OUTER).then(|| {
+            let gas = Gas::new(inputs.gas_limit());
+            CreateOutcome::new(
+                InterpreterResult::new(InstructionResult::Stop, Bytes::new(), gas),
+                None,
+            )
+        })
+    }
+
+    fn create_end(
+        &mut self,
+        _: &mut MegaContext<DB>,
+        inputs: &CreateInputs,
+        out: &mut CreateOutcome,
+    ) {
+        if self.0 == AddressRewrite::Cleared && inputs.caller() == OUTER {
+            assert!(out.result.is_ok() && out.address.is_some(), "the creation took its address");
+            out.address = None;
+        }
+    }
+}
+
+/// A creation that took no address settles as one, whoever took it: an end callback that clears a
+/// successful creation's address has its start charge given back, the created account's record,
+/// whose history the transaction no longer pays, as revm reports the creation took no address; an
+/// inspector's success answered without an address gives nothing back, an inspector's answer
+/// carrying no start charge, and the transaction pays what the creation's opcode was charged, as
+/// it pays when the creation runs and keeps it.
+#[test]
+fn test_a_creation_that_takes_no_address_settles_as_one() {
+    let run = |inspector: Option<CreationRewrites>| {
+        let tx = call(CALLER, OUTER, U256::ZERO, GAS_LIMIT);
+        let outcome = match inspector {
+            Some(inspector) => MegaEvm::new(context(creates_an_empty_contract()))
+                .with_inspector(inspector)
+                .execute_transaction(tx),
+            None => MegaEvm::new(context(creates_an_empty_contract())).execute_transaction(tx),
+        };
+        let outcome = outcome.expect("the transaction is valid");
+        assert!(outcome.result.is_success(), "{:?}", outcome.result);
+        outcome
+    };
+    let kept = run(None);
+    for rewrite in [AddressRewrite::Cleared, AddressRewrite::AnsweredWithout] {
+        let mut evm = MegaEvm::new(context(creates_an_empty_contract()))
+            .with_inspector(CreationRewrites(rewrite));
+        let outcome = evm
+            .execute_transaction(call(CALLER, OUTER, U256::ZERO, GAS_LIMIT))
+            .expect("the transaction is valid");
+        assert!(outcome.result.is_success(), "{rewrite:?}: {:?}", outcome.result);
+        let (settled, end) = settlements(evm.ctx_mut());
+        assert_eq!(end, LifecycleEnd::Settled, "{rewrite:?}");
+        let creation = settled[0];
+        assert_eq!((creation.id, creation.depth), (2, 1), "{rewrite:?}: the creation's start");
+        assert_eq!(
+            (creation.status, creation.created, creation.inspector_answer),
+            (SettleStatus::Ok, Some(false), rewrite == AddressRewrite::AnsweredWithout),
+            "{rewrite:?}: a success that took no address"
+        );
+        let given_back = match rewrite {
+            AddressRewrite::Cleared => history(WRITE_RECORD_SIZE),
+            AddressRewrite::AnsweredWithout => 0,
+        };
+        assert_eq!(outcome.gas.history, kept.gas.history - given_back, "{rewrite:?}");
     }
 }
