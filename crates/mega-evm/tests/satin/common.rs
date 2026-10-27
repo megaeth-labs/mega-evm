@@ -311,12 +311,17 @@ pub(crate) fn assert_answered_at_unlimited_budgets(
     start: u32,
     depth: usize,
 ) {
-    let settled = settlements
-        .iter()
-        .find(|settled| settled.start == start)
-        .unwrap_or_else(|| panic!("start {start} settled: {settlements:?}"));
+    let settled = ledger_settled(settlements, start);
     assert_eq!(settled.depth, depth, "start {start}");
     assert_eq!(settled.frame.remaining, PoolAmounts::UNLIMITED, "start {start}: the answer's");
     assert_eq!(settled.frame.net, [0; PoolId::COUNT], "start {start}: the answer's");
     assert_eq!(settled.caller.remaining, PoolAmounts::UNLIMITED, "start {start}: its caller's");
+}
+
+/// What the start ledger settled for `start`, among `settlements`.
+pub(crate) fn ledger_settled(settlements: &[LedgerSettlement], start: u32) -> LedgerSettlement {
+    *settlements
+        .iter()
+        .find(|settled| settled.start == start)
+        .unwrap_or_else(|| panic!("start {start} settled on the ledger: {settlements:?}"))
 }

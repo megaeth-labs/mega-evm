@@ -49,8 +49,6 @@ mod schedule;
 #[path = "../shared/snapshot.rs"]
 mod snapshot;
 mod spec_numbers;
-// These read the start lifecycle off revm's debug mirror, which a debug build alone keeps.
-#[cfg(debug_assertions)]
 mod start_ledger;
 mod state;
 mod state_growth;

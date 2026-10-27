@@ -710,9 +710,9 @@ impl AdditionalLimit {
     /// is counted after the creation's own counts are closed, and outlives the creation's failure.
     ///
     /// A result revm did not decide the start of — the depth guard's, an interceptor's, an
-    /// inspector's — has no start to close, and no creator: revm bumped no nonce for it. The depth
-    /// guard's and an interceptor's carry the start charge their input declared, which revm gives
-    /// back; an inspector's carries what the inspector built it with.
+    /// inspector's — has no start to close, and no creator: revm bumped no nonce for it. The start
+    /// charge of each comes back where revm settles its start, from the start ledger: by its status
+    /// for the depth guard's and an interceptor's, never for an inspector's.
     pub(crate) fn close_start(&mut self, depth: usize, kept: bool) -> (u64, Option<CreatorBefore>) {
         let Some(&start) = self.decided.last().filter(|start| start.depth == depth) else {
             return (0, None);
@@ -956,7 +956,7 @@ mod tests {
         let mut layer = AdditionalLimit::new(limits);
         layer.begin_transaction(class, 0);
         let ledger = layer.ledger_mut();
-        ledger.park_transaction(Some(super::super::Parked::transaction(pools, 0)));
+        ledger.park_transaction(Some(crate::limit::Parked::transaction(pools, 0)));
         ledger.split(1, None, 0);
         layer
     }
@@ -1117,7 +1117,7 @@ mod tests {
                                                 // Two drawn already, so a frame's net is not zero.
                                                 let mut layer = layer.clone();
                                                 let ledger = layer.ledger_mut();
-                                                let start = super::super::Parked::transaction(
+                                                let start = crate::limit::Parked::transaction(
                                                     PoolAmounts::ZERO
                                                         .with(DATA_SIZE_POOL, pa + 2)
                                                         .with(KV_UPDATE_POOL, pb + 2)

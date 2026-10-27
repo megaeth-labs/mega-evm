@@ -319,7 +319,7 @@ fn test_pause_and_resume_gas_metering_hold_the_gas() {
         // and one new slot. The budgets themselves read unlimited, the cheatcode's answer at the
         // pause having left `TEST` with unlimited budgets.
         let settlements = take_start_ledger_settlements(evm.ctx_mut());
-        let resumed = settlements.iter().find(|settled| settled.start == 3).expect("settled");
+        let resumed = crate::common::ledger_settled(&settlements, 3);
         assert_eq!((resumed.depth, resumed.caller.net), (1, [WRITE_RECORD_SIZE as i64, 1, 1]));
         assert_eq!(resumed.caller.remaining, revm::interpreter::PoolAmounts::UNLIMITED);
         (outcome, evm.inspector().answered)
