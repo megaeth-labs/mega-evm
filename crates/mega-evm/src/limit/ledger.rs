@@ -414,6 +414,10 @@ impl StartLedger {
 
     /// Draws `counted` on the top entry's pools, which the limits admitted: what it takes back goes
     /// back to each pool first, then what it adds is drawn. A pool it leaves alone is not visited.
+    ///
+    /// The limits admit a draw past the pool only for an exempt transaction, which no budget holds:
+    /// past a saturated unlimited pool, or on a start an inspector built itself, which opens with
+    /// none. Such a draw takes nothing.
     pub(crate) fn draw(&mut self, counted: &Counted) {
         let Some(entry) = self.entries.last_mut() else { return };
         for pool in PoolId::ALL {
@@ -422,13 +426,7 @@ impl StartLedger {
                 continue;
             }
             entry.pools.refill(pool, taken);
-            let drew = entry.pools.record(pool, added);
-            // Admitted by the limits, so refused only past a saturated unlimited pool, which an
-            // exempt transaction's frames hold.
-            debug_assert!(
-                drew || entry.pools.remaining.get(pool) == u64::MAX,
-                "the checks admit the draw"
-            );
+            entry.pools.record(pool, added);
         }
     }
 
@@ -802,6 +800,24 @@ mod tests {
         assert_eq!(ledger.draw_allowance(80), 10, "past it");
         assert_eq!(ledger.draw_allowance(5), 5, "spent");
         assert_eq!(StartLedger::default().draw_allowance(5), 5, "no start open");
+    }
+
+    /// A start an inspector built itself, which nothing parked for, opens with no budget; a draw
+    /// the limits admitted on it anyway — an exempt transaction's, which no budget holds — takes
+    /// nothing and is no broken invariant.
+    #[test]
+    fn test_a_draw_on_a_start_nothing_was_parked_for_takes_nothing() {
+        let mut ledger = opened(PoolAmounts::UNLIMITED);
+        ledger.split(2, Some(1), 1);
+        assert_eq!(ledger.budget(DATA_SIZE_POOL), (0, 0), "no budget");
+        ledger.draw(&Counted::records(1, 0, false).with_growth(1, 0));
+        assert_eq!(ledger.top_pools(), [(0, 0); PoolId::COUNT], "nothing taken");
+        assert_eq!(ledger.settle(&settled(2, 1, SettleStatus::Ok)), 0);
+        assert_eq!(
+            top(&ledger).remaining,
+            PoolAmounts::UNLIMITED,
+            "the caller's pools as they were"
+        );
     }
 
     /// The running frame's budget is its entry's pools; with no start open there is none, and a

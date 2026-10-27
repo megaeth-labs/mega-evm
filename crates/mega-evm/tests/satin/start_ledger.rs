@@ -21,18 +21,21 @@ use mega_evm::{
 };
 use revm::{
     bytecode::opcode::{ADDRESS, CALL, GAS, POP, PUSH0, REVERT, STOP},
-    context::{BlockEnv, ContextTr},
+    context::{BlockEnv, ContextTr, JournalTr},
     context_interface::{
         host::{FrameSettle, LifecycleEnd, SettleStatus},
         LifecycleEvent, LocalContextTr,
     },
     handler::FrameResult,
     interpreter::{
-        interpreter::EthInterpreter, CallInputs, CallOutcome, CreateInputs, CreateOutcome,
-        FrameInput, Gas, InstructionResult, InterpreterResult, PoolAmounts,
+        interpreter::EthInterpreter,
+        interpreter_types::{InputsTr, LoopControl},
+        CallInput, CallInputs, CallOutcome, CallScheme, CallValue, CreateInputs, CreateOutcome,
+        FrameInput, Gas, InstructionResult, Interpreter, InterpreterAction, InterpreterResult,
+        PoolAmounts,
     },
     primitives::CALL_STACK_LIMIT,
-    Database, Inspector,
+    Database, InspectSystemCallEvm, Inspector,
 };
 
 use crate::common::{block, call, context, create, history};
@@ -478,4 +481,69 @@ fn test_a_creation_that_takes_no_address_settles_as_one() {
         let ledger = ledger_settled(&take_start_ledger_settlements(evm.ctx_mut()), 2);
         assert_eq!(ledger.refund, given_back, "{rewrite:?}: the ledger's refund");
     }
+}
+
+/// Starts a call of its own from the first instruction `OUTER` runs, without an opcode: a start
+/// nothing parked anything for.
+struct StartsItsOwnCall {
+    started: bool,
+}
+
+impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for StartsItsOwnCall {
+    fn step(&mut self, interp: &mut Interpreter<EthInterpreter>, ctx: &mut MegaContext<DB>) {
+        if self.started || interp.input.target_address() != OUTER {
+            return;
+        }
+        self.started = true;
+        // The account a call's opcode would have loaded, with its code, before it starts the frame.
+        let callee = JournalTr::load_account_with_code(ctx.journal_mut(), CHILD)
+            .expect("the database serves the callee");
+        let info = &callee.data.info;
+        let known_bytecode = (info.code_hash, info.code.clone().expect("loaded with its code"));
+        let inputs = CallInputs {
+            input: CallInput::Bytes(Bytes::new()),
+            return_memory_offset: 0..0,
+            gas_limit: 1_000_000,
+            bytecode_address: CHILD,
+            known_bytecode,
+            target_address: CHILD,
+            caller: OUTER,
+            value: CallValue::Transfer(U256::ZERO),
+            scheme: CallScheme::Call,
+            is_static: false,
+            reservoir: 0,
+            charged_new_account_state_gas: false,
+            charged_start: Default::default(),
+            pool_shares: PoolAmounts::UNLIMITED,
+            history_allowance: 0,
+        };
+        interp.bytecode.set_action(InterpreterAction::NewFrame(FrameInput::Call(Box::new(inputs))));
+    }
+}
+
+/// A start an inspector makes itself, without an opcode, has nothing parked and opens with no
+/// budget on the start ledger. A system call is held to no budget, so a write in that frame is
+/// admitted, and the ledger takes nothing for it: the call succeeds and keeps the write.
+#[test]
+fn test_a_write_in_a_start_an_inspector_made_itself_runs_in_a_system_call() {
+    let outer = BytecodeBuilder::default().append_many([PUSH0, POP]).stop().build();
+    let child = BytecodeBuilder::default().sstore(U256::from(7), U256::from(1)).stop().build();
+    let db = MemoryDatabase::default().account_code(OUTER, outer).account_code(CHILD, child);
+    let mut evm = MegaEvm::new(context(db)).with_inspector(StartsItsOwnCall { started: false });
+    record_start_ledger_settlements(evm.ctx_mut());
+    let result = InspectSystemCallEvm::inspect_one_system_call_with_caller(
+        &mut evm,
+        CALLER,
+        OUTER,
+        Bytes::new(),
+    )
+    .expect("the system call runs");
+    assert!(result.is_success(), "{result:?}");
+    assert!(evm.inspector().started);
+    let ledger = take_start_ledger_settlements(evm.ctx_mut());
+    let child = ledger_settled(&ledger, 2);
+    assert_eq!(child.frame.remaining, PoolAmounts::ZERO, "no budget");
+    assert_eq!(child.frame.net, [0; 3], "the write took nothing");
+    let slot = evm.ctx().journal_ref().state[&CHILD].storage[&U256::from(7)].present_value;
+    assert_eq!(slot, U256::from(1), "the write is kept");
 }
