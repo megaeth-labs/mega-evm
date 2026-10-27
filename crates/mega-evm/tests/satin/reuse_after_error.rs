@@ -29,7 +29,7 @@ use revm::{
     bytecode::opcode::{BALANCE, POP, SLOAD},
     context::{
         result::{ExecResultAndState, ExecutionResult},
-        BlockEnv, ContextSetters, ContextTr, TxEnv,
+        BlockEnv, ContextError, ContextSetters, ContextTr, TxEnv,
     },
     context_interface::LocalContextTr,
     handler::{EvmTr, SystemCallEvm},
@@ -55,6 +55,8 @@ const READS: Address = address!("0000000000000000000000000000000000e10005");
 const READS_BENEFICIARY: Address = address!("0000000000000000000000000000000000e10006");
 /// `SSTORE(0, 7)`.
 const WRITES: Address = address!("0000000000000000000000000000000000e10007");
+/// `SSTORE(0, 7)`: the contract the call that fails before its first frame targets.
+const BEFORE_FRAME: Address = address!("0000000000000000000000000000000000e10008");
 const BENEFICIARY: Address = address!("0000000000000000000000000000000000e1bef0");
 const GAS_LIMIT: u64 = 100_000_000;
 /// What each sender holds before the test.
@@ -253,6 +255,43 @@ fn test_an_error_in_the_failed_deposit_recovery_leaves_the_evm_clean() {
     assert_same_outcome(&reused, &fresh, "after the recovery's error");
 }
 
+/// The same error in the failed-deposit recovery, then a direct `transact_one` retry on the same
+/// EVM with no finalize in between: the journal the error left holds no transaction and none of
+/// the failed deposit's reads, so the retry has the result a fresh EVM's `transact_one` gives it
+/// and leaves the database as the fresh one leaves it.
+#[test]
+fn test_a_transact_one_retry_after_a_failed_deposit_recovery_error_runs_as_on_a_fresh_evm() {
+    let limits = EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(TX_BODY_SIZE - 1);
+    let mut db = ErrorInjectingDatabase::new(database());
+    db.fail_on_account = Some(SENDER);
+    let mut evm = evm_over(db).with_tx_runtime_limits(limits);
+    evm.ctx_mut().chain_mut().tx_l1_cost = Some(U256::from(1_000));
+    evm.ctx_mut().local_mut().shared_memory_buffer().borrow_mut().resize(64, 0xff);
+    // An error a load recorded and nothing took, for the cleanup to drop before the recovery's read
+    // fails: were it dropped after, the recovery's early return would leave it for the retry.
+    *evm.ctx_mut().error() = Err(ContextError::Custom("left behind".into()));
+
+    let error = evm
+        .transact_one(over_the_limit_deposit(SENDER, 7))
+        .expect_err("the recovery's read of the sender fails");
+    assert!(format!("{error:?}").contains("injected basic()"), "{error:?}");
+    assert!(evm.ctx_mut().error().is_ok(), "the error slot");
+
+    evm.ctx_mut().db_mut().fail_on_account = None;
+    evm.set_tx_runtime_limits(EvmTxRuntimeLimits::default());
+    let next = call(SENDER, KEPT, U256::ZERO, GAS_LIMIT);
+    let retried = evm.transact_one(next.clone()).expect("the retry is valid");
+    let mut fresh = evm_over(ErrorInjectingDatabase::new(database()));
+    let expected = fresh.transact_one(next).expect("the transaction is valid");
+    assert!(expected.is_success(), "{expected:?}");
+    assert_eq!(retried, expected, "the retry's result");
+    for evm in [&mut evm, &mut fresh] {
+        let state = evm.finalize();
+        ExecuteCommitEvm::commit(evm, state);
+    }
+    assert_eq!(committed(&evm), committed(&fresh), "what the database holds");
+}
+
 /// The EVM every row of the entry-point table runs on.
 type Evm = MegaEvm<ErrorInjectingDatabase, NoOpInspector>;
 
@@ -263,6 +302,7 @@ fn table_database() -> MemoryDatabase {
     let reads_beneficiary = writes().push_address(BENEFICIARY).append(BALANCE).append(POP);
     database()
         .account_code(WRITES, writes().stop().build())
+        .account_code(BEFORE_FRAME, writes().stop().build())
         .account_code(READS_BENEFICIARY, reads_beneficiary.stop().build())
         .account_code(HISTORY_STORAGE_ADDRESS, writer())
         .account_code(BEACON_ROOTS_ADDRESS, writer())
@@ -282,6 +322,13 @@ fn table_evm(db: ErrorInjectingDatabase, inspect: bool) -> Evm {
 /// Where the failing call's error comes from.
 #[derive(Clone, Copy, Debug)]
 enum Site {
+    /// The database fails the read of the sender's account, which a transaction's validation
+    /// makes: the call fails before anything is loaded for its frame. A system call that takes no
+    /// caller reads no sender.
+    Validation,
+    /// The database fails the read of the call's target, which pre-execution or a system call's
+    /// start makes before the first frame is built.
+    BeforeFrame,
     /// A child's read of slot 1, after the call's own frame wrote slot 0: the child ends with the
     /// error, its caller's return takes it, and the call fails with its own frame's write open in
     /// the journal.
@@ -296,20 +343,29 @@ enum Site {
 }
 
 impl Site {
-    const ALL: [Self; 3] = [Self::Nested, Self::Preempted, Self::PostExecution];
+    const ALL: [Self; 5] =
+        [Self::Validation, Self::BeforeFrame, Self::Nested, Self::Preempted, Self::PostExecution];
+
+    /// Whether a system call can fail here: it has neither post-execution nor a validated sender.
+    const fn reaches_system_calls(self) -> bool {
+        matches!(self, Self::BeforeFrame | Self::Nested)
+    }
 
     /// The contract a transaction or a system call of the table calls.
     const fn contract(self) -> Address {
         match self {
+            Self::Validation | Self::PostExecution => WRITES,
+            Self::BeforeFrame => BEFORE_FRAME,
             Self::Nested => WRITER,
             Self::Preempted => READS_BENEFICIARY,
-            Self::PostExecution => WRITES,
         }
     }
 
-    /// Makes `db` fail the read the site's call fails on.
-    const fn arm(self, db: &mut ErrorInjectingDatabase) {
+    /// Makes `db` fail the read the site's call fails on; `target` is the contract the call runs.
+    const fn arm(self, db: &mut ErrorInjectingDatabase, target: Address) {
         match self {
+            Self::Validation => db.fail_on_account = Some(SENDER),
+            Self::BeforeFrame => db.fail_on_account = Some(target),
             Self::Nested => db.fail_on_storage = Some((CHILD, U256::ONE)),
             Self::Preempted => db.fail_on_account = Some(BENEFICIARY),
             Self::PostExecution => db.fail_on_account = Some(BASE_FEE_RECIPIENT),
@@ -647,14 +703,15 @@ fn committed(evm: &Evm) -> BTreeMap<Address, (u64, U256, B256, BTreeMap<U256, U2
 /// writes. The same call run again on the same EVM, the database serving again, has the result a
 /// fresh EVM gives it and leaves the database as the fresh one leaves it. Each entry point runs on
 /// an EVM with inspection enabled and on one without, which only alloy-evm's `transact` methods and
-/// `execute_transaction` read; a system call has no post-execution, so the two post-execution sites
-/// are the transactions'.
+/// `execute_transaction` read; a system call has no validated sender and no post-execution, so the
+/// sender's read and the two post-execution sites are the transactions'. Two sites fail before
+/// the first frame, the sender's read and the target's, and three with frames open or settled.
 #[test]
 fn test_every_entry_point_leaves_nothing_of_a_failed_call() {
     for inspect in [false, true] {
         for site in Site::ALL {
             for entry in EntryPoint::ALL {
-                if entry.is_system_call() && !matches!(site, Site::Nested) {
+                if entry.is_system_call() && !site.reaches_system_calls() {
                     continue;
                 }
                 assert_a_failed_call_leaves_nothing(entry, site, inspect);
@@ -666,11 +723,12 @@ fn test_every_entry_point_leaves_nothing_of_a_failed_call() {
 fn assert_a_failed_call_leaves_nothing(entry: EntryPoint, site: Site, inspect: bool) {
     let row = format!("{entry:?} / {site:?} / inspect={inspect}");
     // A system call before the failing one, for a `_one` entry point's journal to hold: it reads
-    // neither the beneficiary nor a fee recipient, which the failing call's database fails.
+    // neither the beneficiary, a fee recipient, the sender nor the target the failing call's
+    // database fails.
     let earlier = |evm: &mut Evm| {
         if !entry.finalizes() {
             let earlier = evm
-                .system_call_one_with_caller(SENDER, KEPT, Bytes::new())
+                .system_call_one_with_caller(EARLIER_SENDER, KEPT, Bytes::new())
                 .expect("the earlier call runs");
             assert!(earlier.is_success(), "{row}: {earlier:?}");
         }
@@ -678,7 +736,7 @@ fn assert_a_failed_call_leaves_nothing(entry: EntryPoint, site: Site, inspect: b
 
     let mut evm = table_evm(ErrorInjectingDatabase::new(table_database()), inspect);
     earlier(&mut evm);
-    site.arm(evm.ctx_mut().db_mut());
+    site.arm(evm.ctx_mut().db_mut(), entry.target(site));
     let failed = entry.run(&mut evm, site);
     assert!(matches!(&failed, Err(error) if error.contains("injected")), "{row}: {failed:?}");
     Site::disarm(evm.ctx_mut().db_mut());
