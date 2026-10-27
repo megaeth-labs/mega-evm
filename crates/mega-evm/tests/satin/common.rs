@@ -6,11 +6,10 @@ use alloy_primitives::{Address, Bytes, TxKind, B256, U256};
 use mega_evm::{
     active_satin_prices,
     test_utils::{
-        note_price_guard, op_transaction, zero_fee_l1_block_info, BytecodeBuilder,
-        LedgerSettlement, PoolAmounts, PoolId,
+        note_price_guard, op_transaction, zero_fee_l1_block_info, BytecodeBuilder, LedgerSettlement,
     },
     EvmTxRuntimeLimits, LimitUsage, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
-    MegaTransaction, MegaTransactionOutcome,
+    MegaTransaction, MegaTransactionOutcome, PoolAmounts, PoolId,
 };
 use revm::{
     bytecode::opcode::{PUSH0, RETURN},
@@ -303,9 +302,8 @@ pub(crate) fn body_history(calldata_len: u64) -> u64 {
 /// Asserts that the start ledger settled start `start`, at `depth`, an inspector's answer, at
 /// unlimited budgets, whatever gas the inspector built it on — the engine's own
 /// `untouched_call_gas` and `untouched_create_gas` included — and left the answer's caller with
-/// unlimited budgets: the frame's pools as it settled
-/// and its caller's once it settled into them, all three unlimited, with no net drawn on the
-/// answer.
+/// unlimited budgets: the frame's pools as it settled and its caller's once it settled into them,
+/// all three unlimited, with no net drawn on the answer.
 pub(crate) fn assert_answered_at_unlimited_budgets(
     settlements: &[LedgerSettlement],
     start: u32,
