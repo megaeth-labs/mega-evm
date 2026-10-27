@@ -471,10 +471,11 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
     /// The transaction's start ends the transaction: when its frame halted, giving the charge back
     /// burns every regular gas the transaction's gas holds, what the refill credited and what
     /// revm's settlement left alike, as revm's settlement burns a halted transaction's after each
-    /// of its own refunds. revm's settlement leaves regular gas there only where an inspector
-    /// handed the frame back more reservoir than it inherited, which unwinds part of the spill the
-    /// charge made: an input's or a result's reservoir raised, or a tracker built in the result's
-    /// place. A child's caller runs on, and keeps its regular gas.
+    /// of its own refunds; with no charge to give back nothing is burned, as revm's settlement
+    /// burned nothing then. revm's settlement leaves regular gas there only where an inspector
+    /// makes the frame hand back more reservoir than it inherited — on its input, or in its
+    /// result's figures — which unwinds part of the spill the charges made before the frame. A
+    /// child's caller runs on, and keeps its regular gas.
     #[inline]
     fn frame_settle(&mut self, settle: &FrameSettle, gas: &mut GasTracker) {
         self.inner.frame_settle(settle, gas);
