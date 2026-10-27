@@ -1,7 +1,8 @@
 //! What a frame's caller holds of the EIP-8037 reservoir once its frame settled into it: the part
 //! of its reservoir it kept while the frame ran, and what the frame hands back on top, once that
-//! has unwound the caller's outstanding spill, last in first out. The transaction's gas, whose
-//! frame takes the whole reservoir, holds what its frame hands back alone.
+//! has unwound the caller's outstanding spill, last in first out. The transaction's frame is given
+//! the whole reservoir, of which the transaction's gas keeps a copy until the frame settles, and
+//! the transaction's gas then holds what its frame hands back alone.
 //!
 //! An inspector reads the transaction's frame's gas at the end of each `CALL` it makes, once the
 //! start took the child's share out of it; the child's gas when the child ends, before revm settles
@@ -12,7 +13,10 @@
 use alloy_primitives::{address, Address, U256};
 use mega_evm::{
     constants::TX_GAS_LIMIT_CAP,
-    test_utils::{BytecodeBuilder, MemoryDatabase},
+    test_utils::{
+        record_start_ledger_settlements, take_start_ledger_settlements, BytecodeBuilder,
+        MemoryDatabase,
+    },
     MegaContext, MegaEvm,
 };
 use revm::{
@@ -24,7 +28,7 @@ use revm::{
     Database, Inspector,
 };
 
-use crate::common::{body_history, call, context, slot_state_gas, state_is_free};
+use crate::common::{body_history, call, context, history_is_free, slot_state_gas, state_is_free};
 
 const SENDER: Address = address!("0000000000000000000000000000000000740000");
 const A: Address = address!("0000000000000000000000000000000000740001");
@@ -42,48 +46,54 @@ const IDLE: Address = address!("0000000000000000000000000000000000740006");
 /// The new slots [`SPENDER`] writes.
 const SPENT_SLOTS: u64 = 4;
 
-/// A frame's reservoir and outstanding spill.
+/// What funds a frame's state and history charges beside its regular gas: its reservoir, and the
+/// spill those charges made onto its regular gas that is still outstanding.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Pools {
+struct Funding {
     reservoir: u64,
     spilled: u64,
 }
 
+impl Funding {
+    /// No reservoir and no spill.
+    const NONE: Self = Self { reservoir: 0, spilled: 0 };
+}
+
 /// One child of the transaction's frame, from its start to its settlement.
 #[derive(Clone, Copy, Debug, Default)]
-struct Settled {
-    /// The caller's pools once the start took the child's share: what it kept.
-    kept: Option<Pools>,
+struct Child {
+    /// The caller's funding once the start took the child's share: what it kept.
+    kept: Option<Funding>,
     /// The reservoir the child was given.
     share: u64,
     /// What the child hands back: its reservoir as revm settles it, and its spill.
-    handed_back: Option<Pools>,
-    /// The caller's pools once the child settled into it.
-    after: Option<Pools>,
+    handed_back: Option<Funding>,
+    /// The caller's funding once the child settled into it.
+    after: Option<Funding>,
 }
 
-/// Reads [`Settled`] for every child of the transaction's frame, and that frame's own reservoir as
-/// it started and its pools as it ended.
+/// Reads [`Child`] for every child of the transaction's frame, and that frame's own reservoir as
+/// it started and its funding as it ended.
 #[derive(Clone, Default)]
 struct Settlements {
     opcode: Option<u8>,
     depth: usize,
-    children: Vec<Settled>,
-    /// The child that settled last, whose caller's pools the next instruction reads.
+    children: Vec<Child>,
+    /// The child that settled last, whose caller's funding the next instruction reads.
     settling: Option<usize>,
     frame_given: Option<u64>,
-    frame_ended: Option<(InstructionResult, Pools)>,
+    frame_ended: Option<(InstructionResult, Funding)>,
 }
 
-const fn pools(gas: &revm::interpreter::Gas) -> Pools {
-    Pools { reservoir: gas.reservoir(), spilled: gas.state_gas_spilled() }
+const fn funding(gas: &revm::interpreter::Gas) -> Funding {
+    Funding { reservoir: gas.reservoir(), spilled: gas.state_gas_spilled() }
 }
 
 impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for Settlements {
     fn step(&mut self, interp: &mut Interpreter<EthInterpreter>, _: &mut MegaContext<DB>) {
         if self.depth == 1 {
             if let Some(index) = self.settling.take() {
-                self.children[index].after = Some(pools(&interp.gas));
+                self.children[index].after = Some(funding(&interp.gas));
             }
             self.opcode = Some(interp.bytecode.opcode());
         }
@@ -91,7 +101,7 @@ impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for Settlements {
 
     fn step_end(&mut self, interp: &mut Interpreter<EthInterpreter>, _: &mut MegaContext<DB>) {
         if self.depth == 1 && self.opcode.take() == Some(CALL) {
-            self.children.push(Settled { kept: Some(pools(&interp.gas)), ..Settled::default() });
+            self.children.push(Child { kept: Some(funding(&interp.gas)), ..Child::default() });
         }
     }
 
@@ -112,14 +122,14 @@ impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for Settlements {
         let result = outcome.result.result;
         let gas = &outcome.result.gas;
         match self.depth {
-            1 => self.frame_ended = Some((result, pools(gas))),
+            1 => self.frame_ended = Some((result, funding(gas))),
             2 => {
                 let index = self.children.len() - 1;
                 let child = &mut self.children[index];
                 child.handed_back = Some(if result.is_ok() {
-                    pools(gas)
+                    funding(gas)
                 } else {
-                    Pools { reservoir: child.share, spilled: 0 }
+                    Funding { reservoir: child.share, spilled: 0 }
                 });
                 self.settling = Some(index);
             }
@@ -149,25 +159,47 @@ fn calling(children: &[Address], end: u8) -> MemoryDatabase {
         .account_code(IDLE, BytecodeBuilder::default().stop().build())
 }
 
-/// Runs a call to `A` over `db` at a gas limit that leaves `reservoir` once the body is paid, and
-/// returns the outcome's reservoir and gas used with what [`Settlements`] read.
-fn run(db: MemoryDatabase, reservoir: u64) -> (u64, u64, u64, Settlements) {
-    let gas_limit = TX_GAS_LIMIT_CAP + body_history(0) + reservoir;
+/// A call to `A`, as it ended.
+struct Run {
+    gas_limit: u64,
+    gas_used: u64,
+    reservoir_remaining: u64,
+    /// The history gas the start ledger gave back to the transaction's gas at its start's
+    /// settlement: the start charge, or nothing.
+    start_refund: u64,
+    read: Settlements,
+}
+
+/// The gas limit that leaves `reservoir` once the body is paid.
+fn leaving(reservoir: u64) -> u64 {
+    TX_GAS_LIMIT_CAP + body_history(0) + reservoir
+}
+
+/// Runs a call to `A` carrying `value` over `db` at `gas_limit`.
+fn run(db: MemoryDatabase, gas_limit: u64, value: u64) -> Run {
     let mut evm = MegaEvm::new(context(db)).with_inspector(Settlements::default());
-    let outcome =
-        evm.execute_transaction(call(SENDER, A, U256::ZERO, gas_limit)).expect("the call is valid");
-    let gas_used = outcome.result.tx_gas_used();
-    let reservoir = outcome.gas.reservoir_remaining;
-    (gas_limit, gas_used, reservoir, evm.inspector().clone())
+    record_start_ledger_settlements(evm.ctx_mut());
+    let outcome = evm
+        .execute_transaction(call(SENDER, A, U256::from(value), gas_limit))
+        .expect("the call is valid");
+    let settlements = take_start_ledger_settlements(evm.ctx_mut());
+    let start = settlements.iter().find(|settled| settled.depth == 0).expect("the start settled");
+    Run {
+        gas_limit,
+        gas_used: outcome.result.tx_gas_used(),
+        reservoir_remaining: outcome.gas.reservoir_remaining,
+        start_refund: start.refund,
+        read: evm.inspector().clone(),
+    }
 }
 
 /// What a caller that kept `kept` holds once a child that hands back `handed_back` settled into
 /// it: the reservoir the child hands back unwinds the caller's spill, the child's own merged in,
 /// as far as it goes, and the rest joins the part the caller kept.
-const fn settled(kept: Pools, handed_back: Pools) -> Pools {
+const fn after_settlement(kept: Funding, handed_back: Funding) -> Funding {
     let spilled = kept.spilled + handed_back.spilled;
     let unwound = if handed_back.reservoir < spilled { handed_back.reservoir } else { spilled };
-    Pools {
+    Funding {
         reservoir: kept.reservoir + handed_back.reservoir - unwound,
         spilled: spilled - unwound,
     }
@@ -185,16 +217,16 @@ fn test_a_callers_reservoir_after_a_child_is_what_it_kept_with_what_the_child_ha
         return;
     }
     let children = [OK, REVERTER, HALTER, SPENDER, IDLE];
-    let (_, _, reservoir_remaining, read) =
-        run(calling(&children, revm::bytecode::opcode::STOP), 4 * slot_state_gas());
+    let Run { reservoir_remaining, read, .. } =
+        run(calling(&children, revm::bytecode::opcode::STOP), leaving(4 * slot_state_gas()), 0);
 
     assert_eq!(read.children.len(), children.len());
-    for (child, settled_child) in children.iter().zip(&read.children) {
-        let kept = settled_child.kept.expect("the CALL ended");
-        let handed_back = settled_child.handed_back.expect("the child ended");
+    for (child, settled) in children.iter().zip(&read.children) {
+        let kept = settled.kept.expect("the CALL ended");
+        let handed_back = settled.handed_back.expect("the child ended");
         assert_eq!(
-            settled_child.after,
-            Some(settled(kept, handed_back)),
+            settled.after,
+            Some(after_settlement(kept, handed_back)),
             "{child}: kept {kept:?}, handed back {handed_back:?}"
         );
     }
@@ -209,23 +241,29 @@ fn test_a_callers_reservoir_after_a_child_is_what_it_kept_with_what_the_child_ha
 
     let (result, ended) = read.frame_ended.expect("the frame ended");
     assert!(result.is_ok(), "{result:?}");
-    let to_the_transaction = settled(Pools { reservoir: 0, spilled: 0 }, ended);
+    let to_the_transaction = after_settlement(Funding::NONE, ended);
     assert_eq!(reservoir_remaining, to_the_transaction.reservoir);
 }
 
-/// The transaction's frame hands back what a child's would, into gas that holds nothing of the
-/// reservoir it gave the frame: what the frame left after a child that kept a part of it and a
-/// write of its own when it succeeds, the whole reservoir it was given when it reverts or halts.
-/// A halt also burns the transaction's regular gas.
+/// The transaction's frame hands back what a child's would, into gas whose copy of the reservoir it
+/// gave the frame the settlement replaces, nothing added back: what the frame left after a child
+/// that kept a part of it and a write of its own when it succeeds, the whole reservoir it was
+/// given when it reverts or halts. A halt of a frame whose value transfer was charged a start
+/// charge gives the charge back first and then burns the transaction's regular gas: above the cap
+/// the charge comes back into the reservoir; below it, where the charge spilled onto the
+/// transaction's regular gas, it comes back there and is burned with the rest.
 #[test]
 fn test_the_transactions_gas_holds_what_its_frame_hands_back_and_nothing_more() {
     if state_is_free() {
         return;
     }
-    for (end, ok) in [
-        (revm::bytecode::opcode::STOP, true),
-        (revm::bytecode::opcode::REVERT, false),
-        (INVALID, false),
+    let above = leaving(4 * slot_state_gas());
+    for (end, ok, value, gas_limit) in [
+        (revm::bytecode::opcode::STOP, true, 0, above),
+        (revm::bytecode::opcode::REVERT, false, 0, above),
+        (INVALID, false, 0, above),
+        (INVALID, false, 1, above),
+        (INVALID, false, 1, 30_000_000),
     ] {
         let code = BytecodeBuilder::default()
             .call(OK, U256::ZERO)
@@ -234,16 +272,28 @@ fn test_the_transactions_gas_holds_what_its_frame_hands_back_and_nothing_more() 
         let code =
             if end == revm::bytecode::opcode::REVERT { code.revert() } else { code.append(end) };
         let db = calling(&[], end).account_code(A, code.build());
-        let (gas_limit, gas_used, reservoir_remaining, read) = run(db, 4 * slot_state_gas());
+        let Run { gas_limit, gas_used, reservoir_remaining, start_refund, read } =
+            run(db, gas_limit, value);
+        let case = format!("{end:#04x}, value {value}, gas limit {gas_limit}");
 
         let given = read.frame_given.expect("the frame started");
         let (result, ended) = read.frame_ended.expect("the frame ended");
-        assert_eq!(result.is_ok(), ok, "{end:#04x}: {result:?}");
-        let expected =
-            if ok { settled(Pools { reservoir: 0, spilled: 0 }, ended).reservoir } else { given };
-        assert_eq!(reservoir_remaining, expected, "{end:#04x}");
+        assert_eq!(result.is_ok(), ok, "{case}: {result:?}");
+        assert_eq!(start_refund != 0, value != 0 && !ok && !history_is_free(), "{case}");
+        let expected = if ok {
+            after_settlement(Funding::NONE, ended).reservoir
+        } else if gas_limit > TX_GAS_LIMIT_CAP {
+            given + start_refund
+        } else {
+            0
+        };
+        assert_eq!(reservoir_remaining, expected, "{case}");
         if end == INVALID {
-            assert_eq!(gas_used + reservoir_remaining, gas_limit, "the halt burns the regular gas");
+            assert_eq!(
+                gas_used + reservoir_remaining,
+                gas_limit,
+                "{case}: the halt burns the regular gas"
+            );
         }
     }
 }
