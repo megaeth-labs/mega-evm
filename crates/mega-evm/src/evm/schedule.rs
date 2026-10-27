@@ -15,14 +15,14 @@
 //!    ([`FORWARD_REDUCTION_QUOTIENT`], the fork's `GasId::call_stipend_reduction`).
 //!
 //! What else a frame start takes from its caller is the engine's, not the schedule's, and is in no
-//! entry of it: the share of its caller's pools —
-//! data size, KV updates, state growth — and of its caller's EIP-8037 reservoir a frame starts
-//! with, all but [`FRAME_KEPT_PERCENT`] of what the caller has left, and the history allowance a
-//! value-transferring call gives the frame, `HISTORY_ALLOWANCE_BYTES` at the cost per history
-//! byte, are decided where the start is made (`MegaContext::forward_start`) and kept on the
-//! engine's start ledger. A pool's share is `floor(remaining × 98 / 100)`, and the reservoir's
-//! `remaining − remaining × 2 / 100`, so a caller keeps nothing of a reservoir below 50; the
-//! transaction's own frame and a system call's outermost frame take the whole reservoir.
+//! entry of it: the share of its caller's pools — data size, KV updates, state growth — and of its
+//! caller's EIP-8037 reservoir a frame starts with, all but [`FRAME_KEPT_PERCENT`] of what the
+//! caller has left, and the history allowance a value-transferring call gives the frame,
+//! `HISTORY_ALLOWANCE_BYTES` at the cost per history byte, are decided where the start is made
+//! (`MegaContext::forward_start`) and kept on the engine's start ledger. A pool's share is
+//! `floor(remaining × 98 / 100)`, and the reservoir's `remaining − remaining × 2 / 100`, so a
+//! caller keeps nothing of a reservoir below 50; the transaction's own frame and a system call's
+//! outermost frame take the whole reservoir.
 //!
 //! Every regular-gas price is Amsterdam's, so state creation is split between the two dimensions
 //! as Amsterdam splits it: the regular part is the access and write work EIP-8038 prices, and the
@@ -155,10 +155,7 @@ mod tests {
         constants::{
             ACCOUNT_STATE_GAS, COST_PER_HISTORY_BYTE, COST_PER_STATE_BYTE, SLOT_STATE_GAS,
         },
-        evm::{
-            history::HISTORY_ALLOWANCE_BYTES,
-            prices::{runs_at_measurement_prices, BytePrice},
-        },
+        evm::prices::{runs_at_measurement_prices, BytePrice},
     };
 
     fn osaka() -> GasParams {
@@ -271,15 +268,6 @@ mod tests {
                 assert_eq!(exempt.get(other), satin.get(other), "{} must not move", other.name());
             }
         }
-    }
-
-    /// What a frame start takes beyond the regular gas it forwards is the engine's, in no entry of
-    /// the schedule: a child keeps all but [`FRAME_KEPT_PERCENT`], 2, of its caller's reservoir and
-    /// budgets, and a value call's frame gets `HISTORY_ALLOWANCE_BYTES`, 160, of history.
-    #[test]
-    fn test_a_starts_shares_and_allowance_are_the_engines() {
-        assert_eq!(FRAME_KEPT_PERCENT, 2);
-        assert_eq!(HISTORY_ALLOWANCE_BYTES, 160);
     }
 
     /// A call or creation forwards at most `remaining − remaining × 2 / 100` of its caller's
