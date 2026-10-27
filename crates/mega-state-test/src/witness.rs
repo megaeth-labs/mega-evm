@@ -140,6 +140,7 @@ pub fn check_replay(
             Err(reason) => return Ok(Replayed::Skipped(reason)),
         };
 
+    crate::input::check_state_size(unit.pre.values().map(|account| account.storage.len()))?;
     let record = SharedWitnessRecord::default();
     let recorded = run(
         mode,

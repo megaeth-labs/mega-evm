@@ -300,6 +300,93 @@ fn test_what_is_counted_and_what_is_skipped() {
     );
 }
 
+/// An explicit transaction type must not bypass the fixture types' inferred-type rejection of
+/// blob and EIP-7702 creates. Only the corresponding expected exception permits the skip.
+#[test]
+fn test_explicit_blob_and_authorization_creates_are_rejected_for_the_named_reason() {
+    let dir = tempfile::tempdir().unwrap();
+    for (ty, exception) in [(3, "TYPE_3_TX_CONTRACT_CREATION"), (4, "TYPE_4_TX_CONTRACT_CREATION")]
+    {
+        let mut expected = unit(&[Fork::Osaka], json!({ "type": ty, "to": "" }));
+        expected["post"]["Osaka"][0]["expectException"] =
+            json!(format!("TransactionException.{exception}"));
+        let mut wrong = expected.clone();
+        wrong["post"]["Osaka"][0]["expectException"] =
+            json!("TransactionException.INVALID_SIGNATURE_VRS");
+        let missing = unit(&[Fork::Osaka], json!({ "type": ty, "to": "" }));
+        let path = write(
+            dir.path(),
+            &format!("type{ty}.json"),
+            json!({ "a_expected": expected, "b_wrong": wrong, "c_missing": missing }),
+        );
+        let report = run(&[path], config(Mode::Equivalence, Fork::Osaka));
+        let outcomes = outcomes(&report);
+        assert_eq!(
+            outcomes[0],
+            &Outcome::Skipped { reason: SkipReason::UnbuildableInvalidTransaction },
+            "type {ty}"
+        );
+        assert_eq!(failure_kind(outcomes[1]), Some(FailureKind::WrongException));
+        assert_eq!(failure_kind(outcomes[2]), Some(FailureKind::Fixture));
+    }
+}
+
+/// The inferred forms keep the same expected-invalid handling as their explicit counterparts.
+#[test]
+fn test_inferred_blob_and_authorization_creates_keep_their_expected_invalid_skips() {
+    let dir = tempfile::tempdir().unwrap();
+    for (fields, exception) in [
+        (json!({ "maxFeePerBlobGas": "0x01", "to": "" }), "TYPE_3_TX_CONTRACT_CREATION"),
+        (json!({ "authorizationList": [], "to": "" }), "TYPE_4_TX_CONTRACT_CREATION"),
+    ] {
+        let mut expected = unit(&[Fork::Osaka], fields);
+        expected["post"]["Osaka"][0]["expectException"] =
+            json!(format!("TransactionException.{exception}"));
+        let path = write(dir.path(), "inferred.json", json!({ "invalid": expected }));
+        let report = run(&[path], config(Mode::Equivalence, Fork::Osaka));
+        assert_eq!(
+            outcomes(&report),
+            [&Outcome::Skipped { reason: SkipReason::UnbuildableInvalidTransaction }]
+        );
+    }
+}
+
+/// Reject the wide public fixture value before `block_env` attempts its panicking conversion,
+/// even when the transaction itself is expected to be invalid.
+#[test]
+fn test_excess_blob_gas_overflow_is_a_fixture_failure_instead_of_a_panic() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut wide = unit(&[Fork::Osaka], json!({}));
+    wide["env"]["currentExcessBlobGas"] = json!("0x10000000000000000");
+    wide["post"]["Osaka"][0]["expectException"] =
+        json!("TransactionException.INVALID_SIGNATURE_VRS");
+    let path = write(dir.path(), "wide.json", json!({ "wide": wide }));
+    let report = run(&[path], config(Mode::Equivalence, Fork::Osaka));
+    let Outcome::Failed(failure) = &report.results[0].outcome else {
+        panic!("must reject fixture")
+    };
+    assert_eq!(failure.kind, FailureKind::Fixture);
+    assert!(failure.detail.contains("currentExcessBlobGas"));
+    assert!(failure.detail.contains("u64"));
+}
+
+/// A borrowed slow-test basename does not exempt unrelated fixture content from execution.
+#[test]
+fn test_slow_test_names_do_not_skip_replacement_content() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = fill_from_ethereum(unit(&[Fork::Osaka], json!({})));
+    for name in [
+        "Call50000_sha256.json",
+        "static_Call50000_sha256.json",
+        "loopMul.json",
+        "CALLBlake2f_MaxRounds.json",
+    ] {
+        let path = write(dir.path(), name, json!({ "replacement": fixture }));
+        let report = run(&[path], config(Mode::Equivalence, Fork::Osaka));
+        assert_eq!(outcomes(&report), [&Outcome::Passed], "{name}");
+    }
+}
+
 /// A test name that appears twice in a file fails the file, rather than the second test silently
 /// replacing the first.
 #[test]

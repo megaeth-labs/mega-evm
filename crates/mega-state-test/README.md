@@ -44,6 +44,9 @@ Base fees go to Optimism's base-fee vault on Satin, where Ethereum burns them.
 The runner takes the vault back out of the post-state only when the fee routing made it: the pre-state has no vault, and the vault holds exactly the base fee of the gas the transaction used.
 
 The runner skips what the reference runner skips (`src/skips.rs`), for the same reasons: the EIP-7610 collision fixtures with storage, which revm cannot see, and a transaction that cannot be built when the fixture expects it to be invalid — here only when the fixture names the reason it cannot be, an invalid signature or a blob or EIP-7702 transaction without a recipient.
+That recipient check also applies after construction when an explicit transaction type bypasses the fixture types' inferred-type guard.
+The four known slow fixture names are bound to the raw-file content hashes recorded in `src/skips.rs`, so renaming a known file preserves its skip and replacing its contents does not.
+The hashes identify the Cancun files and two older Constantinople variants at `ethereum/legacytests` revision `1f581b8ccdc4c63acf5f2c5c1b155c690c32a8eb`; the pinned Osaka fixture release contains none of them.
 So the two runners execute the same population, and the executed and skipped counts equal the reference runner's.
 
 ## Running it
@@ -57,6 +60,18 @@ cargo run --release -p state-test -- --mode satin --fork Osaka <main>/state_test
 
 `--expect-executed`, `--expect-skipped` and `--expect-deviations` turn a full run into the pinned gate CI runs (`.github/workflows/exec-spec-satin.yml`).
 `--json-outcome` prints one JSON line per test, a failure's produced hashes included, and `--trace` runs each test under an EIP-3155 tracer.
+
+## Fixture input limits
+
+Discovery accepts at most 100,000 fixture files across all input paths and entries at most 64 levels below each input directory.
+A traversal error or an exceeded limit fails the run; neither a deep subtree nor excess files are silently omitted.
+Symlinks to JSON files are accepted; directory symlinks are refused rather than traversed or silently omitted.
+The state-test runner accepts fixture files up to 64 MiB; the blockchain-test runner accepts up to 256 MiB because a file bundles many block sequences, and the pinned execution-spec fixtures include files around 160 MiB.
+Both reject oversized files before reading their contents and cap the read itself in case a file grows.
+Before materializing a fixture's state or computing its root, the runners require at most 100,000 accounts, 1,000,000 storage slots per account and 1,000,000 slots across the whole state.
+The blockchain runner checks both the fixture's pre-state and its expected post-state, and the witness runner checks its pre-state too.
+An exceeded state limit is a fixture error; a truncated state is never used to compute a root.
+These are input bounds for the developer tools, separate from the protocol limits on execution.
 
 ## The outcome digest
 

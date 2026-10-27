@@ -498,7 +498,7 @@ pub fn run(files: &[PathBuf], config: Config) -> Report {
 /// not be read.
 pub fn run_file(path: &Path, config: Config) -> Result<Vec<TestResult>, Failure> {
     let path_str = path.to_string_lossy().into_owned();
-    let json = std::fs::read_to_string(path)
+    let json = crate::input::read_blockchain_fixture(path)
         .map_err(|error| Failure::new(FailureKind::Fixture, None, format!("read: {error}")))?;
     let suite = serde_json::from_str::<Suite<'_>>(&json)
         .map_err(|error| Failure::new(FailureKind::Fixture, None, format!("parse: {error}")))?;
@@ -708,6 +708,10 @@ fn import_test(
     witness: Option<(DigestForm, &TestId)>,
 ) -> Result<(), Failure> {
     let fixture = |detail: String| Failure::new(FailureKind::Fixture, None, detail);
+    crate::input::check_state_size(test.pre.values().map(|account| account.storage.len()))
+        .map_err(|error| fixture(format!("pre-state: {error}")))?;
+    crate::input::check_state_size(test.post_state.values().map(|account| account.storage.len()))
+        .map_err(|error| fixture(format!("post-state: {error}")))?;
     let chain_id = u64::try_from(test.config.chainid)
         .map_err(|_| fixture(format!("chain id {} does not fit a u64", test.config.chainid)))?;
     let fraction = test
