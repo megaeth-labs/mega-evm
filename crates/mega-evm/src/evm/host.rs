@@ -90,7 +90,7 @@ use revm::{
         context::{ContextError, SStoreResult, SelfDestructResult, StateLoad},
         host::{
             CompletedWrite, FrameSettle, FrameSplit, FrameStart, FrameStartKind, LifecycleEnd,
-            LoadError, WriteVerdict,
+            LoadError, SettleStatus, WriteVerdict,
         },
         journaled_state::AccountInfoLoad,
     },
@@ -466,15 +466,24 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
     /// its records: a call that did not succeed, a creation that did not succeed or took no
     /// address — but for an inspector's answer and an outcome an inspector rebuilt, which carry
     /// none. It is given back as history, as it was charged, once revm's own settlement of the
-    /// frame is made, its upfront state-gas refund included; for the transaction's start revm then
-    /// consumes what it credits to regular gas when the frame halted, as it consumes the rest of a
-    /// halted frame's.
+    /// frame is made, its upfront state-gas refund included.
+    ///
+    /// The transaction's start ends the transaction: when its frame halted, giving the charge back
+    /// burns every regular gas the transaction's gas holds, what the refill credited and what
+    /// revm's settlement left alike, as revm's settlement burns a halted transaction's after each
+    /// of its own refunds. revm's settlement leaves regular gas there only where an inspector
+    /// handed the frame back more reservoir than it inherited, which unwinds part of the spill the
+    /// charge made: an input's or a result's reservoir raised, or a tracker built in the result's
+    /// place. A child's caller runs on, and keeps its regular gas.
     #[inline]
     fn frame_settle(&mut self, settle: &FrameSettle, gas: &mut GasTracker) {
         self.inner.frame_settle(settle, gas);
         let refund = self.additional_limit.ledger_mut().settle(&settle.into());
         if refund != 0 {
             gas.refill_history(refund);
+            if settle.depth == 0 && settle.status == SettleStatus::Halt {
+                gas.spend_all();
+            }
         }
     }
 
