@@ -85,10 +85,10 @@ Each change is stated here in plain words with its reason; the specification has
 
 ### What is counted
 
-- **Data size, KV updates and state growth are pools on revm's gas tracker.**
-  Each is a pool on every frame's `GasTracker`, which the fork forwards to a child at a start and settles on the child's return as it settles the EIP-8037 reservoir; the transaction's limits are held beside the pools, on what the transaction keeps.
-  The engine's per-frame record lanes, its journal wrapper and its ledger are gone, and the context's journal is revm's own.
-  Why: a frame's budget then fails and succeeds with the frame's own gas, by revm's settlement, instead of a second account kept beside the journal.
+- **Data size, KV updates and state growth are pools on each frame start, settled with revm's start lifecycle.**
+  Each is a pool on the frame's entry of the engine's start ledger, which a child's start takes its share of where it is made and which merges into the caller's when revm settles the start, as revm settles the EIP-8037 reservoir; the transaction's limits are held beside the pools, on what the transaction keeps.
+  The engine's per-frame record lanes and its journal wrapper are gone, and the context's journal is revm's own.
+  Why: a frame's budget then fails and succeeds with the frame's start, paired by revm, instead of a second account kept beside the journal.
 - **Write records follow the net change.**
   An account's record exists while its nonce, balance or code differs from what the transaction loaded, and a slot's while its value differs from its original.
   The per-frame deduplication is gone, a `SELFDESTRUCT` records the account it clears as well as its beneficiary, and a creation is charged exactly the records it makes.

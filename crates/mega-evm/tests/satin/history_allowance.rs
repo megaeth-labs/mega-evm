@@ -638,7 +638,7 @@ fn test_an_unspent_allowance_does_not_return_to_the_caller() {
 /// A chain of value transfers grants each frame its own allowance, and one frame's spending is
 /// not another's: three frames each emit their event and the transaction pays for none of them.
 ///
-/// An allowance is on the gas tracker of the frame it was granted to, and a child is granted its
+/// An allowance is on the start of the frame it was granted to, and a child is granted its
 /// own rather than handed its caller's, so a chain cannot draw on an allowance granted further up.
 #[test]
 fn test_a_chain_of_transfers_grants_each_frame_its_own_allowance() {
