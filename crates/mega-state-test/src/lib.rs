@@ -28,7 +28,7 @@ pub mod deviations;
 pub mod digest;
 pub mod exceptions;
 mod fork;
-pub mod input;
+mod input;
 mod mode;
 pub mod roots;
 pub mod runner;

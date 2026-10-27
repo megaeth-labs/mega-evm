@@ -29,7 +29,7 @@ The fixture types are the revm fork's own (`revm::statetest_types`, the `test-ty
 - Every failure is a `FailureKind`; equivalence mode names the deviation that explains it, and one it does not name is unattributed.
 - A deviation lists the exact entries it explains — file, test, data, gas and value indices — with the hashes Satin produces; a failure is its only with those hashes, and `--expect-deviations` requires every listed entry to fail exactly as listed.
 - Skips mirror the reference runner's, so the executed and skipped counts equal the ones `.github/workflows/exec-spec.yml` pins for it.
-- Slow state-test fixtures are identified by their raw content hashes, not their names; the blockchain runner's skips remain separate.
+- Historical slow-test filenames do not skip fixtures for the supported forks; the blockchain runner's skips remain separate.
 - A blockchain test is skipped only for a class decided from its content (`src/blockchain/skips.rs`); a block that differs passes only when a deviation the registry already has lists that test and block with exactly the outcome Satin produces, and the chain is imported on from Satin's state, so a listed block exempts no later one.
 - An account is taken out of a blockchain test's state root only by `SATIN_ACCOUNTS`, only when the pre-state does not hold it and it holds exactly what the seed or a Satin block put there.
 

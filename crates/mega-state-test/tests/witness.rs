@@ -140,7 +140,7 @@ fn test_a_sample_of_the_fixtures_replays_from_its_witness() {
 
     let (mut both, mut record_only, mut skipped, mut failed) = (0, 0, 0, Vec::new());
     for path in &sampled {
-        let json = state_test::input::read_fixture(path).expect("a readable fixture");
+        let json = std::fs::read_to_string(path).expect("a readable fixture");
         let suite: TestSuite = match serde_json::from_str(&json) {
             Ok(suite) => suite,
             Err(error) => {

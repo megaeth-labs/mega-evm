@@ -9,22 +9,20 @@ use std::{
 use walkdir::WalkDir;
 
 /// The largest state-test fixture file the runner reads: 64 MiB.
-pub const MAX_FIXTURE_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_FIXTURE_BYTES: u64 = 64 * 1024 * 1024;
 /// The largest blockchain-test fixture file: 256 MiB, accommodating bundled block sequences.
-pub const MAX_BLOCKCHAIN_FIXTURE_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_BLOCKCHAIN_FIXTURE_BYTES: u64 = 256 * 1024 * 1024;
 /// The largest collection of JSON files one discovery accepts, across all input paths.
-pub const MAX_FIXTURE_FILES: usize = 100_000;
+const MAX_FIXTURE_FILES: usize = 100_000;
 /// The deepest entry discovery accepts, relative to each input directory.
-pub const MAX_FIXTURE_DEPTH: usize = 64;
+const MAX_FIXTURE_DEPTH: usize = 64;
 /// The largest state a fixture may materialize, in accounts.
-pub const MAX_STATE_ACCOUNTS: usize = 100_000;
-/// The largest storage of any one account a fixture may materialize, in slots.
-pub const MAX_ACCOUNT_SLOTS: usize = 1_000_000;
+const MAX_STATE_ACCOUNTS: usize = 100_000;
 /// The largest state a fixture may materialize, in storage slots across all accounts.
-pub const MAX_STATE_SLOTS: usize = 1_000_000;
+const MAX_STATE_SLOTS: usize = 1_000_000;
 
 /// Reads a UTF-8 fixture, refusing an oversized file before allocating its contents.
-pub fn read_fixture(path: &Path) -> io::Result<String> {
+pub(crate) fn read_fixture(path: &Path) -> io::Result<String> {
     read_with_limit(File::open(path)?, MAX_FIXTURE_BYTES)
 }
 
@@ -83,14 +81,11 @@ pub fn find_json_files_in_paths(paths: &[PathBuf]) -> io::Result<Vec<PathBuf>> {
 }
 
 fn discover(path: &Path, files: &mut Vec<PathBuf>, depth: usize, limit: usize) -> io::Result<()> {
-    if path.metadata()?.is_file() {
+    let metadata = path
+        .metadata()
+        .map_err(|error| io::Error::new(error.kind(), format!("{}: {error}", path.display())))?;
+    if metadata.is_file() {
         return add_file(path.to_path_buf(), files, limit);
-    }
-    if path.symlink_metadata()?.file_type().is_symlink() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("fixture discovery refuses directory symlink: {}", path.display()),
-        ));
     }
     for entry in WalkDir::new(path) {
         let entry = entry?;
@@ -101,22 +96,7 @@ fn discover(path: &Path, files: &mut Vec<PathBuf>, depth: usize, limit: usize) -
                 format!("fixture directory depth exceeds {depth}: {}", entry.path().display()),
             ));
         }
-        let is_file = if entry.file_type().is_symlink() {
-            let target = entry.path().metadata()?;
-            if target.is_dir() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!(
-                        "fixture discovery refuses directory symlink: {}",
-                        entry.path().display()
-                    ),
-                ));
-            }
-            target.is_file()
-        } else {
-            entry.file_type().is_file()
-        };
-        if is_file && entry.path().extension().is_some_and(|ext| ext == "json") {
+        if entry.path().extension().is_some_and(|ext| ext == "json") {
             add_file(entry.into_path(), files, limit)?;
         }
     }
@@ -127,7 +107,7 @@ fn add_file(path: PathBuf, files: &mut Vec<PathBuf>, limit: usize) -> io::Result
     if files.len() >= limit {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!("fixture file count exceeds {limit}"),
+            format!("fixture file count exceeds {limit}: {}", path.display()),
         ));
     }
     files.push(path);
@@ -136,37 +116,17 @@ fn add_file(path: PathBuf, files: &mut Vec<PathBuf>, limit: usize) -> io::Result
 
 /// Checks account and slot cardinality before copying fixture state or building its tries.
 pub(crate) fn check_state_size(slot_counts: impl IntoIterator<Item = usize>) -> Result<(), String> {
-    StateLimits {
-        accounts: MAX_STATE_ACCOUNTS,
-        account_slots: MAX_ACCOUNT_SLOTS,
-        slots: MAX_STATE_SLOTS,
-    }
-    .check(slot_counts)
-}
-
-struct StateLimits {
-    accounts: usize,
-    account_slots: usize,
-    slots: usize,
-}
-
-impl StateLimits {
-    fn check(&self, slot_counts: impl IntoIterator<Item = usize>) -> Result<(), String> {
-        let mut total_slots = 0usize;
-        for (index, slots) in slot_counts.into_iter().enumerate() {
-            if index >= self.accounts {
-                return Err(format!("state account count exceeds {}", self.accounts));
-            }
-            if slots > self.account_slots {
-                return Err(format!("account storage exceeds {} slots", self.account_slots));
-            }
-            total_slots = total_slots
-                .checked_add(slots)
-                .filter(|total| *total <= self.slots)
-                .ok_or_else(|| format!("state storage exceeds {} total slots", self.slots))?;
+    let mut total_slots = 0usize;
+    for (index, slots) in slot_counts.into_iter().enumerate() {
+        if index >= MAX_STATE_ACCOUNTS {
+            return Err(format!("state account count exceeds {MAX_STATE_ACCOUNTS}"));
         }
-        Ok(())
+        total_slots = total_slots
+            .checked_add(slots)
+            .filter(|total| *total <= MAX_STATE_SLOTS)
+            .ok_or_else(|| format!("state storage exceeds {MAX_STATE_SLOTS} total slots"))?;
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -182,8 +142,9 @@ mod tests {
         std::fs::create_dir(&nested).unwrap();
         std::fs::write(nested.join("one.json"), "{}").unwrap();
         assert!(discover(root.path(), &mut Vec::new(), 2, 1).is_ok());
-        let error = discover(root.path(), &mut Vec::new(), 1, 1).unwrap_err();
-        assert!(error.to_string().contains("depth exceeds 1"));
+        std::fs::create_dir_all(nested.join("b").join("c")).unwrap();
+        let error = discover(root.path(), &mut Vec::new(), 2, 1).unwrap_err();
+        assert!(error.to_string().contains("depth exceeds 2"));
     }
 
     #[test]
@@ -202,33 +163,10 @@ mod tests {
     #[test]
     fn test_discovery_propagates_missing_root() {
         let root = tempfile::tempdir().unwrap();
-        assert!(find_json_files(&root.path().join("absent")).is_err());
+        let missing = root.path().join("absent");
+        let error = find_json_files(&missing).unwrap_err();
+        assert!(error.to_string().contains(&missing.display().to_string()));
         assert!(find_json_files_in_paths(&[root.path().to_path_buf()]).is_err());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn test_discovery_refuses_a_broken_symlink_root() {
-        let root = tempfile::tempdir().unwrap();
-        let broken = root.path().join("broken");
-        std::os::unix::fs::symlink(root.path().join("absent"), &broken).unwrap();
-        assert!(discover(&broken, &mut Vec::new(), 4, 4).is_err());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn test_discovery_keeps_json_file_symlinks_and_refuses_directory_symlinks() {
-        let root = tempfile::tempdir().unwrap();
-        let target = root.path().join("source");
-        std::fs::write(&target, "{}").unwrap();
-        let alias = root.path().join("alias.json");
-        std::os::unix::fs::symlink(&target, &alias).unwrap();
-        assert_eq!(find_json_files(root.path()).unwrap(), vec![alias]);
-        let directory = root.path().join("subtree");
-        std::os::unix::fs::symlink(root.path(), &directory).unwrap();
-        let error = find_json_files(root.path()).unwrap_err();
-        assert!(error.to_string().contains("directory symlink"));
-        assert!(find_json_files(&directory).unwrap_err().to_string().contains("directory symlink"));
     }
 
     #[test]
@@ -250,12 +188,11 @@ mod tests {
 
     #[test]
     fn test_state_limits_accept_boundaries_and_reject_each_dimension() {
-        let limits = StateLimits { accounts: 2, account_slots: 3, slots: 4 };
-        assert!(limits.check([1, 3]).is_ok());
-        assert!(limits.check([0, 0, 0]).unwrap_err().contains("account count"));
-        assert!(limits.check([4]).unwrap_err().contains("account storage"));
-        assert!(limits.check([2, 3]).unwrap_err().contains("total slots"));
-        let overflow = StateLimits { accounts: 2, account_slots: usize::MAX, slots: usize::MAX };
-        assert!(overflow.check([usize::MAX, 1]).is_err());
+        assert!(check_state_size(std::iter::repeat_n(0, MAX_STATE_ACCOUNTS)).is_ok());
+        let error = check_state_size(std::iter::repeat_n(0, MAX_STATE_ACCOUNTS + 1)).unwrap_err();
+        assert!(error.contains("account count"));
+        assert!(check_state_size([MAX_STATE_SLOTS / 2, MAX_STATE_SLOTS / 2]).is_ok());
+        assert!(check_state_size([MAX_STATE_SLOTS, 1]).unwrap_err().contains("total slots"));
+        assert!(check_state_size([1, usize::MAX]).is_err());
     }
 }

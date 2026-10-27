@@ -135,7 +135,8 @@ impl Cmd {
     /// Without an override this reads the chain id, and, only on a chain that switches engines
     /// at a scheduled timestamp, the timestamp of the block the replay runs the transaction in,
     /// from the source the replay itself reads, through a provider that persists nothing: the
-    /// transaction's block. Pending transactions have no canonical replay context and are refused.
+    /// transaction's block, or for a pending transaction the latest block. The selected engine
+    /// decides whether it can replay a pending transaction.
     /// Under `--genesis` a chain other than the file's is refused
     /// once the chain id is read, before an engine is picked for it.
     pub async fn engine(&self) -> Result<Engine> {
@@ -154,7 +155,10 @@ impl Cmd {
             .map_err(|e| ReplayError::RpcError(format!("Failed to fetch transaction: {e}")))?
             .ok_or(ReplayError::TransactionNotFound(tx_hash))?;
         let transport = |e| ReplayError::RpcError(format!("RPC transport error: {e}"));
-        let number = mined_block_number(tx_hash, tx.block_number)?;
+        let number = match tx.block_number {
+            Some(number) => number,
+            None => provider.get_block_number().await.map_err(transport)?,
+        };
         let timestamp = provider
             .get_block_by_number(number.into())
             .await

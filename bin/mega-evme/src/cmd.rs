@@ -183,7 +183,7 @@ impl MainCmd {
             Commands::Replay(cmd) => cmd.run().await,
         };
         result.map_err(Error::from).inspect_err(|e| {
-            error!(err = %sanitize_terminal_text(&format!("{e:?}")), "Error executing command");
+            error!(err = ?e, "Error executing command");
         })
     }
 }

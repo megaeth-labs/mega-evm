@@ -20,113 +20,97 @@ use serde::{Deserialize, Serialize};
 
 use crate::common::{EvmeError, Result};
 
-/// HTTP with the same RPC/status handling as alloy's transport, but without URL-bearing
-/// tracing spans or reqwest errors. Endpoint paths and queries commonly hold credentials.
+/// Hides transport diagnostics only after the dependency has applied its retry policy.
+/// The inner future runs without tracing because dependency spans can contain the endpoint URL.
 #[derive(Clone)]
-pub(super) struct RpcHttp {
-    client: alloy_transport_http::reqwest::Client,
-    url: alloy_transport_http::reqwest::Url,
+pub(super) struct RedactedTransport<T> {
+    inner: T,
+    max_retries: u32,
 }
 
-impl std::fmt::Debug for RpcHttp {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RpcHttp")
-            .field("origin", &super::display_rpc_url(self.url.as_str()))
-            .finish()
+impl<T> RedactedTransport<T> {
+    pub(super) fn new(inner: T, max_retries: u32) -> Self {
+        Self { inner, max_retries }
     }
 }
 
-impl RpcHttp {
-    pub(super) fn new(url: alloy_transport_http::reqwest::Url) -> Self {
-        Self { client: alloy_transport_http::reqwest::Client::new(), url }
-    }
-}
-
-impl tower::Service<RequestPacket> for RpcHttp {
+impl<T: alloy_transport::IntoBoxTransport> tower::Service<RequestPacket> for RedactedTransport<T> {
     type Response = ResponsePacket;
     type Error = TransportError;
     type Future = TransportFut<'static>;
 
     fn poll_ready(
         &mut self,
-        _cx: &mut std::task::Context<'_>,
+        cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<std::result::Result<(), Self::Error>> {
-        std::task::Poll::Ready(Ok(()))
+        self.inner.poll_ready(cx).map_err(|error| redact_transport_error(error, self.max_retries))
     }
 
     fn call(&mut self, req: RequestPacket) -> Self::Future {
-        let this = self.clone();
+        use tracing::{instrument::WithSubscriber, subscriber::NoSubscriber};
+
+        let future =
+            tracing::subscriber::with_default(NoSubscriber::default(), || self.inner.call(req));
+        let max_retries = self.max_retries;
         Box::pin(async move {
-            let response = this
-                .client
-                .post(this.url)
-                .json(&req)
-                .headers(req.headers())
-                .send()
+            let mut response = future
+                .with_subscriber(NoSubscriber::default())
                 .await
-                .map_err(|e| TransportErrorKind::custom(e.without_url()))?;
-            let status = response.status();
-            let body =
-                response.bytes().await.map_err(|e| TransportErrorKind::custom(e.without_url()))?;
-            let parsed = serde_json::from_slice::<ResponsePacket>(&body);
-            if !status.is_success() && !parsed.as_ref().is_ok_and(ResponsePacket::is_error) {
-                return Err(TransportErrorKind::http_error(
-                    status.as_u16(),
-                    "<redacted HTTP response body>".to_string(),
-                ));
+                .map_err(|error| redact_transport_error(error, max_retries))?;
+            match &mut response {
+                ResponsePacket::Single(response) => redact_error_response(response),
+                ResponsePacket::Batch(responses) => {
+                    responses.iter_mut().for_each(redact_error_response)
+                }
             }
-            let mut parsed = parsed.map_err(|error| {
-                TransportError::deser_err(
-                    // A serde error can quote an offending JSON string, including its URL.
-                    serde_json::Error::io(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        format!(
-                            "invalid RPC response at line {}, column {}",
-                            error.line(),
-                            error.column()
-                        ),
-                    )),
-                    "<redacted HTTP response body>",
-                )
-            })?;
-            // Preserve successful results verbatim; only errors are displayed as diagnostics.
-            match &mut parsed {
-                ResponsePacket::Single(response) => redact_error(response),
-                ResponsePacket::Batch(responses) => responses.iter_mut().for_each(redact_error),
-            }
-            Ok(parsed)
+            Ok(response)
         })
     }
 }
 
-fn redact_error(response: &mut alloy_json_rpc::Response) {
+fn redact_error_payload(error: &mut alloy_json_rpc::ErrorPayload) {
+    error.message = super::redact_rpc_urls_in_text(&error.message).into();
+    // Arbitrary error data need not be interpreted or re-serialized for a diagnostic.
+    // Backoff hints have already been consumed by the inner retry layer.
+    error.data = None;
+}
+
+fn redact_error_response(response: &mut alloy_json_rpc::Response) {
     if let alloy_json_rpc::ResponsePayload::Failure(error) = &mut response.payload {
-        error.message = super::redact_rpc_urls_in_text(&error.message).into();
-        if let Some(data) = error.data.take() {
-            // RawValue accepts values (large numbers or deep nesting) Value cannot represent.
-            // Omit data we cannot inspect, rather than panic or echo it without redaction.
-            if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(data.get()) {
-                redact_error_data(&mut value);
-                error.data = serde_json::value::to_raw_value(&value).ok();
-            }
-        }
+        redact_error_payload(error);
     }
 }
 
-fn redact_error_data(value: &mut serde_json::Value) {
-    match value {
-        serde_json::Value::String(text) => *text = super::redact_rpc_urls_in_text(text),
-        serde_json::Value::Array(values) => values.iter_mut().for_each(redact_error_data),
-        serde_json::Value::Object(values) => {
-            *values = std::mem::take(values)
-                .into_iter()
-                .map(|(key, mut value)| {
-                    redact_error_data(&mut value);
-                    (super::redact_rpc_urls_in_text(&key), value)
-                })
-                .collect();
+fn redact_transport_error(error: TransportError, max_retries: u32) -> TransportError {
+    use alloy_provider::transport::RpcError;
+    match error {
+        RpcError::ErrorResp(mut error) => {
+            redact_error_payload(&mut error);
+            RpcError::ErrorResp(error)
         }
-        _ => {}
+        RpcError::Transport(TransportErrorKind::Custom(error)) => {
+            match error.downcast::<alloy_transport_http::reqwest::Error>() {
+                Ok(error) => TransportErrorKind::custom((*error).without_url()),
+                Err(error) if error.to_string().starts_with("Max retries exceeded ") => {
+                    TransportErrorKind::custom_str(&format!(
+                        "Max retries exceeded ({max_retries} retries; details redacted)"
+                    ))
+                }
+                Err(_) => TransportErrorKind::custom_str("RPC transport error (details redacted)"),
+            }
+        }
+        RpcError::Transport(TransportErrorKind::HttpError(mut error)) => {
+            error.body = "<redacted HTTP response body>".to_string();
+            RpcError::Transport(TransportErrorKind::HttpError(error))
+        }
+        RpcError::DeserError { err, .. } => RpcError::DeserError {
+            err: serde_json::Error::io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("invalid RPC response at line {}, column {}", err.line(), err.column()),
+            )),
+            text: "<redacted HTTP response body>".to_string(),
+        },
+        error => error,
     }
 }
 
@@ -373,27 +357,6 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-
-    #[test]
-    fn test_rpc_error_data_that_cannot_be_inspected_is_omitted() {
-        for data in ["1e400".to_string(), format!("{}0{}", "[".repeat(200), "]".repeat(200))] {
-            let mut response = alloy_json_rpc::Response {
-                id: alloy_json_rpc::Id::Number(0),
-                payload: alloy_json_rpc::ResponsePayload::Failure(alloy_json_rpc::ErrorPayload {
-                    code: -32603,
-                    message: "upstream error".into(),
-                    data: Some(serde_json::value::RawValue::from_string(data).unwrap()),
-                }),
-            };
-            redact_error(&mut response);
-            let alloy_json_rpc::ResponsePayload::Failure(error) = response.payload else {
-                panic!("error")
-            };
-            assert_eq!(error.code, -32603);
-            assert_eq!(error.message, "upstream error");
-            assert!(error.data.is_none());
-        }
-    }
 
     /// The replay transport is always ready.
     /// Single-request cache misses return a descriptive Custom error (safe because

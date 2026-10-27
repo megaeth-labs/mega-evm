@@ -24,6 +24,7 @@ Two engines: the in-tree sources run Satin; a spec from `Equivalence` to `Rex6` 
 - Logging is structured via tracing macros, with explicit progress milestones.
 - RPC diagnostics use `display_rpc_url`, which hides userinfo, path, query and fragment; cache identity uses `redact_rpc_url` and keeps the path and query.
   Keep the two separate, and remove reqwest's URL before an HTTP error reaches a diagnostic.
+  `RedactedTransport` wraps the retry layer: the dependency classifies the original errors and consumes backoff hints before final diagnostics are redacted.
 - Output paths keep both human-readable summaries and optional machine artifacts (trace/state dump).
 
 - The engine is decided where a command needs it (`cmd.rs` for `run`/`tx`, `replay::Cmd::engine` for a transaction replay, `block/cmd.rs` per block), always through `Engine` (`of_spec`, `of_block`, `of_chain`), and a Satin run's schedule through `common::satin_schedule`; both read the chain's activation table, so they agree.

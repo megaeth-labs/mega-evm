@@ -35,7 +35,7 @@ use tracing::{debug, info, warn};
 pub use self::cache_store::{ExternalEnvSnapshot, RpcCacheStore};
 use self::{
     cache_store::CacheFileEnvelope,
-    transport::{CachingTransport, ReplayTransport, RpcHttp, TransportCache},
+    transport::{CachingTransport, RedactedTransport, ReplayTransport, TransportCache},
 };
 use super::{EvmeError, Result};
 
@@ -338,7 +338,7 @@ impl RpcArgs {
         // envelope first, a stale eth_chainId entry would short-circuit the
         // cross-chain validation.
         let transport_cache = TransportCache::new();
-        let http = RpcHttp::new(url.clone());
+        let http = alloy_transport_http::Http::new(url.clone());
         let caching = CachingTransport::new(http, transport_cache.clone());
         let client = self.build_client(caching, &url);
         let provider = ProviderBuilder::new()
@@ -390,7 +390,7 @@ impl RpcArgs {
 
     /// Build an `RpcClient` over HTTP, wired with the configured retry layer.
     fn build_retry_client(&self, url: alloy_transport_http::reqwest::Url) -> RpcClient {
-        self.build_client(RpcHttp::new(url.clone()), &url)
+        self.build_client(alloy_transport_http::Http::new(url.clone()), &url)
     }
 
     /// Build an `RpcClient` over an arbitrary transport, wired with the configured
@@ -403,6 +403,7 @@ impl RpcArgs {
     ) -> RpcClient {
         let is_local =
             url.host_str().is_some_and(|h| h == "localhost" || h == "127.0.0.1" || h == "::1");
+        let max_retries = self.max_retries;
         if self.max_retries > 0 {
             let policy = RateLimitRetryPolicy::default().or(|err: &TransportError| {
                 matches!(err, RpcError::Transport(TransportErrorKind::Custom(_)))
@@ -413,9 +414,15 @@ impl RpcArgs {
                 self.compute_units_per_sec,
                 policy,
             );
-            ClientBuilder::default().layer(retry).transport(transport, is_local)
+            ClientBuilder::default()
+                .layer(tower::layer::layer_fn(move |inner| {
+                    RedactedTransport::new(inner, max_retries)
+                }))
+                .layer(retry)
+                .transport(transport, is_local)
         } else {
-            ClientBuilder::default().transport(transport, is_local)
+            ClientBuilder::default()
+                .transport(RedactedTransport::new(transport, max_retries), is_local)
         }
     }
 
@@ -600,25 +607,6 @@ mod tests {
     }
 
     #[test]
-    fn test_display_redaction_does_not_merge_cache_endpoints() {
-        let first = "https://rpc.example/key-one?key=one";
-        assert_eq!(rpc_cache_file_name(4326, first), "rpc-cache-4326-4b33965d.json");
-        assert_eq!(display_rpc_url(first), display_rpc_url("https://rpc.example/key-two?key=two"));
-        assert_ne!(
-            rpc_cache_file_name(4326, first),
-            rpc_cache_file_name(4326, "https://rpc.example/key-two?key=one")
-        );
-        assert_ne!(
-            rpc_cache_file_name(4326, first),
-            rpc_cache_file_name(4326, "https://rpc.example/key-one?key=two")
-        );
-        assert_eq!(
-            rpc_cache_file_name(4326, "http://example.com/rpc"),
-            "rpc-cache-4326-e2afa302.json"
-        );
-    }
-
-    #[test]
     fn test_urls_echoed_in_error_text_are_redacted_through_punctuation() {
         for text in [
             "request failed for https://rpc.example/v2/(secret-key)",
@@ -648,6 +636,12 @@ mod tests {
         assert!(!name.contains("secret") && !name.contains("alice") && !name.contains("example"));
         assert_eq!(name, rpc_cache_file_name(4326, "http://example.com/rpc"));
         assert_ne!(name, rpc_cache_file_name(4326, "http://other.example/rpc"));
+        assert_ne!(name, rpc_cache_file_name(4326, "http://example.com/another-path"));
+        assert_ne!(name, rpc_cache_file_name(4326, "http://example.com/rpc?key=one"));
+        assert_ne!(
+            rpc_cache_file_name(4326, "http://example.com/rpc?key=one"),
+            rpc_cache_file_name(4326, "http://example.com/rpc?key=two"),
+        );
     }
 
     #[test]

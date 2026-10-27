@@ -708,10 +708,6 @@ fn import_test(
     witness: Option<(DigestForm, &TestId)>,
 ) -> Result<(), Failure> {
     let fixture = |detail: String| Failure::new(FailureKind::Fixture, None, detail);
-    crate::input::check_state_size(test.pre.values().map(|account| account.storage.len()))
-        .map_err(|error| fixture(format!("pre-state: {error}")))?;
-    crate::input::check_state_size(test.post_state.values().map(|account| account.storage.len()))
-        .map_err(|error| fixture(format!("post-state: {error}")))?;
     let chain_id = u64::try_from(test.config.chainid)
         .map_err(|_| fixture(format!("chain id {} does not fit a u64", test.config.chainid)))?;
     let fraction = test

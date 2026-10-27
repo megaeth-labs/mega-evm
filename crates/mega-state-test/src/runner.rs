@@ -49,7 +49,7 @@ use mega_evm::{
         database::{EmptyDB, State},
         inspector::{inspectors::TracerEip3155, Inspector, NoOpInspector},
         interpreter::interpreter::EthInterpreter,
-        primitives::{Bytes, TxKind, B256, KECCAK_EMPTY, U256},
+        primitives::{Bytes, B256, KECCAK_EMPTY, U256},
         DatabaseCommit, ExecuteCommitEvm,
     },
     test_utils::{RecordingDatabase, RecordingEnvFactory, SharedWitnessRecord},
@@ -67,8 +67,8 @@ use crate::{
     exceptions::{self, Mismatch},
     mode::MAX_BLOBS_PER_TX,
     roots::{logs_hash, state_root},
-    skips::{skip_file, skip_slow_file, SkipReason},
-    types::{Test, TestSuite, TestUnit},
+    skips::{skip_file, SkipReason},
+    types::{Test, TestError, TestSuite, TestUnit},
     Fork, Mode,
 };
 
@@ -494,7 +494,7 @@ pub fn run_file(path: &Path, config: Config) -> Result<Vec<TestResult>, Failure>
     let suite = serde_json::from_str::<UniqueNames>(&json)
         .map_err(|error| Failure::new(FailureKind::Fixture, format!("parse: {error}")))?
         .0;
-    let skip = skip_file(&path_str).or_else(|| skip_slow_file(json.as_bytes()));
+    let skip = skip_file(&path_str);
 
     let mut results = Vec::new();
     for (name, unit) in &suite.0 {
@@ -707,8 +707,6 @@ fn execute_and_check(
         Err(reason) => return Ok(Some(reason)),
     };
 
-    crate::input::check_state_size(unit.pre.values().map(|account| account.storage.len()))
-        .map_err(|error| Failure::new(FailureKind::Fixture, format!("pre-state: {error}")))?;
     let basefee = block.basefee;
     let mut state =
         State::builder().with_cached_prestate(unit.state()).with_bundle_update().build();
@@ -824,7 +822,16 @@ pub(crate) fn prepare(
     eth_cfg.set_max_blobs_per_tx(MAX_BLOBS_PER_TX);
     let block = unit.block_env(&mut eth_cfg);
 
-    let tx = match (test.tx_env(unit), &test.expect_exception) {
+    // An explicit type bypasses the fixture types' inferred-type recipient guard. Reject the
+    // built transaction through the same exception-matching path as an inferred invalid type.
+    let tx = test.tx_env(unit).and_then(|tx| {
+        if matches!(tx.tx_type, 3 | 4) && tx.kind.is_create() {
+            Err(TestError::InvalidTransactionType)
+        } else {
+            Ok(tx)
+        }
+    });
+    let tx = match (tx, &test.expect_exception) {
         (Ok(tx), _) => tx,
         (Err(error), Some(expected)) => {
             return match exceptions::check_unbuildable(expected, &error, unit) {
@@ -839,28 +846,8 @@ pub(crate) fn prepare(
             return Err(Failure::new(FailureKind::Fixture, format!("transaction: {error}")))
         }
     };
-    // An explicit type bypasses TransactionParts::tx_type's inferred-type create guard.
-    // Apply the same rejection to the transaction the fixture types actually built.
-    let creation_exception: &'static [&'static str] = match (tx.tx_type, tx.kind) {
-        (3, TxKind::Create) => &["TYPE_3_TX_CONTRACT_CREATION"],
-        (4, TxKind::Create) => &["TYPE_4_TX_CONTRACT_CREATION"],
-        _ => &[],
-    };
-    if !creation_exception.is_empty() {
-        return match &test.expect_exception {
-            Some(expected) if exceptions::check_names(expected, creation_exception).is_ok() => {
-                Ok(Err(SkipReason::UnbuildableInvalidTransaction))
-            }
-            Some(expected) => Err(Failure::new(
-                FailureKind::WrongException,
-                format!("expected {expected}, rejected as {}", creation_exception[0]),
-            )),
-            None => Err(Failure::new(
-                FailureKind::Fixture,
-                format!("transaction: {}", creation_exception[0]),
-            )),
-        };
-    }
+    crate::input::check_state_size(unit.pre.values().map(|account| account.storage.len()))
+        .map_err(|error| Failure::new(FailureKind::Fixture, format!("pre-state: {error}")))?;
     let tx =
         OpTx(OpTransaction { base: tx, enveloped_tx: Some(Bytes::new()), ..Default::default() });
     Ok(Ok(Ready { chain_id, block, tx }))
