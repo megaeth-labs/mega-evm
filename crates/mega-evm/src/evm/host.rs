@@ -465,10 +465,10 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
     /// the start ledger, which gives the start charge back to `gas` when the start did not keep
     /// its records: a call that did not succeed, a creation that did not succeed or took no
     /// address — but for an inspector's answer and an outcome an inspector rebuilt, which carry
-    /// none. It is given back as history, as it was charged, and after revm's own settlement of
-    /// the start, where the fork gave it back; for the transaction's start revm then consumes what
-    /// it credits to regular gas when the frame halted, as it consumes the rest of a halted
-    /// frame's.
+    /// none. It is given back as history, as it was charged, once revm's own settlement of the
+    /// frame is made, its upfront state-gas refund included; for the transaction's start revm then
+    /// consumes what it credits to regular gas when the frame halted, as it consumes the rest of a
+    /// halted frame's.
     #[inline]
     fn frame_settle(&mut self, settle: &FrameSettle, gas: &mut GasTracker) {
         self.inner.frame_settle(settle, gas);

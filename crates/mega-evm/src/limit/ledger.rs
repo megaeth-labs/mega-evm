@@ -181,8 +181,8 @@ const fn kept_part(amount: u64, kept: u64) -> u64 {
 }
 
 /// The share of its caller's EIP-8037 `reservoir` a frame starts with: all but the caller's
-/// `kept` per cent of it, which is rounded down, so a caller that keeps two per cent keeps nothing
-/// of a reservoir below 50 and forwards 98 of 99.
+/// `kept` per cent of it, which is rounded down. A caller that keeps two per cent keeps nothing of
+/// a reservoir below 50, and of a reservoir of 99 it forwards 98.
 pub(crate) const fn reservoir_share(reservoir: u64, kept: u64) -> u64 {
     reservoir - kept_part(reservoir, kept)
 }
@@ -593,9 +593,9 @@ mod tests {
 
     /// A child's share of each pool is the floor of 98 per cent of what its caller has left, the
     /// caller keeping the rest; a child's share of the reservoir is what the caller has less the
-    /// floor of its 2 per cent, so a caller keeps nothing of a reservoir below 50 and forwards 98
-    /// of
-    /// 99. On the neutral configuration the caller keeps nothing of either.
+    /// floor of its 2 per cent, so a caller keeps nothing of a reservoir below 50, and of a
+    /// reservoir of 99 it forwards 98. On the neutral configuration the caller keeps nothing of
+    /// either.
     #[test]
     fn test_a_start_takes_its_shares_and_leaves_the_caller_its_part() {
         for (kept, forwarded) in [(KEPT, 98), (0, 100)] {
