@@ -215,6 +215,102 @@ fn checked(rows: &[Value], held: Option<usize>) -> Vec<usize> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn test_replay_rejects_an_unlinked_parent_before_reading_state() {
+    for wrong_hash in [true, false] {
+        let recorded = read_block(fixtures(), BLOCK);
+        let target = recorded.block["transactions"][1]["hash"].as_str().unwrap().to_owned();
+        let recording =
+            Recording { block: recorded, parent_timestamp: None, codes: HashMap::default() };
+        let mut parent = recording.parent();
+        if wrong_hash {
+            parent["hash"] = json!(B256::repeat_byte(0x42));
+        } else {
+            parent["number"] = json!(format!("0x{:x}", BLOCK - 2));
+        }
+        let server = Server::start(recording.block).await;
+        Mock::given(matchers::body_partial_json(json!({
+            "method": "eth_getBlockByNumber", "params": [format!("0x{:x}", BLOCK - 1), false]
+        })))
+        .respond_with(move |request: &wiremock::Request| {
+            let body: Value = serde_json::from_slice(&request.body).unwrap();
+            ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0", "id": body["id"], "result": parent
+            }))
+        })
+        .with_priority(1)
+        .expect(1)
+        .mount(&server.0)
+        .await;
+        let run = run_evme(&[
+            "replay",
+            &target,
+            "--rpc",
+            &server.0.uri(),
+            "--rpc.no-cache-file",
+            "--rpc.max-retries",
+            "0",
+            "--override.spec",
+            "Satin",
+        ]);
+        assert_ne!(run.code, 0, "the mismatched parent must be rejected");
+        assert!(run.stderr.contains("parent block does not match"), "{}{}", run.stdout, run.stderr);
+        let requests = server.0.received_requests().await.unwrap();
+        assert!(
+            requests.iter().all(|request| {
+                let body: Value = serde_json::from_slice(&request.body).unwrap();
+                matches!(
+                    body["method"].as_str(),
+                    Some("eth_chainId" | "eth_getTransactionByHash" | "eth_getBlockByNumber")
+                )
+            }),
+            "a mismatched parent is rejected before reading state or receipts"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_replay_rejects_a_pending_transaction_before_fetching_blocks() {
+    let recorded = read_block(fixtures(), BLOCK);
+    let mut tx = recorded.block["transactions"][1].clone();
+    let target = tx["hash"].as_str().unwrap().to_owned();
+    tx["blockNumber"] = Value::Null;
+    tx["blockHash"] = Value::Null;
+    tx["transactionIndex"] = Value::Null;
+    let server = Server::start(recorded).await;
+    Mock::given(matchers::body_partial_json(json!({"method": "eth_getTransactionByHash"})))
+        .respond_with(move |request: &wiremock::Request| {
+            let body: Value = serde_json::from_slice(&request.body).unwrap();
+            ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0", "id": body["id"], "result": tx
+            }))
+        })
+        .with_priority(1)
+        .expect(1)
+        .mount(&server.0)
+        .await;
+    let run = run_evme(&[
+        "replay",
+        &target,
+        "--rpc",
+        &server.0.uri(),
+        "--rpc.no-cache-file",
+        "--rpc.max-retries",
+        "0",
+        "--override.spec",
+        "Satin",
+    ]);
+    assert_ne!(run.code, 0);
+    assert!(run.stderr.contains("pending"), "{}{}", run.stdout, run.stderr);
+    assert!(
+        server.0.received_requests().await.unwrap().iter().all(|request| {
+            let body: Value = serde_json::from_slice(&request.body).unwrap();
+            matches!(body["method"].as_str(), Some("eth_chainId" | "eth_getTransactionByHash"))
+        }),
+        "a pending transaction must not fetch a block or read state"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn test_a_transaction_replayed_alone_is_the_one_the_block_replay_runs() {
     let recorded = read_block(fixtures(), BLOCK);
     let server = Server::start(recorded).await;
