@@ -121,6 +121,29 @@ pub(crate) type MegaInnerEvm<DB, INSP, ExtEnvs> = revm::context::Evm<
 /// execution traits ([`ExecuteEvm`], [`InspectEvm`], [`SystemCallEvm`] and their commit
 /// variants) and alloy-evm's [`Evm`](alloy_evm::Evm), which is what a node's block executor
 /// drives.
+///
+/// # Reuse after an error
+///
+/// A call that fails with an error — a read the database could not serve, a transaction
+/// validation refuses — leaves nothing of itself in the EVM, whichever entry point ran it: the
+/// handler's fatal cleanup ([`MegaHandler`]'s `catch_error`) drops the error a load recorded and
+/// nothing took, takes back the call's journal transaction — its nonce bump and fee, and the writes
+/// of its frames, those that completed before the error included — and clears the per-transaction
+/// caches and the frame stack. What the next call reads of the context is prepared afresh when it
+/// starts. So an EVM is reused after an error as after a success, and the next call runs as on a
+/// fresh EVM over the same database.
+///
+/// Every entry point that takes the state off the journal on a success does so on an error too:
+/// [`execute_transaction`](Self::execute_transaction), `transact`, `transact_many`, `replay`, the
+/// `inspect` methods, the `_commit` variants, the system calls that return state, alloy-evm's
+/// methods and the pre-block calls. The `_one` entry points leave the journal to the caller on both
+/// outcomes, so the calls before a failed one stay in it for the caller to finalize, and none of
+/// the failed call's writes do. A failed deposit is a result, not an error: its nonce bump and mint
+/// stay.
+///
+/// A caller of the handler's `run_without_catch_error` that drops an error makes the same cleanup
+/// first, through `catch_error`. A panic unwinds past the cleanup: an EVM a panic unwound out of is
+/// not reused.
 #[allow(missing_debug_implementations)]
 pub struct MegaEvm<DB: Database, INSP, ExtEnvs: ExternalEnvTypes = EmptyExternalEnv> {
     inner: MegaInnerEvm<DB, INSP, ExtEnvs>,
@@ -352,11 +375,15 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> ExecuteEvm for MegaEvm<DB, I
         self.inner.ctx.journal_mut().finalize()
     }
 
+    /// Runs the transaction set on the context again, and finalizes the journal whether or not
+    /// it succeeded, as [`transact`](ExecuteEvm::transact) does (see [`MegaEvm`] on the entry
+    /// points and the journal).
     fn replay(
         &mut self,
     ) -> Result<ExecResultAndState<Self::ExecutionResult, Self::State>, Self::Error> {
-        let result = MegaHandler::<_, Self::Error, _>::new().run(self)?;
-        Ok(ExecResultAndState::new(result, self.finalize()))
+        let output_or_error = MegaHandler::<_, Self::Error, _>::new().run(self);
+        let state = self.finalize();
+        Ok(ExecResultAndState::new(output_or_error?, state))
     }
 }
 
@@ -407,6 +434,21 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> SystemCallEvm for MegaEvm<DB
             data,
         ))
     }
+
+    /// Runs a system call and finalizes the journal whether or not it succeeded (see
+    /// [`MegaEvm`] on the entry points and the journal). The trait's own returns before it
+    /// finalizes on an error.
+    fn system_call_with_caller(
+        &mut self,
+        caller: Address,
+        system_contract_address: Address,
+        data: Bytes,
+    ) -> Result<ExecResultAndState<Self::ExecutionResult, Self::State>, Self::Error> {
+        let output_or_error =
+            self.system_call_one_with_caller(caller, system_contract_address, data);
+        let state = self.finalize();
+        Ok(ExecResultAndState::new(output_or_error?, state))
+    }
 }
 
 impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
@@ -417,7 +459,8 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
     /// budget, [`PRE_BLOCK_CALL_GAS_LIMIT`], instead of revm's [`SYSTEM_CALL_GAS_LIMIT`]: at most
     /// [`SYSTEM_CALL_REGULAR_GAS_LIMIT`] of it is regular gas, as of every system call, and the
     /// rest is the call's state-gas reservoir. What the call left of its reservoir is
-    /// [`AdditionalLimit::reservoir_remaining`](crate::AdditionalLimit::reservoir_remaining).
+    /// [`AdditionalLimit::reservoir_remaining`](crate::AdditionalLimit::reservoir_remaining). The
+    /// journal is finalized whether or not the call succeeded, as `transact_system_call`'s.
     ///
     /// [`PRE_BLOCK_CALL_GAS_LIMIT`]: crate::constants::PRE_BLOCK_CALL_GAS_LIMIT
     /// [`SYSTEM_CALL_GAS_LIMIT`]: revm::handler::SYSTEM_CALL_GAS_LIMIT
@@ -430,8 +473,9 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
     ) -> Result<ResultAndState<OpHaltReason>, EVMError<DB::Error, MegaTransactionError>> {
         let mut tx = MegaTransaction::new_system_tx_with_caller(caller, contract, data);
         tx.0.base.gas_limit = crate::constants::PRE_BLOCK_CALL_GAS_LIMIT;
-        let result = self.run_system_call(tx).map_err(map_op_err)?;
-        Ok(ResultAndState::new(result, ExecuteEvm::finalize(self)))
+        let output_or_error = self.run_system_call(tx);
+        let state = ExecuteEvm::finalize(self);
+        Ok(ResultAndState::new(output_or_error.map_err(map_op_err)?, state))
     }
 
     /// Runs `tx` as a system call: the protocol's own work, prepared as such (see
