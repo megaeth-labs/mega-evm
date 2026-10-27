@@ -701,7 +701,7 @@ When the agent is requested to implement a new feature or bug fix, it should con
   Any logic change or modification to mega-evm should be equipped with tests if there is no specific reason of not adding tests.
   The agent should always consider accompanying tests or suggest to add additional tests.
 - **Reset per-transaction state before the next execution reads it.**
-  An execution that fails with an error leaves through no settlement, so a new per-transaction field of `MegaContext` is reset in `MegaContext::prepare`, unless every execution overwrites it before reading it, and a new cache in revm's context or on the EVM that a run fills is cleared in `MegaHandler::catch_error` as well as on success.
+  An execution that fails with an error can fail before the normal transaction cleanup (in post-execution after the root frame settled, for one), so a new per-transaction field of `MegaContext` is reset in `MegaContext::prepare`, unless every execution overwrites it before reading it, and a new cache in revm's context or on the EVM that a run fills is cleared in `MegaHandler::catch_error` as well as on success.
   A new public entry point that takes the state off the journal does so on an error too, and joins the entry-point table in `tests/satin/reuse_after_error.rs`; so does a provided method a revm or alloy-evm upgrade adds.
 - **Keep the op-revm baseline honest.**
   A change that makes Satin differ from op-revm on purpose must update `tests/satin/equivalence.rs` (or add a case) so the difference is pinned, not silently absorbed.
