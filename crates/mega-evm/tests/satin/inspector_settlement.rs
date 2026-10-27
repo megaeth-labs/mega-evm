@@ -39,10 +39,12 @@ use revm::{
 };
 
 use crate::{
-    common::assert_answered_at_unlimited_budgets,
+    common::{
+        assert_answered_at_unlimited_budgets, authorizing_call, history_is_free, state_is_free,
+    },
     salt::{
         create_with, crowded_account, db, entry, minimal_envs, salt_context, tx_with_gas,
-        value_call, SaltEnvs, CALLER, CONTRACT, EMPTY,
+        value_call, SaltEnvs, AUTHORITY, CALLER, CONTRACT, DELEGATE, EMPTY,
     },
 };
 use mega_evm::test_utils::{record_start_ledger_settlements, take_start_ledger_settlements};
@@ -1158,8 +1160,24 @@ enum MoreReservoir {
     OnABuiltTracker,
 }
 
-const MORE_RESERVOIR: [MoreReservoir; 3] =
-    [MoreReservoir::OnTheInput, MoreReservoir::OnTheResult, MoreReservoir::OnABuiltTracker];
+impl MoreReservoir {
+    const ALL: [Self; 3] = [Self::OnTheInput, Self::OnTheResult, Self::OnABuiltTracker];
+}
+
+/// Requires `handed` — `ran` with an inspector handing back one more reservoir than a frame
+/// inherited — to bill the same history and to leave one more reservoir.
+fn assert_hands_back_one_more_reservoir(
+    case: &str,
+    handed: &MegaTransactionOutcome,
+    ran: &MegaTransactionOutcome,
+) {
+    assert_eq!(handed.gas.history, ran.gas.history, "{case}: the history");
+    assert_eq!(
+        handed.gas.reservoir_remaining,
+        ran.gas.reservoir_remaining + 1,
+        "{case}: the extra reservoir comes back"
+    );
+}
 
 /// Hands a call to `target` one more reservoir than it inherited, as `how` says.
 #[derive(Clone, Copy, Debug)]
@@ -1202,6 +1220,9 @@ impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for AddsReservoir {
 /// with a reservoir the record's charge drains, and above it with one that pays the charge.
 #[test]
 fn test_the_transactions_own_halt_burns_its_regular_gas_when_an_inspector_adds_to_its_reservoir() {
+    if history_is_free() {
+        return;
+    }
     let tx = |value: u64, gas_limit: u64| to(CONTRACT, value, Bytes::new(), gas_limit);
     let body = history_gas(transaction_body_bytes(&tx(0, 0))).unwrap();
     let record = history_gas(WRITE_RECORD_SIZE).unwrap();
@@ -1212,17 +1233,12 @@ fn test_the_transactions_own_halt_burns_its_regular_gas_when_an_inspector_adds_t
             let tx = tx(value, gas_limit);
             let ran = plain(invalid(), minimal_envs(), tx.clone());
             assert!(ran.result.is_halt(), "{:?}", ran.result);
-            for how in MORE_RESERVOIR {
+            for how in MoreReservoir::ALL {
                 let case = format!("{how:?}, value {value}, gas limit {gas_limit}");
                 let adds = AddsReservoir { target: CONTRACT, how };
                 let halted = inspected(invalid(), minimal_envs(), tx.clone(), adds);
                 assert!(halted.result.is_halt(), "{case}: {:?}", halted.result);
-                assert_eq!(halted.gas.history, ran.gas.history, "{case}: the body's history");
-                assert_eq!(
-                    halted.gas.reservoir_remaining,
-                    ran.gas.reservoir_remaining + 1,
-                    "{case}: the extra reservoir comes back"
-                );
+                assert_hands_back_one_more_reservoir(&case, &halted, &ran);
                 assert_eq!(
                     halted.gas.gas_used + halted.gas.reservoir_remaining,
                     gas_limit,
@@ -1240,24 +1256,51 @@ fn test_the_transactions_own_halt_burns_its_regular_gas_when_an_inspector_adds_t
 /// succeeds, billing one gas less than its run without the inspector.
 #[test]
 fn test_a_halting_child_handed_more_reservoir_leaves_its_caller_its_regular_gas() {
+    if history_is_free() {
+        return;
+    }
     let caller = BytecodeBuilder::default().call(CALLEE, U256::from(1)).append(POP).stop().build();
     let db = || db(caller.clone()).account_code(CALLEE, Bytes::from_static(&[INVALID]));
     for gas_limit in GAS_LIMITS {
         let tx = to(CONTRACT, 0, Bytes::new(), gas_limit);
         let ran = plain(db(), minimal_envs(), tx.clone());
         assert!(ran.result.is_success(), "{:?}", ran.result);
-        for how in MORE_RESERVOIR {
+        for how in MoreReservoir::ALL {
             let case = format!("{how:?}, gas limit {gas_limit}");
             let adds = AddsReservoir { target: CALLEE, how };
             let returned = inspected(db(), minimal_envs(), tx.clone(), adds);
             assert!(returned.result.is_success(), "{case}: {:?}", returned.result);
-            assert_eq!(returned.gas.history, ran.gas.history, "{case}: the records given back");
-            assert_eq!(
-                returned.gas.reservoir_remaining,
-                ran.gas.reservoir_remaining + 1,
-                "{case}: the extra reservoir comes back"
-            );
+            assert_hands_back_one_more_reservoir(&case, &returned, &ran);
             assert_eq!(returned.gas.gas_used, ran.gas.gas_used - 1, "{case}: nothing burned");
         }
+    }
+}
+
+/// The transaction's own frame halts with no start charge to give back — it moves no value, so it
+/// makes no write record — after an authorization the transaction applied before it, whose account
+/// and record were charged below the execution cap and spilled onto regular gas. An inspector
+/// hands the frame back one more reservoir than it inherited, which unwinds one gas of that spill
+/// into regular gas, so no reservoir is left. With nothing to give back nothing is burned, as
+/// revm's settlement burned nothing then: the sender keeps that one gas, and the transaction bills
+/// one gas less than its run without the inspector, with the same history and reservoir.
+#[test]
+fn test_the_transactions_own_halt_with_no_start_charge_keeps_what_its_settlement_left() {
+    if history_is_free() || state_is_free() {
+        return;
+    }
+    let gas_limit = GAS_LIMITS[0];
+    let tx = authorizing_call(CALLER, CONTRACT, U256::ZERO, gas_limit, DELEGATE, &[(AUTHORITY, 0)]);
+    let invalid = || db(Bytes::from_static(&[INVALID]));
+    let ran = plain(invalid(), minimal_envs(), tx.clone());
+    assert!(ran.result.is_halt(), "{:?}", ran.result);
+    assert_eq!(ran.gas.gas_used + ran.gas.reservoir_remaining, gas_limit, "the halt burns");
+    for how in MoreReservoir::ALL {
+        let case = format!("{how:?}");
+        let adds = AddsReservoir { target: CONTRACT, how };
+        let halted = inspected(invalid(), minimal_envs(), tx.clone(), adds);
+        assert!(halted.result.is_halt(), "{case}: {:?}", halted.result);
+        assert_eq!(halted.gas.history, ran.gas.history, "{case}: the history");
+        assert_eq!(halted.gas.reservoir_remaining, ran.gas.reservoir_remaining, "{case}: unwound");
+        assert_eq!(halted.gas.gas_used, ran.gas.gas_used - 1, "{case}: one regular gas kept");
     }
 }
