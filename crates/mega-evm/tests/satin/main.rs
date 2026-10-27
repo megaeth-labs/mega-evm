@@ -39,6 +39,7 @@ mod pool_validation;
 mod precompile_gas;
 mod pricing_table;
 mod reservoir_drain;
+mod reservoir_settlement;
 mod reservoir_share;
 mod reuse_after_error;
 mod salt;
