@@ -31,7 +31,7 @@ use revm::{
             GasId, StateGasCharge, StateGasSite,
         },
         journaled_state::{entry::JournalEntry, JournalCheckpoint},
-        Host,
+        Host, LocalContextTr,
     },
     handler::{
         evm::{ContextDbError, FrameInitResult, FrameTr},
@@ -474,13 +474,32 @@ where
     /// account creates it: one account of state growth, which the transaction reports and its
     /// block counts, though it pays no state gas for it and no limit stops a deposit that already
     /// failed.
+    ///
+    /// It is the fatal cleanup of every entry point, so nothing the failed execution left is read
+    /// by the next one on the same EVM, whatever cleanup op-revm made:
+    ///
+    /// - the error a Host load recorded and the handler never took — post-execution failed first,
+    ///   on a read of its own — is dropped before op-revm runs, which its own failure cannot skip;
+    ///   the error returned is the one the execution failed with;
+    /// - an execution that fails with an error leaves no writes: its journal transaction is
+    ///   discarded, which op-revm does only for the failed deposit it commits; the transactions
+    ///   before it in the journal stay, for a caller of a `_one` entry point to finalize;
+    /// - the cached L1 cost, the local context and the frame stack are cleared after op-revm, whose
+    ///   own clearing an error out of its failed-deposit recovery skips.
     fn catch_error(
         &self,
         evm: &mut Self::Evm,
         error: Self::Error,
     ) -> Result<revm::context::result::ExecutionResult<Self::HaltReason>, Self::Error> {
+        *evm.ctx().error() = Ok(());
         evm.ctx_mut().additional_limit.set_reservoir_remaining(0);
         let result = self.op.catch_error(evm, error);
+        if result.is_err() {
+            evm.ctx().journal_mut().discard_tx();
+        }
+        evm.ctx().chain_mut().clear_tx_l1_cost();
+        evm.ctx().local_mut().clear();
+        evm.frame_stack().clear();
         let failed_deposit = matches!(
             result,
             Ok(revm::context::result::ExecutionResult::Halt {

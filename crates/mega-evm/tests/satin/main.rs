@@ -40,6 +40,7 @@ mod precompile_gas;
 mod pricing_table;
 mod reservoir_drain;
 mod reservoir_share;
+mod reuse_after_error;
 mod salt;
 mod salt_delegation;
 mod salt_deposit;
