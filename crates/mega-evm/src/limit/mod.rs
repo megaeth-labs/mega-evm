@@ -13,13 +13,13 @@
 //! ([`LimitCheck::ExceedsLimit`]).
 //!
 //! What the data-size limit meters — data-size bytes, among them the write records — is drawn from
-//! the byte pool on each frame's gas tracker, which the revm fork forwards to a child as its share
-//! and settles as it does the reservoir: a frame that fails gives its draws back, and a frame that
-//! succeeds hands its caller what it kept. A write an opcode makes is drawn once the opcode
-//! completed, in the Host's completed-write hook, which revm calls after every charge the opcode
-//! makes; a frame start's records once revm decided the start, on the pool its frame starts with.
-//! [`AdditionalLimit`] holds the transaction's limit beside the pools, on what the transaction
-//! keeps, with the stops and the settled figures.
+//! each frame's byte pool on the engine's start ledger, which a child's start takes its share of
+//! and which settles when revm settles the start: a frame that fails gives its draws back, and a
+//! frame that succeeds hands its caller what it kept. A write an opcode makes is drawn once the
+//! opcode completed, in the Host's completed-write hook, which revm calls after every charge the
+//! opcode makes; a frame start's records once revm decided the start, on the pool its frame starts
+//! with. [`AdditionalLimit`] holds the transaction's limit beside the pools, on what the
+//! transaction keeps, with the stops and the settled figures.
 //!
 //! # The data-size limit
 //!
@@ -204,20 +204,20 @@ use alloy_primitives::Bytes;
 use alloy_sol_types::SolError;
 use revm::{context::result::ExecutionResult, interpreter::PoolId};
 
-/// The pool of a frame's gas tracker that is the frame's data-size budget: the bytes the frame
-/// may still keep.
+/// The pool of a frame's start on the start ledger that is the frame's data-size budget: the bytes
+/// the frame may still keep.
 pub(crate) const DATA_SIZE_POOL: PoolId = PoolId::new(0);
 
-/// The pool of a frame's gas tracker that is the frame's KV-update budget: the write records the
-/// frame may still keep.
+/// The pool of a frame's start on the start ledger that is the frame's KV-update budget: the write
+/// records the frame may still keep.
 pub(crate) const KV_UPDATE_POOL: PoolId = PoolId::new(1);
 
-/// The pool of a frame's gas tracker that is the frame's state-growth budget: the new accounts
-/// and new storage slots the frame may still keep, net.
+/// The pool of a frame's start on the start ledger that is the frame's state-growth budget: the
+/// new accounts and new storage slots the frame may still keep, net.
 pub(crate) const STATE_GROWTH_POOL: PoolId = PoolId::new(2);
 
 /// The dimensions the common execution layer counts and limits, each drawn from the pool of a
-/// frame's gas tracker it names ([`LimitKind::pool`]), in the order an operation that crosses more
+/// frame's start it names ([`LimitKind::pool`]), in the order an operation that crosses more
 /// than one of them stops on: data size, KV updates, state growth.
 pub(crate) const COUNTED: [LimitKind; 3] =
     [LimitKind::DataSize, LimitKind::KvUpdate, LimitKind::StateGrowth];
@@ -532,8 +532,8 @@ impl LimitKind {
         }
     }
 
-    /// The pool of a frame's gas tracker the dimension is drawn from; `None` for compute, which
-    /// gas detention holds through the frame's gas instead.
+    /// The pool of a frame's start the dimension is drawn from; `None` for compute, which gas
+    /// detention holds through the frame's gas instead.
     pub(crate) const fn pool(&self) -> Option<PoolId> {
         match self {
             Self::DataSize => Some(DATA_SIZE_POOL),

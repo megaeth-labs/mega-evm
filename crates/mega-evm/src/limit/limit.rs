@@ -27,18 +27,18 @@ use super::{
 /// # The three counted dimensions
 ///
 /// Data size, KV updates (write records) and state growth are each limited per transaction and
-/// per frame ([`COUNTED`]). A frame's budget in a dimension is a pool on its gas tracker
-/// ([`LimitKind::pool`]), which the revm fork forwards and settles as it does the reservoir: the
-/// transaction's own frame gets what the transaction has left once its body and the counts made
-/// before it are counted ([`first_frame_pools`](Self::first_frame_pools)), every child the
-/// schedule's share of what its caller has left (98/100: the caller keeps
-/// `GasId::pool_kept_percent`) under the frame cap, a failing frame's draws go back to its pool and
-/// a successful one hands its signed net to its caller. A count is drawn where it is made, on the
-/// pool of the frame that makes it ([`draw`](Self::draw)): a completed write's record or log, a
-/// frame start's records and transfer log on the started frame, deployed code on the creating
-/// frame. A creator's nonce record is the creating frame's own, drawn on its pools once the
-/// creation returned into it with the nonce bumped ([`close_start`](Self::close_start) hands back
-/// what tells): the creation's budgets were taken before it.
+/// per frame ([`COUNTED`]). A frame's budget in a dimension is a pool on its start's entry of the
+/// start ledger ([`LimitKind::pool`]), which settles when revm settles the start: the transaction's
+/// own frame gets what the transaction has left once its body and the counts made before it are
+/// counted ([`first_frame_pools`](Self::first_frame_pools)), every child its share of what its
+/// caller has left (98/100, the caller keeping `FRAME_KEPT_PERCENT`) under the frame cap, a failing
+/// frame's draws go back to its pool and a successful one hands its signed net to its caller. A
+/// count is drawn where it is made, on the pool of the frame that makes it ([`draw`](Self::draw)):
+/// a completed write's record or log, a frame start's records and transfer log on the started
+/// frame, deployed code on the creating frame. A creator's nonce record is the creating frame's
+/// own, drawn on its pools once the creation returned into it with the nonce bumped
+/// ([`close_start`](Self::close_start) hands back what tells): the creation's budgets were taken
+/// before it.
 ///
 /// The transaction's limits are held beside the pools, on what the transaction keeps
 /// ([`usage`](Self::usage)): its body, its Oracle hints, the records of its applied authorities,

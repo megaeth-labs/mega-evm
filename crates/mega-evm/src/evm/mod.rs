@@ -14,15 +14,17 @@
 //!
 //! - **A rewrite is taken as given.** revm commits or reverts a frame's journal checkpoint before
 //!   the inspector sees its result, and the caller settles the result the inspector hands back —
-//!   its classification, output and gas, reservoir and byte pool included — and an answer the
-//!   inspector gives in place of a frame never reaches the engine's frame start: the depth guard,
-//!   the interceptors and gas detention see none of it, and it settles on the gas it is built on.
+//!   its classification, output and gas, reservoir included, the start ledger settling the start by
+//!   the status the inspector left and revm's flags — and an answer the inspector gives in place of
+//!   a frame never reaches the engine's frame start: the depth guard, the interceptors and gas
+//!   detention see none of it, and it settles on the gas it is built on, at unlimited budgets and
+//!   with no start charge back.
 //! - **A callback's writes to gas are the inspector's.** A charge a frame cannot pay is refused,
 //!   and leaves its record on the frame's gas as an opcode's does: a crossing of the withheld part
 //!   stops nothing in a frame that ends without an out-of-gas, and a later halt that records
 //!   nothing of its own is read off the record. An inspector that overwrites the interpreter's gas
-//!   overwrites gas detention's split and the byte pool with it, until detention next holds the
-//!   frame.
+//!   overwrites gas detention's split with it, until detention next holds the frame; the frame's
+//!   budgets are on the start ledger, which a gas it restores does not reach.
 //! - **What an inspector sees.** A frame's end as the engine settled it: a frame that crossed gas
 //!   detention's compute limit ends with the stop, which the engine makes of its out-of-gas once
 //!   its run returns and before the inspector's `call_end`, `create_end` and `frame_end` see it, as

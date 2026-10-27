@@ -69,14 +69,17 @@ Each change is stated here in plain words with its reason; the specification has
   revm's frame run returns an action set on a frame before it runs, without running an instruction or calling the inspector's `step`, and its inspected frame start hands a frame built with one to no `initialize_interp`: a `keylessDeploy` call's creation and answer, and the stop of a caller a child left over a limit, come back through revm's own run.
   The run-result hook (`EvmTr::frame_run_result`) is called once a frame's run returns, before the inspector's `call_end`, `create_end` and `frame_end` and before `frame_return_result`; gas detention turns a crossing into the stop there, so inspectors and tracers see the stop the caller gets.
   Why: both are points in the middle of revm's own loop that mega-evm cannot reach from outside, which is what the fork is for, and with them the engine has no frame run of its own.
-- **A debug build keeps its own ledger of every frame start and checks it against the fork's figures.**
-  The fork carries four figures of a start on the frame's gas: the three pools with their nets and crossings, the part of the reservoir the caller keeps, the start charge and the history allowance.
-  The engine keeps the same four in an entry per start (`src/limit/ledger.rs`), computed by its own rules and driven only by the fork's start lifecycle hooks (`frame_split`, `frame_settle`, `frame_lifecycle_end`), and compares them with the fork's at every settlement, panicking on a difference; every result still reads the fork's figures, and a release build carries none of it.
-  A test of an inspector that answers or rewrites with pools or a start charge it set, or restores a snapshot of a running tracker, records the differences and asserts each, since those figures are accepted to change once the engine reads its own ledger.
-  Why: the figures are to leave the fork for the engine, and the ledger that will replace them is proved against them, on every engine path, before anything reads it.
+- **The engine decides the four figures of a frame start, and the fork forwards whole.**
+  The fork carries four figures of a start on the frame's gas: the three pools with their nets, the part of the reservoir the caller keeps, the start charge and the history allowance.
+  The engine now decides all four itself, in every build: the budgets, the start charge and the allowance on its start ledger (`src/limit/ledger.rs`), an entry per start driven only by the fork's start lifecycle hooks (`frame_split`, `frame_settle`, `frame_lifecycle_end`), and the reservoir's share where the start is made (`MegaContext::forward_start`, named to revm on `FrameStart::reservoir`).
+  The fork's figures are inert: the Satin schedule keeps Amsterdam's zero in `pool_kept_percent`, `reservoir_kept_percent` and `call_history_allowance`, so revm forwards every pool and the reservoir whole and grants no allowance; the engine declares no start charge on a start or on the first frame's input, puts no pool on a tracker and draws none; its synthetic answers carry neither pools nor a charge.
+  A limit check reads the running frame's budget off the ledger's top entry; `frame_settle` gives a failed start's charge back to the caller's gas, as history; a log's history draws the entry's allowance first; the frame cap is the ledger's (`cap_child`, which replaced `cap_the_shares` and is held to it by a unit test).
+  The ledger is no longer checked against the fork's figures, which stopped meaning the same once the fork forwards whole; a randomized differential against the build that still read the fork's figures found every result, ledger and inspector observation equal, but for the inspector shapes accepted to change: an answer built on gas whose pools the inspector set or with the input's start charge copied, which settles at unlimited budgets with no charge back, and a tracker an inspector restores from a snapshot, which leaves the ledger's draws where they were.
+  A test reads what the ledger settled (`test_utils::record_start_ledger_settlements`).
+  Why: the figures leave the fork for the engine, and the fork's copy of them goes next.
 - **Writes and frame starts are metered in the fork's instruction hooks.**
   `SSTORE`, `LOG0`–`LOG4` and `SELFDESTRUCT` call `write_completed` once the write is in the journal and every charge the opcode makes is made.
-  The four calls and the two creations call `frame_starting` once the forward is taken: the caller is charged the history of the start's records out of what it kept, and the frame's own part is declared on the start (`FrameStart::charge`) for the fork to refund when the frame fails.
+  The four calls and the two creations call `frame_starting` once the forward is taken: the caller is charged the history of the start's records out of what it kept, the frame's own part is parked on the start ledger as the start's charge, which its settlement gives back when the frame fails, and the frame's share of the caller's reservoir is taken and named on the start (`FrameStart::reservoir`).
   Why: a write the opcode's own failure takes back is never counted, and the engine no longer rebuilds revm's state from outside with instruction wrappers.
 
 ### What is counted
@@ -137,7 +140,7 @@ Each change is stated here in plain words with its reason; the specification has
   The three pools give a child `remaining × 98 / 100`, rounded down, so the two formulas differ at some values.
   Why: the regular forward is Rex6's, and the reservoir share keeps a caller's own work within reach of what it calls, since state and history gas draw the reservoir first; EIP-8037 passes the reservoir whole, which would let a callee spend all of it.
 - **The history allowance replaces the storage-gas stipend.**
-  A value `CALL` or `CALLCODE` below the transaction's own frame gives the frame it starts 160 bytes of history (`HISTORY_ALLOWANCE_BYTES`, 14,080 gas at the cost per history byte, the schedule's `call_history_allowance`), on which only a log's history charge draws.
+  A value `CALL` or `CALLCODE` below the transaction's own frame gives the frame it starts 160 bytes of history (`HISTORY_ALLOWANCE_BYTES`, 14,080 gas at the cost per history byte, kept on the start's entry of the start ledger), on which only a log's history charge draws.
   It never enters the frame's gas and is on no ledger.
   Why: a `receive()` reached through Solidity's `transfer()` can still emit one event, and an allowance that is not gas leaves nothing to burn on return.
 - **One fixed gas budget for the pre-block calls.**
@@ -226,7 +229,7 @@ A test name or a line count is not a reason to trust the code: read the code aga
 - **Stop**: what a limit does.
   The frame that crosses it reverts with `MegaLimitExceeded(kind, limit)`, and its caller resumes and may catch it.
 - **Answered frame**: a frame that gets a result without running (a precompile, a call to an account with no code, an interceptor, the engine, an inspector's hook).
-- **Start charge**: the history gas a frame start charges its caller for the records the started frame makes, declared on the start and refunded by the fork when the frame fails.
+- **Start charge**: the history gas a frame start charges its caller for the records the started frame makes, kept on the start's entry of the start ledger and given back to the caller when the frame fails.
 - **Failed-charge record**: the regular gas a frame had before a charge that failed, which the fork keeps, so the engine knows exactly what a halting frame burned.
 - **Byte-price grid**: the CI job that runs the suite at other costs per state and history byte, because the prices are provisional.
 
@@ -237,7 +240,7 @@ For each module: where it is, what to check, the spec sections, and the `AGENTS.
 
 ### Limits: data size, KV updates, state growth, the stop
 
-- **Where:** `src/limit/` (the byte table, `LimitKind`, `LimitCheck`, `MegaLimitExceeded` and `EvmTxRuntimeLimits` in `mod.rs`; the write records and the state growth a write and a frame start make in `record.rs`; `AdditionalLimit` in `limit.rs`; the debug build's start ledger in `ledger.rs`), `src/block/limit.rs` (`ProtocolLimits::for_spec`, `BlockLimits`, `BlockLimiter`), `src/constants.rs`.
+- **Where:** `src/limit/` (the byte table, `LimitKind`, `LimitCheck`, `MegaLimitExceeded` and `EvmTxRuntimeLimits` in `mod.rs`; the write records and the state growth a write and a frame start make in `record.rs`; `AdditionalLimit` in `limit.rs`; the start ledger in `ledger.rs`), `src/block/limit.rs` (`ProtocolLimits::for_spec`, `BlockLimits`, `BlockLimiter`), `src/constants.rs`.
 - **Read first:** the module doc of `src/limit/mod.rs` and the doc of `AdditionalLimit` in `src/limit/limit.rs`.
 - **Check:**
   - A count is drawn where it is made, on the pool of the frame that makes it (`AdditionalLimit::draw`), and a failed frame's draws go back with its gas.
@@ -265,7 +268,8 @@ For each module: where it is, what to check, the spec sections, and the `AGENTS.
 - **Check:**
   - A write is counted in the Host's completed-write hook (`write_completed`), which revm calls only once the opcode made every charge, so a failed opcode counts nothing; the Host's write methods count nothing, whoever calls them.
   - A completed write's record is held to the limits before its history is charged, so a record a limit refuses is not charged; at a frame start the order is the other way round, the caller paying at its opcode before revm decides the start and its records are held.
-  - The frame-start hook (`frame_starting`) charges the caller the history of the start's records after the forward is taken, out of what the caller kept, and declares the frame's own part on the fork's start (`FrameStart::charge`); a caller that cannot pay gets the forward back, the halt's record re-written, and starts no frame.
+  - The frame-start hook (`frame_starting`) charges the caller the history of the start's records after the forward is taken, out of what the caller kept, parks the frame's own part as the start's charge on the start ledger with the frame's budget shares and allowance, and takes the frame's reservoir share out of the caller (`forward_start`); a caller that cannot pay gets the forward back, the halt's record re-written, and starts no frame.
+  - Every budget a limit check reads, and every draw, is the start ledger's top entry, the running frame's start (`StartLedger::budget`, `draw`); with no start open there is no frame budget. The start charge comes back in `frame_settle`, by the settlement's status, `created` and revm's inspector flags.
   - A start's records, state growth and transfer log are read off what revm did: its accounts before revm decides the start and again once it did (`FrameStart::of` and `FrameStart::count` in `src/evm/execution.rs`, `Accounts::start_before` and `start_made` in `src/limit/record.rs`), but for a call that moves no value and runs no precompile, which writes nothing on them (`start_writes_nothing`), counted on the started frame's pools (`AdditionalLimit::count_start`) for a frame revm built or a call it answered with a success; an answer that failed counts nothing and is held to no records limit, and a precompile gas detention answers from its price counts nothing and is held to the price alone; a start revm refuses on its caller's account counts nothing and is charged nothing.
   - A frame revm built whose start crossed a limit ends with the stop before its first instruction (`end_before_it_runs`); a success revm gave without building a frame gives way to the stop on its untouched forward, its value move and log taken back to the start's journal mark (`stop_the_answer_at`, `take_back_a_stopped_answer`); an answer that failed is revm's result, held to nothing.
   - Pre-frame charges (a deposit's caller account, EIP-7702 authorities, pre-frame records) either succeed or leave an included out-of-gas halt without a frame, with the journal unwound as revm unwinds it (a creation keeps its nonce bump).
@@ -337,12 +341,12 @@ For each module: where it is, what to check, the spec sections, and the `AGENTS.
 - **Where:** `src/evm/schedule.rs`, `src/evm/prices.rs`, `src/evm/history.rs`, `src/evm/precompiles.rs`, `src/external/` (SALT pricing), `state_gas_price` in `src/evm/host.rs`, the Amsterdam opcode activation in `src/evm/instructions.rs`.
 - **Check:**
   - Every regular entry is Amsterdam's; state creation is paid once, in state gas.
-  - The forwards are schedule entries: `call_stipend_reduction` = 50 (the regular-gas cap), `reservoir_kept_percent` = 2, and `pool_kept_percent` = 2 for each of the three pools; the neutral configuration keeps EIP-150's 63/64 and forwards the whole reservoir.
+  - The regular-gas forward is a schedule entry, `call_stipend_reduction` = 50; the shares of the reservoir and the three budgets are the engine's (`FRAME_KEPT_PERCENT` = 2), and the schedule's `reservoir_kept_percent` and `pool_kept_percent` are Amsterdam's zero; the neutral configuration keeps EIP-150's 63/64 and forwards the whole reservoir and budgets, whatever schedule it is given.
   - State gas = schedule entry × bucket multiplier `m`; regular gas never scales.
     A failed capacity lookup is a node fault: the transaction gets no outcome and is not settled, and the node reports an internal error with the cause.
   - History gas uses the limit layer's byte table, so a record's history bytes are its data size; the three sites where the totals part are in the `src/limit/mod.rs` module doc, "The byte table".
   - A deposit, a protocol-produced transaction and a system call pay no history gas.
-  - The history allowance (`HISTORY_ALLOWANCE_BYTES`, 160 bytes; `history_allowance_gas()` in `src/evm/history.rs`, the schedule's `call_history_allowance`) draws only on a log's charge.
+  - The history allowance (`HISTORY_ALLOWANCE_BYTES`, 160 bytes; `history_allowance_gas()` in `src/evm/history.rs`, kept on the start ledger, the schedule's `call_history_allowance` being zero) draws only on a log's charge.
   - The EIP-7623 floor is still computed and validated.
   - The constants are provisional; a build with `satin-price-override` must never reach a node.
 - **Spec:** §2, §4, §5, §6, §7, §8, §9.
@@ -359,7 +363,7 @@ For each module: where it is, what to check, the spec sections, and the `AGENTS.
   - A start an inspector rewrites after its opcode is not charged again: what the opcode charged stands, its declared part coming back only as for any start whose frame keeps nothing (a frame that fails, or a start revm refuses before it bumps a nonce or moves a value), and its records are those revm then made.
   - A pre-block system call runs on the plain system-call path, with no callback.
   - `test_utils::ReadOnlyObserver` checks, in debug builds, that an inspector a test declares an observer writes nothing back: a tripwire for tests, not a proof.
-  - A debug build's start ledger settles an inspector's answer and a replaced tracker at unlimited pools, and gives no start charge back for an answer or a rebuilt outcome; a test whose inspector builds an answer or a result with pools or a charge of its own, or restores a snapshot of a running tracker, records the ledger's differences from the fork and asserts each, and every other test fails on any difference.
+  - The start ledger settles an inspector's answer and a replaced tracker at unlimited budgets, and gives no start charge back for an answer or a rebuilt outcome; the pools, charge and allowance fields an inspector writes on an input, an answer or a result are not read, and a restored tracker snapshot leaves the ledger's draws standing; the tests of such inspectors read what the ledger settled.
 - **Detail:** [`AGENTS.md`, "Contracts of the common execution layer"](../../../AGENTS.md#contracts-of-the-common-execution-layer), the entries on inspectors.
 
 ### Node surface, validation and the stateless witness
