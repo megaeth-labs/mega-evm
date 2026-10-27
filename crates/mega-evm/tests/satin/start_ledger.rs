@@ -17,6 +17,7 @@ use mega_evm::{
     test_utils::{
         neutral_cfg, neutralize_evm, record_start_ledger_settlements,
         take_start_ledger_settlements, BytecodeBuilder, ErrorInjectingDatabase, MemoryDatabase,
+        PoolAmounts,
     },
     EthSpecId, EvmTxRuntimeLimits, MegaContext, MegaEvm, WRITE_RECORD_SIZE,
 };
@@ -33,7 +34,6 @@ use revm::{
         interpreter_types::{InputsTr, LoopControl},
         CallInput, CallInputs, CallOutcome, CallScheme, CallValue, CreateInputs, CreateOutcome,
         FrameInput, Gas, InstructionResult, Interpreter, InterpreterAction, InterpreterResult,
-        PoolAmounts,
     },
     primitives::CALL_STACK_LIMIT,
     Database, InspectSystemCallEvm, Inspector,
@@ -523,9 +523,6 @@ impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for StartsItsOwnCa
             is_static: false,
             reservoir: 0,
             charged_new_account_state_gas: false,
-            charged_start: Default::default(),
-            pool_shares: PoolAmounts::UNLIMITED,
-            history_allowance: 0,
         };
         interp.bytecode.set_action(InterpreterAction::NewFrame(FrameInput::Call(Box::new(inputs))));
     }

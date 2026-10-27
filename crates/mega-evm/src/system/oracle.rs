@@ -150,9 +150,6 @@ mod tests {
             scheme: CallScheme::Call,
             is_static: false,
             charged_new_account_state_gas: false,
-            charged_start: Default::default(),
-            pool_shares: revm::interpreter::PoolAmounts::UNLIMITED,
-            history_allowance: 0,
         }
     }
 

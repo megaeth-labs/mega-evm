@@ -321,7 +321,7 @@ fn test_pause_and_resume_gas_metering_hold_the_gas() {
         let settlements = take_start_ledger_settlements(evm.ctx_mut());
         let resumed = crate::common::ledger_settled(&settlements, 3);
         assert_eq!((resumed.depth, resumed.caller.net), (1, [WRITE_RECORD_SIZE as i64, 1, 1]));
-        assert_eq!(resumed.caller.remaining, revm::interpreter::PoolAmounts::UNLIMITED);
+        assert_eq!(resumed.caller.remaining, mega_evm::test_utils::PoolAmounts::UNLIMITED);
         (outcome, evm.inspector().answered)
     };
     assert_eq!(answered, 2);

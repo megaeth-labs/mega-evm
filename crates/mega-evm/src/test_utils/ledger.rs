@@ -4,7 +4,7 @@
 //! The engine keeps a frame's budgets, its start charge and its history allowance on its own start
 //! ledger, not on the frame's gas: a test reads them as the ledger settled each start, once the
 //! transaction ran. An inspector's answer and a result whose gas an inspector replaced settle as
-//! unlimited budgets whatever pools the inspector's gas carries, and a tracker an inspector
+//! unlimited budgets whatever gas the inspector built, and a tracker an inspector
 //! restores from a snapshot leaves the ledger's draws where they were, which is what a test of
 //! such an inspector asserts.
 
@@ -15,7 +15,7 @@ use std::vec::Vec;
 use crate::{ExternalEnvTypes, MegaContext};
 use revm::Database;
 
-pub use crate::limit::{LedgerPools, LedgerSettlement};
+pub use crate::limit::{LedgerPools, LedgerSettlement, PoolAmounts, PoolId};
 
 /// Has `ctx`'s start ledger record every settlement from now on, across transactions, until they
 /// are taken.

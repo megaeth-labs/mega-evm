@@ -182,6 +182,7 @@
 mod ledger;
 #[allow(clippy::module_inception)]
 mod limit;
+mod pool;
 mod record;
 
 pub(crate) use ledger::{reservoir_share, Parked, StartLedger};
@@ -189,6 +190,7 @@ pub(crate) use ledger::{reservoir_share, Parked, StartLedger};
 pub use ledger::{LedgerPools, LedgerSettlement};
 pub use limit::AdditionalLimit;
 pub(crate) use limit::{Counted, TxClass};
+pub use pool::{PoolAmounts, PoolId};
 #[cfg(test)]
 pub(crate) use record::emits_transfer_logs;
 #[cfg(any(test, feature = "test-utils"))]
@@ -202,7 +204,7 @@ pub(crate) use record::{
 
 use alloy_primitives::Bytes;
 use alloy_sol_types::SolError;
-use revm::{context::result::ExecutionResult, interpreter::PoolId};
+use revm::context::result::ExecutionResult;
 
 /// The pool of a frame's start on the start ledger that is the frame's data-size budget: the bytes
 /// the frame may still keep.

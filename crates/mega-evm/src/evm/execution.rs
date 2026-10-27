@@ -1659,13 +1659,17 @@ fn first_frame_records<DB: Database, ExtEnvs: ExternalEnvTypes>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{test_utils::MemoryDatabase, MegaSpecId};
+    use crate::{
+        limit::{PoolAmounts, PoolId},
+        test_utils::MemoryDatabase,
+        MegaSpecId,
+    };
     use alloy_primitives::{address, U256};
     use revm::{
         context_interface::journaled_state::account::JournaledAccountTr,
         interpreter::{
             gas::WithheldCrossing, CallInput, CallInputs, CallValue, CreateInputs, CreateScheme,
-            PoolAmounts, PoolId, SharedMemory,
+            SharedMemory,
         },
     };
     use std::boxed::Box;
@@ -1688,9 +1692,6 @@ mod tests {
             scheme: CallScheme::Call,
             is_static: false,
             charged_new_account_state_gas: true,
-            charged_start: Default::default(),
-            pool_shares: PoolAmounts::UNLIMITED,
-            history_allowance: 0,
         }))
     }
 
@@ -1726,9 +1727,6 @@ mod tests {
                 scheme: CallScheme::StaticCall,
                 is_static: true,
                 charged_new_account_state_gas: false,
-                charged_start: Default::default(),
-                pool_shares: PoolAmounts::UNLIMITED,
-                history_allowance: 0,
             })),
         }
     }
@@ -2095,58 +2093,59 @@ mod tests {
         }
     }
 
-    /// The engine's earlier holding of a child's shares, which ran on the fork's figures: the
-    /// shares revm forwarded on the input, `child`'s, held to `caps` and, for a caller whose net
-    /// is negative, to the share of the caller's budget by `params`, the excess given back to the
-    /// caller's pools, which `caller` holds. The start ledger's [`StartLedger::cap_child`] took its
-    /// place and is held to it.
+    /// A caller's pools as the engine held them on the gas tracker before the start ledger: what
+    /// it may still draw on each, and its net draw on each.
+    struct TrackerPools {
+        remaining: PoolAmounts,
+        net: [i64; PoolId::COUNT],
+    }
+
+    /// `percent` per cent of `amount`, rounded down, without widening, as the gas schedule
+    /// computed a frame's share of a pool when the tracker carried the pools.
+    const fn percent_of(amount: u64, percent: u64) -> u64 {
+        amount / 100 * percent + amount % 100 * percent / 100
+    }
+
+    /// The engine's earlier holding of a child's shares, on the tracker's figures: the shares the
+    /// child was forwarded, `shares`, held to `caps` and, for a caller whose net is negative, to
+    /// the share of the caller's budget, two per cent of it kept, the excess given back to the
+    /// caller's pools. The start ledger's [`StartLedger::cap_child`] took its place and is held to
+    /// it.
     ///
     /// [`StartLedger::cap_child`]: crate::limit::StartLedger
-    fn cap_the_shares(
-        params: &revm::context_interface::cfg::GasParams,
-        caps: PoolAmounts,
-        caller: &mut Gas,
-        child: &mut FrameInit,
-    ) {
-        let FrameInput::Call(inputs) = &mut child.frame_input else { unreachable!() };
+    fn cap_the_shares(caps: PoolAmounts, caller: &mut TrackerPools, shares: &mut PoolAmounts) {
+        let forwarded = 100 - crate::evm::FRAME_KEPT_PERCENT;
         for pool in PoolId::ALL {
-            let share = inputs.pool_shares.get(pool);
+            let share = shares.get(pool);
             let mut allowed = caps.get(pool);
-            let spent = caller.pool_spent(pool);
+            let spent = caller.net[pool.index()];
             if spent < 0 {
-                let had = caller.pool_remaining(pool).saturating_add(share);
+                let had = caller.remaining.get(pool).saturating_add(share);
                 let budget = had.saturating_add_signed(spent);
-                allowed = allowed.min(params.pool_forward_share(pool, budget));
+                allowed = allowed.min(percent_of(budget, forwarded));
             }
             let Some(excess) = share.checked_sub(allowed).filter(|excess| *excess != 0) else {
                 continue;
             };
-            caller.set_pool_remaining(pool, caller.pool_remaining(pool).saturating_add(excess));
-            inputs.pool_shares.set(pool, allowed);
+            caller.remaining.set(pool, caller.remaining.get(pool).saturating_add(excess));
+            shares.set(pool, allowed);
         }
     }
 
-    /// The start ledger holds a child's shares as the engine held them on the fork's figures
-    /// before the ledger decided them ([`cap_the_shares`], on a schedule that keeps 2 per cent of
-    /// each pool from a child, as the Satin schedule did): to the frame cap, and, for a caller
-    /// whose net is negative, to the share of the caller's budget, the excess given back to the
-    /// caller. Each case runs both on the same caller: pools limited, unlimited or empty; a net
-    /// of nothing, positive or negative; and a data-size cap above, at or below the share, or
-    /// none.
+    /// The start ledger holds a child's shares as the engine held them on the gas tracker before
+    /// the ledger decided them ([`cap_the_shares`], with two per cent of each pool kept from a
+    /// child): to the frame cap, and, for a caller whose net is negative, to the share of the
+    /// caller's budget, the excess given back to the caller. Each case runs both on the same
+    /// caller: pools limited, unlimited or empty; a net of nothing, positive or negative; and a
+    /// data-size cap above, at or below the share, or none.
     #[test]
-    fn test_the_start_ledger_holds_a_childs_shares_as_the_engine_held_them_on_the_forks() {
+    fn test_the_start_ledger_holds_a_childs_shares_as_the_engine_held_them_on_the_tracker() {
         use crate::{
             evm::FRAME_KEPT_PERCENT,
             limit::{
                 Counted, Parked, StartLedger, DATA_SIZE_POOL, KV_UPDATE_POOL, STATE_GROWTH_POOL,
             },
-            satin_gas_params,
         };
-        let mut params = satin_gas_params();
-        params.override_gas(
-            [DATA_SIZE_POOL, KV_UPDATE_POOL, STATE_GROWTH_POOL]
-                .map(|pool| (GasId::pool_kept_percent(pool), FRAME_KEPT_PERCENT)),
-        );
         let pools = [
             PoolAmounts::ZERO.with(DATA_SIZE_POOL, 10_000).with(KV_UPDATE_POOL, 250),
             PoolAmounts::UNLIMITED,
@@ -2172,32 +2171,33 @@ mod tests {
                     {
                         continue;
                     }
-                    let mut caller = Gas::new_with_regular_gas_and_reservoir(1_000_000, 0);
-                    caller.tracker_mut().set_pools_remaining(pools);
+                    let mut caller = TrackerPools { remaining: pools, net: [0; PoolId::COUNT] };
                     for pool in PoolId::ALL {
-                        caller.tracker_mut().refill_pool(pool, counted.taken.get(pool));
-                        assert!(caller.tracker_mut().record_pool(pool, counted.added.get(pool)));
+                        let (taken, added) = (counted.taken.get(pool), counted.added.get(pool));
+                        let remaining = caller.remaining.get(pool).saturating_add(taken) - added;
+                        caller.remaining.set(pool, remaining);
+                        caller.net[pool.index()] += added as i64 - taken as i64;
                     }
                     let mut ledger = StartLedger::default();
                     ledger.park_transaction(Some(Parked::transaction(pools, 0)));
                     ledger.split(1, None, 0);
                     ledger.draw(&counted);
 
-                    let shares = caller.tracker_mut().forward_to_child(&params).pools;
+                    let mut shares = PoolAmounts::ZERO;
+                    for pool in PoolId::ALL {
+                        let remaining = caller.remaining.get(pool);
+                        let share = percent_of(remaining, 100 - FRAME_KEPT_PERCENT);
+                        caller.remaining.set(pool, remaining - share);
+                        shares.set(pool, share);
+                    }
                     ledger.park(FRAME_KEPT_PERCENT, 0, 0);
                     ledger.split(2, Some(1), 1);
-                    let mut child = static_call(TARGET, &[], 100_000);
-                    child.depth = 1;
-                    let FrameInput::Call(inputs) = &mut child.frame_input else { unreachable!() };
-                    inputs.pool_shares = shares;
                     let caps = PoolAmounts::UNLIMITED.with(DATA_SIZE_POOL, cap);
-                    cap_the_shares(&params, caps, &mut caller, &mut child);
+                    cap_the_shares(caps, &mut caller, &mut shares);
                     ledger.cap_child(caps, FRAME_KEPT_PERCENT);
 
-                    let FrameInput::Call(inputs) = &child.frame_input else { unreachable!() };
-                    let caller_pools = caller.tracker().pools_remaining();
                     let held = ledger.top_shares_and_caller_pools();
-                    assert_eq!(held, (inputs.pool_shares, caller_pools), "{case}");
+                    assert_eq!(held, (shares, caller.remaining), "{case}");
                 }
             }
         }

@@ -7,10 +7,7 @@ use revm::{
         BlockEnv, CfgEnv, Context, ContextError, ContextSetters, ContextTr, Journal, LocalContext,
         Transaction,
     },
-    context_interface::{
-        cfg::{gas::GasTracker, GasId},
-        context::CodeDeposit,
-    },
+    context_interface::{cfg::GasId, context::CodeDeposit},
     primitives::{Address, Bytes, StorageKey},
     Database,
 };
@@ -734,12 +731,11 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> ContextTr for MegaContext<DB, ExtE
 
     /// Holds the code a creation deposits to the data-size limit, and counts its bytes, on the
     /// creating frame's budget — the start ledger's top entry, the creation's own start, which
-    /// settles only once the creation returns; the creating frame's tracker revm lends is not
-    /// drawn — once `return_create` made every charge for the deposit and before it commits the
-    /// creation. A crossing draws nothing and refuses the deposit with the stop's revert data:
-    /// `return_create` reverts the creation's checkpoint, so the code is not written, puts the
-    /// frame's gas back to what it had before the deposit's charges, and ends the creation as a
-    /// revert carrying the stop.
+    /// settles only once the creation returns — once `return_create` made every charge for the
+    /// deposit and before it commits the creation. A crossing draws nothing and refuses the deposit
+    /// with the stop's revert data: `return_create` reverts the creation's checkpoint, so the
+    /// code is not written, puts the frame's gas back to what it had before the deposit's
+    /// charges, and ends the creation as a revert carrying the stop.
     ///
     /// A creation `return_create` fails itself is never offered: a revert or a halt of the init
     /// code, code it refuses — starting with `0xEF`, or over the code-size limit — and a creation
@@ -751,11 +747,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> ContextTr for MegaContext<DB, ExtE
     /// A keyless deployment's constructor that returns empty code for the deploy address is
     /// refused the same way, with empty revert data ([`keyless::refuses_empty_deposit`]).
     #[inline]
-    fn admit_code_deposit(
-        &mut self,
-        deposit: &CodeDeposit<'_>,
-        _gas: &mut GasTracker,
-    ) -> Result<(), Bytes> {
+    fn admit_code_deposit(&mut self, deposit: &CodeDeposit<'_>) -> Result<(), Bytes> {
         // Destroyed in this transaction: the flag revm keeps for the whole journal may stand from
         // an earlier transaction on it.
         let destroyed = self.accounts().is_destroyed(deposit.address);

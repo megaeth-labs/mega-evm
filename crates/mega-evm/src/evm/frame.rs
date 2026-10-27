@@ -8,11 +8,12 @@
 //! 1. an upfront state-gas charge the calling opcode made for the frame (a new account, a creation)
 //!    is priced for refund when the frame failed;
 //! 2. the frame's gas merges into the caller's: unused regular gas back on success and revert, and
-//!    the frame's reservoir added to what the caller kept;
+//!    the frame's reservoir in place of the caller's;
 //! 3. the refund is refilled into the caller's reservoir;
-//! 4. revm settles the frame's start, and the engine's start ledger merges the frame's budgets into
-//!    its caller's and gives back the start charge — what its caller paid for the records its start
-//!    makes — when it failed, by the result's status, as for a frame revm ran.
+//! 4. revm settles the frame's start: the engine gives the caller back the part of its reservoir it
+//!    kept, and its start ledger merges the frame's budgets into its caller's and gives back the
+//!    start charge — what its caller paid for the records its start makes — when it failed, by the
+//!    result's status, as for a frame revm ran.
 //!
 //! The contract for a synthetic result is that it settles exactly like revm's own: its gas carries
 //! the reservoir the frame inherited ([`untouched_call_gas`], [`untouched_create_gas`]), never
@@ -59,7 +60,6 @@ pub fn synthetic_frame_result(
             address: None,
             charged_create_state_gas: inputs.charged_create_state_gas(),
             charged_state_gas_address: inputs.charged_state_gas_address(),
-            charged_start: Default::default(),
             start_mark: OutcomeMark::NONE,
         }),
         FrameInput::Empty => unreachable!("a frame input always names a call or a creation"),
@@ -81,7 +81,6 @@ pub fn synthetic_call_result(
         precompile_call_logs: Default::default(),
         charged_new_account_state_gas: inputs.charged_new_account_state_gas,
         charged_state_gas_address: inputs.target_address,
-        charged_start: Default::default(),
         start_mark: OutcomeMark::NONE,
     })
 }
@@ -90,7 +89,7 @@ pub fn synthetic_call_result(
 mod tests {
     use super::*;
     use alloy_primitives::{address, Address, U256};
-    use revm::interpreter::{CallInput, CallScheme, CallValue, PoolAmounts};
+    use revm::interpreter::{CallInput, CallScheme, CallValue};
 
     const TARGET: Address = address!("0000000000000000000000000000000000001234");
 
@@ -108,9 +107,6 @@ mod tests {
             is_static: false,
             reservoir,
             charged_new_account_state_gas: charged,
-            charged_start: Default::default(),
-            pool_shares: PoolAmounts::UNLIMITED,
-            history_allowance: 0,
         }
     }
 

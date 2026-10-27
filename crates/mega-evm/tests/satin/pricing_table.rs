@@ -147,8 +147,7 @@ fn render() -> String {
          entries where one of those applies. A frame's share of its caller's reservoir and of \
          its data-size, KV-update and state-growth budgets, 98 per cent of what the caller has \
          left, and the history allowance a value call gives its frame are the engine's, taken \
-         where the frame starts, and are in no entry: Satin keeps Amsterdam's, which take \
-         nothing.\n\n",
+         where the frame starts, and are in no entry.\n\n",
     );
     out.push_str("| Gas id | Osaka | Amsterdam | Satin |\n|---|---:|---:|---:|\n");
     for slot in 0..=u8::MAX {

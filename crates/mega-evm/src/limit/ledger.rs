@@ -10,7 +10,8 @@
 //! ([`settle`](StartLedger::settle)), and a log's history draws the top entry's allowance first
 //! ([`draw_allowance`](StartLedger::draw_allowance)). The part of its EIP-8037 reservoir a caller
 //! keeps is the engine's rule too ([`reservoir_share`]), taken out of the caller's gas where the
-//! start is made; the reservoir itself stays on the gas, which revm settles.
+//! start is made and given back on top of what the child hands back when revm settles the child
+//! (`Host::frame_settle`); the reservoir itself stays on the gas, which revm settles.
 //!
 //! It is driven by the start lifecycle revm owns and by nothing else: an entry opens when revm
 //! opens the start (`Host::frame_split`), settles when revm settles it (`Host::frame_settle`), and
@@ -59,12 +60,9 @@
 use alloc as std;
 use std::vec::Vec;
 
-use revm::context_interface::{
-    cfg::gas::{PoolAmounts, PoolId},
-    host::{FrameSettle, SettleStatus},
-};
+use revm::context_interface::host::{FrameSettle, SettleStatus};
 
-use super::Counted;
+use super::{Counted, PoolAmounts, PoolId};
 
 /// What a start owes, decided where it is made and taken by the split that opens it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

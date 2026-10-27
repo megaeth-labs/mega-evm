@@ -14,8 +14,8 @@
 //!    what its caller has left, Rex6's rule, in place of EIP-150's 63/64
 //!    ([`FORWARD_REDUCTION_QUOTIENT`], the fork's `GasId::call_stipend_reduction`).
 //!
-//! What else a frame start takes from its caller is the engine's, not the schedule's, and the
-//! schedule keeps Amsterdam's entries for it, which take nothing: the share of its caller's pools —
+//! What else a frame start takes from its caller is the engine's, not the schedule's, and is in no
+//! entry of it: the share of its caller's pools —
 //! data size, KV updates, state growth — and of its caller's EIP-8037 reservoir a frame starts
 //! with, all but [`FRAME_KEPT_PERCENT`] of what the caller has left, and the history allowance a
 //! value-transferring call gives the frame, `HISTORY_ALLOWANCE_BYTES` at the cost per history
@@ -159,7 +159,6 @@ mod tests {
             history::HISTORY_ALLOWANCE_BYTES,
             prices::{runs_at_measurement_prices, BytePrice},
         },
-        limit::{DATA_SIZE_POOL, KV_UPDATE_POOL, STATE_GROWTH_POOL},
     };
 
     fn osaka() -> GasParams {
@@ -274,25 +273,11 @@ mod tests {
         }
     }
 
-    /// The schedule takes nothing at a frame start beyond the regular gas it forwards: it keeps
-    /// none of a caller's pools or reservoir from the frame and gives a value call's frame no
-    /// history allowance, as upstream's, so revm forwards every pool and the reservoir whole and
-    /// grants nothing. The engine takes the shares and grants the allowance itself, by
-    /// [`FRAME_KEPT_PERCENT`], 2, and `HISTORY_ALLOWANCE_BYTES`, 160.
+    /// What a frame start takes beyond the regular gas it forwards is the engine's, in no entry of
+    /// the schedule: a child keeps all but [`FRAME_KEPT_PERCENT`], 2, of its caller's reservoir and
+    /// budgets, and a value call's frame gets `HISTORY_ALLOWANCE_BYTES`, 160, of history.
     #[test]
-    fn test_the_schedule_leaves_a_starts_shares_and_allowance_to_the_engine() {
-        let satin = satin_gas_params();
-        for id in [DATA_SIZE_POOL, KV_UPDATE_POOL, STATE_GROWTH_POOL] {
-            assert_eq!(satin.get(GasId::pool_kept_percent(id)), 0);
-            for pool in [0, 1, 49, 50, 99, 9_690, u64::MAX] {
-                assert_eq!(satin.pool_forward_share(id, pool), pool, "{pool}: the whole pool");
-            }
-        }
-        assert_eq!(satin.get(GasId::reservoir_kept_percent()), 0);
-        for reservoir in [0, 1, 49, 50, 99, 1_000, u64::MAX] {
-            assert_eq!(satin.reservoir_forward_share(reservoir), reservoir, "{reservoir}");
-        }
-        assert_eq!(satin.get(GasId::call_history_allowance()), 0);
+    fn test_a_starts_shares_and_allowance_are_the_engines() {
         assert_eq!(FRAME_KEPT_PERCENT, 2);
         assert_eq!(HISTORY_ALLOWANCE_BYTES, 160);
     }
