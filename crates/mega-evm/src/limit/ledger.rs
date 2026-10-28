@@ -167,12 +167,8 @@ impl Pools {
 }
 
 /// `amount` as a signed net, saturating.
-const fn signed(amount: u64) -> i64 {
-    if amount > i64::MAX as u64 {
-        i64::MAX
-    } else {
-        amount as i64
-    }
+fn signed(amount: u64) -> i64 {
+    i64::try_from(amount).unwrap_or(i64::MAX)
 }
 
 /// `kept` per cent of `amount`, rounded down: the part of its reservoir a caller keeps when it
@@ -459,16 +455,15 @@ impl StartLedger {
         for pool in PoolId::ALL {
             let (index, share) = (pool.index(), entry.shares.get(pool));
             let ProviderDraw { net: drawn, past_a_share } = draws[index];
-            if past_a_share || (drawn > 0 && drawn as u64 > share) {
-                entry.pools.remaining.set(pool, 0);
-                entry.pools.net[index] = signed(share);
+            // A draw past the share is held to it: the whole share drawn, nothing left.
+            let (remaining, net) = if past_a_share {
+                (0, signed(share))
             } else {
-                entry
-                    .pools
-                    .remaining
-                    .set(pool, share.saturating_add_signed(drawn.saturating_neg()));
-                entry.pools.net[index] = drawn;
-            }
+                let net = drawn.min(signed(share));
+                (share.saturating_add_signed(net.saturating_neg()), net)
+            };
+            entry.pools.remaining.set(pool, remaining);
+            entry.pools.net[index] = net;
         }
     }
 
@@ -796,6 +791,53 @@ mod tests {
         let unlimited = u64::MAX;
         assert_eq!(adopted(unlimited, 7, false), (unlimited - 7, 7), "an unlimited share");
         assert_eq!(adopted(unlimited, i64::MAX, true), (0, i64::MAX), "marked past a share");
+    }
+
+    /// A caller's net decides whether its child's share is held to the share of the caller's
+    /// budget: one whose net is back at zero — it took back a draw before the start and drew it
+    /// again after — holds the child to the frame cap alone, though the share the child took was
+    /// counted on more than the caller's budget now holds; one whose net is below zero holds it to
+    /// the share of that budget, the excess going back to the caller.
+    #[test]
+    fn test_only_a_callers_negative_net_holds_its_childs_share_to_its_budget() {
+        let pools = PoolAmounts::ZERO.with(DATA_SIZE_POOL, 1_000);
+        let taken_back = Counted {
+            added: PoolAmounts::ZERO,
+            taken: PoolAmounts::ZERO.with(DATA_SIZE_POOL, 10),
+            transfer_log: false,
+        };
+        // Drawn again, the net is zero and the child keeps its 989; not drawn again, the net is
+        // -10, the caller's budget 21 + 989 - 10 = 1,000, of which the child may have 980, and the
+        // 9 past it go back to the caller.
+        for (drawn_again, held) in [(10, (989, 11)), (0, (980, 30))] {
+            let mut ledger = opened(pools);
+            ledger.draw(&taken_back);
+            // 1,010 left: the child's share is 98 per cent of it, rounded down, 989.
+            ledger.park(KEPT, 0, 0);
+            ledger.draw(&Counted::bytes(drawn_again));
+            ledger.split(2, Some(1), 1);
+            ledger.cap_child(PoolAmounts::UNLIMITED, KEPT);
+            let (shares, caller) = ledger.top_shares_and_caller_pools();
+            assert_eq!(
+                (shares.get(DATA_SIZE_POOL), caller.get(DATA_SIZE_POOL)),
+                held,
+                "drawn again {drawn_again}"
+            );
+        }
+    }
+
+    /// An answer rebuilt on the gas its caller forwarded puts the start back at its shares,
+    /// undrawn, whatever was drawn on it before.
+    #[test]
+    fn test_a_rebuilt_answer_puts_its_start_back_at_its_shares() {
+        let mut ledger = opened(POOLS);
+        ledger.park(KEPT, 0, 0);
+        ledger.split(2, Some(1), 1);
+        let shares = ledger.entries[1].shares;
+        ledger.draw(&Counted::bytes(100));
+        assert_ne!(top(&ledger).remaining, shares, "drawn");
+        ledger.rebuild_on_shares();
+        assert_eq!(top(&ledger), Pools::of(shares));
     }
 
     /// A log's history draws the allowance first and pays the rest; with no start open it pays all.
