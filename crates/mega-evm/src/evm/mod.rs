@@ -60,7 +60,7 @@ use alloy_evm::{
     Database,
 };
 use revm::{
-    context::{BlockEnv, CfgEnv, ContextTr},
+    context::{BlockEnv, CfgEnv, ContextTr, JournalTr, LocalContextTr},
     handler::{EthFrame, EvmTr},
     inspector::NoOpInspector,
     interpreter::interpreter::EthInterpreter,
@@ -86,6 +86,26 @@ use crate::{BucketId, ExternalEnvTypes, LimitUsage, MegaTransaction};
 ///
 /// The EVM uses delegation to efficiently wrap the underlying Optimism EVM while providing
 /// `MegaETH`-specific customizations through the configured context, instructions, and precompiles.
+///
+/// # Execution entry points and the journal
+///
+/// A call that fails with an error leaves none of its writes behind, whichever entry point ran
+/// it: the handler reverts them, including a transaction's nonce bump and fee and the writes of
+/// frames that completed before the error. Every entry point that finalizes the journal on
+/// success ([`execute_transaction`](Self::execute_transaction), `transact`, `replay`, `inspect_tx`,
+/// `inspect`, the `_commit` variants and the system calls that return state) finalizes it on an
+/// error too, so the next call starts from an empty journal. The `_one` entry points leave the
+/// journal to the caller on both outcomes, so earlier calls it holds survive a failed one.
+///
+/// One write is outside the journal: before `REX5`, a keyless deployment merges its sandbox state
+/// straight into the journal's state map, which keeps an outer revert from undoing it on those
+/// frozen specs. A failed call cannot revert that merge either. The finalizing entry points drop
+/// it with the rest of the journal, but a `_one` caller keeps it until it finalizes.
+///
+/// This holds for the methods of the traits `MegaEvm` implements. The traits it does not
+/// implement, such as `SystemCallCommitEvm` and `InspectSystemCallEvm`, are reachable through
+/// [`Deref`](core::ops::Deref) on the inner revm `Evm`, but they run revm's handler rather than
+/// `MegaETH`'s and are not entry points of this EVM.
 #[allow(missing_debug_implementations)]
 #[allow(clippy::type_complexity)]
 pub struct MegaEvm<DB: Database, INSP, ExtEnvTypes: ExternalEnvTypes> {
@@ -369,6 +389,54 @@ where
             compute_gas_used: compute_gas,
             state_growth_used: state_growth,
         })
+    }
+
+    /// Clears the entire journal and transaction execution context after a caught panic.
+    ///
+    /// Use this before reusing the EVM when a panic unwinds out of
+    /// [`MegaEvm::execute_transaction`]. A panic skips the normal cleanup and leaves state writes,
+    /// loaded accounts, logs, shared memory, cached L1 cost, frames and `MegaETH` resource
+    /// trackers behind. The inherited compute gas cap is restored to the value left by the last
+    /// completed run, including a run that returned an error.
+    ///
+    /// This resets the whole journal, as [`ExecuteEvm::finalize`] does. Earlier transactions
+    /// accumulated through [`ExecuteEvm::transact_one`] or [`ExecuteEvm::transact_many`] without
+    /// finalizing are discarded too. To preserve earlier transactions, execute them through
+    /// `execute_transaction` and commit their returned state before starting the next one.
+    ///
+    /// A call that returns an error needs no discard: it leaves none of its writes behind, and
+    /// the entry points that finalize the journal also finalize it on an error (see [`MegaEvm`]).
+    /// Calling this after such an error still resets the whole journal, which only matters to a
+    /// caller of the `_one` entry points. Calling it twice has the same effect as calling it
+    /// once.
+    ///
+    /// The inspector and the database, including its caches and previously committed state, are
+    /// untouched. So is the SALT bucket-multiplier cache: it keeps the panicked transaction's
+    /// bucket lookups as it keeps those of a transaction that ran but was not committed, which
+    /// changes no result because the multipliers are fixed for the block, and the accessed
+    /// bucket ids it reports include them. Oracle hints already delivered to the oracle
+    /// environment cannot be recalled. A panic during database commit is outside this method's
+    /// recovery contract.
+    pub fn discard_tx(&mut self) {
+        let ctx = &mut self.inner.ctx;
+        // `finalize` is the whole journal reset `transact` ends every transaction with: it takes
+        // the state map (dropped here, writes and loaded accounts alike), clears the entries, logs,
+        // transient storage and warm sets, and restarts the transaction id. Reverting the entries
+        // first, as revm's own `catch_error` does, would only change a map that is dropped anyway.
+        let _discarded = ctx.journal_mut().finalize();
+        // The L1 cost cached for the panicked transaction would be charged to the next one.
+        ctx.chain_mut().clear_tx_l1_cost();
+        // The shared memory buffer still holds the panicked transaction's expansion, which the
+        // next transaction's first frame would start from.
+        ctx.local_mut().clear();
+        // A database error stashed by a load and never taken by the handler would fail the next
+        // transaction.
+        *ctx.error() = Ok(());
+        ctx.discard_tx();
+        // The stack cursor decides whether a frame init is the transaction's first frame; left on
+        // the panicked transaction's frame, it would make the next transaction's first frame a
+        // child frame.
+        self.inner.frame_stack.clear();
     }
 
     /// Inspect a transaction and return the outcome. The inspector used is the one set up already
