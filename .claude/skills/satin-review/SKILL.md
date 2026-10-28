@@ -32,7 +32,7 @@ The guide describes the code at `cz/feat/satin-w2` with #407 merged into it and 
   Satin is a new spec: simpler semantics win over parity with the legacy engine.
 - Out of scope: the legacy engine (`main`, frozen), which runs every block before Satin activates.
   Satin never executes or decodes legacy-era data, so "Satin cannot handle legacy data" is not a defect, and code kept only for that purpose is dead code.
-- Fork code: the `megaeth-labs/revm` fork at `426217bb2e76c0a41d46907eb788250e8efa107c` and the `megaeth-labs/op-revm` fork at `3d43e32029fc5cd293ab70eb0929d70e37337966`, which the patch blocks pin by `rev`, are pinned dependencies with their own review: megaeth-labs/revm#76, stacked on megaeth-labs/revm#75, and megaeth-labs/op-revm#8.
+- Fork code: the `megaeth-labs/revm` fork at `4c8f0d43b70f2175f9ce0132cc343283f9a29548` and the `megaeth-labs/op-revm` fork at `8c0db939291e1c4cbf2375782d1483bc371d6b94`, which the patch blocks pin by `rev`, are pinned dependencies with their own review: megaeth-labs/revm#76, stacked on megaeth-labs/revm#75, and megaeth-labs/op-revm#8.
   Their diff is not part of this pull request.
   A finding about a fork function is about how mega-evm uses it, unless it shows the fork breaking its own documented default behaviour.
   The fork functions the engine relies on are listed in [`AGENTS.md`, "Dependencies on the forks"](../../../AGENTS.md#dependencies-on-the-forks).
@@ -372,7 +372,7 @@ For each module: where it is, what to check, the spec sections, and the `AGENTS.
   - A start an inspector rewrites after its opcode is not charged again: what the opcode charged stands, its declared part coming back only as for any start whose frame keeps nothing (a frame that fails, or a start revm refuses before it bumps a nonce or moves a value), and its records are those revm then made.
   - A pre-block system call runs on the plain system-call path, with no callback.
   - `test_utils::ReadOnlyObserver` checks, in debug builds, that an inspector a test declares an observer writes nothing back: a tripwire for tests, not a proof.
-  - The start ledger settles an inspector's answer and a replaced tracker at unlimited budgets, and gives no start charge back for an answer or a rebuilt outcome; the pools, charge and allowance fields an inspector writes on an input, an answer or a result are not read, a restored tracker snapshot leaves the ledger's draws standing, and a replaced interpreter leaves the frame its allowance; the tests of such inspectors read what the ledger settled.
+  - The start ledger settles an inspector's answer and a replaced tracker at unlimited budgets, and gives no start charge back for an answer or a rebuilt outcome; an inspector has no budget, start-charge or allowance field to write on an input, an answer or a result, since the engine keeps all three on its ledger, a restored tracker snapshot leaves the ledger's draws standing, and a replaced interpreter leaves the frame its allowance; the tests of such inspectors read what the ledger settled.
 - **Detail:** [`AGENTS.md`, "Contracts of the common execution layer"](../../../AGENTS.md#contracts-of-the-common-execution-layer), the entries on inspectors.
 
 ### Node surface, validation and the stateless witness
