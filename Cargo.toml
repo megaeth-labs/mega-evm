@@ -201,11 +201,18 @@ wiremock = { version = "0.6", default-features = false }
 debug = "full"
 split-debuginfo = "unpacked"
 
-# Speed up tests.
+# Speed up tests. The signature, hashing and JSON crates dominate the mainnet replay corpus
+# test (`bin/mega-evme/tests/replay_corpus.rs`) in an unoptimized build: recovering the senders
+# of its 21,153-transaction block alone takes over a minute without them.
 [profile.dev.package]
+k256.opt-level = 3
+keccak.opt-level = 3
+memchr.opt-level = 3
 proptest.opt-level = 3
 rand_chacha.opt-level = 3
 rand_xorshift.opt-level = 3
+serde_json.opt-level = 3
+sha2.opt-level = 3
 unarray.opt-level = 3
 
 # Meant for testing - all optimizations, but with debug assertions and overflow checks.
