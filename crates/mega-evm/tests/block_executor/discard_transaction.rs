@@ -14,7 +14,6 @@
 //! the `catch_unwind` harness have no place in the other executor tests.
 
 use std::{
-    backtrace::Backtrace,
     convert::Infallible,
     panic::{catch_unwind, AssertUnwindSafe},
 };
@@ -110,16 +109,19 @@ const CALL_RETURN_MSIZE: Address = address!("10000000000000000000000000000000000
 struct PanickingDatabase {
     inner: ErrorInjectingDatabase,
     panic_on_account: Address,
-    /// The call stack of the last injected panic, for the tests that check where it landed.
-    last_panic_backtrace: Option<String>,
+    /// Account reads since the current panic attempt began, including failed reads.
+    account_reads: Vec<Address>,
+    /// The read sequence through the injected panic, independent of symbols and inlining.
+    last_panic_account_reads: Option<Vec<Address>>,
 }
 
 impl Database for PanickingDatabase {
     type Error = InjectedDbError;
 
     fn basic(&mut self, address: Address) -> Result<Option<AccountInfo>, InjectedDbError> {
+        self.account_reads.push(address);
         if address == self.panic_on_account {
-            self.last_panic_backtrace = Some(Backtrace::force_capture().to_string());
+            self.last_panic_account_reads = Some(std::mem::take(&mut self.account_reads));
             panic!("injected panic reading account {address}");
         }
         self.inner.basic(address)
@@ -254,7 +256,8 @@ fn database() -> PanickingDatabase {
     PanickingDatabase {
         inner: ErrorInjectingDatabase::new(db),
         panic_on_account: PANICKING_ACCOUNT,
-        last_panic_backtrace: None,
+        account_reads: Vec::new(),
+        last_panic_account_reads: None,
     }
 }
 
@@ -358,6 +361,9 @@ fn deposit_tx(from: Address, to: Address, value: U256, input: Bytes) -> Recovere
 /// Executes `tx` on `executor`, asserting that the injected database panic unwinds out of the
 /// executor.
 fn execute_panicking(executor: &mut Executor<'_>, tx: &Recovered<MegaTxEnvelope>) {
+    let database = &mut executor.evm.db_mut().database;
+    database.account_reads.clear();
+    database.last_panic_account_reads = None;
     let unwound = catch_unwind(AssertUnwindSafe(|| executor.execute_mega_transaction(tx)));
     assert!(unwound.is_err(), "the injected database panic must unwind out of execution");
 }
@@ -523,10 +529,16 @@ fn test_discard_transaction_clears_a_stashed_context_error() {
         let database = &mut executor.evm.db_mut().database;
         database.inner.fail_on_account = None;
         database.panic_on_account = PANICKING_ACCOUNT;
-        let backtrace = database.last_panic_backtrace.take().expect("the panic captured its stack");
-        assert!(
-            backtrace.contains("reward_beneficiary"),
-            "the panic landed elsewhere:\n{backtrace}"
+        // This contract never reads the beneficiary: that read follows its in-frame DB error
+        // only when post-execution starts rewarding the beneficiary.
+        let reads = database
+            .last_panic_account_reads
+            .take()
+            .expect("the injected panic recorded its account reads");
+        assert_eq!(
+            reads,
+            [PANICKING_SENDER, READ_TIMESTAMP_THEN_FAIL, FAILING_ACCOUNT, BENEFICIARY],
+            "the panic must land in the beneficiary reward after the in-frame error"
         );
         assert!(executor.evm.ctx.error().is_err(), "premise: the in-frame error is still stashed");
 
@@ -723,27 +735,18 @@ impl PanicSite {
         }
     }
 
-    /// Whether the call stack of the injected panic is the one this site stands for. It matches
-    /// function names in the captured backtrace, so it relies on the debug test profile keeping
-    /// symbols and not inlining these functions, and on their names: renaming one of them fails
-    /// the sweep here.
-    fn landed_as_intended(self, spec: MegaSpecId, backtrace: &str) -> bool {
+    /// Expected reads through the panic on a cold database, independently of the injection.
+    /// Combined with `precedes_on_new_tx`, this distinguishes the depositor pre-read from the
+    /// caller load and the system caller's pre-REX5 load from its REX5+ pre-run inspection.
+    fn expected_account_reads(self) -> &'static [Address] {
         match self {
-            Self::DepositorPreRead => {
-                backtrace.contains("run_transaction_with_sizes") &&
-                    !backtrace.contains("MegaHandler")
+            Self::DepositorPreRead | Self::CallerLoad => &[PANICKING_ACCOUNT],
+            Self::SystemTxPreRun => &[MEGA_SYSTEM_ADDRESS],
+            Self::TargetLoad => &[PANICKING_SENDER, PANICKING_ACCOUNT],
+            Self::MidExecution => {
+                &[PANICKING_SENDER, RESIDUE_THEN_PANIC, BENEFICIARY, PANICKING_ACCOUNT]
             }
-            Self::SystemTxPreRun if spec.is_enabled(MegaSpecId::REX5) => {
-                backtrace.contains("before_run")
-            }
-            Self::SystemTxPreRun | Self::CallerLoad => {
-                backtrace.contains("validate_against_state_and_deduct_caller")
-            }
-            Self::TargetLoad => {
-                backtrace.contains("frame_init") && !backtrace.contains("frame_run")
-            }
-            Self::MidExecution => backtrace.contains("frame_run"),
-            Self::BeneficiaryReward => backtrace.contains("reward_beneficiary"),
+            Self::BeneficiaryReward => &[PANICKING_SENDER, RETURN_MSIZE, BENEFICIARY],
         }
     }
 }
@@ -865,22 +868,30 @@ fn test_discard_transaction_is_right_for_every_panic_site_and_preceding_outcome(
                     continue;
                 }
                 rows += 1;
+                // Reads satisfied by the preceding transaction's state cache never reach the
+                // database. Freeze that cache projection before running the panicking tx.
+                let expected_reads: Vec<_> = site
+                    .expected_account_reads()
+                    .iter()
+                    .copied()
+                    .filter(|address| !executor.evm.db_mut().cache.accounts.contains_key(address))
+                    .collect();
                 executor.evm.db_mut().database.panic_on_account = panic_on;
                 execute_panicking(&mut executor, &tx);
                 executor.evm.db_mut().database.panic_on_account = PANICKING_ACCOUNT;
 
-                // The injection landed where the row says it does: the call stack of the panic
-                // names the stage, and the trackers show whether `on_new_tx` ran.
-                let backtrace = executor
+                // The read sequence pins the stage; the trackers distinguish reads that can
+                // happen on either side of `on_new_tx`.
+                let reads = executor
                     .evm
                     .db_mut()
                     .database
-                    .last_panic_backtrace
+                    .last_panic_account_reads
                     .take()
-                    .expect("the injected panic captured its call stack");
-                assert!(
-                    site.landed_as_intended(spec, &backtrace),
-                    "{row}: the panic landed elsewhere:\n{backtrace}"
+                    .expect("the injected panic recorded its account reads");
+                assert_eq!(
+                    reads, expected_reads,
+                    "{row}: the panic landed at a different account-read stage"
                 );
                 let usage_after = usage(&executor);
                 assert_eq!(
