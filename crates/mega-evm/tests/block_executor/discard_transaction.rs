@@ -14,12 +14,11 @@
 //! the `catch_unwind` harness have no place in the other executor tests.
 
 use std::{
-    backtrace::Backtrace,
     convert::Infallible,
     panic::{catch_unwind, AssertUnwindSafe},
 };
 
-use alloy_consensus::{transaction::Recovered, Sealed, Signed, TxLegacy};
+use alloy_consensus::{transaction::Recovered, Sealed, Signed, Transaction as _, TxLegacy};
 use alloy_evm::{EvmEnv, EvmFactory, IntoTxEnv};
 use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
 use alloy_primitives::{address, Address, Bytes, Signature, TxKind, B256, U256};
@@ -110,18 +109,18 @@ const CALL_RETURN_MSIZE: Address = address!("10000000000000000000000000000000000
 struct PanickingDatabase {
     inner: ErrorInjectingDatabase,
     panic_on_account: Address,
-    /// The call stack of the last injected panic, for the tests that check where it landed.
-    last_panic_backtrace: Option<String>,
+}
+
+/// The message of the panic the database injects on reading `address`.
+fn injected_panic_message(address: Address) -> String {
+    format!("injected panic reading account {address}")
 }
 
 impl Database for PanickingDatabase {
     type Error = InjectedDbError;
 
     fn basic(&mut self, address: Address) -> Result<Option<AccountInfo>, InjectedDbError> {
-        if address == self.panic_on_account {
-            self.last_panic_backtrace = Some(Backtrace::force_capture().to_string());
-            panic!("injected panic reading account {address}");
-        }
+        assert!(address != self.panic_on_account, "{}", injected_panic_message(address));
         self.inner.basic(address)
     }
 
@@ -254,7 +253,6 @@ fn database() -> PanickingDatabase {
     PanickingDatabase {
         inner: ErrorInjectingDatabase::new(db),
         panic_on_account: PANICKING_ACCOUNT,
-        last_panic_backtrace: None,
     }
 }
 
@@ -356,10 +354,69 @@ fn deposit_tx(from: Address, to: Address, value: U256, input: Bytes) -> Recovere
 }
 
 /// Executes `tx` on `executor`, asserting that the injected database panic unwinds out of the
-/// executor.
+/// executor. Another panic, such as a handler's debug assertion, fails with its own message.
 fn execute_panicking(executor: &mut Executor<'_>, tx: &Recovered<MegaTxEnvelope>) {
-    let unwound = catch_unwind(AssertUnwindSafe(|| executor.execute_mega_transaction(tx)));
-    assert!(unwound.is_err(), "the injected database panic must unwind out of execution");
+    let injected = injected_panic_message(executor.evm.db_mut().database.panic_on_account);
+    let Err(payload) = catch_unwind(AssertUnwindSafe(|| executor.execute_mega_transaction(tx)))
+    else {
+        panic!("the injected database panic must unwind out of execution");
+    };
+    let message = payload
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| payload.downcast_ref::<&str>().copied())
+        .unwrap_or("<a panic payload that is not a string>");
+    assert_eq!(message, injected, "execution unwound with a panic other than the injected one");
+}
+
+/// How far `execute_mega_transaction` got with a transaction when it unwound, read from the state
+/// the unwind left in the executor. For these fixtures the marks tell the sites of `PanicSite`
+/// apart, in every build profile and whatever accounts were read on the way. They do not prove
+/// the handler stage in general: the site docs name the moves that leave a site's marks unchanged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Progress {
+    /// The block executor handed the transaction to the EVM: it is the context's transaction.
+    handed_over: bool,
+    /// The handler's `on_new_tx` ran: its tracker reset and data-size charge changed the data-size
+    /// usage (see `panicking_input`).
+    started: bool,
+    /// Pre-execution charged the caller: the journal holds it with its nonce bumped.
+    caller_charged: bool,
+    /// Pre-execution warmed the accounts it warms up front: the coinbase is warm (EIP-3651).
+    accounts_warmed: bool,
+    /// A frame's checkpoint is open: the journal depth is above zero. This holds from the first
+    /// frame's checkpoint on, before its interpreter runs any instruction.
+    in_frame: bool,
+    /// The journal holds the call target and no checkpoint is open. The first frame loads its
+    /// target before it takes its checkpoint, so this holds from that load on, not only once the
+    /// frames returned.
+    target_loaded_outside_checkpoint: bool,
+}
+
+impl Progress {
+    /// Reads the progress of `tx` after it unwound out of `executor`, given the usage the
+    /// executor reported before `tx` ran.
+    fn observe(
+        executor: &Executor<'_>,
+        tx: &Recovered<MegaTxEnvelope>,
+        usage_before: LimitUsage,
+    ) -> Self {
+        let ctx = &executor.evm.ctx;
+        let journal = ctx.journal_ref();
+        let target = tx.to().expect("every panicking transaction is a call");
+        let closed = journal.depth == 0;
+        Self {
+            handed_over: ctx.tx().base.caller == tx.signer() && ctx.tx().base.data == *tx.input(),
+            started: usage(executor).data_size != usage_before.data_size,
+            caller_charged: journal
+                .state
+                .get(&tx.signer())
+                .is_some_and(|caller| caller.info.nonce == tx.nonce() + 1),
+            accounts_warmed: journal.warm_addresses.is_warm(&ctx.block().beneficiary),
+            in_frame: !closed,
+            target_loaded_outside_checkpoint: closed && journal.state.contains_key(&target),
+        }
+    }
 }
 
 /// Executes `tx` as the first transaction of a fresh executor: what the same transaction must
@@ -469,8 +526,9 @@ fn test_discard_transaction_drops_the_panicked_transactions_state() {
 /// A panic inside a CALL-family body leaves the host's target-resolution scope open. The discard
 /// closes it, so the next transaction's own CALL opens a fresh scope and executes as on a fresh
 /// executor. From REX6 the open scope changes nothing the outcome shows, so this pins the scope
-/// through the handlers' debug assertion that scopes do not nest; the REX5 test below pins the
-/// observable effect.
+/// through the handlers' debug assertion that scopes do not nest, and runs in debug builds only;
+/// the REX5 test below pins the observable effect in every profile.
+#[cfg(debug_assertions)]
 #[test]
 fn test_discard_transaction_closes_the_call_target_resolution_scope() {
     let mut state = State::builder().with_database(database()).build();
@@ -515,6 +573,7 @@ fn test_discard_transaction_clears_a_stashed_context_error() {
         let mut state = State::builder().with_database(database()).build();
         let mut executor = new_executor(&mut state, MegaSpecId::REX6);
 
+        let usage_before = usage(&executor);
         let database = &mut executor.evm.db_mut().database;
         database.inner.fail_on_account = Some(FAILING_ACCOUNT);
         database.panic_on_account = BENEFICIARY;
@@ -523,10 +582,13 @@ fn test_discard_transaction_clears_a_stashed_context_error() {
         let database = &mut executor.evm.db_mut().database;
         database.inner.fail_on_account = None;
         database.panic_on_account = PANICKING_ACCOUNT;
-        let backtrace = database.last_panic_backtrace.take().expect("the panic captured its stack");
-        assert!(
-            backtrace.contains("reward_beneficiary"),
-            "the panic landed elsewhere:\n{backtrace}"
+        // This contract never reads the beneficiary, so the panic lands in the reward that follows
+        // its frame: the marks place it outside any checkpoint with the target loaded, and the
+        // in-frame error the premise below finds stashed shows that the frame ran.
+        assert_eq!(
+            Progress::observe(&executor, &tx, usage_before),
+            PanicSite::BeneficiaryReward.progress(MegaSpecId::REX6),
+            "the panic must land in the beneficiary reward after the in-frame error"
         );
         assert!(executor.evm.ctx.error().is_err(), "premise: the in-frame error is still stashed");
 
@@ -668,13 +730,20 @@ enum PanicSite {
     /// `on_new_tx` from REX5 on; before REX5 the system address is first read by the caller load
     /// in pre-execution.
     SystemTxPreRun,
-    /// The caller load in pre-execution, after `on_new_tx` and before any frame.
+    /// The caller load in pre-execution, after `on_new_tx` and before any frame. Its marks are
+    /// also those of a caller read moved earlier, into `validate`.
     CallerLoad,
-    /// The load of the call target when the first frame is built.
+    /// The load of the call target when the first frame is built. Nothing public marks a frame
+    /// build that has not read its target yet, so this site's marks are also those of a target
+    /// read moved to the end of pre-execution, after the accounts are warmed.
     TargetLoad,
-    /// A BALANCE read inside the contract, with a frame open.
+    /// A BALANCE read inside the contract, with a frame open. The marks alone are also those of a
+    /// read moved to after the first frame's checkpoint and before its first instruction; the
+    /// matrix also requires the contract's earlier beneficiary read, which rules that move out.
     MidExecution,
-    /// The beneficiary load in the post-execution reward, after the frames returned.
+    /// The beneficiary load in the post-execution reward, after the frames returned. Its marks are
+    /// also those of a read moved to after the first frame's target load and before its
+    /// checkpoint.
     BeneficiaryReward,
 }
 
@@ -723,27 +792,19 @@ impl PanicSite {
         }
     }
 
-    /// Whether the call stack of the injected panic is the one this site stands for. It matches
-    /// function names in the captured backtrace, so it relies on the debug test profile keeping
-    /// symbols and not inlining these functions, and on their names: renaming one of them fails
-    /// the sweep here.
-    fn landed_as_intended(self, spec: MegaSpecId, backtrace: &str) -> bool {
-        match self {
-            Self::DepositorPreRead => {
-                backtrace.contains("run_transaction_with_sizes") &&
-                    !backtrace.contains("MegaHandler")
-            }
-            Self::SystemTxPreRun if spec.is_enabled(MegaSpecId::REX5) => {
-                backtrace.contains("before_run")
-            }
-            Self::SystemTxPreRun | Self::CallerLoad => {
-                backtrace.contains("validate_against_state_and_deduct_caller")
-            }
-            Self::TargetLoad => {
-                backtrace.contains("frame_init") && !backtrace.contains("frame_run")
-            }
-            Self::MidExecution => backtrace.contains("frame_run"),
-            Self::BeneficiaryReward => backtrace.contains("reward_beneficiary"),
+    /// The progress the run has made when the panic lands at this site. The marks differ between
+    /// the sites, except that before REX5 the system transaction's site is a caller load and has
+    /// the caller load's marks.
+    fn progress(self, spec: MegaSpecId) -> Progress {
+        let pre_executed =
+            matches!(self, Self::TargetLoad | Self::MidExecution | Self::BeneficiaryReward);
+        Progress {
+            handed_over: !matches!(self, Self::DepositorPreRead),
+            started: !self.precedes_on_new_tx(spec),
+            caller_charged: pre_executed,
+            accounts_warmed: pre_executed,
+            in_frame: matches!(self, Self::MidExecution),
+            target_loaded_outside_checkpoint: matches!(self, Self::BeneficiaryReward),
         }
     }
 }
@@ -825,8 +886,9 @@ impl Preceding {
 /// The discard is right wherever the panic lands and whatever the preceding transaction did:
 /// afterwards the probe transaction behaves exactly as on an executor with the same history and no
 /// panicked transaction, and the detained cap is the one that history left. The rows are
-/// (spec) × (what preceded) × (panic site). Each row also checks that the injected panic landed at
-/// the intended stage, so a site that silently moved fails instead of passing vacuously. The
+/// (spec) × (what preceded) × (panic site). Each row also checks the state the panic left against
+/// the site's marks, so a site that moved to another site's stage fails instead of passing
+/// vacuously; the site docs name the moves the marks do not catch. The
 /// beneficiary-reward site is unreachable once a preceding transaction has put the beneficiary in
 /// the state cache; those rows are skipped, and the skip set is asserted.
 #[test]
@@ -869,25 +931,28 @@ fn test_discard_transaction_is_right_for_every_panic_site_and_preceding_outcome(
                 execute_panicking(&mut executor, &tx);
                 executor.evm.db_mut().database.panic_on_account = PANICKING_ACCOUNT;
 
-                // The injection landed where the row says it does: the call stack of the panic
-                // names the stage, and the trackers show whether `on_new_tx` ran.
-                let backtrace = executor
-                    .evm
-                    .db_mut()
-                    .database
-                    .last_panic_backtrace
-                    .take()
-                    .expect("the injected panic captured its call stack");
-                assert!(
-                    site.landed_as_intended(spec, &backtrace),
-                    "{row}: the panic landed elsewhere:\n{backtrace}"
-                );
-                let usage_after = usage(&executor);
+                // The state the panic left carries the site's marks, whether `on_new_tx` ran
+                // among them.
                 assert_eq!(
-                    usage_after.data_size == usage_before.data_size,
-                    site.precedes_on_new_tx(spec),
-                    "{row}: the panic did not land on the intended side of on_new_tx"
+                    Progress::observe(&executor, &tx, usage_before),
+                    site.progress(spec),
+                    "{row}: the panic landed at a different stage"
                 );
+                if matches!(site, PanicSite::MidExecution) {
+                    // The contract read the beneficiary's balance before the panicking account's:
+                    // that is residue the discard must clear. `on_new_tx`, which ran, reset the
+                    // tracker, so the access is this transaction's; unlike the database read, it
+                    // is recorded when the beneficiary is already in the state cache.
+                    assert!(
+                        executor
+                            .evm
+                            .ctx
+                            .volatile_data_tracker
+                            .borrow()
+                            .has_accessed_beneficiary_balance(),
+                        "{row}: the panic landed before the contract read the beneficiary"
+                    );
+                }
 
                 executor.discard_transaction();
                 assert_eq!(detained_cap(&executor), cap_before, "{row}: the cap after the discard");
