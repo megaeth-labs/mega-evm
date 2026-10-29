@@ -443,6 +443,39 @@ fn test_a_chain_filled_from_ethereum_passes() {
         .all(|p| !p.contains("executed")));
 }
 
+#[test]
+fn test_oversized_fixture_fails_before_parsing() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("oversized.json");
+    std::fs::File::create(&path).unwrap().set_len(256 * 1024 * 1024 + 1).unwrap();
+    let failure = state_test::blockchain::run_file(&path, config(&[])).unwrap_err();
+    assert_eq!(failure.kind, FailureKind::Fixture);
+    assert!(failure.detail.contains("exceeds 268435456 bytes"), "{failure:?}");
+}
+
+/// Input-state bounds reject the whole fixture before materialization or root construction.
+#[test]
+fn test_wide_pre_and_post_states_fail_instead_of_hashing_partial_state() {
+    let clean = chain(&[BlockSpec::valid(vec![])]);
+    assert_eq!(outcome(&run_one(clean.clone())), &Outcome::Passed);
+    for (field, label) in [("pre", "pre-state"), ("postState", "post-state")] {
+        let mut test = clean.clone();
+        let accounts = (0..=100_000)
+            .map(|index| (format!("0x{index:040x}"), account(U256::ZERO, "0x", 0)))
+            .collect();
+        test[field] = Value::Object(accounts);
+        let report = run_one(test);
+        let Outcome::Failed(failure) = outcome(&report) else {
+            panic!("oversized {label} was accepted: {report:?}")
+        };
+        assert_eq!(failure.kind, FailureKind::Fixture);
+        assert!(
+            failure.detail.contains(&format!("{label}: state account count exceeds")),
+            "{failure:?}"
+        );
+    }
+}
+
 /// A block the fixture expects to be invalid for its nonce is refused for that reason, and the
 /// chain stays at the previous block: the fixture's last block and post-state are the first
 /// block's.

@@ -93,12 +93,19 @@ pub fn check<DBError>(
 /// for a blob or EIP-7702 transaction without a recipient. Empty for anything else.
 pub fn unbuildable_names(error: &TestError, unit: &TestUnit) -> &'static [&'static str] {
     let invalid_type = || {
-        if unit.transaction.max_fee_per_blob_gas.is_some() {
-            &["TYPE_3_TX_CONTRACT_CREATION"][..]
-        } else if unit.transaction.authorization_list.is_some() {
-            &["TYPE_4_TX_CONTRACT_CREATION"][..]
-        } else {
-            &[][..]
+        if unit.transaction.to.is_some() {
+            return &[][..];
+        }
+        match unit.transaction.tx_type {
+            Some(3) => &["TYPE_3_TX_CONTRACT_CREATION"][..],
+            Some(4) => &["TYPE_4_TX_CONTRACT_CREATION"][..],
+            None if unit.transaction.max_fee_per_blob_gas.is_some() => {
+                &["TYPE_3_TX_CONTRACT_CREATION"][..]
+            }
+            None if unit.transaction.authorization_list.is_some() => {
+                &["TYPE_4_TX_CONTRACT_CREATION"][..]
+            }
+            _ => &[][..],
         }
     };
     match error {
@@ -272,6 +279,12 @@ mod tests {
 
         let blob = unit(serde_json::json!({ "maxFeePerBlobGas": "0x01" }));
         let auth = unit(serde_json::json!({ "authorizationList": [] }));
+        let explicit_blob = unit(serde_json::json!({ "type": 3 }));
+        let explicit_auth = unit(serde_json::json!({ "type": 4, "maxFeePerBlobGas": "0x01" }));
+        let other_type = unit(serde_json::json!({ "type": 2, "maxFeePerBlobGas": "0x01" }));
+        let call = unit(serde_json::json!({
+            "type": 3, "to": "0x0000000000000000000000000000000000000001",
+        }));
         for error in [
             TestError::InvalidTransactionType,
             TestError::UnexpectedException {
@@ -279,36 +292,42 @@ mod tests {
                 got_exception: Some("Invalid transaction type".into()),
             },
         ] {
-            assert_eq!(
-                check_unbuildable(
-                    "TransactionException.TYPE_3_TX_CONTRACT_CREATION",
-                    &error,
-                    &blob
-                ),
-                Ok(())
-            );
-            assert!(check_unbuildable(
-                "TransactionException.TYPE_4_TX_CONTRACT_CREATION",
-                &error,
-                &blob
-            )
-            .is_err());
-            assert_eq!(
-                check_unbuildable(
+            for transaction in [&blob, &explicit_blob] {
+                assert_eq!(
+                    check_unbuildable(
+                        "TransactionException.TYPE_3_TX_CONTRACT_CREATION",
+                        &error,
+                        transaction
+                    ),
+                    Ok(())
+                );
+                assert!(check_unbuildable(
                     "TransactionException.TYPE_4_TX_CONTRACT_CREATION",
                     &error,
-                    &auth
-                ),
-                Ok(())
-            );
-            assert_eq!(
-                check_unbuildable(
-                    "TransactionException.TYPE_3_TX_CONTRACT_CREATION",
-                    &error,
-                    &plain
-                ),
-                Err(Mismatch::Unnamed)
-            );
+                    transaction
+                )
+                .is_err());
+            }
+            for transaction in [&auth, &explicit_auth] {
+                assert_eq!(
+                    check_unbuildable(
+                        "TransactionException.TYPE_4_TX_CONTRACT_CREATION",
+                        &error,
+                        transaction
+                    ),
+                    Ok(())
+                );
+            }
+            for transaction in [&plain, &other_type, &call] {
+                assert_eq!(
+                    check_unbuildable(
+                        "TransactionException.TYPE_3_TX_CONTRACT_CREATION",
+                        &error,
+                        transaction
+                    ),
+                    Err(Mismatch::Unnamed)
+                );
+            }
         }
         let overflow = TestError::UnexpectedException {
             expected_exception: None,

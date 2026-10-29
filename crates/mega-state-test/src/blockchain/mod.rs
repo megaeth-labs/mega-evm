@@ -498,7 +498,7 @@ pub fn run(files: &[PathBuf], config: Config) -> Report {
 /// not be read.
 pub fn run_file(path: &Path, config: Config) -> Result<Vec<TestResult>, Failure> {
     let path_str = path.to_string_lossy().into_owned();
-    let json = std::fs::read_to_string(path)
+    let json = crate::input::read_blockchain_fixture(path)
         .map_err(|error| Failure::new(FailureKind::Fixture, None, format!("read: {error}")))?;
     let suite = serde_json::from_str::<Suite<'_>>(&json)
         .map_err(|error| Failure::new(FailureKind::Fixture, None, format!("parse: {error}")))?;

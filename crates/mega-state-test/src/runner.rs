@@ -60,7 +60,6 @@ use serde::{
     de::{Error as _, MapAccess, Visitor},
     Deserialize, Deserializer, Serialize,
 };
-use walkdir::WalkDir;
 
 use crate::{
     deviations::{self, Deviation},
@@ -69,7 +68,7 @@ use crate::{
     mode::MAX_BLOBS_PER_TX,
     roots::{logs_hash, state_root},
     skips::{skip_file, SkipReason},
-    types::{Test, TestSuite, TestUnit},
+    types::{Test, TestError, TestSuite, TestUnit},
     Fork, Mode,
 };
 
@@ -451,20 +450,7 @@ impl fmt::Display for TestId {
     }
 }
 
-/// Every JSON file under `path`, or `path` itself when it is a file, in path order.
-pub fn find_json_files(path: &Path) -> Vec<PathBuf> {
-    if path.is_file() {
-        return vec![path.to_path_buf()];
-    }
-    let mut files: Vec<_> = WalkDir::new(path)
-        .into_iter()
-        .filter_map(Result::ok)
-        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
-        .map(walkdir::DirEntry::into_path)
-        .collect();
-    files.sort();
-    files
-}
+pub use crate::input::{find_json_files, find_json_files_in_paths};
 
 /// Executes every entry `files` define for `config.fork`, in `config.mode`, and reports each.
 pub fn run(files: &[PathBuf], config: Config) -> Report {
@@ -503,7 +489,7 @@ pub fn run(files: &[PathBuf], config: Config) -> Report {
 /// the file could not be read.
 pub fn run_file(path: &Path, config: Config) -> Result<Vec<TestResult>, Failure> {
     let path_str = path.to_string_lossy().into_owned();
-    let json = std::fs::read_to_string(path)
+    let json = crate::input::read_fixture(path)
         .map_err(|error| Failure::new(FailureKind::Fixture, format!("read: {error}")))?;
     let suite = serde_json::from_str::<UniqueNames>(&json)
         .map_err(|error| Failure::new(FailureKind::Fixture, format!("parse: {error}")))?
@@ -821,6 +807,14 @@ pub(crate) fn prepare(
     test: &Test,
 ) -> Result<Result<Ready, SkipReason>, Failure> {
     let chain_id = chain_id(unit)?;
+    if let Some(excess) = unit.env.current_excess_blob_gas {
+        u64::try_from(excess).map_err(|_| {
+            Failure::new(
+                FailureKind::Fixture,
+                format!("currentExcessBlobGas {excess} does not fit a u64"),
+            )
+        })?;
+    }
 
     let mut eth_cfg = CfgEnv::new();
     eth_cfg.chain_id = chain_id;
@@ -828,7 +822,16 @@ pub(crate) fn prepare(
     eth_cfg.set_max_blobs_per_tx(MAX_BLOBS_PER_TX);
     let block = unit.block_env(&mut eth_cfg);
 
-    let tx = match (test.tx_env(unit), &test.expect_exception) {
+    // An explicit type bypasses the fixture types' inferred-type recipient guard. Reject the
+    // built transaction through the same exception-matching path as an inferred invalid type.
+    let tx = test.tx_env(unit).and_then(|tx| {
+        if matches!(tx.tx_type, 3 | 4) && tx.kind.is_create() {
+            Err(TestError::InvalidTransactionType)
+        } else {
+            Ok(tx)
+        }
+    });
+    let tx = match (tx, &test.expect_exception) {
         (Ok(tx), _) => tx,
         (Err(error), Some(expected)) => {
             return match exceptions::check_unbuildable(expected, &error, unit) {
@@ -843,6 +846,8 @@ pub(crate) fn prepare(
             return Err(Failure::new(FailureKind::Fixture, format!("transaction: {error}")))
         }
     };
+    crate::input::check_state_size(unit.pre.values().map(|account| account.storage.len()))
+        .map_err(|error| Failure::new(FailureKind::Fixture, format!("pre-state: {error}")))?;
     let tx =
         OpTx(OpTransaction { base: tx, enveloped_tx: Some(Bytes::new()), ..Default::default() });
     Ok(Ok(Ready { chain_id, block, tx }))
@@ -913,6 +918,10 @@ fn check<DBError: fmt::Debug>(
     }
     let logs: &[_] = result.as_ref().map(ExecutionResult::logs).unwrap_or_default();
     let logs_hash = logs_hash(logs);
+    crate::input::check_state_size(
+        state.cache.trie_account().into_iter().map(|(_, account)| account.storage.len()),
+    )
+    .map_err(|error| Failure::new(FailureKind::Fixture, format!("post-state: {error}")))?;
     let root = state_root(state.cache.trie_account());
     let executed = result.as_ref().map(|r| format!("; {}", describe(r))).unwrap_or_default();
     if logs_hash != test.logs {

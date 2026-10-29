@@ -7,7 +7,8 @@ The `state-test` CLI (`crates/state-test`) is a thin front end over this crate.
 `README.md` says what the two modes are and how a test is judged.
 
 ## STRUCTURE
-- `src/runner.rs`: discovery, parallel execution, judging a test, the report, the summary and the gate.
+- `src/runner.rs`: parallel execution, judging a test, the report, the summary and the gate.
+- `src/input.rs`: bounded fixture discovery and reads, and account/storage-slot cardinality checks before materializing state or hashing it.
 - `src/mode.rs`: the two configurations a test runs under, built from `mega-evm`'s `test_utils::{neutral_cfg, neutralize_evm}`.
 - `src/fork.rs`: the fixture forks a run executes (Osaka, Amsterdam).
 - `src/exceptions.rs`: validation errors mapped to the execution-spec exception names.
@@ -23,10 +24,12 @@ The `state-test` CLI (`crates/state-test`) is a thin front end over this crate.
 The fixture types are the revm fork's own (`revm::statetest_types`, the `test-types` feature), re-exported as `state_test::types`.
 
 ## KEY PATTERNS
+- Discovery and input/state bounds fail explicitly when exceeded; never truncate the corpus or a state and report it as complete.
 - A fixture's expectation is Ethereum's; a test here that needs one fills it from revm's mainnet EVM, never from `MegaEvm`.
 - Every failure is a `FailureKind`; equivalence mode names the deviation that explains it, and one it does not name is unattributed.
 - A deviation lists the exact entries it explains — file, test, data, gas and value indices — with the hashes Satin produces; a failure is its only with those hashes, and `--expect-deviations` requires every listed entry to fail exactly as listed.
 - Skips mirror the reference runner's, so the executed and skipped counts equal the ones `.github/workflows/exec-spec.yml` pins for it.
+- Historical slow-test filenames do not skip fixtures for the supported forks; the blockchain runner's skips remain separate.
 - A blockchain test is skipped only for a class decided from its content (`src/blockchain/skips.rs`); a block that differs passes only when a deviation the registry already has lists that test and block with exactly the outcome Satin produces, and the chain is imported on from Satin's state, so a listed block exempts no later one.
 - An account is taken out of a blockchain test's state root only by `SATIN_ACCOUNTS`, only when the pre-state does not hold it and it holds exactly what the seed or a Satin block put there.
 

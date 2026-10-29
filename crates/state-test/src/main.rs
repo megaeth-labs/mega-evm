@@ -17,7 +17,9 @@ use std::{path::PathBuf, process::ExitCode};
 use clap::Parser;
 use state_test::{
     deviations,
-    runner::{find_json_files, run, Config, DigestForm, Outcome, Report, Summary, TestResult},
+    runner::{
+        find_json_files_in_paths, run, Config, DigestForm, Outcome, Report, Summary, TestResult,
+    },
     EvmTxRuntimeLimits, Fork, Mode,
 };
 
@@ -110,19 +112,13 @@ fn main() -> ExitCode {
         return btest::main(std::env::args_os().skip(1));
     }
     let cmd = Cmd::parse();
-    let mut files = Vec::new();
-    for path in &cmd.paths {
-        if !path.exists() {
-            eprintln!("error: {} does not exist", path.display());
+    let files = match find_json_files_in_paths(&cmd.paths) {
+        Ok(files) => files,
+        Err(error) => {
+            eprintln!("error: {error}");
             return ExitCode::FAILURE;
         }
-        let found = find_json_files(path);
-        if found.is_empty() {
-            eprintln!("error: no JSON fixtures under {}", path.display());
-            return ExitCode::FAILURE;
-        }
-        files.extend(found);
-    }
+    };
 
     let threads = if cmd.trace {
         1

@@ -271,7 +271,7 @@ fn test_what_is_counted_and_what_is_skipped() {
         json!("TransactionException.INTRINSIC_GAS_TOO_LOW");
     let others = write(
         dir.path(),
-        "o.json",
+        "loopMul.json",
         json!({
             "a_both": both,
             "b_expected_invalid": expected_invalid,
@@ -300,6 +300,37 @@ fn test_what_is_counted_and_what_is_skipped() {
     );
 }
 
+/// An explicit transaction type must not bypass the fixture types' inferred-type rejection of
+/// blob and EIP-7702 creates. Only the corresponding expected exception permits the skip.
+#[test]
+fn test_explicit_blob_and_authorization_creates_are_rejected_for_the_named_reason() {
+    let dir = tempfile::tempdir().unwrap();
+    for (ty, exception) in [(3, "TYPE_3_TX_CONTRACT_CREATION"), (4, "TYPE_4_TX_CONTRACT_CREATION")]
+    {
+        let mut expected = unit(&[Fork::Osaka], json!({ "type": ty, "to": "" }));
+        expected["post"]["Osaka"][0]["expectException"] =
+            json!(format!("TransactionException.{exception}"));
+        let mut wrong = expected.clone();
+        wrong["post"]["Osaka"][0]["expectException"] =
+            json!("TransactionException.INVALID_SIGNATURE_VRS");
+        let missing = unit(&[Fork::Osaka], json!({ "type": ty, "to": "" }));
+        let path = write(
+            dir.path(),
+            &format!("type{ty}.json"),
+            json!({ "a_expected": expected, "b_wrong": wrong, "c_missing": missing }),
+        );
+        let report = run(&[path], config(Mode::Equivalence, Fork::Osaka));
+        let outcomes = outcomes(&report);
+        assert_eq!(
+            outcomes[0],
+            &Outcome::Skipped { reason: SkipReason::UnbuildableInvalidTransaction },
+            "type {ty}"
+        );
+        assert_eq!(failure_kind(outcomes[1]), Some(FailureKind::WrongException));
+        assert_eq!(failure_kind(outcomes[2]), Some(FailureKind::Fixture));
+    }
+}
+
 /// A test name that appears twice in a file fails the file, rather than the second test silently
 /// replacing the first.
 #[test]
@@ -318,17 +349,22 @@ fn test_a_duplicate_test_name_fails_the_file() {
     );
 }
 
-/// A file that cannot be parsed is a failure of the run, not a set of skipped tests.
+/// A malformed or oversized file fails the gate instead of becoming a set of skipped tests.
 #[test]
 fn test_an_unreadable_file_fails_the_gate() {
     let dir = tempfile::tempdir().unwrap();
-    let path = write(dir.path(), "broken.json", json!({ "t": { "env": {} } }));
-    let report = run(&[path], config(Mode::Equivalence, Fork::Osaka));
-    assert!(report.results.is_empty());
-    assert_eq!(report.file_failures.len(), 1);
-    let summary = report.summary();
-    assert_eq!((summary.file_failures, summary.defined), (1, 0));
-    assert_eq!(report.gate(None, None, false), ["1 fixture files could not be read"]);
+    let broken = write(dir.path(), "broken.json", json!({ "t": { "env": {} } }));
+    let oversized = dir.path().join("oversized.json");
+    std::fs::File::create(&oversized).unwrap().set_len(64 * 1024 * 1024 + 1).unwrap();
+    for (path, detail) in [(broken, "parse:"), (oversized, "exceeds 67108864 bytes")] {
+        let report = run(&[path], config(Mode::Equivalence, Fork::Osaka));
+        assert!(report.results.is_empty());
+        assert_eq!(report.file_failures.len(), 1);
+        assert!(report.file_failures[0].1.detail.contains(detail), "{:?}", report.file_failures);
+        let summary = report.summary();
+        assert_eq!((summary.file_failures, summary.defined), (1, 0));
+        assert_eq!(report.gate(None, None, false), ["1 fixture files could not be read"]);
+    }
 }
 
 /// The base-fee vault Satin credits is taken back only when the fee routing made it: a vault the
@@ -344,25 +380,58 @@ fn test_the_fee_vault_is_taken_back_only_when_the_routing_made_it() {
     assert_eq!(failure_kind(outcomes(&report)[0]), Some(FailureKind::StateRootMismatch));
 }
 
-/// A chain id that does not fit a `u64`, and a fixture value the transaction builder cannot take,
-/// fail the test they belong to and nothing else.
+/// Chain-id and blob-gas values wider than `u64`, and a value the transaction builder cannot
+/// take, fail only the test they belong to.
 #[test]
 fn test_bad_fixture_values_fail_their_own_test() {
     let dir = tempfile::tempdir().unwrap();
     let good = fill_from_ethereum(unit(&[Fork::Osaka], json!({})));
     let mut chain = good.clone();
     chain["env"]["currentChainID"] = json!("0x010000000000000000");
+    let mut blob = good.clone();
+    blob["env"]["currentExcessBlobGas"] = json!("0x010000000000000000");
+    blob["post"]["Osaka"][0]["expectException"] =
+        json!("TransactionException.INVALID_SIGNATURE_VRS");
     let fee = unit(
         &[Fork::Osaka],
         // One more than `u128::MAX`, which the fixture types' transaction builder refuses with a
         // panic rather than an error.
         json!({ "maxFeePerGas": "0x0a", "maxPriorityFeePerGas": "0x0100000000000000000000000000000000" }),
     );
-    let path =
-        write(dir.path(), "a.json", json!({ "a_chain": chain, "b_fee": fee, "c_good": good }));
+    let path = write(
+        dir.path(),
+        "a.json",
+        json!({
+            "a_chain": chain, "b_blob": blob, "c_fee": fee, "d_good": good,
+        }),
+    );
     let report = run(&[path], config(Mode::Equivalence, Fork::Osaka));
     let kinds: Vec<_> = outcomes(&report).into_iter().map(failure_kind).collect();
-    assert_eq!(kinds, [Some(FailureKind::Fixture), Some(FailureKind::Panic), None]);
+    assert_eq!(
+        kinds,
+        [Some(FailureKind::Fixture), Some(FailureKind::Fixture), Some(FailureKind::Panic), None]
+    );
+    let Outcome::Failed(blob) = &report.results[1].outcome else { panic!("must reject blob gas") };
+    assert!(blob.detail.contains("currentExcessBlobGas"));
+}
+
+/// A compact state can fit the input-byte bound and still exceed the account bound. It must
+/// fail before the runner copies it into a database or computes a state root from it.
+#[test]
+fn test_wide_prestate_is_rejected_before_materializing_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut wide = unit(&[Fork::Osaka], json!({}));
+    let account = json!({ "balance": "0x0", "code": "0x", "nonce": "0x0", "storage": {} });
+    wide["pre"] = Value::Object(
+        (0..=100_000).map(|index| (format!("0x{index:040x}"), account.clone())).collect(),
+    );
+    let path = write(dir.path(), "wide.json", json!({ "wide": wide }));
+    assert!(std::fs::metadata(&path).unwrap().len() < 64 * 1024 * 1024);
+    let report = run(&[path], config(Mode::Equivalence, Fork::Osaka));
+    let [result] = &report.results[..] else { panic!("must exercise one fixture entry") };
+    let Outcome::Failed(failure) = &result.outcome else { panic!("must reject oversized state") };
+    assert_eq!(failure.kind, FailureKind::Fixture);
+    assert!(failure.detail.contains("pre-state: state account count exceeds"), "{failure:?}");
 }
 
 /// A registry of one Osaka deviation listing every failure of `report`, in the file at `path`

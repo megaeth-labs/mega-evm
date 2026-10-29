@@ -22,9 +22,14 @@ Two engines: the in-tree sources run Satin; a spec from `Equivalence` to `Rex6` 
 - Command handlers follow staged flow: parse inputs → build state/env → execute → print summary/receipt/trace.
 - Replay uses block executor flow, including pre-execution system calls and preceding transactions.
 - Logging is structured via tracing macros, with explicit progress milestones.
+- RPC diagnostics use `display_rpc_url`, which hides userinfo, path, query and fragment; cache identity uses `redact_rpc_url` and keeps the path and query.
+  Keep the two separate, and remove reqwest's URL before an HTTP error reaches a diagnostic.
+  `RedactedTransport` wraps the retry layer: the dependency classifies the original errors and consumes backoff hints before final diagnostics are redacted.
 - Output paths keep both human-readable summaries and optional machine artifacts (trace/state dump).
 
-- The engine is decided where a command needs it (`cmd.rs` for `run`/`tx`, `replay::Cmd::engine` for a transaction replay, `block/cmd.rs` per block), always through `Engine` (`of_spec`, `of_block`, `of_chain`), and a Satin run's schedule through `common::satin_schedule`; both read the chain's activation table, so they agree. A transaction replay's engine is decided at the timestamp of the block the replay runs it in (its own, or the latest for a pending one), the one whose schedule it runs under: keep a new site to the same pair.
+- The engine is decided where a command needs it (`cmd.rs` for `run`/`tx`, `replay::Cmd::engine` for a transaction replay, `block/cmd.rs` per block), always through `Engine` (`of_spec`, `of_block`, `of_chain`), and a Satin run's schedule through `common::satin_schedule`; both read the chain's activation table, so they agree.
+  A transaction replay's engine is decided at the timestamp of its mined block, the one whose schedule it runs under: keep a new site to the same pair.
+  Satin transaction replay refuses pending and genesis transactions and checks the fetched parent's number and hash before using its state.
 - Output on Satin is additive to the legacy output: every legacy field keeps its name and meaning, and what only Satin counts goes in the `satin` object (`tests/integration.rs` checks it on every fixture pair).
 
 ## ANTI-PATTERNS

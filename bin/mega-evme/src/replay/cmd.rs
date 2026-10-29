@@ -135,8 +135,9 @@ impl Cmd {
     /// Without an override this reads the chain id, and, only on a chain that switches engines
     /// at a scheduled timestamp, the timestamp of the block the replay runs the transaction in,
     /// from the source the replay itself reads, through a provider that persists nothing: the
-    /// transaction's block, or for a pending transaction the latest block, whose environment and
-    /// schedule the replay runs it in. Under `--genesis` a chain other than the file's is refused
+    /// transaction's block, or for a pending transaction the latest block. The selected engine
+    /// decides whether it can replay a pending transaction.
+    /// Under `--genesis` a chain other than the file's is refused
     /// once the chain id is read, before an engine is picked for it.
     pub async fn engine(&self) -> Result<Engine> {
         let tx_hash = self.tx_hash();
@@ -280,7 +281,7 @@ impl Cmd {
             info!(path = %path.display(), "Provider mode: offline replay from cache file");
             self.rpc_args.build_replay_provider().await?
         } else if let Some(rpc) = &self.rpc_args.rpc_url {
-            info!(rpc = %crate::redact_rpc_url(rpc), "Provider mode: online RPC");
+            info!(rpc = %crate::display_rpc_url(rpc), "Provider mode: online RPC");
             self.rpc_args.build_provider().await?
         } else {
             return Err(ReplayError::Other(
@@ -308,19 +309,11 @@ impl Cmd {
             .ok_or(ReplayError::TransactionNotFound(tx_hash))?;
         debug!(block_number = ?target_tx.block_number, "Transaction found");
 
-        let (state_base_block, block_number, is_pending) = if let Some(n) = target_tx.block_number {
-            (n - 1, n, false)
-        } else {
-            let latest = provider
-                .get_block_number()
-                .await
-                .map_err(|e| ReplayError::RpcError(format!("RPC transport error: {e}")))?;
-            (latest, latest, true)
-        };
+        let block_number = mined_block_number(tx_hash, target_tx.block_number)?;
+        let state_base_block = block_number - 1;
         debug!(
             state_base_block = state_base_block,
             block = block_number,
-            is_pending,
             "Block numbers determined",
         );
 
@@ -334,6 +327,18 @@ impl Cmd {
             .await
             .map_err(|e| ReplayError::RpcError(format!("RPC transport error: {e}")))?
             .ok_or(ReplayError::BlockNotFound(block_number))?;
+
+        if parent_block.number() != state_base_block ||
+            parent_block.hash() != block.header.parent_hash()
+        {
+            return Err(ReplayError::Other(format!(
+                "parent block does not match block {block_number}: expected \
+                 {state_base_block} ({}), fetched {} ({})",
+                block.header.parent_hash(),
+                parent_block.number(),
+                parent_block.hash()
+            )));
+        }
 
         let preceding_tx_hashes = preceding_transactions(
             tx_hash,
@@ -674,6 +679,19 @@ fn predecessor_error(error: &BlockExecutionError) -> PredecessorError {
     }
 }
 
+/// A historical replay needs a mined block and its predecessor.
+fn mined_block_number(hash: B256, number: Option<u64>) -> Result<u64> {
+    match number {
+        Some(0) => Err(ReplayError::Other(format!(
+            "transaction {hash} is in genesis; replay requires a parent block"
+        ))),
+        Some(number) => Ok(number),
+        None => Err(ReplayError::Other(format!(
+            "transaction {hash} is pending; replay requires a mined transaction"
+        ))),
+    }
+}
+
 /// Hashes of the transactions before `target_hash` in the fetched block.
 ///
 /// A pending transaction has no block yet, so it has no predecessors here. A mined transaction
@@ -871,6 +889,14 @@ mod tests {
             ),
             other => panic!("unexpected error variant: {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_replay_requires_a_mined_block_with_a_predecessor() {
+        let hash = B256::repeat_byte(1);
+        assert!(mined_block_number(hash, None).unwrap_err().to_string().contains("pending"));
+        assert!(mined_block_number(hash, Some(0)).unwrap_err().to_string().contains("genesis"));
+        assert_eq!(mined_block_number(hash, Some(1)).unwrap(), 1);
     }
 
     #[test]

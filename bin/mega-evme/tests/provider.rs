@@ -15,7 +15,9 @@ use alloy_primitives::B256;
 use alloy_provider::Provider;
 use clap::Parser;
 use mega_evme::common::{BuildProviderOutput, EvmeError, RpcArgs};
+use rstest::rstest;
 use tempfile::tempdir;
+use wiremock::{matchers, Mock, MockServer, ResponseTemplate};
 
 mod common;
 use common::{rpc_cache_path, test_rpc_args, test_rpc_args_cached, MockRpcServer};
@@ -145,35 +147,46 @@ async fn test_build_provider_with_cache_names_file_from_fetched_chain_id() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_build_provider_invalid_url() {
-    let args = RpcArgs::parse_from(["mega-evme", "--rpc", "not a url", "--rpc.cache-size", "0"]);
+    let args = RpcArgs::parse_from([
+        "mega-evme",
+        "--rpc",
+        "http://bad host/path-secret?key=query-secret",
+        "--rpc.cache-size",
+        "0",
+    ]);
     let err = args.build_provider().await.expect_err("build_provider should fail");
     match err {
         EvmeError::RpcError(msg) => {
-            assert!(msg.contains("not a url"), "error must echo the original input, got: {msg}");
+            assert!(msg.contains("Invalid RPC URL '<redacted RPC URL>'"), "{msg}");
+            assert!(!msg.contains("path-secret") && !msg.contains("query-secret"), "{msg}");
         }
         other => panic!("expected EvmeError::RpcError, got {other:?}"),
     }
 }
 
-/// A chain-id failure reports the endpoint without the URL's userinfo.
+/// HTTP, response-decoding and JSON-RPC errors hide endpoint credentials echoed by the server.
+#[rstest]
+#[case::http(500, "failed {rpc}")]
+#[case::malformed(200, r#"{"url":"{rpc}"}"#)]
+#[case::rpc(200, r#"{"jsonrpc":"2.0","id":0,"error":{"code":-32603,"message":"failed {rpc}","data":{"url":"{rpc}"}}}"#)]
 #[tokio::test(flavor = "multi_thread")]
-async fn test_chain_id_error_omits_rpc_userinfo() {
-    let server = MockRpcServer::start().await;
-    server.respond_status_always(500).await;
-    let url = server.uri().replacen("http://", "http://alice:secret@", 1);
-    let args = RpcArgs::parse_from([
-        "mega-evme",
-        "--rpc",
-        &url,
-        "--rpc.cache-size",
-        "0",
-        "--rpc.max-retries",
-        "0",
-    ]);
-    let err = args.build_provider().await.expect_err("chain id fetch fails");
-    let msg = err.to_string();
-    assert!(msg.contains("Failed to fetch chain ID"), "{msg}");
-    assert!(!msg.contains("secret") && !msg.contains("alice"), "{msg}");
+async fn test_chain_id_error_omits_rpc_credentials(#[case] status: u16, #[case] body: &str) {
+    let server = MockServer::start().await;
+    let url = format!(
+        "{}/v2/(path-secret)?key=query-secret#fragment-secret",
+        server.uri().replacen("http://", "http://alice:userinfo-secret@", 1)
+    );
+    Mock::given(matchers::method("POST"))
+        .respond_with(ResponseTemplate::new(status).set_body_string(body.replace("{rpc}", &url)))
+        .mount(&server)
+        .await;
+    let error = test_rpc_args(&url, Some(0)).build_provider().await.expect_err("request fails");
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    let message = error.to_string();
+    assert!(message.contains("Failed to fetch chain ID"), "{message}");
+    for secret in ["alice", "userinfo-secret", "path-secret", "query-secret", "fragment-secret"] {
+        assert!(!message.contains(secret), "{message}");
+    }
 }
 
 // ─── Chain-id resolution ─────────────────────────────────────────────────────
@@ -462,19 +475,34 @@ async fn test_build_provider_auto_creates_cache_dir() {
 
 // ─── Retry layer behavior tests ──────────────────────────────────────────────
 
-/// Server fails 503 twice then succeeds; `max-retries=3` must reach success.
-/// `eth_chainId` mock at highest priority ensures `build_provider` succeeds.
+/// Status errors and nonstandard rate-limit bodies keep the dependency's retry behavior.
+#[rstest]
+#[case::http_503(503, "temporarily unavailable")]
+#[case::bare_429(200, r#"{"code":429,"message":"rate limit"}"#)]
+#[case::missing_id(200, r#"{"jsonrpc":"2.0","error":{"code":-32005,"message":"rate limit"}}"#)]
 #[tokio::test(flavor = "multi_thread")]
-async fn test_retry_layer_retries_on_503_then_succeeds() {
-    let server = MockRpcServer::start().await;
-    server.respond_eth_chain_id(4326, 1).await;
-    server.respond_status_n_times(503, 2, 2).await;
-    server.respond_jsonrpc_result("0x10e6", 3).await;
+async fn test_retry_layer_retries_transient_response_then_succeeds(
+    #[case] status: u16,
+    #[case] body: &str,
+) {
+    let server = MockServer::start().await;
+    Mock::given(matchers::method("POST"))
+        .respond_with(ResponseTemplate::new(status).set_body_string(body))
+        .up_to_n_times(2)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(matchers::method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "jsonrpc":"2.0", "id":0, "result":"0x10e6"
+        })))
+        .with_priority(2)
+        .mount(&server)
+        .await;
 
-    let BuildProviderOutput { provider, .. } =
-        test_rpc_args(&server.uri(), Some(3)).build_provider().await.expect("build_provider");
-    let block = provider.get_block_number().await.expect("must succeed after 2 retries");
-    assert_eq!(block, 0x10e6);
+    let result = test_rpc_args(&server.uri(), Some(3)).build_provider().await;
+    assert_eq!(server.received_requests().await.unwrap().len(), 3, "{result:?}");
+    assert_eq!(result.expect("must succeed after two transient errors").chain_id, 4326);
 }
 
 /// `max-retries=0` must surface the first 503 immediately, with no retries.

@@ -13,7 +13,7 @@ use clap::Parser;
 use state_test::{
     blockchain::{run, Config, Outcome, Report, SkipReason, Summary, TestResult, NETWORK},
     deviations,
-    runner::find_json_files,
+    runner::find_json_files_in_paths,
 };
 
 /// How many unattributed failures, and how many unreproduced tests, the summary lists.
@@ -77,19 +77,13 @@ pub(crate) fn main(args: impl IntoIterator<Item = std::ffi::OsString>) -> ExitCo
             return ExitCode::FAILURE;
         }
     }
-    let mut files = Vec::new();
-    for path in &cmd.paths {
-        if !path.exists() {
-            eprintln!("error: {} does not exist", path.display());
+    let files = match find_json_files_in_paths(&cmd.paths) {
+        Ok(files) => files,
+        Err(error) => {
+            eprintln!("error: {error}");
             return ExitCode::FAILURE;
         }
-        let found = find_json_files(path);
-        if found.is_empty() {
-            eprintln!("error: no JSON fixtures under {}", path.display());
-            return ExitCode::FAILURE;
-        }
-        files.extend(found);
-    }
+    };
 
     let threads =
         cmd.threads.unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()));

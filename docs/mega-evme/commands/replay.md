@@ -8,6 +8,11 @@ Re-execute a historical transaction locally using an RPC endpoint or a previousl
 In online mode, `mega-evme` fetches the transaction, block environment, and pre-state from the RPC and re-executes locally.
 In offline mode (`--rpc.replay-file`), all data is served from a local fixture captured by an earlier run — no network access is required.
 
+A Satin transaction replay requires a mined transaction in a block after genesis.
+Pending transactions have no canonical block context and are refused.
+Before reading the parent state, replay checks that the fetched parent has the preceding block number and the hash named by the transaction's block.
+A mismatch aborts the replay; retry with a consistent RPC endpoint or recording.
+
 With `--block`, `replay` re-executes whole blocks instead and compares every receipt with the chain's; see [Replaying Whole Blocks](#replaying-whole-blocks).
 
 ## Usage
