@@ -147,7 +147,7 @@ pub fn validate_transaction_stateless(
     Ok(IntrinsicGas {
         regular: gas.initial_regular_gas(),
         state: gas.initial_state_gas_final(),
-        history: evm.ctx().additional_limit.intrinsic_history_gas(),
+        history: evm.ctx().intrinsic_history_gas(),
         floor: gas.floor_gas(),
     })
 }

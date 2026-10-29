@@ -328,7 +328,7 @@ fn write(dir: &Path, relative: &str, tests: Value) -> PathBuf {
 }
 
 fn config(deviations: &'static [Deviation]) -> Config {
-    Config { threads: 2, json_outcome: false, deviations }
+    Config { threads: 2, json_outcome: false, witness: None, deviations }
 }
 
 fn run_one(test: Value) -> Report {

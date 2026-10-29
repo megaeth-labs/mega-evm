@@ -407,10 +407,9 @@ fn settle_a_synthetic_failure(
     assert!(caller.record_state_cost(price), "the caller can pay the crowded charge");
     let spilled = caller.state_gas_spilled();
 
-    // The calling opcode hands the frame the reservoir its charge left, taken out of the caller,
-    // whose return adds what the frame gives back to what the caller kept.
+    // The calling opcode hands the frame a copy of the reservoir its charge left, which the
+    // frame's return replaces with what the frame gives back.
     let share = caller.reservoir();
-    caller.forward_reservoir(share);
     let result = synthetic_frame_result(&input(share), InstructionResult::Revert, Bytes::new());
     let mut frame = EthFrame::<EthInterpreter>::default();
     *frame.interpreter.gas.tracker_mut() = caller;
@@ -436,9 +435,6 @@ fn charged_call_input(reservoir: u64) -> FrameInput {
         is_static: false,
         reservoir,
         charged_new_account_state_gas: true,
-        charged_start: Default::default(),
-        pool_shares: revm::interpreter::PoolAmounts::UNLIMITED,
-        history_allowance: 0,
     }))
 }
 

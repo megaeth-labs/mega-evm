@@ -213,7 +213,7 @@ fn evm(tx: MegaTransaction, system_address: Option<Address>) -> Verdict {
             }
             result => Verdict::Admitted {
                 floor: result.gas().floor_gas(),
-                history: evm.ctx().additional_limit().intrinsic_history_gas(),
+                history: evm.ctx().intrinsic_history_gas(),
             },
         },
     }

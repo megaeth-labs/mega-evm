@@ -294,23 +294,37 @@ pub(crate) fn intrinsic(data: &[u8]) -> u64 {
     12_000 + 3_000 + calldata + crate::common::body_history(data.len() as u64)
 }
 
-/// A Satin context over `db` reading `envs`.
+/// `deployment` run at `gas_limit` on a Satin context over `db` reading `envs`.
 pub(crate) fn salt_run(
     db: MemoryDatabase,
     envs: TestExternalEnvs<String>,
     deployment: &Deployment,
     gas_limit: u64,
 ) -> MegaTransactionOutcome {
-    let context = MegaContext::<_, TestExternalEnvs<String>>::new_with_external_envs(
+    MegaEvm::new(salt_context(db, envs))
+        .execute_transaction(salt_tx(deployment, gas_limit))
+        .expect("the transaction is valid")
+}
+
+/// A Satin context over `db` reading `envs`.
+pub(crate) fn salt_context(
+    db: MemoryDatabase,
+    envs: TestExternalEnvs<String>,
+) -> MegaContext<MemoryDatabase, TestExternalEnvs<String>> {
+    MegaContext::<_, TestExternalEnvs<String>>::new_with_external_envs(
         db,
         MegaSpecId::SATIN,
         ExternalEnvs { salt_env: envs.clone(), oracle_env: envs },
     )
     .with_block(block())
-    .with_chain(mega_evm::test_utils::zero_fee_l1_block_info());
+    .with_chain(mega_evm::test_utils::zero_fee_l1_block_info())
+}
+
+/// The transaction that calls `KeylessDeploy` with `deployment` at `gas_limit`.
+pub(crate) fn salt_tx(deployment: &Deployment, gas_limit: u64) -> mega_evm::MegaTransaction {
     let mut tx = call_tx(KEYLESS_DEPLOY_ADDRESS, deployment.call_data(LARGE_OVERRIDE), U256::ZERO);
     tx.0.base.gas_limit = gas_limit;
-    MegaEvm::new(context).execute_transaction(tx).expect("the transaction is valid")
+    tx
 }
 
 /// The bucket `account`'s own state lives in.

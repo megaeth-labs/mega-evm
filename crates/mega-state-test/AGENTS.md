@@ -39,6 +39,7 @@ The fixture types are the revm fork's own (`revm::statetest_types`, the `test-ty
 ## WHERE TO LOOK
 - Add or move a deviation: `src/deviations.rs`, its entries taken from a `--json-outcome` run, then `UPDATE_DEVIATIONS=1 cargo test -p mega-state-test --lib deviations`.
 - Change what the outcome digest records, or how it is encoded: `src/digest.rs`; every change moves the digest of every transaction it touches, so it is made on its own, with the base's digest taken by the same code.
+- Change what the read-set digest records (`digest::reads`, printed by `Config::witness` per transaction and by `blockchain::Config::witness` per block): `src/digest.rs`; the reads are recorded by `mega-evm`'s `test_utils::{RecordingDatabase, RecordingEnvFactory}` around the database and environments a test runs on, and the same rule holds: a change is made on its own, the base's read sets taken by the same code.
 - Tighten the limits a run is held to: `Config::limits`, from `state-test`'s `--limit-*` options.
 - Change what a mode configures: `src/mode.rs`, and `mega-evm`'s `src/test_utils/neutral.rs`.
 - Change how a test is judged: `src/runner.rs::check`, `src/exceptions.rs`.

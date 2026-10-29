@@ -141,11 +141,13 @@ fn render() -> String {
     out.push_str(
         "Every named entry of the schedule, at the Osaka price, at the Amsterdam (glamsterdam \
          devnet-8) price and at the Satin price. Satin is Amsterdam with the EIP-8037 state \
-         entries rebuilt at `MegaETH`'s cost per state byte, deposited code and a value call's \
-         history allowance priced at `MegaETH`'s cost per history byte, and a frame forwarded \
-         98 per cent of what its caller has left of its regular gas, of its reservoir and of its \
-         data-size, KV-update and state-growth budgets; the `Satin` column differs from \
-         `Amsterdam` in exactly the entries where one of those applies.\n\n",
+         entries rebuilt at `MegaETH`'s cost per state byte, deposited code priced at \
+         `MegaETH`'s cost per history byte, and a frame forwarded 98 per cent of what its caller \
+         has left of its regular gas; the `Satin` column differs from `Amsterdam` in exactly the \
+         entries where one of those applies. A frame's share of its caller's reservoir and of \
+         its data-size, KV-update and state-growth budgets, 98 per cent of what the caller has \
+         left, and the history allowance a value call gives its frame are the engine's, taken \
+         where the frame starts, and are in no entry.\n\n",
     );
     out.push_str("| Gas id | Osaka | Amsterdam | Satin |\n|---|---:|---:|---:|\n");
     for slot in 0..=u8::MAX {
@@ -309,21 +311,13 @@ fn test_the_table_shows_where_satin_differs_from_amsterdam() {
 
     // Every regular entry is Amsterdam's. The state entries are rebuilt rather than copied, and
     // land on Amsterdam's numbers because the provisional cost per state byte is the one
-    // Glamsterdam uses. The history entries are the ones Satin adds — upstream prices no history
-    // byte at all — and so are the parts of the data-size, KV-update and state-growth pools and of
-    // the reservoir a caller keeps from the frame it starts, which upstream forwards whole, and the
-    // quotient of the regular gas a call forwards, Rex6's 98/100 in place of EIP-150's 63/64.
+    // Glamsterdam uses. The history entry is the one Satin adds — upstream prices no history byte
+    // at all — and so is the quotient of the regular gas a call forwards, Rex6's 98/100 in place
+    // of EIP-150's 63/64. The parts of the pools and of the reservoir a caller keeps from the
+    // frame it starts, and a value call's history allowance, are the engine's and in no entry.
     assert_eq!(
         differing,
-        [
-            "call_stipend_reduction",
-            "pool2_kept_percent",
-            "pool1_kept_percent",
-            "pool0_kept_percent",
-            "reservoir_kept_percent",
-            "call_history_allowance",
-            "code_deposit_history_gas"
-        ],
+        ["call_stipend_reduction", "code_deposit_history_gas"],
         "the entries Satin prices differently from Amsterdam"
     );
 }

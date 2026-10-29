@@ -51,7 +51,7 @@ For the current stable behavior as a single reference, see the [MegaEVM Overview
 <summary>Satin (unstable): base layer and reference implementation</summary>
 
 Satin inherits standard EVM semantics from Optimism Karst (Ethereum Osaka) unless explicitly overridden, and every transaction but a deposit or one of the protocol's own pays history gas, so no transaction that pays it behaves identically to Optimism under Satin.
-Its reference implementation is the 2.x line of [MegaEVM](https://github.com/megaeth-labs/mega-evm), built on the [MegaETH fork of revm](https://github.com/megaeth-labs/revm) 40.0.3 at commit `fd230a3427d1b96c88e0b581bab8a7763c8ec298` ([megaeth-labs/revm#76](https://github.com/megaeth-labs/revm/pull/76)), the [MegaETH fork of op-revm](https://github.com/megaeth-labs/op-revm) 20.0.0 at commit `2ecb7dceed1c458a2b59ca4d8993a073968cb111` ([megaeth-labs/op-revm#8](https://github.com/megaeth-labs/op-revm/pull/8)), and alloy-evm 0.36.
+Its reference implementation is the 2.x line of [MegaEVM](https://github.com/megaeth-labs/mega-evm), built on the [MegaETH fork of revm](https://github.com/megaeth-labs/revm) 40.0.3 at commit `426217bb2e76c0a41d46907eb788250e8efa107c` ([megaeth-labs/revm#76](https://github.com/megaeth-labs/revm/pull/76)), the [MegaETH fork of op-revm](https://github.com/megaeth-labs/op-revm) 20.0.0 at commit `3d43e32029fc5cd293ab70eb0929d70e37337966` ([megaeth-labs/op-revm#8](https://github.com/megaeth-labs/op-revm/pull/8)), and alloy-evm 0.36.
 See the [Satin Network Upgrade](upgrades/satin.md).
 
 </details>

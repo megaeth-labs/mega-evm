@@ -55,6 +55,15 @@ struct Cmd {
     /// As `--json-digest`, with the canonical record in each line, to see which field differs.
     #[arg(long)]
     json_digest_full: bool,
+    /// Print one JSON line per executed transaction on standard error, beside its digest line when
+    /// both are asked for: the test's identity and the hash of the canonical record of everything
+    /// the transaction read below the journal (the database's accounts, codes, slots and block
+    /// hashes, and the SALT buckets and Oracle slots the external environment answered).
+    #[arg(long)]
+    json_witness: bool,
+    /// As `--json-witness`, with the canonical record of the reads in each line.
+    #[arg(long)]
+    json_witness_full: bool,
     /// Satin mode: hold every transaction to this data-size limit, in bytes, instead of the
     /// spec's; the frame budget follows it unless `--limit-frame-data-size` names one.
     #[arg(long, value_name = "BYTES")]
@@ -127,11 +136,8 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let digest = match (cmd.json_digest, cmd.json_digest_full) {
-        (_, true) => Some(DigestForm::Full),
-        (true, false) => Some(DigestForm::Compact),
-        (false, false) => None,
-    };
+    let digest = digest_form(cmd.json_digest, cmd.json_digest_full);
+    let witness = digest_form(cmd.json_witness, cmd.json_witness_full);
     let config = Config {
         mode: cmd.mode,
         fork: cmd.fork,
@@ -139,6 +145,7 @@ fn main() -> ExitCode {
         json_outcome: cmd.json_outcome,
         trace: cmd.trace,
         digest,
+        witness,
         limits,
         deviations: deviations::DEVIATIONS,
     };
@@ -174,6 +181,15 @@ fn main() -> ExitCode {
         // failure rather than Satin's.
         Mode::Satin if summary.file_failures > 0 => ExitCode::FAILURE,
         Mode::Satin => ExitCode::SUCCESS,
+    }
+}
+
+/// The form a compact and a full flag ask for: the full one when both are given.
+pub(crate) const fn digest_form(compact: bool, full: bool) -> Option<DigestForm> {
+    match (compact, full) {
+        (_, true) => Some(DigestForm::Full),
+        (true, false) => Some(DigestForm::Compact),
+        (false, false) => None,
     }
 }
 

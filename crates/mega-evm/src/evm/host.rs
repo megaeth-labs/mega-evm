@@ -67,6 +67,15 @@
 //! destroyed it. A database that answers an empty account for an address it holds none for gives
 //! that leaf back to no destruction: an empty account is a leaf the state holds.
 //!
+//! # The start lifecycle
+//!
+//! The three lifecycle hooks — a start revm opened, one it settled, the lifecycle's end — reach the
+//! inner context, whose mirror checks their order over every engine path in a debug build and does
+//! nothing in a release build, and drive the engine's start ledger, which keeps what each start
+//! owes and holds — its frame budgets, its start charge, its history allowance — and gives the
+//! start charge back when a start's settlement does not keep its records (the `limit` module's
+//! `ledger`).
+//!
 //! Every other Host method delegates to op-revm's context.
 
 #[cfg(not(feature = "std"))]
@@ -77,12 +86,12 @@ use delegate::delegate;
 use revm::{
     context::ContextTr,
     context_interface::{
-        cfg::{
-            gas::{GasTracker, PoolAmounts, StartCharge},
-            GasId, GasParams, StateGasCharge, StateGasSite,
-        },
+        cfg::{gas::GasTracker, GasId, GasParams, StateGasCharge, StateGasSite},
         context::{ContextError, SStoreResult, SelfDestructResult, StateLoad},
-        host::{CompletedWrite, FrameStart, LoadError, WriteVerdict},
+        host::{
+            CompletedWrite, FrameSettle, FrameSplit, FrameStart, FrameStartKind, LifecycleEnd,
+            LoadError, SettleStatus, WriteVerdict,
+        },
         journaled_state::AccountInfoLoad,
     },
     primitives::{Address, Log, StorageKey, StorageValue, B256, U256},
@@ -331,7 +340,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
             CompletedWrite::SelfDestruct { .. } => (false, false),
         };
         let (counted, history, destroyed) = self.accounts().write_counted(&write);
-        let check = self.additional_limit.draw(gas, &counted);
+        let check = self.additional_limit.draw(&counted);
         if check.exceeded_limit() {
             return WriteVerdict::Revert(self.additional_limit.note_frame_stop(&check));
         }
@@ -355,7 +364,11 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
             }
             if appended != 0 {
                 let Some(cost) = history_gas(appended) else { return WriteVerdict::OutOfGas };
-                let cost = if from_allowance { gas.draw_history_allowance(cost) } else { cost };
+                let cost = if from_allowance {
+                    self.additional_limit.ledger_mut().draw_allowance(cost)
+                } else {
+                    cost
+                };
                 if !gas.record_history_cost(cost) {
                     return WriteVerdict::OutOfGas;
                 }
@@ -380,16 +393,21 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
     ///
     /// The charge comes out of what the caller kept rather than out of what the callee gets, so
     /// the frame's allowance is free for what the recipient does. What the frame's own records
-    /// cost is declared on the start ([`FrameStart::charge`]), which the fork carries on the
-    /// frame's input and gives back to the caller when the frame fails; the creator's record
-    /// outlives the creation and is not declared. The frame's input copies the caller's
-    /// reservoir after the charge, so the frame, or the answer revm gives in its place,
-    /// inherits the reservoir the charge left. An opcode that starts no frame — a creation the
-    /// balance, the nonce or the depth refuses, an out-of-gas before the forward — never calls
-    /// it, and makes no records; with EIP-8037 off, such a creation calls it without the address
-    /// it would take, which makes none either. A start revm then refuses — a value the caller
-    /// cannot fund, a frame past the call-stack limit — makes no records, and the charge comes
-    /// back when it returns, as does what a frame that ran did not keep.
+    /// cost is the start's charge, parked on the start ledger with the frame's shares of the
+    /// caller's pools and, for a value-transferring `CALL` or `CALLCODE`, its history allowance
+    /// ([`forward_start`](MegaContext::forward_start)): the ledger gives the charge back to the
+    /// caller when the frame fails; the creator's record outlives the creation and is not part of
+    /// it. The frame's share of the caller's reservoir is taken out of the reservoir the charge
+    /// left and named on the start ([`FrameStart::reservoir`]), so the frame, or the answer revm
+    /// gives in its place, inherits it, and the caller keeps the rest while the frame runs. revm
+    /// puts what the frame leaves of it in place of the caller's reservoir when it returns, and
+    /// the settlement adds back what the caller kept ([`frame_settle`](Self::frame_settle)). An
+    /// opcode that starts no frame — a creation the balance, the nonce or the depth refuses, an
+    /// out-of-gas before the forward — never calls it, and makes no records; with EIP-8037 off,
+    /// such a creation calls it without the address it would take, which makes none either. A
+    /// start revm then refuses — a value the caller cannot fund, a frame past the call-stack
+    /// limit — makes no records, and the charge comes back when it returns, as does what a
+    /// frame that ran did not keep.
     ///
     /// A charge the caller cannot pay, or a price that does not fit in a `u64`, fails the opcode
     /// with an out-of-gas and starts no frame, even where revm would have refused the start. The
@@ -398,9 +416,14 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
     /// record of what the frame had, which detention reads where the frame ends, is written again
     /// once the forward is back: a failed charge recorded the gas left after the forward was
     /// taken, and a price that could not be computed failed before any charge.
+    ///
+    /// A call that transfers no value makes no record, whatever the journal holds
+    /// ([`start_makes_no_records`](crate::limit::start_makes_no_records)), and is charged nothing
+    /// without reading it; a debug build reads it and asserts there is nothing to charge.
     #[inline]
     fn frame_starting(&mut self, start: &mut FrameStart, gas: &mut GasTracker) -> bool {
-        let charge = if self.prices_history() {
+        let makes_no_records = crate::limit::start_makes_no_records(start.kind, start.value);
+        let charge = if self.prices_history() && !makes_no_records {
             let records =
                 self.accounts().start_records(start.kind, start.caller, start.target, start.value);
             let on_frame = records.on_frame().added;
@@ -412,14 +435,102 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
             };
             charge
         } else {
+            debug_assert!(
+                !makes_no_records ||
+                    self.accounts().start_records(
+                        start.kind,
+                        start.caller,
+                        start.target,
+                        start.value
+                    ) == crate::limit::StartRecords::NONE,
+                "a call that transfers no value makes no record"
+            );
             0
         };
-        start.charge = StartCharge::new(charge, PoolAmounts::ZERO);
+        let value_call = matches!(start.kind, FrameStartKind::Call | FrameStartKind::CallCode) &&
+            !start.value.is_zero();
+        let allowance = if value_call { self.value_call_allowance() } else { 0 };
+        start.reservoir = Some(self.forward_start(gas, charge, allowance));
         true
+    }
+
+    /// Hands the inner context, whose debug mirror checks the lifecycle's order, the start revm
+    /// opened, and opens it on the start ledger with what was parked for it.
+    #[inline]
+    fn frame_split(&mut self, split: &FrameSplit) {
+        self.inner.frame_split(split);
+        self.additional_limit.ledger_mut().split(split.id, split.parent, split.depth);
+    }
+
+    /// Hands the inner context the start revm settled into `gas`, its caller's, and settles it on
+    /// the start ledger, which gives the start charge back to `gas` when the start did not keep
+    /// its records: a call that did not succeed, a creation that did not succeed or took no
+    /// address — but for an inspector's answer and an outcome an inspector rebuilt, which carry
+    /// none. It is given back as history, as it was charged, once revm's own settlement of the
+    /// frame is made, its upfront state-gas refund included.
+    ///
+    /// revm's settlement put the reservoir the frame handed back in place of the caller's, once it
+    /// unwound the caller's outstanding spill; a child's caller gets back here the reservoir it
+    /// held while the child ran (`held_reservoir`), the part it kept at the start, on top. The
+    /// caller then holds what it kept and what the child handed back, whatever the order of this
+    /// and the refunds, which read the spill and their own amount, never the reservoir. The
+    /// transaction's gas holds a copy of the reservoir its frame was given, which revm's
+    /// settlement replaced, so nothing is added back to it.
+    ///
+    /// The transaction's start ends the transaction: when its frame halted, giving the charge back
+    /// burns every regular gas the transaction's gas holds, what the refill credited and what
+    /// revm's settlement left alike, as revm's settlement burns a halted transaction's after each
+    /// of its own refunds; with no charge to give back nothing is burned, as revm's settlement
+    /// burned nothing then. revm's settlement leaves regular gas there only where an inspector
+    /// makes the frame hand back more reservoir than it inherited — on its input, or in its
+    /// result's figures — which unwinds part of the spill the charges made before the frame. A
+    /// child's caller runs on, and keeps its regular gas.
+    #[inline]
+    fn frame_settle(&mut self, settle: &FrameSettle, gas: &mut GasTracker) {
+        self.inner.frame_settle(settle, gas);
+        if settle.depth != 0 {
+            gas.set_reservoir(gas.reservoir().saturating_add(settle.held_reservoir));
+        }
+        let refund = self.additional_limit.ledger_mut().settle(&settle.into());
+        if refund != 0 {
+            gas.refill_history(refund);
+            if settle.depth == 0 && settle.status == SettleStatus::Halt {
+                gas.spend_all();
+            }
+        }
+    }
+
+    /// Hands the inner context the lifecycle's end, and ends the start ledger with it: every start
+    /// settled, or what is open discarded.
+    #[inline]
+    fn frame_lifecycle_end(&mut self, end: LifecycleEnd) {
+        self.inner.frame_lifecycle_end(end);
+        self.additional_limit.ledger_mut().end(end == LifecycleEnd::Settled);
     }
 }
 
 impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
+    /// Forwards what the start the running frame is making takes from it, by the engine's rule
+    /// ([`frame_kept_percent`](Self::frame_kept_percent)): the frame's share of `gas`'s EIP-8037
+    /// reservoir, as it stands once the start's charges are made, which is taken out of `gas` and
+    /// answered, the frame keeping the rest; and, parked on the start ledger for the split that
+    /// opens the start, the shares of the frame's pools, taken out of them, the start's `charge`,
+    /// and the child's `allowance`. The frame-start hook forwards an instruction's start, and a
+    /// `keylessDeploy` call's builder its creation.
+    pub(crate) fn forward_start(
+        &mut self,
+        gas: &mut GasTracker,
+        charge: u64,
+        allowance: u64,
+    ) -> u64 {
+        let kept = self.frame_kept_percent();
+        let reservoir = gas.reservoir();
+        let share = crate::limit::reservoir_share(reservoir, kept);
+        gas.set_reservoir(reservoir - share);
+        self.additional_limit.ledger_mut().park(kept, charge, allowance);
+        share
+    }
+
     /// Prices one EIP-8037 state gas unit `id` at `site`, scaling the schedule's entry by the SALT
     /// bucket capacity of the account — or, for a slot-scoped entry, of the storage slot — the
     /// charge lands on.

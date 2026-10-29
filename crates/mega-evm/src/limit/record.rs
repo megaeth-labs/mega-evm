@@ -30,21 +30,29 @@
 //! nothing ([`Accounts::is_destroyed`]). Every fact is the journal's: revm's flags of an account
 //! created and of one destroyed in the transaction, which a failed frame's revert takes back with
 //! the rest of it, the account's original info and each slot's original value.
+//!
+//! Whether a value movement journals an EIP-7708 transfer log, whose bytes a frame start and a
+//! `SELFDESTRUCT` count, is the journal's too: its own switch, read by the rule revm emits the log
+//! by ([`emits_transfer_logs`]). A caller or an inspector that turns the journal's switch through
+//! the context's mutable journal, past the configuration the spec fixes, changes what revm emits,
+//! and the count follows the logs revm emits.
 
 #[cfg(not(feature = "std"))]
 use alloc as std;
 use std::vec::Vec;
 
 use revm::{
+    context::JournalInner,
     context_interface::{
         host::{CompletedWrite, FrameStartKind},
         journaled_state::entry::{JournalEntry, SelfdestructionRevertStatus},
     },
     primitives::{
         eip7708::{ETH_TRANSFER_LOG_ADDRESS, ETH_TRANSFER_LOG_TOPIC},
+        hardfork::SpecId,
         Address, Log, StorageKey, KECCAK_EMPTY, U256,
     },
-    state::{Account, AccountInfo, EvmState, TransactionId},
+    state::{Account, AccountInfo},
     Journal,
 };
 
@@ -151,22 +159,47 @@ impl DestroyedParts {
 /// a write makes.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Accounts<'a> {
-    state: &'a EvmState,
-    /// The journal's entries, which revm clears between transactions: this transaction's.
-    entries: &'a [JournalEntry],
-    /// The logs the journal holds, which a failed frame's revert takes back with its entries.
-    logs: &'a [Log],
-    transaction_id: TransactionId,
-    /// Whether a value movement journals an EIP-7708 transfer log.
-    transfer_logs: bool,
+    /// The journal: its state; its entries, which revm clears between transactions, so they are
+    /// this transaction's; its logs, which a failed frame's revert takes back with its entries;
+    /// and its configuration, which says whether a value movement journals an EIP-7708 transfer
+    /// log ([`emits_transfer_logs`]), read only where a write's count needs it.
+    journal: &'a JournalInner<JournalEntry>,
 }
 
 /// Whether `info` differs from `original` in what a write record stands for: the nonce, the
 /// balance or the code.
 fn differs(info: &AccountInfo, original: &AccountInfo) -> bool {
+    differs_with_balance(info, info.balance, original)
+}
+
+/// Whether `info` with its balance replaced by `balance` differs from `original` in what a write
+/// record stands for ([`differs`]).
+fn differs_with_balance(info: &AccountInfo, balance: U256, original: &AccountInfo) -> bool {
     info.nonce != original.nonce ||
-        info.balance != original.balance ||
+        balance != original.balance ||
         info.code_hash != original.code_hash
+}
+
+/// Whether the transaction changed `account`, which it loaded, from what it loaded: its nonce,
+/// balance or code differs from its original info.
+fn changed(account: &Account) -> bool {
+    differs(&account.info, account.original_info_ref())
+}
+
+/// Whether the account `account` — the transaction's load of it, `None` for one it has not loaded
+/// — is changed from what the transaction loaded, and whether it would be were its balance
+/// `balance`, the rest of its info as it is. What the transaction loads for an account it has not
+/// loaded is what the chain holds, so it is unchanged, and a balance it does not hold changes it.
+/// The account's original info is read once for both.
+fn changed_now_and_with_balance(account: Option<&Account>, balance: U256) -> (bool, bool) {
+    let Some(account) = account else { return (false, balance != U256::ZERO) };
+    let original = account.original_info_ref();
+    (differs(&account.info, original), differs_with_balance(&account.info, balance, original))
+}
+
+/// The balance of `account`, the transaction's load of it; nothing for one it has not loaded.
+fn balance_of(account: Option<&Account>) -> U256 {
+    account.map_or(U256::ZERO, |account| account.info.balance)
 }
 
 /// A creation's creator as the transaction held it before revm decided the creation's start: what
@@ -189,8 +222,21 @@ struct AccountBefore {
     address: Address,
     /// Whether the transaction had changed it from what it loaded.
     changed: bool,
-    /// Whether it was empty under EIP-161.
+    /// Whether it was empty under EIP-161 — no nonce, no balance, no code — as the transaction
+    /// held it: a value moved to it, or a creation at it, makes a new account. An account the
+    /// transaction had not loaded is not known to be empty.
     empty: bool,
+}
+
+impl AccountBefore {
+    /// The account at `address` as `account`, the transaction's load of it, holds it.
+    fn of(address: Address, account: Option<&Account>) -> Self {
+        Self {
+            address,
+            changed: account.is_some_and(changed),
+            empty: account.is_some_and(|account| account.info.is_empty()),
+        }
+    }
 }
 
 /// The accounts a frame's start writes on its frame — a call's caller and target, a creation's
@@ -206,29 +252,57 @@ pub(crate) struct StartBefore {
     logs: usize,
 }
 
+/// Whether a frame start of `kind` that transfers `value` makes no write record whatever the
+/// journal holds, so the opcode starting it prices its records at nothing without reading the
+/// journal: a call of any scheme that transfers no value, whose transfer records nothing
+/// ([`Accounts::transfer_records`]). A creation may record the account it creates and its
+/// creator's nonce.
+///
+/// This is the opcode's price, read off the value the opcode transfers, which is none for a
+/// `DELEGATECALL`. Whether revm's start then writes nothing on the frame's accounts, so that they
+/// need not be read, is decided where the frame starts, on the frame's input, which a precompile
+/// can make write (`start_writes_nothing` in `evm/execution.rs`).
+pub(crate) fn start_makes_no_records(kind: FrameStartKind, value: U256) -> bool {
+    match kind {
+        FrameStartKind::Create | FrameStartKind::Create2 => false,
+        FrameStartKind::Call |
+        FrameStartKind::CallCode |
+        FrameStartKind::DelegateCall |
+        FrameStartKind::StaticCall => value.is_zero(),
+    }
+}
+
 /// Whether `log` is the EIP-7708 transfer log revm journals for a value movement: a log from the
 /// system address `0xff…fe` carrying ERC-20's `Transfer` event.
 pub(crate) fn is_transfer_log(log: &Log) -> bool {
     log.address == ETH_TRANSFER_LOG_ADDRESS && log.topics().first() == Some(&ETH_TRANSFER_LOG_TOPIC)
 }
 
+/// Whether a value movement journals an EIP-7708 transfer log on `journal`: from Amsterdam on, or
+/// with the switch on, unless EIP-7708 is disabled. It is the rule revm's journal emits one by,
+/// read off the journal's own copy of the configuration, so the data size counts a transfer log
+/// exactly where revm emits one, a switch a caller turned on the journal itself included.
+pub(crate) fn emits_transfer_logs(journal: &JournalInner<JournalEntry>) -> bool {
+    (journal.cfg.spec.is_enabled_in(SpecId::AMSTERDAM) || journal.amsterdam_eip7708_enabled()) &&
+        !journal.cfg.eip7708_disabled
+}
+
 impl<'a> Accounts<'a> {
-    /// The accounts `journal` holds, in a transaction whose value movements journal transfer logs
-    /// or not (`transfer_logs`).
-    pub(crate) fn of<DB>(journal: &'a Journal<DB>, transfer_logs: bool) -> Self {
-        Self {
-            state: &journal.state,
-            entries: &journal.journal,
-            logs: &journal.logs,
-            transaction_id: journal.transaction_id,
-            transfer_logs,
-        }
+    /// The accounts `journal` holds.
+    pub(crate) const fn of<DB>(journal: &'a Journal<DB>) -> Self {
+        Self { journal: &journal.inner }
+    }
+
+    /// The journal's entries, which revm clears between transactions: this transaction's.
+    fn entries(&self) -> &'a [JournalEntry] {
+        &self.journal.journal
     }
 
     /// The account at `address` as the transaction loaded it and holds it now: `None` for one
     /// the transaction has not loaded, which it has not changed either.
     fn loaded(&self, address: Address) -> Option<&'a Account> {
-        self.state.get(&address).filter(|account| account.transaction_id == self.transaction_id)
+        let transaction_id = self.journal.transaction_id;
+        self.journal.state.get(&address).filter(|account| account.transaction_id == transaction_id)
     }
 
     /// Whether the transaction has loaded the account at `address`. An account an earlier
@@ -241,20 +315,7 @@ impl<'a> Accounts<'a> {
     /// balance or code differs from the account's original info. An account the transaction has
     /// not loaded is unchanged.
     pub(crate) fn is_changed(&self, address: Address) -> bool {
-        self.loaded(address).is_some_and(|account| differs(&account.info, &account.original_info()))
-    }
-
-    /// Whether the account at `address` would be changed from what the transaction loaded were
-    /// its balance `balance`, the rest of its info as it is.
-    fn changed_with_balance(&self, address: Address, balance: U256) -> bool {
-        match self.loaded(address) {
-            Some(account) => {
-                differs(&AccountInfo { balance, ..account.info.clone() }, &account.original_info())
-            }
-            // What the transaction loads for an account it has not loaded is what the chain holds,
-            // so a balance it does not hold changes it.
-            None => balance != U256::ZERO,
-        }
+        self.loaded(address).is_some_and(changed)
     }
 
     /// Whether the account at `address` was created in the transaction and has been destroyed
@@ -300,8 +361,9 @@ impl<'a> Accounts<'a> {
         } else {
             account.info.code.as_ref().map_or(0, |code| code.len() as u64)
         };
+        let transaction_id = self.journal.transaction_id;
         let loaded =
-            account.storage.iter().filter(|(_, slot)| slot.transaction_id == self.transaction_id);
+            account.storage.iter().filter(|(_, slot)| slot.transaction_id == transaction_id);
         let mut slots = Vec::new();
         let mut deleted = 0;
         for (key, slot) in loaded {
@@ -334,7 +396,7 @@ impl<'a> Accounts<'a> {
             return false;
         }
         account.is_loaded_as_not_existing() ||
-            self.entries.iter().rev().find_map(|entry| match entry {
+            self.entries().iter().rev().find_map(|entry| match entry {
                 JournalEntry::AccountDestroyed { address: destroyed, destroyed_status, .. }
                     if *destroyed == address =>
                 {
@@ -344,38 +406,25 @@ impl<'a> Accounts<'a> {
             }) == Some(true)
     }
 
-    /// Whether the account at `address` is empty under EIP-161 — no nonce, no balance, no code —
-    /// as the transaction holds it: a value moved to it, or a creation at it, makes a new account.
-    /// An account the transaction has not loaded is not known to be empty.
-    pub(crate) fn is_empty(&self, address: Address) -> bool {
-        self.loaded(address).is_some_and(|account| account.info.is_empty())
-    }
-
-    /// The current balance of the account at `address`; nothing for one the transaction has not
-    /// loaded.
-    fn balance(&self, address: Address) -> U256 {
-        self.loaded(address).map_or(U256::ZERO, |account| account.info.balance)
-    }
-
     /// The records a transfer of `value` from `from` to `to` makes and takes back, as the journal's
     /// state stands: nothing for a transfer to the same account or of nothing, which revm moves
-    /// nothing for, and nothing for a value `from` cannot fund, which revm refuses.
+    /// nothing for, and nothing for a value `from` cannot fund, which revm refuses. Each account
+    /// is looked up once.
     pub(crate) fn transfer_records(&self, from: Address, to: Address, value: U256) -> StartRecords {
         if from == to || value.is_zero() {
             return StartRecords::NONE;
         }
-        let Some(from_after) = self.balance(from).checked_sub(value) else {
+        let (from, to) = (self.loaded(from), self.loaded(to));
+        let Some(from_balance) = balance_of(from).checked_sub(value) else {
             return StartRecords::NONE;
         };
-        let to_after = self.balance(to).saturating_add(value);
-        let transfer = RecordDelta::of_account(
-            self.is_changed(from),
-            self.changed_with_balance(from, from_after),
-        )
-        .with(RecordDelta::of_account(
-            self.is_changed(to),
-            self.changed_with_balance(to, to_after),
-        ));
+        let to_balance = balance_of(to).saturating_add(value);
+        // Before the transfer the accounts are as they are now; after it they hold the balances it
+        // leaves them with.
+        let (from_before, from_after) = changed_now_and_with_balance(from, from_balance);
+        let (to_before, to_after) = changed_now_and_with_balance(to, to_balance);
+        let transfer = RecordDelta::of_account(from_before, from_after)
+            .with(RecordDelta::of_account(to_before, to_after));
         StartRecords { transfer, ..StartRecords::NONE }
     }
 
@@ -391,22 +440,24 @@ impl<'a> Accounts<'a> {
         value: U256,
     ) -> StartRecords {
         let Some(created) = created else { return StartRecords::NONE };
-        if self.balance(creator) < value {
+        let creator = self.loaded(creator);
+        if balance_of(creator) < value {
             return StartRecords::NONE;
         }
         StartRecords {
             transfer: RecordDelta::NONE,
             created: !self.is_changed(created),
-            creator: !self.is_changed(creator),
+            creator: !creator.is_some_and(changed),
         }
     }
 
     /// The creator at `address` of a creation revm is about to decide, as the transaction holds it.
     /// The creator is read loaded: revm loads it first thing when it decides the creation.
     pub(crate) fn creator_before(&self, address: Address) -> CreatorBefore {
+        let account = self.loaded(address);
         CreatorBefore {
-            account: self.account_before(address),
-            nonce: self.loaded(address).map_or(0, |account| account.info.nonce),
+            account: AccountBefore::of(address, account),
+            nonce: account.map_or(0, |account| account.info.nonce),
         }
     }
 
@@ -430,15 +481,15 @@ impl<'a> Accounts<'a> {
 
     /// The account at `address` as the transaction holds it.
     fn account_before(&self, address: Address) -> AccountBefore {
-        AccountBefore { address, changed: self.is_changed(address), empty: self.is_empty(address) }
+        AccountBefore::of(address, self.loaded(address))
     }
 
     /// What changed of the account `before` was read of since, as the journal holds it now: its
     /// write record, by its change ([`RecordDelta::of_account`]), and whether it became a new
-    /// account, empty under EIP-161 then and not now.
+    /// account, empty under EIP-161 then and not now. The account is looked up once.
     fn account_made(&self, before: &AccountBefore) -> (RecordDelta, bool) {
-        let record = RecordDelta::of_account(before.changed, self.is_changed(before.address));
         let loaded = self.loaded(before.address);
+        let record = RecordDelta::of_account(before.changed, loaded.is_some_and(changed));
         (record, before.empty && loaded.is_some_and(|account| !account.info.is_empty()))
     }
 
@@ -468,7 +519,7 @@ impl<'a> Accounts<'a> {
             records = records.with(record);
             growth += u64::from(grew);
         }
-        let logs = self.logs.get(before.logs..).unwrap_or_default();
+        let logs = self.journal.logs.get(before.logs..).unwrap_or_default();
         let logged = logs.iter().any(is_transfer_log);
         (records, Counted::records(records.added, records.taken, logged).with_growth(growth, 0))
     }
@@ -502,18 +553,17 @@ impl<'a> Accounts<'a> {
     /// destructed account held `balance` before it, and a beneficiary that is another account its
     /// balance less `balance`, all of which it got.
     fn destruction_records(&self, address: Address, target: Address, balance: U256) -> RecordDelta {
-        let source = RecordDelta::of_account(
-            self.changed_with_balance(address, balance),
-            self.is_changed(address),
-        );
+        // After the destruction the accounts are as they are now; before it they held the
+        // balances it moved.
+        let (now, before) = changed_now_and_with_balance(self.loaded(address), balance);
+        let source = RecordDelta::of_account(before, now);
         if target == address {
             return source;
         }
-        let before = self.balance(target).saturating_sub(balance);
-        source.with(RecordDelta::of_account(
-            self.changed_with_balance(target, before),
-            self.is_changed(target),
-        ))
+        let target = self.loaded(target);
+        let held = balance_of(target).saturating_sub(balance);
+        let (now, before) = changed_now_and_with_balance(target, held);
+        source.with(RecordDelta::of_account(before, now))
     }
 
     /// What the completed write `write` counts, the history bytes it appends and takes back, and,
@@ -565,7 +615,7 @@ impl<'a> Accounts<'a> {
             CompletedWrite::SelfDestruct { address, target, balance, result } => {
                 let records = self.destruction_records(address, target, balance);
                 let moved = result.had_value && target != address;
-                let logged = self.transfer_logs && moved;
+                let logged = moved && emits_transfer_logs(self.journal);
                 let creates = moved && !result.target_exists;
                 let counted = Counted::records(records.added, records.taken, logged)
                     .with_growth(u64::from(creates), 0);
@@ -630,13 +680,15 @@ mod tests {
         }
     }
 
-    /// A journal holding three accounts as the transaction loaded them.
+    /// A journal holding three accounts as the transaction loaded them, below Amsterdam, where the
+    /// EIP-7708 switch alone decides whether a value movement logs.
     fn journal() -> Journal<MemoryDatabase> {
         let db = MemoryDatabase::default()
             .account_balance(SENDER, U256::from(10))
             .account_balance(OTHER, U256::from(4))
             .account_balance(DESTRUCTED, U256::from(5));
         let mut journal = Journal::new(db);
+        journal.set_spec_id(SpecId::OSAKA);
         for address in [SENDER, OTHER, DESTRUCTED] {
             journal.load_account(address).unwrap();
         }
@@ -659,7 +711,40 @@ mod tests {
         let journal = journal();
         let slot = slot(original, present, new);
         let write = CompletedWrite::Sstore { address: OTHER, key: U256::ZERO, result: &slot };
-        Accounts::of(&journal, false).write_counted(&write).0
+        Accounts::of(&journal).write_counted(&write).0
+    }
+
+    /// The opcode prices no record without reading the journal exactly for a call that transfers
+    /// no value, of any scheme, and never for a creation; for every such call the journal-read
+    /// price is nothing too, whichever account it calls and whatever the caller holds.
+    #[test]
+    fn test_a_start_makes_no_records_only_when_a_call_transfers_no_value() {
+        let calls = [
+            FrameStartKind::Call,
+            FrameStartKind::CallCode,
+            FrameStartKind::DelegateCall,
+            FrameStartKind::StaticCall,
+        ];
+        let creations = [FrameStartKind::Create, FrameStartKind::Create2];
+        let journal = journal();
+        let accounts = Accounts::of(&journal);
+        for (value, expected) in [(U256::ZERO, true), (U256::from(1), false)] {
+            for kind in calls {
+                assert_eq!(start_makes_no_records(kind, value), expected, "{kind:?} of {value}");
+            }
+            for kind in creations {
+                assert!(!start_makes_no_records(kind, value), "{kind:?} of {value}");
+            }
+        }
+        for kind in calls {
+            for target in [OTHER, SENDER, address!("00000000000000000000000000000000000000ee")] {
+                let records = accounts.start_records(kind, SENDER, Some(target), U256::ZERO);
+                assert_eq!(records, StartRecords::NONE, "{kind:?} to {target}");
+            }
+        }
+        // A transfer that does move value records: the skip is not a price of nothing in general.
+        let moved = accounts.start_records(FrameStartKind::Call, SENDER, Some(OTHER), U256::ONE);
+        assert_ne!(moved, StartRecords::NONE);
     }
 
     /// A slot counts once, on its first change in the transaction; writing it back to its
@@ -709,7 +794,7 @@ mod tests {
     #[test]
     fn test_log_bytes() {
         let journal = journal();
-        let accounts = Accounts::of(&journal, false);
+        let accounts = Accounts::of(&journal);
         let counted = |topics, data_len| {
             let (counted, history, _) =
                 accounts.write_counted(&CompletedWrite::Log { address: OTHER, topics, data_len });
@@ -733,13 +818,14 @@ mod tests {
         let records_bytes = |records| WRITE_RECORD_SIZE * records;
 
         let mut fresh = journal();
+        fresh.set_amsterdam_eip7708_enabled(true);
         fresh.selfdestruct(DESTRUCTED, OTHER, false).unwrap();
-        let (counted, history, _) =
-            Accounts::of(&fresh, true).write_counted(&destruction(OTHER, 5));
+        let (counted, history, _) = Accounts::of(&fresh).write_counted(&destruction(OTHER, 5));
         assert_eq!(counted, Counted::records(2, 0, true));
         assert_eq!(history, HistoryBytes { appended: records_bytes(2), taken: 0 });
+        fresh.set_amsterdam_eip7708_enabled(false);
         assert_eq!(
-            Accounts::of(&fresh, false).write_counted(&destruction(OTHER, 5)).0,
+            Accounts::of(&fresh).write_counted(&destruction(OTHER, 5)).0,
             Counted::records(2, 0, false),
             "no transfer logs, no log"
         );
@@ -750,8 +836,7 @@ mod tests {
         drained.transfer(DESTRUCTED, SENDER, U256::from(1)).unwrap();
         drained.transfer(OTHER, SENDER, U256::from(4)).unwrap();
         drained.selfdestruct(DESTRUCTED, OTHER, false).unwrap();
-        let (counted, history, _) =
-            Accounts::of(&drained, false).write_counted(&destruction(OTHER, 4));
+        let (counted, history, _) = Accounts::of(&drained).write_counted(&destruction(OTHER, 4));
         assert_eq!(counted, Counted::records(0, 1, false));
         assert_eq!(history, HistoryBytes { appended: 0, taken: records_bytes(1) });
 
@@ -759,7 +844,7 @@ mod tests {
         funded.transfer(SENDER, DESTRUCTED, U256::from(2)).unwrap();
         funded.selfdestruct(DESTRUCTED, OTHER, false).unwrap();
         assert_eq!(
-            Accounts::of(&funded, false).write_counted(&destruction(OTHER, 7)).0,
+            Accounts::of(&funded).write_counted(&destruction(OTHER, 7)).0,
             Counted::records(1, 0, false),
             "the beneficiary's record alone"
         );
@@ -767,7 +852,7 @@ mod tests {
         // A pre-existing account destructing to itself keeps its balance: nothing changes.
         let to_itself = journal();
         assert_eq!(
-            Accounts::of(&to_itself, true).write_counted(&destruction(DESTRUCTED, 5)).0,
+            Accounts::of(&to_itself).write_counted(&destruction(DESTRUCTED, 5)).0,
             Counted::NONE
         );
     }
@@ -790,7 +875,7 @@ mod tests {
                 result: &result,
             };
             let journal = journal();
-            let counted = Accounts::of(&journal, true).write_counted(&write).0;
+            let counted = Accounts::of(&journal).write_counted(&write).0;
             (counted.added.get(STATE_GROWTH_POOL), counted.taken.get(STATE_GROWTH_POOL))
         };
         let fresh = address!("00000000000000000000000000000000000000f5");
@@ -834,9 +919,9 @@ mod tests {
         let fresh = address!("00000000000000000000000000000000000c4ea7");
         let slots = [(3, 1), (1, 7), (2, 1), (2, 0)];
         let mut made = created(MemoryDatabase::default(), fresh, 0, &slots, &[0x60, 0x00, 0xff]);
-        assert!(!Accounts::of(&made, true).is_destroyed(fresh));
+        assert!(!Accounts::of(&made).is_destroyed(fresh));
         made.selfdestruct(fresh, OTHER, false).unwrap();
-        let accounts = Accounts::of(&made, true);
+        let accounts = Accounts::of(&made);
         let parts = DestroyedParts {
             leaf: true,
             code: 3,
@@ -890,7 +975,7 @@ mod tests {
             let mut made = created(db, fresh, 0, &[(1, 1)], &[]);
             made.selfdestruct(fresh, OTHER, false).unwrap();
             assert_eq!(
-                Accounts::of(&made, true).destroyed_parts(fresh, false),
+                Accounts::of(&made).destroyed_parts(fresh, false),
                 Some(DestroyedParts {
                     leaf: false,
                     code: 0,
@@ -917,14 +1002,14 @@ mod tests {
         loaded.create_account_checkpoint(SENDER, fresh, U256::ZERO, spec).unwrap();
         loaded.sstore(fresh, U256::from(8), U256::from(6)).unwrap();
         loaded.selfdestruct(fresh, OTHER, false).unwrap();
-        let parts = Accounts::of(&loaded, true).destroyed_parts(fresh, false).unwrap();
+        let parts = Accounts::of(&loaded).destroyed_parts(fresh, false).unwrap();
         assert_eq!(parts, DestroyedParts { leaf: false, code: 0, slots: vec![], deleted: 1 });
         assert_eq!(parts.counted(), Counted::records(1, 0, false));
 
         // An account the transaction did not create is an ordinary deletion.
         let mut older = journal();
         older.selfdestruct(DESTRUCTED, OTHER, false).unwrap();
-        let accounts = Accounts::of(&older, true);
+        let accounts = Accounts::of(&older);
         assert_eq!(accounts.destroyed_parts(DESTRUCTED, false), None);
         assert!(!accounts.is_destroyed(DESTRUCTED));
     }
@@ -951,7 +1036,7 @@ mod tests {
     #[test]
     fn test_a_starts_priced_records_follow_the_net_change() {
         let mut journal = journal();
-        let accounts = Accounts::of(&journal, true);
+        let accounts = Accounts::of(&journal);
         let both = accounts.transfer_records(OTHER, DESTRUCTED, U256::from(1));
         assert_eq!(both.transfer, RecordDelta { added: 2, taken: 0 });
         assert_eq!(accounts.transfer_records(OTHER, OTHER, U256::from(1)), StartRecords::NONE);
@@ -960,11 +1045,11 @@ mod tests {
 
         // OTHER sent 1 to DESTRUCTED: sending it back returns both.
         journal.transfer(OTHER, DESTRUCTED, U256::from(1)).unwrap();
-        let back = Accounts::of(&journal, true).transfer_records(DESTRUCTED, OTHER, U256::from(1));
+        let back = Accounts::of(&journal).transfer_records(DESTRUCTED, OTHER, U256::from(1));
         assert_eq!(back.transfer, RecordDelta { added: 0, taken: 2 });
 
         let created = address!("00000000000000000000000000000000000c4ea7");
-        let accounts = Accounts::of(&journal, true);
+        let accounts = Accounts::of(&journal);
         let creation = accounts.creation_records(SENDER, Some(created), U256::from(1));
         assert_eq!(
             creation,
@@ -994,11 +1079,10 @@ mod tests {
         journal.set_amsterdam_eip7708_enabled(true);
         journal.load_account(empty).unwrap();
         let before = |journal: &Journal<MemoryDatabase>, first, second| {
-            Accounts::of(journal, true).start_before(first, Some(second), journal.logs.len())
+            Accounts::of(journal).start_before(first, Some(second), journal.logs.len())
         };
-        let made = |journal: &Journal<MemoryDatabase>, before| {
-            Accounts::of(journal, true).start_made(&before)
-        };
+        let made =
+            |journal: &Journal<MemoryDatabase>, before| Accounts::of(journal).start_made(&before);
 
         let funding = before(&journal, OTHER, empty);
         assert_eq!(made(&journal, funding), (RecordDelta::NONE, Counted::NONE), "nothing moved");
@@ -1043,7 +1127,7 @@ mod tests {
         let mut journal = journal();
         journal.load_account(empty).unwrap();
         journal.transfer(OTHER, DESTRUCTED, U256::from(1)).unwrap();
-        let accounts = Accounts::of(&journal, true);
+        let accounts = Accounts::of(&journal);
         let [sender, changed, empty_before] =
             [SENDER, DESTRUCTED, empty].map(|address| accounts.creator_before(address));
         for before in [sender, changed, empty_before] {
@@ -1053,7 +1137,7 @@ mod tests {
         for address in [SENDER, DESTRUCTED, empty] {
             assert!(journal.load_account_mut(address).unwrap().data.bump_nonce());
         }
-        let accounts = Accounts::of(&journal, true);
+        let accounts = Accounts::of(&journal);
         let record = Counted::records(1, 0, false);
         for (before, counted) in
             [(sender, record), (changed, Counted::NONE), (empty_before, record.with_growth(1, 0))]
@@ -1067,7 +1151,7 @@ mod tests {
         for address in [SENDER, DESTRUCTED] {
             journal.load_account_mut(address).unwrap().data.set_nonce(0);
         }
-        let accounts = Accounts::of(&journal, true);
+        let accounts = Accounts::of(&journal);
         assert_eq!(accounts.creator_counted(&sender), Counted::NONE);
         assert_eq!(accounts.creator_counted(&changed), Counted::NONE);
     }

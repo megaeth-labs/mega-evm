@@ -2,26 +2,27 @@
 //!
 //! Satin takes the Amsterdam schedule — the one that carries EIP-8037 state gas, EIP-8038's
 //! state-access prices, the EIP-2780 intrinsic decomposition, the EIP-7976 calldata floor and
-//! EIP-7981 access-list data — and changes exactly four things:
+//! EIP-7981 access-list data — and changes exactly three things:
 //!
 //! 1. the EIP-8037 state-gas entries are rebuilt from `MegaETH`'s own cost per state byte
 //!    ([`STATE_GAS_REPRICED`]), which is what makes the state dimension `MegaETH`'s rather than
 //!    Glamsterdam's;
-//! 2. the history price of deposited code ([`HISTORY_GAS_PRICED`]), and the history allowance a
-//!    value-transferring call gives the frame it starts, the entries outside Amsterdam's table:
-//!    upstream leaves them at zero, and Satin gives deposited code the cost of one history byte per
-//!    byte, which is what makes a deployment pay for the bytes every node has to carry, and the
-//!    allowance the cost of [`HISTORY_ALLOWANCE_BYTES`];
-//! 3. the share of its caller's pools — data size, KV updates, state growth — and of its caller's
-//!    EIP-8037 reservoir a frame starts with: upstream forwards the whole of each, and Satin's
-//!    caller keeps [`FRAME_KEPT_PERCENT`] of what it has left (`GasId::pool_kept_percent`,
-//!    `GasId::reservoir_kept_percent`). The fork rounds the two differently, as the spec does: a
-//!    pool's share is `floor(remaining × 98 / 100)`, and the reservoir's `remaining − remaining × 2
-//!    / 100`, so a caller keeps nothing of a reservoir below 50. The transaction's own frame and a
-//!    system call's outermost frame take the whole reservoir;
-//! 4. the regular gas a call or creation forwards: at most `remaining − remaining × 2 / 100` of
+//! 2. the history price of deposited code ([`HISTORY_GAS_PRICED`]), an entry outside Amsterdam's
+//!    table: upstream leaves it at zero, and Satin gives deposited code the cost of one history
+//!    byte per byte, which is what makes a deployment pay for the bytes every node has to carry;
+//! 3. the regular gas a call or creation forwards: at most `remaining − remaining × 2 / 100` of
 //!    what its caller has left, Rex6's rule, in place of EIP-150's 63/64
 //!    ([`FORWARD_REDUCTION_QUOTIENT`], the fork's `GasId::call_stipend_reduction`).
+//!
+//! What else a frame start takes from its caller is the engine's, not the schedule's, and is in no
+//! entry of it: the share of its caller's pools — data size, KV updates, state growth — and of its
+//! caller's EIP-8037 reservoir a frame starts with, all but [`FRAME_KEPT_PERCENT`] of what the
+//! caller has left, and the history allowance a value-transferring call gives the frame,
+//! `HISTORY_ALLOWANCE_BYTES` at the cost per history byte, are decided where the start is made
+//! (`MegaContext::forward_start`) and kept on the engine's start ledger. A pool's share is
+//! `floor(remaining × 98 / 100)`, and the reservoir's `remaining − remaining × 2 / 100`, so a
+//! caller keeps nothing of a reservoir below 50; the transaction's own frame and a system call's
+//! outermost frame take the whole reservoir.
 //!
 //! Every regular-gas price is Amsterdam's, so state creation is split between the two dimensions
 //! as Amsterdam splits it: the regular part is the access and write work EIP-8038 prices, and the
@@ -50,14 +51,8 @@ use revm::{
 };
 
 use crate::{
-    evm::{
-        history::HISTORY_ALLOWANCE_BYTES,
-        prices::{active_satin_prices, SatinPrices},
-    },
-    limit::{
-        DATA_SIZE_POOL, FRAME_DATA_SHARE_DENOMINATOR, FRAME_DATA_SHARE_NUMERATOR, KV_UPDATE_POOL,
-        STATE_GROWTH_POOL,
-    },
+    evm::prices::{active_satin_prices, SatinPrices},
+    limit::{FRAME_DATA_SHARE_DENOMINATOR, FRAME_DATA_SHARE_NUMERATOR},
 };
 
 /// A schedule entry and the number of bytes it prices: the entry is that many bytes at a byte
@@ -82,18 +77,15 @@ pub const STATE_GAS_REPRICED: &[ScheduleEntry] = &[
 ///
 /// Deposited code is the one history charge the schedule prices, because it is the one revm makes
 /// itself: `return_create` writes the code and charges the entry for its length. Every other
-/// history charge is made by the engine, which prices its own byte counts (the `history` module).
-/// The allowance a value-transferring call gives the frame it starts is in the schedule because
-/// revm's call instruction gives it, where it gives the call stipend; only a log the frame emits
-/// draws on it ([`history_allowance_gas`](crate::history_allowance_gas)).
-pub const HISTORY_GAS_PRICED: &[ScheduleEntry] = &[
-    (GasId::code_deposit_history_gas, 1),
-    (GasId::call_history_allowance, HISTORY_ALLOWANCE_BYTES),
-];
+/// history charge is made by the engine, which prices its own byte counts (the `history` module),
+/// and so is the allowance a value-transferring call gives the frame it starts, which only a log
+/// the frame emits draws on ([`history_allowance_gas`](crate::history_allowance_gas)).
+pub const HISTORY_GAS_PRICED: &[ScheduleEntry] = &[(GasId::code_deposit_history_gas, 1)];
 
 /// The part of its pool, in per cent, a caller keeps when it starts a frame, which starts with the
 /// rest: its budget, [`FRAME_DATA_SHARE_NUMERATOR`] / [`FRAME_DATA_SHARE_DENOMINATOR`] of what the
-/// caller has left. revm's forward of a pool rounds the share down, as the budget's rule does.
+/// caller has left, rounded down. The engine takes a start's shares by it, of the pools and of the
+/// reservoir, where the start is made.
 pub(crate) const FRAME_KEPT_PERCENT: u64 =
     100 - FRAME_DATA_SHARE_NUMERATOR * 100 / FRAME_DATA_SHARE_DENOMINATOR;
 const _: () =
@@ -152,13 +144,7 @@ pub fn satin_gas_params_at(prices: SatinPrices) -> GasParams {
     params.override_gas(
         HISTORY_GAS_PRICED.iter().map(|&(id, bytes)| (id(), prices.cphb.fixed_size_gas(bytes))),
     );
-    params.override_gas([
-        (GasId::pool_kept_percent(DATA_SIZE_POOL), FRAME_KEPT_PERCENT),
-        (GasId::pool_kept_percent(KV_UPDATE_POOL), FRAME_KEPT_PERCENT),
-        (GasId::pool_kept_percent(STATE_GROWTH_POOL), FRAME_KEPT_PERCENT),
-        (GasId::reservoir_kept_percent(), FRAME_KEPT_PERCENT),
-        (GasId::call_stipend_reduction(), FORWARD_REDUCTION_QUOTIENT),
-    ]);
+    params.override_gas([(GasId::call_stipend_reduction(), FORWARD_REDUCTION_QUOTIENT)]);
     params
 }
 
@@ -192,10 +178,6 @@ mod tests {
             let id = GasId::new(slot);
             let rebuilt = STATE_GAS_REPRICED.iter().any(|&(entry, _)| entry() == id) ||
                 HISTORY_GAS_PRICED.iter().any(|&(entry, _)| entry() == id) ||
-                id == GasId::pool_kept_percent(DATA_SIZE_POOL) ||
-                id == GasId::pool_kept_percent(KV_UPDATE_POOL) ||
-                id == GasId::pool_kept_percent(STATE_GROWTH_POOL) ||
-                id == GasId::reservoir_kept_percent() ||
                 id == GasId::call_stipend_reduction();
             if rebuilt {
                 continue;
@@ -288,23 +270,6 @@ mod tests {
         }
     }
 
-    /// A frame starts with 98 per cent of what its caller has left of its data-size, KV-update and
-    /// state-growth budgets, which revm forwards at every frame start as the schedule's share of
-    /// each pool, the caller keeping 2 per cent, rounded down as the budget's rule is; upstream
-    /// forwards the whole pool.
-    #[test]
-    fn test_a_frame_is_forwarded_98_percent_of_its_callers_pools() {
-        let satin = satin_gas_params();
-        for id in [DATA_SIZE_POOL, KV_UPDATE_POOL, STATE_GROWTH_POOL] {
-            assert_eq!(satin.get(GasId::pool_kept_percent(id)), 2);
-            assert_eq!(amsterdam().get(GasId::pool_kept_percent(id)), 0);
-            for pool in [0, 1, 49, 50, 51, 99, 100, 101, 9_690, u64::MAX] {
-                let floor = (u128::from(pool) * 98 / 100) as u64;
-                assert_eq!(satin.pool_forward_share(id, pool), floor, "{pool}");
-            }
-        }
-    }
-
     /// A call or creation forwards at most `remaining − remaining × 2 / 100` of its caller's
     /// regular gas, Rex6's rule, which the fork's EIP-150 reduction gives with a quotient of 50;
     /// upstream's is 64, the 63/64 rule.
@@ -324,12 +289,9 @@ mod tests {
 
     /// A frame starts with the reservoir its caller has left less the caller's 2 per cent, the
     /// division truncating, so a caller keeps nothing of a reservoir below 50 and the child gets
-    /// 98 of 99; upstream forwards the whole reservoir.
+    /// 98 of 99; the neutral configuration, which keeps nothing, forwards the whole reservoir.
     #[test]
     fn test_a_frame_is_forwarded_its_callers_reservoir_less_two_percent() {
-        let satin = satin_gas_params();
-        assert_eq!(satin.get(GasId::reservoir_kept_percent()), 2);
-        assert_eq!(amsterdam().get(GasId::reservoir_kept_percent()), 0);
         for (reservoir, share) in [
             (0, 0),
             (1, 1),
@@ -342,22 +304,10 @@ mod tests {
             (1_000_000, 980_000),
             (u64::MAX, u64::MAX - u64::MAX / 50),
         ] {
-            assert_eq!(satin.reservoir_forward_share(reservoir), share, "{reservoir}");
-            assert_eq!(amsterdam().reservoir_forward_share(reservoir), reservoir, "{reservoir}");
+            let kept = FRAME_KEPT_PERCENT;
+            assert_eq!(crate::limit::reservoir_share(reservoir, kept), share, "{reservoir}");
+            assert_eq!(crate::limit::reservoir_share(reservoir, 0), reservoir, "{reservoir}");
         }
-    }
-
-    /// The history allowance a value-transferring call gives the frame it starts is
-    /// [`HISTORY_ALLOWANCE_BYTES`] at the cost per history byte, the same figure the engine
-    /// prices its history at; Osaka and Amsterdam give none.
-    #[test]
-    fn test_a_value_call_is_given_the_history_allowance() {
-        let id = GasId::call_history_allowance();
-        assert_eq!(satin_gas_params().get(id), crate::history_allowance_gas());
-        let constants = satin_gas_params_at(SatinPrices::CONSTANTS);
-        assert_eq!(constants.get(id), 160 * COST_PER_HISTORY_BYTE);
-        assert_eq!(osaka().get(id), 0);
-        assert_eq!(amsterdam().get(id), 0);
     }
 
     /// Deposited code costs one history byte per byte, which is the whole of Satin's history
@@ -410,7 +360,6 @@ mod tests {
             (GasId::code_deposit_state_gas(), 313),
             (GasId::tx_eip7702_state_gas_bytecode(), 7_188),
             (GasId::code_deposit_history_gas(), 400),
-            (GasId::call_history_allowance(), 160 * 400),
         ];
         for slot in 0..=u8::MAX {
             let id = GasId::new(slot);

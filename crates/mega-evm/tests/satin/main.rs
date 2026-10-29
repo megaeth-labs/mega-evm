@@ -39,7 +39,9 @@ mod pool_validation;
 mod precompile_gas;
 mod pricing_table;
 mod reservoir_drain;
+mod reservoir_settlement;
 mod reservoir_share;
+mod reuse_after_error;
 mod salt;
 mod salt_delegation;
 mod salt_deposit;
@@ -49,6 +51,7 @@ mod schedule;
 #[path = "../shared/snapshot.rs"]
 mod snapshot;
 mod spec_numbers;
+mod start_ledger;
 mod state;
 mod state_growth;
 mod static_callee;

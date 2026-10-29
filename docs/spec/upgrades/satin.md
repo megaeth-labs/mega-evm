@@ -36,7 +36,7 @@ The changes, in the order this page records them:
 1. **Base layer.** Optimism Karst (Ethereum Osaka), four Amsterdam opcodes, and no EIP-7825 or EIP-8037 transaction gas cap.
 2. **Precompiles.** Karst's set, with KZG point evaluation still at 100,000.
 3. **Contract size limits.** 512 KiB of code and 1 MiB of initcode.
-4. **Two-pool gas.** EIP-8037, as of 4 September 2026, regular gas and state-gas reservoir under a 200,000,000 execution cap, and three gas ledgers.
+4. **Two-pool gas.** EIP-8037 in Satin's profile, whose freeze point is 18 September 2026: regular gas and state-gas reservoir under a 200,000,000 execution cap, and three gas ledgers.
 5. **Gas schedule and intrinsic gas.** Amsterdam's schedule, EIP-8038's state-access prices included, and EIP-2780 intrinsic cost.
 6. **State gas and SALT pricing.** `entry × multiplier` on EIP-8037's byte counts, replacing `base × (multiplier − 1)`.
 7. **History gas.** A price per byte on everything a transaction appends to history.
@@ -221,6 +221,32 @@ The removal of an unused counter ([commit `052029f362`](https://github.com/ether
   At the spec's numbers the data-size check refuses no transaction the gas checks admit: the floor holds calldata and access list together to at most 3,124,812 bytes, and the execution cap holds the authorization list to at most 25,587 entries, so a body with its authorization records is at most 6,732,889 bytes, about half the 13,107,200-byte limit.
 
 Satin has no separate compute-gas limit: compute is regular gas, bounded by the execution cap and, after a read of volatile data, by [gas detention](#12-gas-detention-on-withheld-gas).
+
+##### Satin's EIP-8037 profile
+
+Satin's EIP-8037 profile is the EIP as this section and the sections it names apply it.
+Its freeze point is [commit `dbc6d457cb`](https://github.com/ethereum/EIPs/commit/dbc6d457cbf90d5f9d55552f3fd91d58b88cc898) (18 September 2026), the last commit to the EIP whose change Satin decided on.
+
+- **Base.**
+  EIP-8037 as of [commit `c406bdb2ff`](https://github.com/ethereum/EIPs/commit/c406bdb2ffbf2fbf9d85698e97b3b2e8b6e79112) (4 September 2026), with the parameters this section and [State Gas and SALT Pricing](#6-state-gas-and-salt-pricing) set: the execution cap, and MegaETH's cost per state byte scaled by the bucket multiplier.
+- **Later commits taken.**
+  The child-merge return of [commit `3ff5cff17a`](https://github.com/ethereum/EIPs/commit/3ff5cff17a11ab31273ee14ebea0df8bbc4f4aef), as the reference implementation performs it.
+  The failure outcome of [commit `9dcd72754f`](https://github.com/ethereum/EIPs/commit/9dcd72754f3fe4b48a4dbeffee669dc4c60f7ec5): a failure of the first frame does not give back the reservoir that an authority charge made before the frame had drawn.
+  The collision rule of [commit `dbc6d457cb`](https://github.com/ethereum/EIPs/commit/dbc6d457cbf90d5f9d55552f3fd91d58b88cc898): a creation does not collide on storage.
+- **Later commits declined.**
+  The transaction gas cap of [commit `d7087803ca`](https://github.com/ethereum/EIPs/commit/d7087803ca236498c73f64665df0ddac7d621950).
+  The commit of the pre-execution spill in [commit `9dcd72754f`](https://github.com/ethereum/EIPs/commit/9dcd72754f3fe4b48a4dbeffee669dc4c60f7ec5), which would keep a later return from unwinding it.
+- **Later commits not tracked.**
+  The removal of an unused counter ([commit `052029f362`](https://github.com/ethereum/EIPs/commit/052029f3625328d6f51dec8e62a7090201e66f17)), which changes no rule a transaction executes.
+- **Satin's own departures from the EIP.**
+  - The reservoir share: a child frame receives `reservoir_share = remaining − remaining × 2 / 100` of the reservoir its caller has left, and the caller keeps the rest, where EIP-8037 passes the whole reservoir (see [Gas Forwarding](#9-gas-forwarding)).
+    The reservoir a child returns joins what the caller kept, after it unwinds the caller's outstanding spill (the child-merge rule above).
+  - History gas: a history charge draws the reservoir first and shares the spill with state charges, is given back with them when its frame fails, and is booked on a ledger of its own; the history gas of the transaction's body is the intrinsic state gas (see [History Gas](#7-history-gas)).
+  - The destruction-table refill: the first effective `SELFDESTRUCT` of an account created in the same transaction refills the state gas of each part of it that was absent at the transaction's start, where EIP-8037 specifies that this destruction produces no state-gas refills (see [The destruction table](#the-destruction-table)).
+
+A change to EIP-8037 after [commit `dbc6d457cb`](https://github.com/ethereum/EIPs/commit/dbc6d457cbf90d5f9d55552f3fd91d58b88cc898) is an input to a later spec, not to Satin.
+The co-author lines and the move to Last Call came after it and change no rule a transaction executes.
+A node MUST NOT apply such a change under Satin, whatever the EIP's status becomes.
 
 ### 5. Gas Schedule and Intrinsic Gas
 
@@ -1476,6 +1502,7 @@ A node, a stateless validator and a replay tool must agree on everything below, 
   An address read from another state treats the old system address's transactions as the protocol's and the new one's as a user's, or the reverse.
   A deposit is never refused for failing validation: one that fails validation is included as a failed deposit, which bumps its sender's nonce and uses its whole gas limit.
   A bucket or database read the node fails to make is not a validation failure, for a deposit either: the transaction gets no outcome; a failed bucket read, a database error the database declares fatal, or any database error on a read block execution makes around the transaction is an internal error of the node, while any other database error the transaction's execution meets makes the block invalid; a builder, which has no outcome to include for that transaction, may then leave a non-deposit transaction out, but cannot build a block that must hold the deposit while the read fails.
+  The reference implementation keeps nothing that changes a later execution of a transaction that got no outcome: the transactions executed after it, and the same transaction executed again once the read succeeds, execute as they would on a fresh execution environment over the same state.
 - **Activation blocks.**
   Block execution does not work out whether a block admits only deposits: it is told, and refuses a non-deposit transaction only when told so.
   The chain's rule is therefore enforced by the nodes that derive and build the chain, not by the executor alone: MegaETH's op-node MUST enforce deposit-only activation blocks for Satin and for every later MegaETH fork, and a block builder MUST compute the flag from the MegaETH schedule, since a node that knows only the Optimism schedule cannot tell that Satin activates.
@@ -1551,6 +1578,7 @@ Satin is unstable and not scheduled on any network: its prices, limits and rules
 
 - [EIP-8037](https://eips.ethereum.org/EIPS/eip-8037) as of [commit `c406bdb2ff`](https://github.com/ethereum/EIPs/commit/c406bdb2ffbf2fbf9d85698e97b3b2e8b6e79112) — state gas and the reservoir.
   Satin adopts the child-merge return of [commit `3ff5cff17a`](https://github.com/ethereum/EIPs/commit/3ff5cff17a11ab31273ee14ebea0df8bbc4f4aef), drawing only the reservoir the child returns, and does not adopt the transaction gas cap of [commit `d7087803ca`](https://github.com/ethereum/EIPs/commit/d7087803ca236498c73f64665df0ddac7d621950).
+  Satin's profile of it, with its freeze point and its departures, is [Satin's EIP-8037 profile](#satins-eip-8037-profile).
   The creation-collision rule of [commit `dbc6d457cb`](https://github.com/ethereum/EIPs/commit/dbc6d457cbf90d5f9d55552f3fd91d58b88cc898) and the first-frame authority outcome of [commit `9dcd72754f`](https://github.com/ethereum/EIPs/commit/9dcd72754f3fe4b48a4dbeffee669dc4c60f7ec5) are this page's own rules, stated in [Two-Pool Gas](#4-two-pool-gas-eip-8037-replaces-the-dual-gas-model).
 - [EIP-2780](https://eips.ethereum.org/EIPS/eip-2780) — the decomposed intrinsic cost.
 - [EIP-8038](https://eips.ethereum.org/EIPS/eip-8038) — the state-access prices.

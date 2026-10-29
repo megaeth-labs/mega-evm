@@ -31,7 +31,8 @@ use mega_evm::{
 use revm::{
     bytecode::opcode::{
         CALL, CALLDATASIZE, CALLER as CALLER_OPCODE, CALLVALUE, CREATE, DELEGATECALL, GAS, INVALID,
-        JUMPDEST, JUMPI, LOG2, POP, PUSH0, PUSH1, RETURN, REVERT, SELFDESTRUCT, SSTORE, STOP,
+        JUMPDEST, JUMPI, LOG2, POP, PUSH0, PUSH1, RETURN, REVERT, SELFDESTRUCT, SSTORE, STATICCALL,
+        STOP,
     },
     context::ContextTr,
     interpreter::{
@@ -1640,6 +1641,69 @@ fn test_zero_value_child_starts_unrecorded() {
         grown(with_extra(records(3), 2 * TRANSFER_LOG_SIZE), 1),
         "CALLEE as the recipient, CONTRACT, CONTRACT2, and two transfer logs; CONTRACT2 is new"
     );
+}
+
+/// Code that calls `target` once with each of the four call schemes, moving no value, and stops.
+fn calls_moving_no_value(target: Address) -> Bytes {
+    let by = |code: BytecodeBuilder, opcode| {
+        code.append_many([PUSH0, PUSH0, PUSH0, PUSH0])
+            .push_address(target)
+            .append(GAS)
+            .append(opcode)
+            .append(POP)
+    };
+    let code = BytecodeBuilder::default().call(target, U256::ZERO).append(POP);
+    let code = code.callcode(target, U256::ZERO).append(POP);
+    by(by(code, DELEGATECALL), STATICCALL).stop().build()
+}
+
+/// A call that moves no value writes nothing on its two accounts, whichever scheme makes it, even
+/// to an account empty under EIP-161 — one the state does not hold, and one it holds empty — which
+/// revm touches and leaves empty: the transaction keeps its body alone, and the account is not
+/// created. Its frame start reads neither account; a debug build reads them and finds nothing.
+#[test]
+fn test_a_call_moving_no_value_to_an_empty_account_counts_nothing() {
+    for held in [false, true] {
+        let mut db = funded().account_code(CALLEE, calls_moving_no_value(CONTRACT));
+        if held {
+            db = db.account_balance(CONTRACT, U256::ZERO);
+        }
+        let (result, usage) = run(db, call(CALLER, CALLEE, U256::ZERO, value_call_room()));
+        assert!(result.result.is_success(), "{:?}", result.result);
+        assert!(result.result.logs().is_empty(), "no transfer log");
+        assert_eq!(usage, body_only(), "held in the state: {held}");
+        let target = &result.state[&CONTRACT];
+        assert!(target.info.is_empty() && !target.is_created(), "held in the state: {held}");
+    }
+}
+
+/// A call that moves no value to an account delegating to code under EIP-7702 writes nothing on
+/// its two accounts: what the delegator keeps is what the delegate's code writes, one fresh slot of
+/// its storage, whether the transaction itself or a contract makes the call.
+#[test]
+fn test_a_call_moving_no_value_to_a_delegated_account_counts_what_the_delegate_writes() {
+    let delegated = |mut db: MemoryDatabase| {
+        let delegation = revm::state::Bytecode::new_eip7702(D);
+        let account = db.load_account(CONTRACT2).expect("the account is in memory");
+        account.info.code_hash = delegation.hash_slow();
+        account.info.code = Some(delegation);
+        account.account_state = revm::database::AccountState::None;
+        db
+    };
+    let writes_a_slot =
+        BytecodeBuilder::default().sstore(U256::from(1), U256::from(1)).stop().build();
+    let caller = BytecodeBuilder::default().call(CONTRACT2, U256::ZERO).append(POP).stop().build();
+    for (to, depth) in [(CONTRACT2, "the transaction"), (CALLEE, "a contract")] {
+        let db = funded()
+            .account_code(D, writes_a_slot.clone())
+            .account_code(CALLEE, caller.clone())
+            .account_balance(CONTRACT2, U256::ZERO);
+        let (result, usage) = run(delegated(db), call(CALLER, to, U256::ZERO, value_call_room()));
+        assert!(result.result.is_success(), "{depth}: {:?}", result.result);
+        let slot = &result.state[&CONTRACT2].storage[&U256::from(1)];
+        assert_eq!(slot.present_value, U256::from(1), "{depth}: the delegate wrote the delegator");
+        assert_eq!(usage, grown(records(1), 1), "{depth}: the slot alone");
+    }
 }
 
 /// Calls `D` with `DELEGATECALL`.

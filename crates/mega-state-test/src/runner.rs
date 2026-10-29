@@ -47,12 +47,14 @@ use mega_evm::{
             BlockEnv, CfgEnv,
         },
         database::{EmptyDB, State},
-        inspector::{inspectors::TracerEip3155, Inspector},
+        inspector::{inspectors::TracerEip3155, Inspector, NoOpInspector},
         interpreter::interpreter::EthInterpreter,
         primitives::{Bytes, B256, KECCAK_EMPTY, U256},
         DatabaseCommit, ExecuteCommitEvm,
     },
-    EvmTxRuntimeLimits, MegaContext, MegaEvm,
+    test_utils::{RecordingDatabase, RecordingEnvFactory, SharedWitnessRecord},
+    EmptyExternalEnv, EvmTxRuntimeLimits, ExternalEnvFactory, ExternalEnvTypes, MegaContext,
+    MegaEvm,
 };
 use serde::{
     de::{Error as _, MapAccess, Visitor},
@@ -86,6 +88,11 @@ pub struct Config {
     pub trace: bool,
     /// Print the digest of every transaction's whole outcome to standard error, in this form.
     pub digest: Option<DigestForm>,
+    /// Print the digest of what every transaction read below the journal to standard error, in
+    /// this form: the database's and the external environment's reads ([`digest::reads`]),
+    /// recorded by a database and environments around the ones the test runs on, which answer as
+    /// those do.
+    pub witness: Option<DigestForm>,
     /// Satin mode: the per-transaction limits the tests run under instead of the spec's, to reach
     /// the limit-stop paths. Equivalence mode installs no limit and refuses these.
     pub limits: Option<EvmTxRuntimeLimits>,
@@ -94,7 +101,7 @@ pub struct Config {
     pub deviations: &'static [Deviation],
 }
 
-/// How much of a transaction's digest a run prints.
+/// How much of a transaction's digest, or of its read set's, a run prints.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DigestForm {
     /// The test's identity and the hash of the canonical record.
@@ -517,21 +524,28 @@ pub fn run_file(path: &Path, config: Config) -> Result<Vec<TestResult>, Failure>
                     indexes: (test.indexes.data, test.indexes.gas, test.indexes.value),
                 };
                 let mut executed = None;
+                let reads = config.witness.map(|_| SharedWitnessRecord::default());
                 let outcome = match skip {
                     Some(reason) => Outcome::Skipped { reason },
                     None => catch_unwind(AssertUnwindSafe(|| {
-                        run_test(config, unit, test, &mut executed)
+                        run_test(config, unit, test, &mut executed, reads.as_ref())
                     }))
                     .unwrap_or_else(|panic| {
                         let message = panic_message(&panic);
                         if let Some(form) = config.digest {
                             print_digest(config, form, &id, "panic", &digest::panicked(&message));
                         }
+                        if let (Some(form), Some(reads)) = (config.witness, &reads) {
+                            print_witness(config, form, &id, "panic", &reads.borrow());
+                        }
                         Outcome::Failed(Failure::new(FailureKind::Panic, message))
                     }),
                 };
                 if let (Some(form), Some(executed)) = (config.digest, &executed) {
                     print_digest(config, form, &id, "outcome", executed);
+                }
+                if let (Some(form), Some(reads), Some(_)) = (config.witness, &reads, &executed) {
+                    print_witness(config, form, &id, "outcome", &reads.borrow());
                 }
                 let outcome = attribute(config, &id, outcome);
                 if config.json_outcome {
@@ -622,6 +636,36 @@ fn print_digest(
     eprintln!("{line}");
 }
 
+/// Prints the read-set line of a test to standard error, beside its digest line and for the same
+/// tests: the compact form names the test and the hash of the canonical record of what it read
+/// ([`digest::reads`]), the full form carries the record too. `row` is `outcome` for a
+/// transaction that ended and `panic` for a test that panicked, whose record holds what it read
+/// before the panic.
+fn print_witness(
+    config: Config,
+    form: DigestForm,
+    id: &TestId,
+    row: &str,
+    record: &mega_evm::test_utils::WitnessRecord,
+) {
+    let reads = digest::reads(record);
+    let mut line = serde_json::json!({
+        "mode": config.mode,
+        "fork": config.fork,
+        "path": id.path,
+        "test": id.name,
+        "d": id.indexes.0,
+        "g": id.indexes.1,
+        "v": id.indexes.2,
+        "witness": digest::hash(&reads),
+        "row": row,
+    });
+    if form == DigestForm::Full {
+        line["reads"] = reads;
+    }
+    eprintln!("{line}");
+}
+
 fn print_outcome(config: Config, id: &TestId, outcome: &Outcome) {
     let line = serde_json::json!({
         "mode": config.mode,
@@ -649,13 +693,16 @@ pub(crate) fn chain_id(unit: &TestUnit) -> Result<u64, Failure> {
 ///
 /// `executed` receives the canonical record of what the transaction ended in as soon as it has
 /// ended, so a test that then fails its fixture, or panics while it is judged, still has one.
+/// With `reads`, the transaction runs on a database and environments that record into it what it
+/// read below the journal.
 fn run_test(
     config: Config,
     unit: &TestUnit,
     test: &Test,
     executed: &mut Option<serde_json::Value>,
+    reads: Option<&SharedWitnessRecord>,
 ) -> Outcome {
-    match execute_and_check(config, unit, test, executed) {
+    match execute_and_check(config, unit, test, executed, reads) {
         Ok(None) => Outcome::Passed,
         Ok(Some(reason)) => Outcome::Skipped { reason },
         Err(failure) => Outcome::Failed(failure),
@@ -667,6 +714,7 @@ fn execute_and_check(
     unit: &TestUnit,
     test: &Test,
     executed: &mut Option<serde_json::Value>,
+    reads: Option<&SharedWitnessRecord>,
 ) -> Result<Option<SkipReason>, Failure> {
     let Ready { chain_id, block, tx } = match prepare(config.fork, unit, test)? {
         Ok(ready) => ready,
@@ -676,15 +724,18 @@ fn execute_and_check(
     let basefee = block.basefee;
     let mut state =
         State::builder().with_cached_prestate(unit.state()).with_bundle_update().build();
-    let mut evm = config.mode.evm(config.fork, &mut state, block, chain_id);
-    if let Some(limits) = config.limits {
-        evm.set_tx_runtime_limits(limits);
-    }
-    let result = if config.trace {
-        let mut evm = evm.with_inspector(TracerEip3155::buffered(stderr()).without_summary());
-        execute_and_commit(&mut evm, tx, executed)
-    } else {
-        execute_and_commit(&mut evm, tx, executed)
+    let result = match reads {
+        None => {
+            let evm = config.mode.evm(config.fork, &mut state, block, chain_id);
+            execute(config, evm, tx, executed)
+        }
+        Some(reads) => {
+            let factory = RecordingEnvFactory::new(EmptyExternalEnv, reads.clone());
+            let envs = factory.external_envs(block.number.saturating_to());
+            let db = RecordingDatabase::new(&mut state, reads.clone());
+            let evm = config.mode.evm_with_envs(config.fork, db, block, chain_id, envs);
+            execute(config, evm, tx, executed)
+        }
     };
     if let Ok(result) = &result {
         undo_fee_vault_credit(unit, &mut state, basefee, result.tx_gas_used());
@@ -693,17 +744,41 @@ fn execute_and_check(
     Ok(None)
 }
 
-/// Executes `tx` on `evm` and commits what it produced, as `transact_commit` does, keeping the
-/// transaction's whole outcome: its canonical record goes to `executed`, and the result is what
-/// the fixture is judged on.
-fn execute_and_commit<DB, INSP>(
-    evm: &mut MegaEvm<DB, INSP>,
+/// Executes `tx` on `evm`, under the run's limits and tracer, and commits what it produced
+/// ([`execute_and_commit`]).
+fn execute<DB, E>(
+    config: Config,
+    mut evm: MegaEvm<DB, NoOpInspector, E>,
     tx: OpTx,
     executed: &mut Option<serde_json::Value>,
 ) -> Result<ExecutionResult<OpHaltReason>, EVMError<DB::Error, OpTransactionError>>
 where
     DB: Database + DatabaseCommit,
-    INSP: Inspector<MegaContext<DB>, EthInterpreter>,
+    E: ExternalEnvTypes,
+{
+    if let Some(limits) = config.limits {
+        evm.set_tx_runtime_limits(limits);
+    }
+    if config.trace {
+        let mut evm = evm.with_inspector(TracerEip3155::buffered(stderr()).without_summary());
+        execute_and_commit(&mut evm, tx, executed)
+    } else {
+        execute_and_commit(&mut evm, tx, executed)
+    }
+}
+
+/// Executes `tx` on `evm` and commits what it produced, as `transact_commit` does, keeping the
+/// transaction's whole outcome: its canonical record goes to `executed`, and the result is what
+/// the fixture is judged on.
+fn execute_and_commit<DB, INSP, E>(
+    evm: &mut MegaEvm<DB, INSP, E>,
+    tx: OpTx,
+    executed: &mut Option<serde_json::Value>,
+) -> Result<ExecutionResult<OpHaltReason>, EVMError<DB::Error, OpTransactionError>>
+where
+    DB: Database + DatabaseCommit,
+    INSP: Inspector<MegaContext<DB, E>, EthInterpreter>,
+    E: ExternalEnvTypes,
 {
     match evm.execute_transaction(tx) {
         Ok(outcome) => {

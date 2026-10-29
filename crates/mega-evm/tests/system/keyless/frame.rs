@@ -47,15 +47,13 @@ fn call_frame(code: revm::state::Bytecode, data: Bytes, gas_limit: u64) -> Frame
             scheme: CallScheme::Call,
             is_static: false,
             charged_new_account_state_gas: false,
-            charged_start: Default::default(),
-            pool_shares: revm::interpreter::PoolAmounts::UNLIMITED,
-            history_allowance: 0,
         })),
     }
 }
 
 /// The call is a frame on revm's stack, driven through revm's frame lifecycle by hand, as revm's
-/// loop drives it, a frame's run result handed over before it returns: revm builds it at depth 0;
+/// loop drives it, from the transaction's start, a frame's run result handed over before it
+/// returns: revm builds it at depth 0;
 /// its first run starts the creation as its child, at depth 1, which revm builds above it on the
 /// stack; the creation returns into it; and on its resume it answers in the ABI, as the outermost
 /// frame.
@@ -67,6 +65,9 @@ fn test_the_call_is_a_frame_on_revms_stack() {
     journal.load_account(CALLER).unwrap();
     let code = journal.load_account_with_code(KEYLESS_DEPLOY_ADDRESS).unwrap().info.code.clone();
     let init = call_frame(code.unwrap(), deployment.call_data(LARGE_OVERRIDE), 10_000_000);
+    // A runner that drives the transaction's frame by hand opens the transaction's start first,
+    // as revm's `Handler::execution` does.
+    revm::handler::lifecycle::open_frame_start(&mut evm, &init).unwrap();
 
     let ItemOrResult::Item(call) = EvmTr::frame_init(&mut evm, init).unwrap() else {
         panic!("revm builds the call's frame");

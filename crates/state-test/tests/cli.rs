@@ -187,6 +187,124 @@ fn test_the_digest_options_print_a_line_per_transaction() {
     assert!(full[0]["record"]["rejected"].is_string(), "the transaction is rejected");
 }
 
+/// The JSON lines of a run's standard error.
+fn stderr_lines(output: &Output) -> Vec<serde_json::Value> {
+    String::from_utf8_lossy(&output.stderr)
+        .lines()
+        .filter(|line| line.starts_with('{'))
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+/// The witness options print one line per executed transaction on standard error, as the digest
+/// options do: the compact form the test and the hash of what it read, the full form the reads
+/// too, and the same line twice. Asked for with the digest, both lines are printed in one run, and
+/// the digest line is the one the digest options print alone.
+#[test]
+fn test_the_witness_options_print_a_line_per_transaction() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = fixture(dir.path(), "TransactionException.INTRINSIC_GAS_TOO_LOW");
+    let lines = |flags: &[&str]| -> Vec<serde_json::Value> {
+        let mut args = flags.to_vec();
+        args.extend(["--fork", "Osaka"]);
+        let output = state_test(&args, &path);
+        assert!(output.status.success(), "{}", stdout(&output));
+        stderr_lines(&output)
+    };
+    let compact = lines(&["--json-witness"]);
+    assert_eq!(compact.len(), 1);
+    assert_eq!(compact[0]["row"], "outcome");
+    assert!(compact[0]["witness"].as_str().unwrap().starts_with("0x"));
+    assert!(compact[0].get("reads").is_none() && compact[0].get("digest").is_none());
+    assert_eq!(compact, lines(&["--json-witness"]));
+
+    let full = lines(&["--json-witness-full"]);
+    assert_eq!(full.len(), 1);
+    assert_eq!(full[0]["witness"], compact[0]["witness"]);
+    // A transaction rejected for its intrinsic gas read the live system address and nothing else:
+    // every transaction reads it first, from the `SequencerRegistry`, which the pre-state lacks.
+    let registry = "0x6342000000000000000000000000000000000006";
+    let reads = &full[0]["reads"];
+    assert_eq!(reads["accounts"], json!({ registry: null }), "{reads}");
+    assert_eq!(reads["storage"][registry].as_object().map(|slots| slots.len()), Some(1));
+
+    let both = lines(&["--json-digest", "--json-witness"]);
+    assert_eq!(both, [lines(&["--json-digest"])[0].clone(), compact[0].clone()]);
+}
+
+/// A state test whose transaction calls a contract that reads the hash of the block its calldata
+/// names, `number`, and keeps nothing of it, with placeholder roots: Satin mode reports it whatever
+/// they are. Any one-byte number costs the same calldata.
+fn block_hash_fixture(dir: &Path, number: u8) -> PathBuf {
+    // PUSH0 CALLDATALOAD BLOCKHASH POP STOP
+    let code = "0x5f35405000";
+    let data = format!("0x{number:064x}");
+    let unit = json!({
+        "env": {
+            "currentCoinbase": "0x2adc25665018aa1fe0e6bc666dac8fc2697ff9ba",
+            "currentGasLimit": "0x1000000",
+            "currentNumber": "0x10",
+            "currentTimestamp": "0x03e8",
+            "currentBaseFee": "0x07",
+            "currentRandom": "0x0000000000000000000000000000000000000000000000000000000000020000",
+        },
+        "pre": {
+            "0xa94f5374fce5edbc8e2a8697c15331677e6ebf0b": {
+                "balance": "0x3635c9adc5dea00000", "code": "0x", "nonce": "0x00", "storage": {}
+            },
+            "0x00000000000000000000000000000000000c0de0": {
+                "balance": "0x00", "code": code, "nonce": "0x01", "storage": {}
+            },
+        },
+        "transaction": {
+            "data": [data],
+            "gasLimit": ["0x0f4240"],
+            "gasPrice": "0x0a",
+            "nonce": "0x00",
+            "secretKey": "0x45a915e4d060149eb4365960e6a7a45f334393093061116b197e3240065ff2d8",
+            "to": "0x00000000000000000000000000000000000c0de0",
+            "value": ["0x00"],
+        },
+        "post": { "Osaka": [{
+            "indexes": { "data": 0, "gas": 0, "value": 0 },
+            "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+            "logs": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        }]},
+    });
+    let path = dir.join(format!("block-hash-{number}.json"));
+    std::fs::write(&path, serde_json::to_string(&json!({ "t": unit })).unwrap()).unwrap();
+    path
+}
+
+/// Two transactions that read the hashes of two different blocks and keep nothing of them end in
+/// the same outcome, so their digests are equal; what they read is not, and the witness tells
+/// them apart, by the one block hash each read.
+#[test]
+fn test_the_witness_tells_apart_two_runs_the_digest_cannot() {
+    let dir = tempfile::tempdir().unwrap();
+    let lines = |number: u8| -> Vec<serde_json::Value> {
+        let path = block_hash_fixture(dir.path(), number);
+        let output = state_test(
+            &["--mode", "satin", "--fork", "Osaka", "--json-digest", "--json-witness-full"],
+            &path,
+        );
+        assert!(output.status.success(), "{}", stdout(&output));
+        stderr_lines(&output)
+    };
+    let (one, two) = (lines(15), lines(14));
+    assert_eq!(one.len(), 2);
+    assert_eq!(one[0]["digest"], two[0]["digest"], "the outcomes are the same");
+    assert_ne!(one[1]["witness"], two[1]["witness"], "the reads are not");
+    let number =
+        |lines: &[serde_json::Value]| lines[1]["reads"]["block_hashes"][0]["number"].clone();
+    assert_eq!((number(&one), number(&two)), (json!(15), json!(14)));
+    let mut without_hashes = [one[1]["reads"].clone(), two[1]["reads"].clone()];
+    for reads in &mut without_hashes {
+        reads["block_hashes"] = json!([]);
+    }
+    assert_eq!(without_hashes[0], without_hashes[1], "the block hash is the one read apart");
+}
+
 /// The limit options tighten Satin mode's limits; equivalence mode holds none, so it refuses them.
 #[test]
 fn test_the_limit_options_need_satin_mode() {
@@ -355,6 +473,44 @@ fn test_btest_an_unattributed_failure_fails_the_gate() {
     let help = stdout(&help).split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(help.contains("deviates exactly as listed"), "{help}");
     assert!(!help.contains("fails exactly as listed"), "{help}");
+}
+
+/// The witness options print one line per imported block, accepted or refused, with what it
+/// read; the import is judged as without them.
+#[test]
+fn test_btest_the_witness_options_print_a_line_per_block() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = blockchain_fixture(dir.path(), "a", |_| {});
+    let output = btest(&["--json-witness"], &path);
+    assert!(output.status.success(), "{}", stdout(&output));
+    assert_eq!(stdout(&output), stdout(&btest(&[], &path)));
+    let compact = stderr_lines(&output);
+    assert_eq!(compact.len(), 1);
+    assert_eq!((&compact[0]["block"], &compact[0]["row"]), (&json!(0), &json!("accepted")));
+    assert!(compact[0]["witness"].as_str().unwrap().starts_with("0x"));
+    assert!(compact[0].get("reads").is_none());
+
+    let full = stderr_lines(&btest(&["--json-witness-full"], &path));
+    assert_eq!(full[0]["witness"], compact[0]["witness"]);
+    // The pre-block calls read the EIP-2935 history contract, which the pre-state does not hold.
+    let history = "0x0000f90827f1c53a10cb7a02335b175320002935";
+    assert_eq!(
+        full[0]["reads"]["accounts"].get(history),
+        Some(&serde_json::Value::Null),
+        "{}",
+        full[0]["reads"]
+    );
+
+    // A block without a parent beacon root, which the EIP-4788 pre-block call needs, is refused
+    // after what it read so far: a line of its own, which the import's failure does not drop.
+    let refused = blockchain_fixture(dir.path(), "b", |header| {
+        header.parent_beacon_block_root = None;
+    });
+    let output = btest(&["--json-witness"], &refused);
+    assert!(stdout(&output).contains("unattributed 1"), "{}", stdout(&output));
+    let lines = stderr_lines(&output);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert_eq!((&lines[0]["block"], &lines[0]["row"]), (&json!(0), &json!("refused")));
 }
 
 #[test]

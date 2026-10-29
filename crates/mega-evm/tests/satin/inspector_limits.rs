@@ -23,13 +23,16 @@ use revm::{
     interpreter::{
         instructions::gas_table_spec, interpreter::EthInterpreter, interpreter_types::LoopControl,
         CallInputs, CallOutcome, Gas, InstructionResult, Interpreter, InterpreterAction,
-        InterpreterResult, PoolId,
+        InterpreterResult,
     },
     primitives::hardfork::SpecId,
     Database, Inspector,
 };
 
-use crate::common::{body_history, call, context, reservoir_share};
+use crate::common::{
+    assert_answered_at_unlimited_budgets, body_history, call, context, reservoir_share,
+};
+use mega_evm::test_utils::{record_start_ledger_settlements, take_start_ledger_settlements};
 
 const CALLER: Address = address!("0000000000000000000000000000000000e00000");
 const A: Address = address!("0000000000000000000000000000000000e00001");
@@ -325,8 +328,8 @@ enum AnswerGas {
     Untouched,
     /// `Gas::new` of the call's gas limit, as Foundry answers a cheatcode: no reservoir.
     Fresh,
-    /// Fresh regular gas carrying the pools of the untouched gas after a state and a history
-    /// charge: charges the frame, which never ran, did not make.
+    /// Fresh regular gas carrying the reservoir and the state and history figures of the untouched
+    /// gas after a state and a history charge: charges the frame, which never ran, did not make.
     Charged,
 }
 
@@ -353,10 +356,6 @@ impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for AnswersB {
                     gas.set_state_gas_spent(charged.state_gas_spent());
                     gas.set_state_gas_spilled(charged.state_gas_spilled());
                     gas.set_history_gas_spent(charged.history_gas_spent());
-                    for pool in PoolId::ALL {
-                        gas.set_pool_remaining(pool, charged.pool_remaining(pool));
-                        gas.set_pool_spent(pool, charged.pool_spent(pool));
-                    }
                     gas
                 }
             };
@@ -390,7 +389,17 @@ fn test_an_answer_settles_on_the_gas_it_is_built_on() {
     {
         let answer = |gas| {
             let inspector = AnswersB { result, gas };
-            run(a_calls_b(), limits, gas_limit, Some(inspector)).0
+            let tx = call(CALLER, A, U256::ZERO, gas_limit);
+            let mut evm = MegaEvm::new(context(a_calls_b()).with_tx_runtime_limits(limits))
+                .with_inspector(inspector);
+            record_start_ledger_settlements(evm.ctx_mut());
+            let outcome = evm.execute_transaction(tx).expect("a valid transaction");
+            // The start ledger settles an inspector's answer at unlimited budgets whatever pools
+            // its gas carries — none on `Gas::new`, the call's shares set on it — and leaves `A`
+            // with unlimited budgets.
+            let settlements = take_start_ledger_settlements(evm.ctx_mut());
+            assert_answered_at_unlimited_budgets(&settlements, 2, 1);
+            outcome
         };
         let untouched = answer(AnswerGas::Untouched);
         assert!(untouched.result.is_success(), "{result:?}: `A` ignores the answer");

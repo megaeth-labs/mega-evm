@@ -3,7 +3,7 @@
 //! `STATICCALL`, `CREATE` or `CREATE2` takes `remaining − remaining × 2 / 100` of what its caller
 //! has left after every charge it made for the start, the history of the start's records
 //! included, whatever regular gas the caller asks to forward. The caller keeps the rest while the
-//! child runs, and the child's return adds what it left back.
+//! child runs, and gets it back on top of what the child left when the child settles.
 //!
 //! An inspector reads the reservoir each start hands its frame off the frame's input, which is
 //! where revm puts the share it took out of the caller.

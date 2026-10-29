@@ -69,6 +69,22 @@ The record holds the status with its halt or revert reason, the output, the crea
 It is canonical: JSON with every object's keys sorted, 256-bit numbers as lowercase hex without leading zeros, hashes and addresses at full width, maps sorted by key, so it depends on neither a thread count nor a hash map's order.
 It is taken from the outcome as the engine produced it, before the runner takes the base-fee vault the fee routing created back out of the state.
 
+## The read-set digest
+
+An outcome says nothing of what a transaction read on its way to it, so a change that keeps every outcome and reads other state — a code it no longer loads, a block hash, a SALT bucket it now asks for, an account a rejected transaction no longer loads — moves no digest, and changes the witness a stateless validator must be given.
+`--json-witness` prints, per executed transaction, a second JSON line beside the digest's, with the same identity fields, the Keccak-256 of the canonical record of what the transaction read below the journal (`witness`) and `row`; `--json-witness-full` adds the record (`reads`).
+It prints for the same tests the digest does, and a run that asks for both prints both lines in one pass, the digest's unchanged, so a comparison of two revisions runs the corpus once.
+
+The record (`digest::reads`, in the digest's encoding) is what a database and environments around the ones the test runs on recorded, answering as those do (`test_utils::RecordingDatabase`, `RecordingEnvFactory`): every account the database answered, with its balance, nonce and code hash or nothing for one it does not hold; every code loaded, by hash; every storage slot, with its value; every block hash; every SALT bucket the environment answered, with its capacity or its error; and every Oracle read, in the order it was made.
+A key read twice is listed once, in key order; the Oracle reads keep their order, which a replay answers them in.
+The recording database serves code by hash, as a node's database does, so a code is in the record only where the engine loaded it.
+What the journal held already, and what the runner reads itself to judge the test, are no reads of the transaction's.
+The hints the Oracle service received are not reads and are not in it.
+A test that panicked prints `row` `panic`, with what it read before the panic.
+
+`state-test btest --json-witness` prints the same record per imported block, with the test, the block's position (`block`) and whether the executor accepted it (`row`, `accepted` or `refused`): what the pre-block steps, the transactions and the end of the block read.
+The import is judged as it is without it.
+
 ## Tightened limits
 
 Satin mode holds each transaction to the spec's limits, which the corpus rarely reaches.
@@ -81,6 +97,9 @@ To compare two revisions, run the same command at both, keep the lines that star
 
 ```bash
 state-test --mode satin --fork Osaka <main>/state_tests --json-digest 2>&1 >/dev/null | grep '^{' | sort > head.digest
+# The digest and the read set in one pass, split by the field each line carries.
+state-test --mode satin --fork Osaka <main>/state_tests --json-digest --json-witness 2>&1 >/dev/null | grep '^{' | sort > head.both
+grep '"digest":' head.both > head.digest; grep '"witness":' head.both > head.witness
 ```
 
 ## Blockchain tests
