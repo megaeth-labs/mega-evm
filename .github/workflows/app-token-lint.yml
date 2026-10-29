@@ -17,6 +17,11 @@ on:
       - ".github/workflows/app-token-lint.yml"
   push:
     branches: [main]
+    paths:
+      - ".github/workflows/release-candidate.yml"
+      - ".github/workflows/release-settle.yml"
+      - ".github/workflows/on-release.yml"
+      - ".github/workflows/app-token-lint.yml"
 
 permissions:
   contents: read
@@ -32,7 +37,4 @@ jobs:
 
       - uses: megaeth-labs/.github/.github/actions/app-token-lint@main
         with:
-          paths: >-
-            .github/workflows/release-candidate.yml
-            .github/workflows/release-settle.yml
-            .github/workflows/on-release.yml
+          paths: .github/workflows/release-candidate.yml .github/workflows/release-settle.yml .github/workflows/on-release.yml .github/workflows/app-token-lint.yml
