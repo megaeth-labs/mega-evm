@@ -69,13 +69,7 @@ impl PoolAmounts {
     /// Whether every amount is zero.
     #[inline]
     pub const fn is_zero(&self) -> bool {
-        let mut index = 0;
-        while index < PoolId::COUNT {
-            if self.0[index] != 0 {
-                return false;
-            }
-            index += 1;
-        }
-        true
+        // One element per pool: the pattern stops compiling if the pool count changes.
+        matches!(self.0, [0, 0, 0])
     }
 }
