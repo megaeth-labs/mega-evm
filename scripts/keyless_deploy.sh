@@ -8,7 +8,7 @@
 # Environment variables:
 #   PRIVATE_KEY  - Private key of a funded account (required)
 #   RPC_URL      - RPC endpoint (default: http://localhost:8545)
-#   MEGA_EVME    - Path to mega-evme binary (default: mega-evme from PATH)
+#   MEGA_EVME    - Path to mega-evme binary, or a command with arguments (default: mega-evme from PATH)
 #   FUND_MARGIN  - Extra wei to fund above simulated cost (default: 0)
 
 KEYLESS_TX="${1:?Usage: PRIVATE_KEY=<key> $0 <keyless-tx-hex>}"
@@ -22,11 +22,22 @@ export FOUNDRY_DISABLE_NIGHTLY_WARNING=1 # Suppress foundry nightly warning
 
 # Check required commands
 MISSING=()
-for cmd in cast jq python3 "$MEGA_EVME"; do
+for cmd in cast jq python3; do
     if ! command -v "$cmd" &>/dev/null; then
         MISSING+=("$cmd")
     fi
 done
+
+# Check mega-evme. MEGA_EVME may be a path (spaces allowed) or a command with arguments.
+if command -v "$MEGA_EVME" &>/dev/null; then
+    MEGA_EVME_CMD=("$MEGA_EVME")
+else
+    read -ra MEGA_EVME_CMD <<< "$MEGA_EVME"
+    if [ ${#MEGA_EVME_CMD[@]} -eq 0 ] || ! command -v "${MEGA_EVME_CMD[0]}" &>/dev/null; then
+        MISSING+=("${MEGA_EVME_CMD[0]:-$MEGA_EVME}")
+    fi
+fi
+
 if [ ${#MISSING[@]} -ne 0 ]; then
     echo "ERROR: Required command(s) not found: ${MISSING[*]}"
     echo "Please install them before running this script."
@@ -91,7 +102,7 @@ echo "--- Step 3: Simulating with mega-evme ---"
 DUMP_FILE=$(mktemp)
 trap "rm -f $DUMP_FILE" EXIT
 
-SIMULATION_OUTPUT=$("$MEGA_EVME" tx \
+SIMULATION_OUTPUT=$("${MEGA_EVME_CMD[@]}" tx \
     "0x${KEYLESS_TX}" \
     --fork --fork.rpc "$RPC_URL" \
     --sender.balance 1000ether \
@@ -104,7 +115,7 @@ SIMULATION_OUTPUT=$("$MEGA_EVME" tx \
 echo "$SIMULATION_OUTPUT" | head -20
 
 # Check execution status
-STATUS=$(echo "$SIMULATION_OUTPUT" | sed -n 's/.*Status:[[:space:]]\+\([^[:space:]]\+\).*/\1/p')
+STATUS=$(echo "$SIMULATION_OUTPUT" | sed -nE 's/.*Status:[[:space:]]+([^[:space:]]+).*/\1/p')
 if [ "$STATUS" != "Success" ]; then
     echo "ERROR: Simulation failed with status: $STATUS"
     echo "Full output:"
@@ -121,6 +132,10 @@ DEPLOYED_ADDR=$(echo "$RECEIPT_JSON" | jq -r '.contractAddress // empty')
 INITIAL_BALANCE="1000000000000000000000"  # 1000 ether in wei
 SIGNER_LOWER=$(echo "$SIGNER" | tr '[:upper:]' '[:lower:]')
 FINAL_BALANCE_HEX=$(jq -r "to_entries[] | select(.key | ascii_downcase == \"$SIGNER_LOWER\") | .value.balance" "$DUMP_FILE")
+if [ -z "$FINAL_BALANCE_HEX" ] || [ "$FINAL_BALANCE_HEX" = "null" ]; then
+    echo "ERROR: signer $SIGNER not found in state dump"
+    exit 1
+fi
 FINAL_BALANCE=$(python3 -c "print(int('$FINAL_BALANCE_HEX', 16))")
 BALANCE_SPENT=$(python3 -c "print($INITIAL_BALANCE - $FINAL_BALANCE)")
 
