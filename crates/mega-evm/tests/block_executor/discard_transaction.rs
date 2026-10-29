@@ -370,9 +370,9 @@ fn execute_panicking(executor: &mut Executor<'_>, tx: &Recovered<MegaTxEnvelope>
 }
 
 /// How far `execute_mega_transaction` got with a transaction when it unwound, read from the state
-/// the unwind left in the executor. Each mark is made by one step of the run and by no step
-/// before it, so the marks place the panic between two steps whatever accounts were read on the
-/// way, in every build profile.
+/// the unwind left in the executor. For these fixtures the marks tell the sites of `PanicSite`
+/// apart, in every build profile and whatever accounts were read on the way. They do not prove
+/// the handler stage in general: the site docs name the moves that leave a site's marks unchanged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Progress {
     /// The block executor handed the transaction to the EVM: it is the context's transaction.
@@ -384,11 +384,13 @@ struct Progress {
     caller_charged: bool,
     /// Pre-execution warmed the accounts it warms up front: the coinbase is warm (EIP-3651).
     accounts_warmed: bool,
-    /// A frame is open: the journal is inside a frame checkpoint.
+    /// A frame's checkpoint is open: the journal depth is above zero. This holds from the first
+    /// frame's checkpoint on, before its interpreter runs any instruction.
     in_frame: bool,
-    /// The frames returned: the journal holds the call target, which the first frame loaded, and
-    /// is outside every checkpoint.
-    frames_returned: bool,
+    /// The journal holds the call target and no checkpoint is open. The first frame loads its
+    /// target before it takes its checkpoint, so this holds from that load on, not only once the
+    /// frames returned.
+    target_loaded_outside_checkpoint: bool,
 }
 
 impl Progress {
@@ -412,7 +414,7 @@ impl Progress {
                 .is_some_and(|caller| caller.info.nonce == tx.nonce() + 1),
             accounts_warmed: journal.warm_addresses.is_warm(&ctx.block().beneficiary),
             in_frame: !closed,
-            frames_returned: closed && journal.state.contains_key(&target),
+            target_loaded_outside_checkpoint: closed && journal.state.contains_key(&target),
         }
     }
 }
@@ -580,8 +582,9 @@ fn test_discard_transaction_clears_a_stashed_context_error() {
         let database = &mut executor.evm.db_mut().database;
         database.inner.fail_on_account = None;
         database.panic_on_account = PANICKING_ACCOUNT;
-        // This contract never reads the beneficiary, so the panic lands after its frame returned
-        // with the in-frame error, when post-execution starts rewarding the beneficiary.
+        // This contract never reads the beneficiary, so the panic lands in the reward that follows
+        // its frame: the marks place it outside any checkpoint with the target loaded, and the
+        // in-frame error the premise below finds stashed shows that the frame ran.
         assert_eq!(
             Progress::observe(&executor, &tx, usage_before),
             PanicSite::BeneficiaryReward.progress(MegaSpecId::REX6),
@@ -727,15 +730,20 @@ enum PanicSite {
     /// `on_new_tx` from REX5 on; before REX5 the system address is first read by the caller load
     /// in pre-execution.
     SystemTxPreRun,
-    /// The caller load in pre-execution, after `on_new_tx` and before any frame.
+    /// The caller load in pre-execution, after `on_new_tx` and before any frame. Its marks are
+    /// also those of a caller read moved earlier, into `validate`.
     CallerLoad,
     /// The load of the call target when the first frame is built. Nothing public marks a frame
     /// build that has not read its target yet, so this site's marks are also those of a target
     /// read moved to the end of pre-execution, after the accounts are warmed.
     TargetLoad,
-    /// A BALANCE read inside the contract, with a frame open.
+    /// A BALANCE read inside the contract, with a frame open. The marks alone are also those of a
+    /// read moved to after the first frame's checkpoint and before its first instruction; the
+    /// matrix also requires the contract's earlier beneficiary read, which rules that move out.
     MidExecution,
-    /// The beneficiary load in the post-execution reward, after the frames returned.
+    /// The beneficiary load in the post-execution reward, after the frames returned. Its marks are
+    /// also those of a read moved to after the first frame's target load and before its
+    /// checkpoint.
     BeneficiaryReward,
 }
 
@@ -784,9 +792,9 @@ impl PanicSite {
         }
     }
 
-    /// The progress the run has made when the panic lands at this site. Each stage leaves marks
-    /// of its own; before REX5 the system transaction's site is a caller load and leaves the
-    /// caller load's.
+    /// The progress the run has made when the panic lands at this site. The marks differ between
+    /// the sites, except that before REX5 the system transaction's site is a caller load and has
+    /// the caller load's marks.
     fn progress(self, spec: MegaSpecId) -> Progress {
         let pre_executed =
             matches!(self, Self::TargetLoad | Self::MidExecution | Self::BeneficiaryReward);
@@ -796,7 +804,7 @@ impl PanicSite {
             caller_charged: pre_executed,
             accounts_warmed: pre_executed,
             in_frame: matches!(self, Self::MidExecution),
-            frames_returned: matches!(self, Self::BeneficiaryReward),
+            target_loaded_outside_checkpoint: matches!(self, Self::BeneficiaryReward),
         }
     }
 }
@@ -878,8 +886,9 @@ impl Preceding {
 /// The discard is right wherever the panic lands and whatever the preceding transaction did:
 /// afterwards the probe transaction behaves exactly as on an executor with the same history and no
 /// panicked transaction, and the detained cap is the one that history left. The rows are
-/// (spec) × (what preceded) × (panic site). Each row also checks that the injected panic landed at
-/// the intended stage, so a site that silently moved fails instead of passing vacuously. The
+/// (spec) × (what preceded) × (panic site). Each row also checks the state the panic left against
+/// the site's marks, so a site that moved to another site's stage fails instead of passing
+/// vacuously; the site docs name the moves the marks do not catch. The
 /// beneficiary-reward site is unreachable once a preceding transaction has put the beneficiary in
 /// the state cache; those rows are skipped, and the skip set is asserted.
 #[test]
@@ -922,13 +931,28 @@ fn test_discard_transaction_is_right_for_every_panic_site_and_preceding_outcome(
                 execute_panicking(&mut executor, &tx);
                 executor.evm.db_mut().database.panic_on_account = PANICKING_ACCOUNT;
 
-                // The injection landed where the row says it does: the marks the run left,
-                // whether `on_new_tx` ran among them, are the site's.
+                // The state the panic left carries the site's marks, whether `on_new_tx` ran
+                // among them.
                 assert_eq!(
                     Progress::observe(&executor, &tx, usage_before),
                     site.progress(spec),
                     "{row}: the panic landed at a different stage"
                 );
+                if matches!(site, PanicSite::MidExecution) {
+                    // The contract read the beneficiary's balance before the panicking account's:
+                    // that is residue the discard must clear. `on_new_tx`, which ran, reset the
+                    // tracker, so the access is this transaction's; unlike the database read, it
+                    // is recorded when the beneficiary is already in the state cache.
+                    assert!(
+                        executor
+                            .evm
+                            .ctx
+                            .volatile_data_tracker
+                            .borrow()
+                            .has_accessed_beneficiary_balance(),
+                        "{row}: the panic landed before the contract read the beneficiary"
+                    );
+                }
 
                 executor.discard_transaction();
                 assert_eq!(detained_cap(&executor), cap_before, "{row}: the cap after the discard");
