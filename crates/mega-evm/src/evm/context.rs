@@ -528,16 +528,33 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         self.spec
     }
 
-    /// Gets the system address for the current block.
+    /// Returns the configured system address for the current block.
     ///
-    /// Pre-REX5: always `MEGA_SYSTEM_ADDRESS`.
-    /// REX5+: resolved from `SequencerRegistry` storage in `apply_pre_execution_changes`.
+    /// [`MegaBlockExecutor`](crate::MegaBlockExecutor) resolves and sets this automatically
+    /// after committing the block's pre-execution changes.
+    /// Embedders replaying or tracing outside the block executor must commit those changes,
+    /// call [`resolve_system_address`](crate::resolve_system_address) for the block, and pass
+    /// the result to [`Self::set_system_address`] before executing the block's transactions.
+    /// Before REX5 the resolved address is always
+    /// [`MEGA_SYSTEM_ADDRESS`](crate::MEGA_SYSTEM_ADDRESS). A new context defaults to that
+    /// legacy address until explicitly set.
     pub fn system_address(&self) -> Address {
         self.system_address
     }
 
     /// Sets the system address for the current block.
-    pub(crate) fn set_system_address(&mut self, address: Address) {
+    ///
+    /// [`MegaBlockExecutor`](crate::MegaBlockExecutor) already does this automatically.
+    /// An embedder replaying or tracing a block outside the block executor must first commit
+    /// that block's pre-execution changes, then call
+    /// [`resolve_system_address`](crate::resolve_system_address) with the block's hardfork
+    /// configuration, spec, and database, and set the returned address before executing any
+    /// of the block's transactions.
+    /// The resolver's optional witness state must also be committed to the database.
+    /// Before REX5 the resolved address is always
+    /// [`MEGA_SYSTEM_ADDRESS`](crate::MEGA_SYSTEM_ADDRESS). On a [`MegaEvm`](crate::MegaEvm),
+    /// this setter is available through `evm.ctx`.
+    pub fn set_system_address(&mut self, address: Address) {
         self.system_address = address;
     }
 

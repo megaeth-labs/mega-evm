@@ -17,26 +17,31 @@ use std::convert::Infallible;
 
 use alloy_consensus::{Signed, TxLegacy};
 use alloy_eips::{eip2935::HISTORY_STORAGE_ADDRESS, eip4788::BEACON_ROOTS_ADDRESS};
-use alloy_evm::{block::BlockExecutor, EvmEnv};
+use alloy_evm::{block::BlockExecutor, Evm as _, EvmEnv, EvmFactory, IntoTxEnv};
 use alloy_hardforks::ForkCondition;
-use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
+use alloy_op_evm::{block::receipt_builder::OpAlloyReceiptBuilder, OpTxError};
 use alloy_primitives::{address, keccak256, Address, Bytes, Signature, TxKind, B256, U256};
 use alloy_sol_types::{SolCall, SolValue};
 use mega_evm::{
-    test_utils::MemoryDatabase, BlockLimits, ISequencerRegistry, MegaBlockExecutionCtx,
-    MegaBlockExecutorFactory, MegaEvmFactory, MegaHardfork, MegaHardforkConfig, MegaSpecId,
-    MegaTxEnvelope, SequencerRegistryConfig, SequencerRegistryRex6Config, TestExternalEnvs,
-    MEGA_SYSTEM_ADDRESS, SEQUENCER_REGISTRY_ADDRESS, SEQUENCER_REGISTRY_CODE,
-    SEQUENCER_REGISTRY_CODE_HASH, SEQUENCER_REGISTRY_CODE_HASH_REX6,
+    resolve_system_address, test_utils::MemoryDatabase, BlockLimits, IOracle, ISequencerRegistry,
+    MegaBlockExecutionCtx, MegaBlockExecutorFactory, MegaEvmFactory, MegaHardfork,
+    MegaHardforkConfig, MegaSpecId, MegaTxEnvelope, SequencerRegistryConfig,
+    SequencerRegistryRex6Config, TestExternalEnvs, MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS,
+    SEQUENCER_REGISTRY_ADDRESS, SEQUENCER_REGISTRY_CODE, SEQUENCER_REGISTRY_CODE_HASH,
+    SEQUENCER_REGISTRY_CODE_HASH_REX6,
 };
 use mega_system_contracts::sequencer_registry::storage_slots::{
     ADMIN, CURRENT_SEQUENCER, CURRENT_SYSTEM_ADDRESS, MIN_ROTATION_DELAY, PENDING_SEQUENCER,
     SEQUENCER_ACTIVATION_BLOCK,
 };
 use revm::{
-    context::BlockEnv,
+    context::{
+        result::{EVMError, InvalidTransaction},
+        BlockEnv,
+    },
     database::State,
     state::{AccountInfo, Bytecode},
+    DatabaseCommit,
 };
 
 const CHAIN_ID: u64 = 8453;
@@ -418,6 +423,102 @@ fn test_rex6_rotation_with_valid_proof_end_to_end() {
         "the rotation must flip at its activation block"
     );
     assert_eq!(read_registry_slot(&mut state, PENDING_SEQUENCER), U256::ZERO);
+}
+
+#[test]
+fn test_standalone_replay_matches_block_executor_after_system_address_rotation() {
+    let new_system_address = address!("0x6000000000000000000000000000000000000006");
+    let schedule_block = 1000;
+    let activation_block = schedule_block + 1;
+    let mut db = MemoryDatabase::default();
+    db.set_account_balance(BOOTSTRAP_ADMIN, U256::from(1_000_000_000_000_000u64));
+    let mut state = State::builder().with_database(db).build();
+    let factory = executor_factory();
+    let mut scheduler =
+        factory.create_executor(&mut state, block_ctx(), evm_env_at_block(schedule_block));
+    scheduler.apply_pre_execution_changes().expect("bootstrap pre-execution");
+    let schedule_tx = create_tx_from(
+        BOOTSTRAP_ADMIN,
+        0,
+        SEQUENCER_REGISTRY_ADDRESS,
+        ISequencerRegistry::scheduleNextSystemAddressChangeCall {
+            newSystemAddress: new_system_address,
+            activationBlock: U256::from(activation_block),
+        }
+        .abi_encode()
+        .into(),
+    );
+    let scheduled = scheduler.run_transaction(&schedule_tx).expect("schedule system address");
+    assert!(scheduled.result.is_success());
+    scheduler.commit_transaction_outcome(scheduled).expect("commit scheduled rotation");
+    drop(scheduler);
+
+    let mut replay_state = State::builder()
+        .with_database(state.database.clone())
+        .with_cached_prestate(state.cache.clone())
+        .build();
+    let mut env = evm_env_at_block(activation_block);
+    // A zero-fee legacy transaction is valid only when recognised as a system transaction.
+    env.block_env.basefee = 1;
+    let mut executor = factory.create_executor(&mut state, block_ctx(), env.clone());
+    executor.apply_pre_execution_changes().expect("activate system address rotation");
+
+    let mut replay_setup = factory.create_executor(&mut replay_state, block_ctx(), env.clone());
+    let outcomes = replay_setup.pre_execution_changes().expect("replay pre-execution changes");
+    drop(replay_setup);
+    for outcome in outcomes {
+        replay_state.commit(outcome.state);
+    }
+    let (system_address, witness) =
+        resolve_system_address(rex6_chain_spec(), MegaSpecId::REX6, &mut replay_state)
+            .expect("resolve from committed replay state");
+    assert_eq!(system_address, new_system_address);
+    replay_state.commit(witness.expect("REX6 registry read witness"));
+
+    let slot = U256::from(7);
+    let value = B256::with_last_byte(42);
+    for (case, calldata, expected_storage, expected_logs) in [
+        ("storage", IOracle::setSlotCall { slot, value }.abi_encode(), Some(U256::from(42)), 0),
+        (
+            "log",
+            IOracle::emitLogCall { topic: value, data: Bytes::from_static(b"rotated") }
+                .abi_encode(),
+            None,
+            1,
+        ),
+    ] {
+        let tx = create_tx_from(new_system_address, 0, ORACLE_CONTRACT_ADDRESS, calldata.into());
+        let canonical = executor.run_transaction(&tx).expect("canonical system transaction");
+        assert!(canonical.result.is_success(), "case={case}");
+        assert_eq!(canonical.state[&new_system_address].info.nonce, 1, "case={case}");
+        assert_eq!(canonical.result.logs().len(), expected_logs, "case={case}");
+        assert_eq!(
+            canonical.state[&ORACLE_CONTRACT_ADDRESS]
+                .storage
+                .get(&slot)
+                .map(|slot| slot.present_value()),
+            expected_storage,
+            "case={case}"
+        );
+
+        let mut replay = factory.evm_factory_ref().create_evm(&mut replay_state, env.clone());
+        assert_eq!(replay.ctx.system_address(), MEGA_SYSTEM_ADDRESS);
+        let err = replay.transact_raw((&tx).into_tx_env()).expect_err("unset replay must reject");
+        assert!(
+            matches!(
+                err,
+                EVMError::Transaction(OpTxError(op_revm::OpTransactionError::Base(
+                    InvalidTransaction::GasPriceLessThanBasefee
+                )))
+            ),
+            "case={case}: {err:?}"
+        );
+
+        replay.ctx.set_system_address(system_address);
+        let replayed = replay.transact_raw((&tx).into_tx_env()).expect("resolved replay");
+        // Full equality includes status, gas, logs, output, and every account/storage change.
+        assert_eq!(replayed, canonical.inner.result_and_state, "case={case}");
+    }
 }
 
 /// The hardened entry point rejects a schedule without a possession proof: the transaction
