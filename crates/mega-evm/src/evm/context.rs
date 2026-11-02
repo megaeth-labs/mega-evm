@@ -112,7 +112,8 @@ pub struct MegaContext<DB: Database, ExtEnvs: ExternalEnvTypes> {
 
     /// The system address for the current block.
     /// Pre-REX5: always `MEGA_SYSTEM_ADDRESS` (the legacy hardcoded constant).
-    /// REX5+: resolved from `SequencerRegistry` storage in `apply_pre_execution_changes`.
+    /// REX5+: resolved from committed `SequencerRegistry` storage and installed through
+    /// [`Self::set_system_address`] by the block executor or an external replay embedder.
     pub(crate) system_address: Address,
 }
 
