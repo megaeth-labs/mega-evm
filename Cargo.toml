@@ -141,24 +141,24 @@ revm = { version = "=40.0.3", default-features = false }
 revm-inspectors = { version = "=0.40.1", default-features = false }
 
 # alloy
-alloy-consensus = { version = "=2.0.5", default-features = false }
-alloy-eips = { version = "=2.0.5", default-features = false }
+alloy-consensus = { version = "2.0.5", default-features = false }
+alloy-eips = { version = "2.0.5", default-features = false }
 alloy-evm = { version = "=0.36.0", default-features = false }
 alloy-hardforks = { version = "=0.4.7", default-features = false }
-alloy-json-rpc = { version = "=2.0.5", default-features = false }
-alloy-network = { version = "=2.0.5", default-features = false }
+alloy-json-rpc = { version = "2.0.5", default-features = false }
+alloy-network = { version = "2.0.5", default-features = false }
 alloy-op-evm = { git = "https://github.com/ethereum-optimism/optimism", rev = "f67d87cd5c9992b62d215c043917b94e3f019629", default-features = false }
 alloy-op-hardforks = { git = "https://github.com/ethereum-optimism/optimism", rev = "f67d87cd5c9992b62d215c043917b94e3f019629", default-features = false }
 alloy-primitives = { version = "1.6.0", default-features = false, features = ["map-foldhash"] }
-alloy-provider = { version = "=2.0.5", default-features = false }
-alloy-rlp = { version = "=0.3.13", default-features = false }
-alloy-rpc-client = { version = "=2.0.5", default-features = false }
-alloy-rpc-types-eth = { version = "=2.0.5", default-features = false, features = ["serde"] }
-alloy-rpc-types-trace = { version = "=2.0.5", default-features = false }
-alloy-serde = { version = "=2.0.5", default-features = false }
+alloy-provider = { version = "2.0.5", default-features = false }
+alloy-rlp = { version = "0.3.13", default-features = false }
+alloy-rpc-client = { version = "2.0.5", default-features = false }
+alloy-rpc-types-eth = { version = "2.0.5", default-features = false, features = ["serde"] }
+alloy-rpc-types-trace = { version = "2.0.5", default-features = false }
+alloy-serde = { version = "2.0.5", default-features = false }
 alloy-sol-types = { version = "1.6.0", default-features = false }
-alloy-transport = { version = "=2.0.5", default-features = false }
-alloy-transport-http = { version = "=2.0.5", default-features = false }
+alloy-transport = { version = "2.0.5", default-features = false }
+alloy-transport-http = { version = "2.0.5", default-features = false }
 op-alloy-consensus = { git = "https://github.com/ethereum-optimism/optimism", rev = "f67d87cd5c9992b62d215c043917b94e3f019629", default-features = false, features = ["k256"] }
 op-alloy-flz = { version = "0.13.1", default-features = false }
 op-alloy-network = { git = "https://github.com/ethereum-optimism/optimism", rev = "f67d87cd5c9992b62d215c043917b94e3f019629", default-features = false }
