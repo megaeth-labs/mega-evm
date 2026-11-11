@@ -1148,9 +1148,10 @@ An out-of-gas step halts the call, consuming its regular gas.
 - Every such read MUST be charged as a cold access (2,100 gas), however often the slot was read, and the slot MUST be loaded whichever source answers, so a later write finds it warm and a stateless witness carries it.
 - A frame whose regular gas, its withheld part included, cannot pay the cold access MUST read nothing and ask nothing; a refused read asks nothing.
 - A system call MUST NOT ask the service at all: its read answers the chain's value (see [System Calls and Pre-Block Calls](#18-system-calls-and-pre-block-calls)).
-- A `sendHint` MUST reach the service synchronously, when it is called, and only when the call is forwarded gas, carries no value, and comes from a frame whose volatile-data access is on.
+- A `sendHint` MUST reach the service synchronously, when it is called, and only when the call is forwarded gas and comes from a frame whose volatile-data access is on.
   A hint that fails any of those conditions is dropped and counts nothing; the call runs the Oracle's bytecode either way.
-  The value condition is new.
+  A call that carries value is judged on its gas like any other: the gas of a value-transferring call includes its stipend, and a transaction's own call is judged on its first frame's whole gas.
+  The Oracle's bytecode refuses the value, which changes nothing about a hint already sent.
   The service MUST be handed the hint's topic, its data, and the address of the frame that made the call: the transaction's sender for a `sendHint` that is the transaction's own call.
   Only a `CALL` or a `STATICCALL` to the Oracle is a `sendHint`: a `CALLCODE` or `DELEGATECALL` of the method runs the Oracle's bytecode in a frame of the caller's own context, reaches no service and counts nothing.
 - An admitted hint MUST count the call's whole input length as data size on the transaction, before the input is decoded, and pays no history gas.

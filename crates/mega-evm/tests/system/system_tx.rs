@@ -75,7 +75,12 @@ fn legacy_tx_with_chain_id(
 }
 
 /// A deposit transaction from `caller`, which pays no fee, minting `mint` to its caller.
-fn deposit_tx(caller: Address, kind: TxKind, value: U256, mint: u128) -> MegaTransaction {
+pub(crate) fn deposit_tx(
+    caller: Address,
+    kind: TxKind,
+    value: U256,
+    mint: u128,
+) -> MegaTransaction {
     let mut tx = legacy_tx(caller, kind, Bytes::new(), 0);
     tx.0.base.gas_price = 0;
     tx.0.base.value = value;
