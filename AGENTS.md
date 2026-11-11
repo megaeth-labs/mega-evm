@@ -577,10 +577,13 @@ for s in $(seq 1 20); do MEGA_FUZZ_SEED=$s cargo test --release -p mega-evm --te
 - **Two modes.**
   The bounded mode is deterministic: seed 0, a fixed case count per property (128 to 768), under ten seconds in debug.
   It is part of `cargo test --workspace`, which `build-and-test.yml` runs in debug (`test`), where every debug assertion runs, and in release (`test-release`), where none does.
-  The long mode (`MEGA_FUZZ_LONG=1`) multiplies each property's count by fifty and draws a seed from the clock unless `MEGA_FUZZ_SEED` names one; `fuzz.yml` runs it on `workflow_dispatch`, in debug and in release, since a schedule fires only on the default branch.
+  The long mode (`MEGA_FUZZ_LONG=1`) multiplies each property's count by fifty and draws a seed from the clock unless `MEGA_FUZZ_SEED` names one; `fuzz.yml` runs it on every pull request and on dispatch, in debug and in release, from one seed drawn per run; a schedule or a dispatch alone would never run it, because GitHub accepts a dispatch only for a workflow the default branch has and fires a schedule only from the default branch.
   `MEGA_FUZZ_SEED` names the seed in either mode.
   `MEGA_FUZZ_CASES` names the case count in either mode, and it is the count: every property runs exactly that many cases, and the long mode's multiplier does not apply to it.
   Either variable set to the empty string counts as unset, which is how `fuzz.yml` passes an input left empty.
+- **Coverage claims.**
+  A property lists the classes its default run (seed 0, the bounded count) must reach and fails if one is missed (`harness::require_coverage`); on any other run a missed class is a printed note.
+  Existence and emptiness give different answers at several sites, so the world holds some addresses as accounts empty under EIP-161 rather than absent (`EmptyLeaves`), and the state-growth and record-count properties claim the cases where that decides the answer: an applied authority, an account a value transfer or a creation fills, and an account created and destroyed over an empty leaf.
 - **The properties hold for any seed.**
   Seed 0 is what CI runs, not what the properties are true of: a change to a generator redraws every case, so a property that held on one seed by luck fails on the pull request that touches a weight.
   Before changing a generator or a property, run the bounded mode on a few dozen seeds and the long mode on a few; a failure there is a bug to fix or a property to correct, never a seed to avoid.
@@ -601,7 +604,7 @@ for s in $(seq 1 20); do MEGA_FUZZ_SEED=$s cargo test --release -p mega-evm --te
   An expected value is computed from the case or from what the transactions themselves report, never read back from the thing under test: an assertion that restates a definition, or compares a counter with itself, cannot fail.
   To add an op or a transaction shape, extend the enum and its strategy in `gen/`, its assembly, and, if op-revm cannot express it, its `neutralized` counterpart.
 - **The byte prices** are a process-wide constant, so a case cannot run at two prices in one test.
-  `prices.rs` checks the schedule builder's monotonicity in-process, and under `satin-price-override` records what every case spent (`MEGA_FUZZ_PRICE_RECORD`) for `scripts/fuzz_price_monotonic.py` to compare two runs at two prices, which `fuzz.yml` does.
+  `prices.rs` checks the schedule builder's monotonicity in-process, and under `satin-price-override` records what every case spent (`MEGA_FUZZ_PRICE_RECORD`) for `scripts/fuzz_price_monotonic.py` to compare two runs at two prices, which `fuzz.yml` does on every pull request.
   The properties themselves hold at any byte price and run in the byte-price grid; the regression tests that fall short of a charge pin a minimal case at the spec's prices and return early at others.
 
 ## Test Gates

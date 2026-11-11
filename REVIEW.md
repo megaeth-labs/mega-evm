@@ -152,6 +152,15 @@ These checks guard every change to the Satin engine.
 - Each point reports how many tests a price guard held back (`guarded`, from `note_price_guard`; the tests are listed in the point's `.guards` file beside its log): every point passes the same number of tests, and this column tells a point at which tests returned early from one at which they ran.
 - Locally, `scripts/price_grid.sh --full`, `--pr` (five points: 0 / 0, 1 / 1, 312.5 / 20, 5000 / 300 and 10000 / 1000, a quick local check), or the points named (`scripts/price_grid.sh 312.5/20 5000/300`); each point's log is under `target/price-grid/`.
 
+### Randomized tests, long mode
+
+- The bounded fuzz run is part of the `test` and `test-release` checks.
+- `.github/workflows/fuzz.yml` runs the long mode on every pull request and on dispatch: every property at fifty times its bounded count, in debug and in release, and the byte-price record at two prices compared by `scripts/fuzz_price_monotonic.py`, all from one seed the run draws and prints in the step summary.
+  It has no schedule and no path filter, because a scheduled or dispatch-only workflow would never run on this line (GitHub needs the workflow on the default branch for either).
+- It is not a required check.
+  A failure prints the seed and the case count that reproduce it and the minimal case; it is a defect in the engine or a property to correct, never a seed to avoid.
+- Locally, `MEGA_FUZZ_LONG=1 MEGA_FUZZ_SEED=<seed> cargo test [--release] -p mega-evm --test fuzz -- --nocapture`.
+
 ### Instruction counts (CodSpeed)
 
 - The bench set is `transact` (`MegaEvm` next to op-revm's `OpEvm`, from an empty transaction to 64-deep calls and loops of storage writes and logs), `corpus` (the JSON scenarios under `benches/scenarios` through `MegaEvm`, a bench input rather than a conformance suite), `factory` (EVM construction through `MegaEvmFactory`) and `block` (a block through `MegaBlockExecutor`), all in `crates/mega-evm/benches`.
