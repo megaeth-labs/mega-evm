@@ -81,6 +81,7 @@ The changes, in the order this page records them:
     A fork activates in a block when it is active at the block's timestamp and not at the parent block's, as the chain configuration schedules it; a fork the configuration does not schedule never activates.
     The rule covers Jovian, Karst and every later Optimism fork the chain configuration schedules.
     A Mega System Transaction is a legacy transaction, so it is refused in such a block too, and the Satin activation block owes none: nothing writes the [Oracle](#16-oracle-storage-reads-and-hints) in it, because the only transactions the block admits are deposits, and a deposit from the system address is a failed deposit that runs no call (see [The Live System Address](#17-the-live-system-address)).
+    Nor does any Oracle read in that block ask the oracle service, since a deposit asks it nothing: every read pushes the slot's value on the chain.
   - Each non-deposit transaction's data-availability footprint — its compressed size times the footprint gas scalar held by the L1 block contract — MUST accumulate against the block's gas limit, and the block MUST report the sum as its blob gas used.
     A transaction whose footprint does not fit in what the block has left MUST NOT be included.
     With no scalar in state the scalar is zero, and the rule costs nothing.
@@ -1143,11 +1144,18 @@ An out-of-gas step halts the call, consuming its regular gas.
 
 #### New behavior
 
-- An `SLOAD` in the Oracle's own frame MUST load the slot from state, then ask the oracle service, and answer the service's value when it gives one and the loaded value otherwise.
+- An `SLOAD` in the Oracle's own frame MUST load the slot from state, then, unless the read is made during a system call, a deposit or a Mega System Transaction, ask the oracle service, and answer the service's value when it gives one and the loaded value otherwise.
   The service's value MUST win over whatever the slot holds at the read, a value the Oracle's own frame wrote earlier in the transaction included; with no value from the service the read answers the slot's present value, that write included.
 - Every such read MUST be charged as a cold access (2,100 gas), however often the slot was read, and the slot MUST be loaded whichever source answers, so a later write finds it warm and a stateless witness carries it.
 - A frame whose regular gas, its withheld part included, cannot pay the cold access MUST read nothing and ask nothing; a refused read asks nothing.
-- A system call MUST NOT ask the service at all: its read answers the chain's value (see [System Calls and Pre-Block Calls](#18-system-calls-and-pre-block-calls)).
+- A system call, a deposit and a Mega System Transaction MUST NOT ask the service for a value: their reads answer the slot's value on the chain, its present value, a write made earlier in the same call or transaction included, are loaded, priced and marked as any Oracle read is, and record no answer.
+  Only a transaction that is neither a deposit nor a Mega System Transaction asks the service, and the rule holds for the whole of the call or transaction it covers.
+  A node that replays a block runs no service, so a value the service gives a read must be on the chain before the transaction that read it, written by a Mega System Transaction the block orders first, and none of the three can have one before it.
+  A system call precedes the block's transactions and is a function of the state a stateless validator is given (see [System Calls and Pre-Block Calls](#18-system-calls-and-pre-block-calls)).
+  Every deposit of a block precedes its other transactions, and a deposit cannot be left out of the block instead.
+  A Mega System Transaction is the sequencer's write of the values the service gave, so a value served to its own read would need another one before it.
+  This is the practice of the node Rex6 runs on, which opens its oracle service only around each user transaction it executes; the block in which Satin activates admits only deposits, so none of its reads asks the service.
+  A `sendHint` made in such a call or transaction is admitted, forwarded and counted as in any other.
 - A `sendHint` MUST reach the service synchronously, when it is called, and only when the call is forwarded gas, carries no value, and comes from a frame whose volatile-data access is on.
   A hint that fails any of those conditions is dropped and counts nothing; the call runs the Oracle's bytecode either way.
   The value condition is new.
@@ -1229,7 +1237,7 @@ An out-of-gas step halts the call, consuming its regular gas.
 - **Oracle reads in a system call.**
   A system call MUST NOT ask the oracle service: an `SLOAD` in the Oracle's own frame during one reads the slot's value on the chain, which is loaded and priced as an Oracle read is (see [Oracle Storage Reads and Hints](#16-oracle-storage-reads-and-hints)), and records no answer.
   The pre-block calls run whatever code sits at the EIP-2935 and EIP-4788 addresses: on MegaETH's chains that is EIP-2935's and EIP-4788's own code, which reads no Oracle, and the rule keeps a system call a function of the state a stateless validator is given, which carries no service answer, whatever that code is.
-  The rule ends with the call: the transactions of the block are answered by the service as they are outside it.
+  The rule ends with the call: the transactions of the block are answered by the service as they are outside it, a deposit and a Mega System Transaction excepted, which ask it nothing either (see [Oracle Storage Reads and Hints](#16-oracle-storage-reads-and-hints)).
 - **Failure.**
   A pre-block call that does not succeed MUST make the block invalid, before its state is used.
   A database error the node's database declares fatal is an internal error of the node, not a verdict on the block; any other failure of a call — a non-fatal database error, another EVM error, an outcome that is not a success — makes the block invalid.
@@ -1423,9 +1431,10 @@ The witness is defined by what the block's execution returns and exports, and a 
   Block execution exports every hash `BLOCKHASH` was served, emptied when the block starts.
   It is not what a node's state cache holds, which may carry hashes an earlier block read.
 - **The oracle.**
-  An `SLOAD` in the Oracle's own frame loads the chain's slot, which is in the transaction's returned state and so in the witness, then takes the service's answer over it.
+  An `SLOAD` in the Oracle's own frame loads the chain's slot, which is in the transaction's returned state and so in the witness, then, in a transaction that is neither a deposit nor a Mega System Transaction, takes the service's answer over it.
   The answer is in no database.
   The engine records every read a transaction makes through the service, with the answer, in order, on the transaction's outcome; an answer can be none, where the service had no value and the slot's loaded value stood.
+  A deposit and a Mega System Transaction ask the service nothing and record no read: each of their reads takes the slot's value on the chain, which the witness carries, and a validator re-executing them is served nothing.
   A node MUST take the oracle reads of the transactions it includes from their outcomes, in block order, and nothing of a candidate it executed and dropped.
   A validator MUST do one of the following:
   - be given those records, and answer each read its own execution makes from them, in order; or
