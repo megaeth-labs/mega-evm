@@ -628,6 +628,7 @@ The same KV and state-growth numbers limit a block: `BLOCK_KV_UPDATE_LIMIT` = 50
   - the keyless signer's account, when the creation's nonce bump creates it, counted on the keyless call;
   - the caller account a deposit-like transaction creates, charged once (see [Gas Schedule and Intrinsic Gas](#5-gas-schedule-and-intrinsic-gas)).
     An account that already exists is not a rise, and neither is a `CALLCODE`, a value call to the calling account itself, deployed code, or the 23-byte delegation indicator.
+    An authority is new only where the state holds no account at its address, so an authority whose account the state holds is not a rise, an account empty under EIP-161 included; every other site counts an account empty under EIP-161 as new, as it counts an absent one.
     An `SSTORE` changes state growth only by the table below.
     The columns are the slot's original value in the transaction, its present value, and the value written.
     The state-growth change is the same transition as the fresh-slot state-gas charge or refill (see [State Gas and SALT Pricing](#6-state-gas-and-salt-pricing)).
