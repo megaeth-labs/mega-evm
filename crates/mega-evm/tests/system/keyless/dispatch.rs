@@ -193,7 +193,7 @@ fn test_arguments_that_do_not_decode_are_not_dispatched() {
     length_past_the_data.extend(word(32));
     let cases = [
         ("short", [selector.clone(), vec![0_u8; 16]].concat()),
-        ("selector alone", selector.clone()),
+        ("selector alone", selector),
         ("offset past the data", offset_past_the_data),
         ("length past the data", length_past_the_data),
         ("cut inside the bytes", well_formed[..well_formed.len() - 40].to_vec()),

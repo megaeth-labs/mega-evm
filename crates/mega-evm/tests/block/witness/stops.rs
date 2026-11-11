@@ -71,10 +71,15 @@ fn read_then_ecrecover() -> Bytes {
         .build()
 }
 
-/// The calldata of a `keylessDeploy` call the dispatch takes: its selector and bytes the value
-/// rule refuses before they are decoded.
+/// The calldata of a `keylessDeploy` call the dispatch takes: a well-formed encoding of its
+/// arguments, carrying bytes the value rule refuses before they are decoded as a transaction.
 fn keyless_call() -> Bytes {
-    IKeylessDeploy::keylessDeployCall::SELECTOR.iter().copied().chain([0_u8; 8]).collect()
+    IKeylessDeploy::keylessDeployCall {
+        keylessDeploymentTransaction: Bytes::from_static(&[0_u8; 8]),
+        gasLimitOverride: U256::ZERO,
+    }
+    .abi_encode()
+    .into()
 }
 
 /// The stop `kind` reports.
