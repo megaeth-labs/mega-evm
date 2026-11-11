@@ -310,7 +310,7 @@ For each module: where it is, what to check, the spec sections, and the `AGENTS.
 - **Where:** `src/block/` (`executor.rs`, `limit.rs`, `result.rs`, `eips.rs`, `l1_block_info.rs`, `factory.rs`, `helpers.rs`).
 - **Read first:** the module doc of `src/block/executor.rs`.
 - **Check:**
-  - The activation-block rule is caller-set (`no_user_tx_activation_block`, default `false`); `MegaHardforks::admits_only_deposits` is what a builder computes it from.
+  - The activation-block rules are derived by the executor (`admits_only_deposits`, `is_satin_activation_block`) from the schedule, the block's timestamp and `MegaBlockExecutionCtx::parent_timestamp`; an absent parent timestamp applies neither.
   - A transaction is an MST when it is a legacy transaction of the system shape from the live system address, decided before it runs; a failed read of the address is an internal error.
   - The block's packing budgets are data size 13,107,200, KV updates 500,000 and state growth 1,000, checked in that order before a transaction runs (`BlockLimiter::pre_execution_check`): the transaction that reaches one is packed, and every later ordinary transaction is refused.
   - A deposit and an MST are never refused by the packing budgets or building policy and count towards them; both are held to the header gas limit (`BlockLimiter::pre_execution_check`), and an MST, a legacy envelope, to the DA footprint (`check_da_footprint`), which a deposit is exempt from.
@@ -335,7 +335,7 @@ For each module: where it is, what to check, the spec sections, and the `AGENTS.
     This is the widest exemption in the engine, so check that claim.
   - An MST is validated (chain id, nonce, EIP-3607) before it is promoted to a deposit.
   - Satin deploys, upgrades and seeds no predeploy.
-    The block in which Satin activates (`MegaBlockExecutionCtx::satin_activation_block`, set by the node from its schedule and the parent's timestamp) reads the seven, each a read-only entry, and each must hold exactly Satin's code whatever its nonce, balance and storage.
+    The block in which Satin activates (`MegaBlockExecutor::is_satin_activation_block`, derived from the schedule, the block's timestamp and the parent's) reads the seven, each a read-only entry, and each must hold exactly Satin's code whatever its nonce, balance and storage.
     Anything else — no account, no code, an older version (the Oracle's 1.0.0 / 1.1.0, the registry's 1.0.0), other code — makes the block invalid with one error, `UnexpectedSystemContractCode`.
     No other block reads them.
   - An Oracle read in a system call reads chain storage, never the oracle service.
