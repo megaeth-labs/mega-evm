@@ -235,8 +235,18 @@ fn test_bytes_after_a_valid_encoding_are_still_dispatched() {
 #[test]
 fn test_a_value_call_whose_arguments_do_not_decode_runs_the_bytecode() {
     let truncated: Bytes = KEYLESS_DEPLOY.iter().copied().chain([0_u8; 16]).collect();
-    let result = run(system_db(), call_tx(KEYLESS_DEPLOY_ADDRESS, truncated, U256::from(1)));
+    let result =
+        run(system_db(), call_tx(KEYLESS_DEPLOY_ADDRESS, truncated.clone(), U256::from(1)));
     assert!(!result.result.is_success());
     assert!(revert_data(&result).is_empty());
-    assert!(result.result.gas().total_gas_spent() < KEYLESS_DEPLOY_OVERHEAD_GAS);
+    // The same input without value is not dispatched either, so it pays no overhead; the value
+    // call must spend within an overhead of it, whatever the calldata costs at the byte prices in
+    // effect.
+    let without_value = run(system_db(), call_tx(KEYLESS_DEPLOY_ADDRESS, truncated, U256::ZERO));
+    let (with, without) =
+        (result.result.gas().total_gas_spent(), without_value.result.gas().total_gas_spent());
+    assert!(
+        with.abs_diff(without) < KEYLESS_DEPLOY_OVERHEAD_GAS,
+        "the value call spent {with} against {without} without value: an overhead it does not owe",
+    );
 }
