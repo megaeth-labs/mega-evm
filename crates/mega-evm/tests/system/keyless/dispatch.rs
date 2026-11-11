@@ -229,6 +229,71 @@ fn test_bytes_after_a_valid_encoding_are_still_dispatched() {
     assert_eq!(total, KEYLESS_DEPLOY_OVERHEAD_GAS);
 }
 
+/// The calldata of a `keylessDeploy` call: the selector and `words` as 32-byte words, then
+/// `tail` as it is.
+fn raw_call(words: &[u64], tail: &[u8]) -> Bytes {
+    let mut data = KEYLESS_DEPLOY.to_vec();
+    for word in words {
+        data.extend(U256::from(*word).to_be_bytes::<32>());
+    }
+    data.extend(tail);
+    Bytes::from(data)
+}
+
+/// A call is recognised exactly when the contract's own calldata decoder for `(bytes, uint256)`
+/// accepts its arguments, and that decoder asks for no padding and no canonical offset: the
+/// padding of the bytes' tail cut off, an offset that points at the head's second word, which is
+/// then read as the length, and an offset of zero are all recognised. Each pays the overhead and
+/// reaches the rule that refuses a payload that is no signed transaction.
+#[test]
+fn test_arguments_the_contracts_decoder_accepts_are_dispatched() {
+    let cases = [
+        // offset 0x40, gas limit, length 5, five bytes and none of the 27 bytes of padding
+        ("the tail's padding cut off", raw_call(&[0x40, 1_000_000, 5], &[0xab; 5])),
+        // offset 0x20 points at the second head word (3), which is read as the length of the
+        // three bytes after the head
+        ("an offset at the second head word", raw_call(&[0x20, 3], &[0xab; 3])),
+        // offset zero points at the first head word (0), read as an empty payload
+        ("an offset of zero", raw_call(&[0, 1_000_000], &[])),
+    ];
+    for (name, data) in cases {
+        for gas_limit in GAS_LIMITS {
+            let dispatched = run_with(system_db(), data.clone(), gas_limit, no_limits());
+            assert_eq!(
+                refusal(&dispatched),
+                KeylessDeployError::MalformedEncoding,
+                "{name} at {gas_limit}",
+            );
+            let [total, regular, ..] = beyond(&dispatched, &reference(data.clone(), gas_limit));
+            assert_eq!(
+                [total, regular],
+                [KEYLESS_DEPLOY_OVERHEAD_GAS; 2],
+                "{name} at {gas_limit}: recognised, so the overhead is charged",
+            );
+        }
+    }
+}
+
+/// The first of those cases one byte short of the declared length is refused by the same
+/// decoder: the call is not recognised, pays no overhead, and the bytecode reverts with empty
+/// data.
+#[test]
+fn test_a_payload_one_byte_short_of_its_declared_length_is_not_dispatched() {
+    let data = raw_call(&[0x40, 1_000_000, 5], &[0xab; 4]);
+    for gas_limit in GAS_LIMITS {
+        let outcome = run_with(system_db(), data.clone(), gas_limit, no_limits());
+        let ExecutionResult::Revert { output, .. } = &outcome.result else {
+            panic!("the bytecode did not revert: {:?}", outcome.result);
+        };
+        assert!(output.is_empty(), "the bytecode's decoder reverts with empty data");
+        let [total, regular, ..] = beyond(&outcome, &reference(data.clone(), gas_limit));
+        assert!(
+            total < KEYLESS_DEPLOY_OVERHEAD_GAS && regular < KEYLESS_DEPLOY_OVERHEAD_GAS,
+            "at {gas_limit}: paid {total} beyond a plain call, an overhead it does not owe",
+        );
+    }
+}
+
 /// A call that carries value and whose arguments do not decode is not dispatched either: the
 /// bytecode runs and refuses the value itself, with the empty revert data of a non-payable
 /// method, and no overhead is charged.
