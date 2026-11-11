@@ -115,6 +115,7 @@ fn executor_on(
         Some(B256::ZERO),
         Bytes::new(),
         BlockLimits::no_limits(),
+        None,
     );
     MegaBlockExecutor::new(evm, ctx, spec, OpAlloyReceiptBuilder::default())
 }
@@ -632,6 +633,7 @@ fn started_block_at(state: &mut State<MemoryDatabase>, number: u64) -> Executor<
         Some(B256::ZERO),
         Bytes::new(),
         BlockLimits::no_limits(),
+        None,
     );
     let mut executor =
         MegaBlockExecutor::new(evm, ctx, common::chain_spec(), OpAlloyReceiptBuilder::default());

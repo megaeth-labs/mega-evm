@@ -59,7 +59,7 @@ The block context a node passes carries only building policy (`BlockLimits`): a 
 The execution figure a block counts for a transaction is its regular ledger — its gas less state and history, read off revm's `Gas` — at least its EIP-7623 floor.
 The block's packing budgets never refuse a deposit, which the block must include, or a Mega System Transaction; both still count towards them.
 A builder that executes candidates and chooses among them commits through `commit_transaction_outcome`, which checks the block's counters again; alloy-evm's `commit_transaction` cannot fail and expects each outcome to commit before the next transaction executes, and a debug build asserts it.
-`apply_pre_execution_changes` makes the EIP-2935 and EIP-4788 calls, in the block in which Satin activates — which the node says with `MegaBlockExecutionCtx::satin_activation_block` — checks that the six MegaETH system contracts and the EIP-7997 `CREATE2` factory hold the code Satin runs, which the legacy forks and OP's genesis tooling installed and without which that block is invalid, applies a role change the `SequencerRegistry` has due in the block with its `applyPendingChanges()` call, and last reads the L1 block contract's account and the five slots the block's transactions can be priced against, which op-revm and the executor read on the database rather than through a transaction.
+`apply_pre_execution_changes` makes the EIP-2935 and EIP-4788 calls, in the block in which Satin activates — which the executor works out from its schedule, the block's timestamp and the parent's (`MegaBlockExecutionCtx::parent_timestamp`) — checks that the six MegaETH system contracts and the EIP-7997 `CREATE2` factory hold the code Satin runs, which the legacy forks and OP's genesis tooling installed and without which that block is invalid, applies a role change the `SequencerRegistry` has due in the block with its `applyPendingChanges()` call, and last reads the L1 block contract's account and the five slots the block's transactions can be priced against, which op-revm and the executor read on the database rather than through a transaction.
 It commits each pre-block state on its own, in order, read-only entries included — the two EIP calls, the activation block's seven reads, the read of the registry's pending changes and its call, and the L1 block info; with the included transactions' states and oracle reads, and the block hashes and buckets the executor exports, the sequence of committed states is the witness a stateless client needs, and a node collects it with a commit hook on its `State` (`State::set_state_hook`).
 A database that cannot serve one of those L1 reads fails the block before its first transaction, as an internal error, whatever the block holds.
 
@@ -197,7 +197,7 @@ use alloy_evm::block::{BlockExecutor as _, BlockExecutorFactory as _};
 use mega_evm::{BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutorFactory, MegaEvmFactory};
 
 let factory = MegaBlockExecutorFactory::new(receipt_builder, chain_spec, MegaEvmFactory::new());
-let ctx = MegaBlockExecutionCtx::new(parent_hash, parent_beacon_block_root, extra_data, BlockLimits::no_limits());
+let ctx = MegaBlockExecutionCtx::new(parent_hash, parent_beacon_block_root, extra_data, BlockLimits::no_limits(), Some(parent_timestamp));
 
 let mut executor = factory.create_executor(evm, ctx);
 executor.apply_pre_execution_changes()?;

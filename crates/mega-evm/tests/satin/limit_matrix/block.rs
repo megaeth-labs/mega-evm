@@ -115,7 +115,7 @@ pub(super) fn drive_with(
 ) -> (Vec<Result<(), String>>, State<MemoryDatabase>) {
     let mut state = State::builder().with_database(db).build();
     let evm = MegaEvmFactory::new().create_evm(&mut state, env());
-    let ctx = MegaBlockExecutionCtx::new(B256::ZERO, Some(B256::ZERO), Bytes::new(), policy);
+    let ctx = MegaBlockExecutionCtx::new(B256::ZERO, Some(B256::ZERO), Bytes::new(), policy, None);
     let mut executor = MegaBlockExecutor::new(
         evm,
         ctx,

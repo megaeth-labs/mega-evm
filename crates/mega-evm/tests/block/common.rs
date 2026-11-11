@@ -18,8 +18,8 @@ use mega_evm::{
     },
     test_utils::{BytecodeBuilder, MemoryDatabase, SequencerRegistryRoles},
     BlockLimits, EmptyExternalEnv, EvmTxRuntimeLimits, MegaBlockExecutionCtx, MegaBlockExecutor,
-    MegaBlockExecutorFactory, MegaEvm, MegaEvmFactory, MegaHardforkConfig, MegaSpecId,
-    MegaTxEnvelope, ProtocolLimits,
+    MegaBlockExecutorFactory, MegaEvm, MegaEvmFactory, MegaHardfork, MegaHardforkConfig,
+    MegaSpecId, MegaTxEnvelope, ProtocolLimits,
 };
 use op_alloy_consensus::TxDeposit;
 use revm::{
@@ -117,6 +117,27 @@ pub(crate) fn chain_spec() -> MegaHardforkConfig {
     MegaHardforkConfig::default().with_all_activated()
 }
 
+/// A schedule in which Satin activates at [`BLOCK_TIMESTAMP`], the timestamp of the block
+/// [`evm_env`] describes, so that block is Satin's activation block when its context names a
+/// parent before it ([`activation_ctx`]).
+pub(crate) fn activation_spec() -> MegaHardforkConfig {
+    MegaHardforkConfig::default()
+        .with(MegaHardfork::Satin, alloy_hardforks::ForkCondition::Timestamp(BLOCK_TIMESTAMP))
+}
+
+/// The context of the block [`evm_env`] describes as Satin's activation block under
+/// [`activation_spec`]: its parent came one second before the activation, so the block admits
+/// only deposits and checks the predeploys.
+pub(crate) fn activation_ctx() -> MegaBlockExecutionCtx {
+    MegaBlockExecutionCtx::new(
+        B256::ZERO,
+        Some(B256::ZERO),
+        Bytes::new(),
+        BlockLimits::no_limits(),
+        Some(BLOCK_TIMESTAMP - 1),
+    )
+}
+
 /// The loosest limits a block could be held to while a read of volatile data still detains:
 /// every limit unlimited, and gas detention's caps one below the most compute a transaction can
 /// spend, which no transaction of a block this size reaches. For a test that holds a block to
@@ -138,7 +159,7 @@ pub(crate) const fn loosest_tx() -> EvmTxRuntimeLimits {
 /// Cancun is active, so the block carries a parent beacon block root; without one the EIP-4788
 /// pre-block call refuses the block.
 pub(crate) fn block_ctx(policy: BlockLimits) -> MegaBlockExecutionCtx {
-    MegaBlockExecutionCtx::new(B256::ZERO, Some(B256::ZERO), Bytes::new(), policy)
+    MegaBlockExecutionCtx::new(B256::ZERO, Some(B256::ZERO), Bytes::new(), policy, None)
 }
 
 /// The context of a block packed under no building policy, as a validator executes one.
