@@ -448,3 +448,97 @@ pub(super) fn state_gas<DB: Database, ExtEnvs: ExternalEnvTypes>(
         .err()
         .unwrap_or_else(|| ContextError::Custom("state gas price lookup failed".into())))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{test_utils::MemoryDatabase, MegaSpecId};
+    use alloy_primitives::address;
+    use revm::interpreter::{CallInput, CallValue, SharedMemory};
+
+    const CALLER: Address = address!("00000000000000000000000000000000000e0001");
+    const OTHER: Address = address!("00000000000000000000000000000000000e0002");
+
+    /// Arguments that decode as `(bytes, uint256)`.
+    fn decodable() -> Bytes {
+        IKeylessDeploy::keylessDeployCall {
+            keylessDeploymentTransaction: Bytes::from_static(&[1, 2, 3]),
+            gasLimitOverride: U256::from(7),
+        }
+        .abi_encode()
+        .into()
+    }
+
+    /// The `keylessDeploy` selector with a head too short to decode.
+    fn undecodable() -> Bytes {
+        Bytes::copy_from_slice(&IKeylessDeploy::keylessDeployCall::SELECTOR)
+    }
+
+    /// A call of `scheme` at `depth` to `target` carrying `input`.
+    fn frame(depth: usize, target: Address, scheme: CallScheme, input: Bytes) -> FrameInit {
+        FrameInit {
+            depth,
+            memory: SharedMemory::new(),
+            frame_input: FrameInput::Call(Box::new(CallInputs {
+                input: CallInput::Bytes(input),
+                return_memory_offset: 0..0,
+                gas_limit: 1_000_000,
+                reservoir: 0,
+                bytecode_address: target,
+                known_bytecode: Default::default(),
+                target_address: target,
+                caller: CALLER,
+                value: CallValue::Apparent(U256::ZERO),
+                scheme,
+                is_static: scheme == CallScheme::StaticCall,
+                charged_new_account_state_gas: false,
+            })),
+        }
+    }
+
+    /// Only a `CALL` at depth 0 to the contract, carrying the `keylessDeploy` selector and
+    /// arguments that decode, is dispatched. Each other row of the table changes exactly one
+    /// condition, so each guard is pinned alone.
+    #[test]
+    fn test_the_dispatch_table_takes_only_the_all_true_row() {
+        let ctx = MegaContext::new(MemoryDatabase::default(), MegaSpecId::SATIN);
+        let other_selector = Bytes::from_static(&[0xde, 0xad, 0xbe, 0xef, 0, 0, 0, 0]);
+        let at = KEYLESS_DEPLOY_ADDRESS;
+        let call = CallScheme::Call;
+
+        let dispatched = is_dispatched(&ctx, &frame(0, at, call, decodable()))
+            .expect("the all-true row is dispatched");
+        assert_eq!(dispatched.keylessDeploymentTransaction, Bytes::from_static(&[1, 2, 3]));
+        assert_eq!(dispatched.gasLimitOverride, U256::from(7));
+
+        let rows: [(&str, FrameInit); 8] = [
+            ("depth 1", frame(1, at, call, decodable())),
+            ("another target", frame(0, OTHER, call, decodable())),
+            ("STATICCALL", frame(0, at, CallScheme::StaticCall, decodable())),
+            ("DELEGATECALL", frame(0, at, CallScheme::DelegateCall, decodable())),
+            // The scheme alone refuses these: every other condition holds.
+            ("CALLCODE", frame(0, at, CallScheme::CallCode, decodable())),
+            ("another selector", frame(0, at, call, other_selector.clone())),
+            ("undecodable arguments", frame(0, at, call, undecodable())),
+            ("no selector", frame(0, at, call, Bytes::from_static(&[0xde, 0xad]))),
+        ];
+        for (name, init) in rows {
+            assert!(is_dispatched(&ctx, &init).is_none(), "{name} is not dispatched");
+        }
+
+        // A non-call frame is never dispatched.
+        let create = FrameInit {
+            depth: 0,
+            memory: SharedMemory::new(),
+            frame_input: FrameInput::Create(Box::new(CreateInputs::new(
+                CALLER,
+                CreateScheme::Create,
+                U256::ZERO,
+                decodable(),
+                1_000_000,
+                0,
+            ))),
+        };
+        assert!(is_dispatched(&ctx, &create).is_none());
+    }
+}
