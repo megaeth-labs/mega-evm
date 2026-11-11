@@ -14,8 +14,11 @@ use mega_evm::{
 };
 use revm::{
     bytecode::opcode::{CALL, CALLCODE, DELEGATECALL, STATICCALL},
-    context::result::ResultAndState,
+    context::{result::ResultAndState, CfgEnv},
+    context_interface::ContextTr,
+    interpreter::{interpreter::EthInterpreter, CallInputs, CallOutcome},
     primitives::TxKind,
+    Inspector,
 };
 
 use crate::common::{
@@ -282,11 +285,59 @@ fn test_a_value_bearing_call_with_gas_forwards_its_hint_and_the_bytecode_refuses
     assert_eq!(usage.data_size, nested_hint(data.len() as u64));
 }
 
+/// Records the gas the first frame of the Oracle call holds: the gas limit of the call as the
+/// interceptor sees it, which an inspector's `call` hook is handed before the engine decides the
+/// start.
+#[derive(Debug, Default)]
+struct OracleCallGas {
+    gas_limits: Vec<u64>,
+}
+
+impl<CTX: ContextTr> Inspector<CTX, EthInterpreter> for OracleCallGas {
+    fn call(&mut self, _context: &mut CTX, inputs: &mut CallInputs) -> Option<CallOutcome> {
+        if inputs.target_address == ORACLE_CONTRACT_ADDRESS {
+            self.gas_limits.push(inputs.gas_limit);
+        }
+        None
+    }
+}
+
+/// Runs `tx` against a recording oracle environment with the calldata floor off, and returns the
+/// outcome, the hints and the gas the Oracle call's frame held.
+///
+/// The floor is off so that the gas limit alone decides how much gas the first frame holds: with
+/// it on, a transaction of this calldata must carry a limit that leaves the first frame thousands
+/// of gas unless history gas is charged beside it, which neither a deposit nor a zero byte price
+/// does, and the boundary below that would be unreachable.
+fn run_observing_first_frame(
+    db: MemoryDatabase,
+    tx: MegaTransaction,
+) -> (MegaTransactionOutcome, Vec<RecordedHint>, u64) {
+    let envs = TestExternalEnvs::<Infallible>::new();
+    let ctx = MegaContext::new_with_external_envs(
+        db,
+        MegaSpecId::SATIN,
+        ExternalEnvs::from(envs.clone()),
+    )
+    .with_cfg(CfgEnv::new_with_spec(MegaSpecId::SATIN).with_disable_eip7623(true))
+    .with_block(block())
+    .with_chain(zero_fee_l1_block_info())
+    .with_tx_runtime_limits(EvmTxRuntimeLimits::no_limits());
+    let mut evm = MegaEvm::new(ctx).with_inspector(OracleCallGas::default());
+    let outcome = evm.execute_transaction(tx).expect("the transaction is valid");
+    let [first_frame_gas] = evm.inspector().gas_limits[..] else {
+        panic!("the Oracle was called once: {:?}", evm.inspector().gas_limits);
+    };
+    (outcome, envs.recorded_hints(), first_frame_gas)
+}
+
 /// A transaction's own value call has no stipend and is judged on its first frame's whole gas:
-/// one gas admits the hint, and so do the stipend's 2,300 and 2,301. The smallest gas limit that
-/// does is found by search, since the first frame's gas is what the limit leaves after the
-/// intrinsic and start charges, which depend on the byte prices; a legacy transaction and a
-/// deposit alike.
+/// none drops the hint, and one gas, the stipend's 2,300 and 2,301 admit it. A legacy transaction
+/// and a deposit alike.
+///
+/// The first frame's gas is what the transaction's limit leaves after the intrinsic charges, which
+/// depend on the byte prices, so the limit is derived from a probe run that observes the gas the
+/// frame held, and each run is held to the gas it was meant to hold.
 #[test]
 fn test_a_transactions_own_value_hint_is_admitted_on_one_gas_and_more() {
     let data = send_hint(b"own");
@@ -304,35 +355,30 @@ fn test_a_transactions_own_value_hint_is_admitted_on_one_gas_and_more() {
         tx
     };
     type Build<'a> = &'a dyn Fn(u64) -> MegaTransaction;
-    let forwarded = |build: Build<'_>, gas: u64| {
-        // A gas limit the transaction is refused at runs nothing.
-        try_run_with_oracle_under(funded(), build(gas), EvmTxRuntimeLimits::no_limits())
-            .is_some_and(|(_, hints)| !hints.is_empty())
-    };
     for (name, build) in [("legacy", &legacy as Build<'_>), ("deposit", &deposit as Build<'_>)] {
-        // The smallest gas limit whose first frame holds any gas at all.
-        let (mut low, mut high) = (21_000_u64, 30_000_000_u64);
-        assert!(forwarded(build, high), "{name}: a large limit forwards");
-        while low < high {
-            let mid = low + (high - low) / 2;
-            if forwarded(build, mid) {
-                high = mid;
-            } else {
-                low = mid + 1;
-            }
-        }
-        let one_gas = high;
-        assert!(!forwarded(build, one_gas - 1), "{name}: no gas in the first frame, no hint");
-        for frame_gas in [1_u64, 2_300, 2_301] {
-            let (outcome, hints) = run_with_oracle_under(
-                funded(),
-                build(one_gas + frame_gas - 1),
-                EvmTxRuntimeLimits::no_limits(),
-            );
+        const PROBE: u64 = 1_000_000;
+        let (_, _, probed) = run_observing_first_frame(funded(), build(PROBE));
+        let before_the_frame = PROBE - probed;
+
+        let mut dropped_size = None;
+        for frame_gas in [0_u64, 1, 2_300, 2_301] {
             let case = format!("{name}: {frame_gas} gas");
+            let (outcome, hints, held) =
+                run_observing_first_frame(funded(), build(before_the_frame + frame_gas));
+            assert_eq!(held, frame_gas, "{case}: the first frame holds the gas it was built for");
+            if frame_gas == 0 {
+                assert!(hints.is_empty(), "{case}: a call without gas drops the hint");
+                dropped_size = Some(outcome.usage.data_size);
+                continue;
+            }
             assert_eq!(hints.len(), 1, "{case}: the hint reached the service");
             assert_eq!(hints[0].from, CALLER, "{case}");
-            assert!(outcome.usage.data_size >= data.len() as u64, "{case}: and it is counted");
+            assert_eq!(
+                outcome.usage.data_size - dropped_size.expect("the zero-gas run came first"),
+                data.len() as u64,
+                "{case}: and exactly its input is counted beside what the transaction keeps \
+                 without the hint",
+            );
         }
     }
 }
