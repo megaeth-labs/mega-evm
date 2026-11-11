@@ -28,7 +28,9 @@ use revm::{
     Database, Inspector,
 };
 
-use crate::common::{body_history, call, context, history_is_free, slot_state_gas, state_is_free};
+use crate::common::{
+    body_history, call, context, history, history_is_free, slot_state_gas, state_is_free,
+};
 
 const SENDER: Address = address!("0000000000000000000000000000000000740000");
 const A: Address = address!("0000000000000000000000000000000000740001");
@@ -170,6 +172,15 @@ struct Run {
     read: Settlements,
 }
 
+/// The reservoir the scenarios run with: four new slots' state gas and, beside each, the history of
+/// one write record that the slot's write is charged on top. Sized from the schedule, so it covers
+/// the transaction's start charge and every child's records at any byte price; a reservoir of the
+/// state gas alone is smaller than one record's history where a history byte is dear, and the
+/// children's shares then round to nothing.
+fn scenario_reservoir() -> u64 {
+    4 * (slot_state_gas() + history(mega_evm::WRITE_RECORD_SIZE))
+}
+
 /// The gas limit that leaves `reservoir` once the body is paid.
 fn leaving(reservoir: u64) -> u64 {
     TX_GAS_LIMIT_CAP + body_history(0) + reservoir
@@ -218,7 +229,7 @@ fn test_a_callers_reservoir_after_a_child_is_what_it_kept_with_what_the_child_ha
     }
     let children = [OK, REVERTER, HALTER, SPENDER, IDLE];
     let Run { reservoir_remaining, read, .. } =
-        run(calling(&children, revm::bytecode::opcode::STOP), leaving(4 * slot_state_gas()), 0);
+        run(calling(&children, revm::bytecode::opcode::STOP), leaving(scenario_reservoir()), 0);
 
     assert_eq!(read.children.len(), children.len());
     for (child, settled) in children.iter().zip(&read.children) {
@@ -257,7 +268,7 @@ fn test_the_transactions_gas_holds_what_its_frame_hands_back_and_nothing_more() 
     if state_is_free() {
         return;
     }
-    let above = leaving(4 * slot_state_gas());
+    let above = leaving(scenario_reservoir());
     for (end, ok, value, gas_limit) in [
         (revm::bytecode::opcode::STOP, true, 0, above),
         (revm::bytecode::opcode::REVERT, false, 0, above),

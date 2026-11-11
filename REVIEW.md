@@ -145,13 +145,12 @@ These checks guard every change to the Satin engine.
 ### Byte-price grid
 
 - `.github/workflows/price-grid.yml` runs the `mega-evm` suite at byte prices other than the constants, through `scripts/price_grid.sh`: a cost per state byte and a cost per history byte per point, each run with `--no-fail-fast`.
-- On a pull request it runs five points: both bytes free (0 / 0), both at one gas (1 / 1), the cheapest and the dearest pair under consideration (312.5 / 20 and 5000 / 300), and a point past every candidate (10000 / 1000).
-  Between them they have failed every test the whole grid failed; 1 / 1 is where a premise that a charge cannot be paid, true only while a byte is dear, breaks.
-- Nightly and on dispatch it runs the whole grid: CPSB 0, 1, 312.5, 700, 1530, 2000, 5000 and 10000 by CPHB 0, 1, 20, 50, 88, 100, 200, 300 and 1000, and 0.001 on both.
+- On a pull request and on dispatch it runs the whole grid: CPSB 0, 1, 312.5, 700, 1530, 2000, 5000 and 10000 by CPHB 0, 1, 20, 50, 88, 100, 200, 300 and 1000, and 0.001 on both.
+  It has no schedule, because a scheduled run would fire only from the default branch.
 - It is not a required check.
   A failure is a test that assumes a price, a scenario that does not scale with it, or an engine defect; the first two are fixed in the test, the third is not hidden behind a guard.
 - Each point reports how many tests a price guard held back (`guarded`, from `note_price_guard`; the tests are listed in the point's `.guards` file beside its log): every point passes the same number of tests, and this column tells a point at which tests returned early from one at which they ran.
-- Locally, `scripts/price_grid.sh --pr`, `--full`, or the points named (`scripts/price_grid.sh 312.5/20 5000/300`); each point's log is under `target/price-grid/`.
+- Locally, `scripts/price_grid.sh --full`, `--pr` (five points: 0 / 0, 1 / 1, 312.5 / 20, 5000 / 300 and 10000 / 1000, a quick local check), or the points named (`scripts/price_grid.sh 312.5/20 5000/300`); each point's log is under `target/price-grid/`.
 
 ### Instruction counts (CodSpeed)
 
@@ -185,7 +184,7 @@ These checks guard every change to the Satin engine.
 
 ### Scheduled workflows
 
-- GitHub fires a `schedule` trigger only from the default branch's copy of a workflow, so the schedules in `satin`'s copies (nightly mutation, doc-audit, the weekly execution-spec run, the nightly byte-price grid) stay inert until `satin` is the default branch.
+- GitHub fires a `schedule` trigger only from the default branch's copy of a workflow, so the schedules in `satin`'s copies (nightly mutation, doc-audit, the weekly execution-spec run) stay inert until `satin` is the default branch.
 - Run them on `satin` by hand: `gh workflow run <workflow>.yml --ref satin` runs `satin`'s copy of the workflow on `satin`'s head, so none of them needs a `ref` input.
   - `mutation.yml`: the whole-crate cargo-mutants run and suppression hygiene.
   - `exec-spec.yml`: the execution-spec fixtures at the pinned fork tag.
