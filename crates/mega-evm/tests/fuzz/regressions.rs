@@ -30,7 +30,8 @@ use crate::{
         program::{End, Forward, InitCode, Op, Program, Scheme, Target},
         tx::{Auth, Delegate, GasTier, Price, Shape, Tx},
         world::{
-            AccountShape, Balance, BeneficiaryIs, BlockShape, Delegation, Limits, Salt, World,
+            AccountShape, Balance, BeneficiaryIs, BlockShape, Delegation, EmptyLeaves, Limits,
+            Salt, World,
         },
         Value, Who, Word,
     },
@@ -59,6 +60,7 @@ fn plain_world() -> World {
         limits: Limits::Default,
         block: BlockShape { basefee: 0, slot_num: 0, blob: true },
         system_nonce: 0,
+        empty_leaves: EmptyLeaves::default(),
     }
 }
 

@@ -472,7 +472,7 @@ fn shape(flavor: Flavor) -> impl Strategy<Value = Shape> {
     let shapes = prop_oneof![
         10 => (who(), 0u16..=200, access_list())
             .prop_map(|(to, data_len, access_list)| Shape::Call { to, data_len, access_list }),
-        3 => Just(Shape::Create),
+        5 => Just(Shape::Create),
         // An empty authorization list refuses the transaction: one in sixteen covers it.
         3 => (
             who(),

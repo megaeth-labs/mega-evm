@@ -317,6 +317,35 @@ fn block() -> impl Strategy<Value = BlockShape> {
         .prop_map(|(basefee, slot_num, blob)| BlockShape { basefee, slot_num, blob })
 }
 
+/// Which addresses that would hold nothing are still in the state, each as an account empty under
+/// EIP-161 (no balance, nonce, code or storage) whose leaf the state holds, as a genesis
+/// allocation can leave one. Existence and emptiness give different answers at several sites, so
+/// the cases must reach both an absent address and an empty one.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct EmptyLeaves {
+    /// The `Fresh` address.
+    pub(crate) fresh: bool,
+    /// The distinct beneficiary, where its balance is zero.
+    pub(crate) beneficiary: bool,
+    /// The address each `CREATE2` of the three programs lands on, and the one a creation
+    /// transaction deploys at.
+    pub(crate) created: bool,
+}
+
+fn empty_leaves() -> impl Strategy<Value = EmptyLeaves> {
+    // A third of the worlds for the fixed addresses, which the rest keep absent. The landings of
+    // creations are empty in two worlds of three: a creation over an empty leaf that its init code
+    // then destroys needs a creation, an init code that destroys and a landing the world holds,
+    // and is otherwise too rare for a bounded run to reach.
+    let third = || prop_oneof![1 => Just(true), 2 => Just(false)];
+    let two_thirds = || prop_oneof![2 => Just(true), 1 => Just(false)];
+    (third(), third(), two_thirds()).prop_map(|(fresh, beneficiary, created)| EmptyLeaves {
+        fresh,
+        beneficiary,
+        created,
+    })
+}
+
 /// The world a case runs in.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct World {
@@ -335,6 +364,8 @@ pub(crate) struct World {
     pub(crate) block: BlockShape,
     /// The system address's nonce.
     pub(crate) system_nonce: u8,
+    /// The addresses held as empty accounts rather than absent.
+    pub(crate) empty_leaves: EmptyLeaves,
 }
 
 impl World {
@@ -378,6 +409,7 @@ pub(crate) fn world() -> impl Strategy<Value = World> {
         limits(),
         block(),
         0u8..2,
+        empty_leaves(),
     )
         .prop_map(
             |(
@@ -390,6 +422,7 @@ pub(crate) fn world() -> impl Strategy<Value = World> {
                 limits,
                 block,
                 system_nonce,
+                empty_leaves,
             )| World {
                 caller,
                 contract,
@@ -403,6 +436,7 @@ pub(crate) fn world() -> impl Strategy<Value = World> {
                 limits,
                 block,
                 system_nonce,
+                empty_leaves,
             },
         )
 }
