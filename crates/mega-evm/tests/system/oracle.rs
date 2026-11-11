@@ -174,6 +174,98 @@ fn test_a_value_bearing_call_forwards_its_hint() {
     assert_eq!(usage.data_size, nested_hint(data.len() as u64), "and its bytes stay counted");
 }
 
+/// Code that calls the Oracle with `data`, one unit of value and no requested gas, and returns
+/// the call's status followed by its return data. The contract holds no balance, so the call
+/// cannot be funded.
+fn unfunded_value_hint_call(data: &[u8]) -> Bytes {
+    use revm::bytecode::opcode::{ADD, MSTORE, RETURN, RETURNDATACOPY, RETURNDATASIZE};
+
+    BytecodeBuilder::default()
+        .mstore(0x0, data)
+        .push_number(0_u64) // retSize
+        .push_number(0_u64) // retOffset
+        .push_number(data.len() as u64) // argsSize
+        .push_number(0_u64) // argsOffset
+        .push_number(1_u64) // value
+        .push_address(ORACLE_CONTRACT_ADDRESS)
+        .push_number(0_u64) // gas: none requested, the stipend is all the call holds
+        .append(CALL)
+        // memory[0..32] = the call's status
+        .push_number(0_u64)
+        .append(MSTORE)
+        // memory[32..] = the return data
+        .append(RETURNDATASIZE)
+        .push_number(0_u64)
+        .push_number(32_u64)
+        .append(RETURNDATACOPY)
+        .append(RETURNDATASIZE)
+        .push_number(32_u64)
+        .append(ADD)
+        .push_number(0_u64)
+        .append(RETURN)
+        .build()
+}
+
+/// The database of the unfunded value-hint cases: a contract with the code of
+/// [`unfunded_value_hint_call`] and no balance.
+fn unfunded_contract_db(data: &[u8]) -> MemoryDatabase {
+    system_db().account_code(CONTRACT, unfunded_value_hint_call(data))
+}
+
+/// A value-bearing `sendHint` whose caller cannot fund the value is intercepted before revm
+/// starts the call and checks the funds: the hint is forwarded and its input counted, then the
+/// call fails for the funds with empty return data and moves no value, and the Oracle's bytecode
+/// never runs.
+#[test]
+fn test_an_unfunded_value_hint_is_forwarded_and_then_fails_for_funds() {
+    let data = send_hint(b"unfunded");
+    let (result, hints, usage) =
+        run_with_oracle(unfunded_contract_db(&data), call_tx(CONTRACT, [], U256::ZERO));
+
+    assert!(result.result.is_success(), "the contract survives the failed call");
+    let returned = result.result.output().cloned().unwrap_or_default();
+    let (status, return_data) = crate::common::split_outcome(&returned);
+    assert!(!status, "the call fails for funds");
+    assert!(return_data.is_empty(), "with empty return data");
+    assert_eq!(
+        hints,
+        vec![RecordedHint { from: CONTRACT, topic: TOPIC, data: Bytes::from_static(b"unfunded") }],
+        "the hint reached the service",
+    );
+    assert_eq!(usage.data_size, nested_hint(data.len() as u64), "and its input is counted");
+    assert_eq!(usage.data_size, mega_evm::TX_BODY_SIZE + data.len() as u64);
+    let balance =
+        |address| result.state.get(&address).map_or(U256::ZERO, |account| account.info.balance);
+    assert_eq!(balance(CONTRACT), U256::ZERO, "no value moved from the caller");
+    assert_eq!(balance(ORACLE_CONTRACT_ADDRESS), U256::ZERO, "and none reached the Oracle");
+}
+
+/// The same unfunded call under a data-size limit its input would cross is answered with the
+/// stop, not with the funds failure: nothing is forwarded and nothing is counted.
+#[test]
+fn test_an_unfunded_value_hint_over_the_limit_is_answered_with_the_stop() {
+    let data = send_hint(b"unfunded");
+    let limit = nested_hint(data.len() as u64) - 1;
+    let (outcome, hints) = run_with_oracle_under(
+        unfunded_contract_db(&data),
+        call_tx(CONTRACT, [], U256::ZERO),
+        EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(limit),
+    );
+
+    assert!(outcome.result.is_success(), "the contract catches the stop: {:?}", outcome.result);
+    let returned = outcome.result.output().cloned().unwrap_or_default();
+    let (status, return_data) = crate::common::split_outcome(&returned);
+    assert!(!status, "the call was stopped");
+    assert_eq!(
+        return_data,
+        MegaLimitExceeded { kind: LimitKind::DataSize.as_u8(), limit }.abi_encode().as_slice(),
+        "with the stop, not the funds failure's empty data",
+    );
+    assert!(hints.is_empty(), "nothing is forwarded");
+    assert_eq!(outcome.usage.data_size, nested_hint(0), "and nothing is counted");
+    assert_eq!(outcome.limit_exceeded, None, "a stop below is no stop of the transaction");
+}
+
 /// The bytecode refuses the value of a value-bearing call that holds gas, as before: the hint is
 /// forwarded and the call reports failure.
 #[test]
