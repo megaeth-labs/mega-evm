@@ -187,7 +187,8 @@ impl fmt::Display for Entry {
 }
 
 /// Every registered deviation.
-pub const DEVIATIONS: &[Deviation] = &[AMSTERDAM_OPCODES_ON_OSAKA, SELFDESTRUCT_BURNS_ON_OSAKA];
+pub const DEVIATIONS: &[Deviation] =
+    &[AMSTERDAM_OPCODES_ON_OSAKA, SELFDESTRUCT_BURNS_ON_OSAKA, SLOTNUM_PUSHES_ZERO];
 
 /// Satin's instruction table carries four Amsterdam opcodes on its Osaka base.
 pub const AMSTERDAM_OPCODES_ON_OSAKA: Deviation = Deviation {
@@ -1196,6 +1197,120 @@ pub const SELFDESTRUCT_BURNS_ON_OSAKA: Deviation = Deviation {
             indexes: (0, 0, 0),
             produced: Produced::StateRoot(b256!(
                 "0xf6456935a8fdccc4fa60c10233d27e602088fdfbce68c9db41363767cffd367d"
+            )),
+        },
+    ],
+};
+
+/// `SLOTNUM` pushes zero, where Amsterdam pushes the block's slot number.
+pub const SLOTNUM_PUSHES_ZERO: Deviation = Deviation {
+    id: "slotnum-pushes-zero",
+    rule: "SLOTNUM pushes zero whatever slot number the block environment carries: the value is \
+           the engine's own and depends on no field the node supplies.",
+    reason: "EIP-7843 has SLOTNUM push the slot number of the block, which a node supplies. Satin \
+             fixes the value instead, so that a stateless validator needs no slot number as an \
+             input. The fixtures set a non-zero slot number in the block environment and expect \
+             it on the stack, or in the state and the gas that follow from it, so each fixture \
+             that executes the opcode with a slot number other than zero fails on the state \
+             root. The read stays a volatile read of the block environment, so the opcode's \
+             price and its marking are Amsterdam's.",
+    fork: Fork::Amsterdam,
+    blockchain_entries: &[],
+    entries: &[
+        Entry {
+            path: "for_amsterdam/amsterdam/eip7843_slotnum/slotnum/slotnum_call_contexts.json",
+            name: "tests/amsterdam/eip7843_slotnum/test_slotnum.py::test_slotnum_call_contexts[fork_Amsterdam-call_opcode_CALL-state_test]",
+            indexes: (0, 0, 0),
+            produced: Produced::StateRoot(b256!(
+                "0x9844550375d5580d1c236fdb59423d5f5c271c18440f4f7eb00d4ab1a289ee8e"
+            )),
+        },
+        Entry {
+            path: "for_amsterdam/amsterdam/eip7843_slotnum/slotnum/slotnum_call_contexts.json",
+            name: "tests/amsterdam/eip7843_slotnum/test_slotnum.py::test_slotnum_call_contexts[fork_Amsterdam-call_opcode_CALLCODE-state_test]",
+            indexes: (0, 0, 0),
+            produced: Produced::StateRoot(b256!(
+                "0xb227ac98fb5ebb4b89cc8e829a1fbd9271f38e92b9f97647e4dcfb9224c6730d"
+            )),
+        },
+        Entry {
+            path: "for_amsterdam/amsterdam/eip7843_slotnum/slotnum/slotnum_call_contexts.json",
+            name: "tests/amsterdam/eip7843_slotnum/test_slotnum.py::test_slotnum_call_contexts[fork_Amsterdam-call_opcode_DELEGATECALL-state_test]",
+            indexes: (0, 0, 0),
+            produced: Produced::StateRoot(b256!(
+                "0x026cf9c2e991acb1be1a28b072563a5bcd18f117291dc90f0a85e0f4ce3fe19a"
+            )),
+        },
+        Entry {
+            path: "for_amsterdam/amsterdam/eip7843_slotnum/slotnum/slotnum_call_contexts.json",
+            name: "tests/amsterdam/eip7843_slotnum/test_slotnum.py::test_slotnum_call_contexts[fork_Amsterdam-call_opcode_STATICCALL-state_test]",
+            indexes: (0, 0, 0),
+            produced: Produced::StateRoot(b256!(
+                "0x86c4b58c8b6c4e5354d9c7e0f7d73d4687085df933246408dd507107ed4f7cf4"
+            )),
+        },
+        Entry {
+            path: "for_amsterdam/amsterdam/eip7843_slotnum/slotnum/slotnum_initcode_create.json",
+            name: "tests/amsterdam/eip7843_slotnum/test_slotnum.py::test_slotnum_initcode_create[fork_Amsterdam-state_test-opcode_CREATE2]",
+            indexes: (0, 0, 0),
+            produced: Produced::StateRoot(b256!(
+                "0x40d0b7ae59cf8b28c14aeb856399b90846fdf1e591043556df14c3d90349504f"
+            )),
+        },
+        Entry {
+            path: "for_amsterdam/amsterdam/eip7843_slotnum/slotnum/slotnum_initcode_create.json",
+            name: "tests/amsterdam/eip7843_slotnum/test_slotnum.py::test_slotnum_initcode_create[fork_Amsterdam-state_test-opcode_CREATE]",
+            indexes: (0, 0, 0),
+            produced: Produced::StateRoot(b256!(
+                "0x9da4f5c40a1b386fbd0ca103b74cccca0d8eb15cef887bea3e3aa17049523934"
+            )),
+        },
+        Entry {
+            path: "for_amsterdam/amsterdam/eip7843_slotnum/slotnum/slotnum_initcode_tx.json",
+            name: "tests/amsterdam/eip7843_slotnum/test_slotnum.py::test_slotnum_initcode_tx[fork_Amsterdam-state_test]",
+            indexes: (0, 0, 0),
+            produced: Produced::StateRoot(b256!(
+                "0xefee50e6818a814993fd8754c49822d9663aabd235e54b6a91ff8a02f143bec4"
+            )),
+        },
+        Entry {
+            path: "for_amsterdam/amsterdam/eip7843_slotnum/slotnum/slotnum_set_code.json",
+            name: "tests/amsterdam/eip7843_slotnum/test_slotnum.py::test_slotnum_set_code[fork_Amsterdam-state_test]",
+            indexes: (0, 0, 0),
+            produced: Produced::StateRoot(b256!(
+                "0x0f50f514d60dd84274327a597b7d8bf19a12c45b13e6771d9081f163b8c4811c"
+            )),
+        },
+        Entry {
+            path: "for_amsterdam/amsterdam/eip7843_slotnum/slotnum/slotnum_value.json",
+            name: "tests/amsterdam/eip7843_slotnum/test_slotnum.py::test_slotnum_value[fork_Amsterdam-state_test-slot_4096]",
+            indexes: (0, 0, 0),
+            produced: Produced::StateRoot(b256!(
+                "0x67b89cfc59cd0d25225e304db8b5d0bf9ec2dad6aebd62374a37f4f14ea78d77"
+            )),
+        },
+        Entry {
+            path: "for_amsterdam/amsterdam/eip7843_slotnum/slotnum/slotnum_value.json",
+            name: "tests/amsterdam/eip7843_slotnum/test_slotnum.py::test_slotnum_value[fork_Amsterdam-state_test-slot_large]",
+            indexes: (0, 0, 0),
+            produced: Produced::StateRoot(b256!(
+                "0x67b89cfc59cd0d25225e304db8b5d0bf9ec2dad6aebd62374a37f4f14ea78d77"
+            )),
+        },
+        Entry {
+            path: "for_amsterdam/amsterdam/eip7843_slotnum/slotnum/slotnum_value.json",
+            name: "tests/amsterdam/eip7843_slotnum/test_slotnum.py::test_slotnum_value[fork_Amsterdam-state_test-slot_max_u64]",
+            indexes: (0, 0, 0),
+            produced: Produced::StateRoot(b256!(
+                "0x67b89cfc59cd0d25225e304db8b5d0bf9ec2dad6aebd62374a37f4f14ea78d77"
+            )),
+        },
+        Entry {
+            path: "for_amsterdam/amsterdam/eip7843_slotnum/slotnum/slotnum_value.json",
+            name: "tests/amsterdam/eip7843_slotnum/test_slotnum.py::test_slotnum_value[fork_Amsterdam-state_test-slot_one]",
+            indexes: (0, 0, 0),
+            produced: Produced::StateRoot(b256!(
+                "0x67b89cfc59cd0d25225e304db8b5d0bf9ec2dad6aebd62374a37f4f14ea78d77"
             )),
         },
     ],
