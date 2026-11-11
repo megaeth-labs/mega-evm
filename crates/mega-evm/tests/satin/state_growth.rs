@@ -304,41 +304,57 @@ fn test_an_authority_an_earlier_transaction_funded_is_no_new_account() {
 }
 
 /// An authority an earlier transaction called without value, which the database holds no account
-/// for, is counted as the application charges it, whether the two transactions run on one journal
-/// or the first is committed before the second runs: the transaction counts a rise for it exactly
-/// when the application charged it a new account beside the delegation's bytes. On one journal the
-/// call touched the empty account, and revm's flag of the touch outlives the call's transaction, so
-/// the application finds the authority touched and charges it no account.
+/// for, is charged as a new account when the earlier transaction is committed: the call touched the
+/// empty account, and a node's database removes a touched empty account (EIP-161), so the
+/// application finds it absent. The transaction counts the rise for it, and one write record.
 #[test]
-fn test_an_authority_an_earlier_transaction_touched_is_counted_as_it_is_charged() {
-    use revm::{DatabaseCommit, ExecuteEvm};
+fn test_an_authority_an_earlier_transaction_touched_is_charged_as_new_when_committed() {
+    use revm::DatabaseCommit;
     if state_is_free() {
         return;
     }
     let (account, delegation) = account_and_delegation();
-    let counted_as_charged = |outcome: &MegaTransactionOutcome, path: &str| {
-        assert!(outcome.result.is_success(), "{path}: {:?}", outcome.result);
-        let charged = outcome.gas.state == account + delegation;
-        assert!(charged || outcome.gas.state == delegation, "{path}: {}", outcome.gas.state);
-        assert_eq!(outcome.usage.state_growth, u64::from(charged), "{path}: the rise");
-        assert_eq!(outcome.usage.write_records, 1, "{path}: the authority's record");
-    };
     let touch = call(CALLER, AUTHORITY_1, U256::ZERO, BELOW_CAP);
     let mut apply = authorizing(A, U256::ZERO, &[(Some(AUTHORITY_1), 0, 0)]);
     apply.0.base.nonce = 1;
     let db = funded().account_code(A, Bytes::from_static(&[STOP]));
-    let first = run(db.clone(), touch.clone());
+    let first = run(db.clone(), touch);
     assert!(first.result.is_success(), "{:?}", first.result);
 
-    let mut committed = db.clone();
+    let mut committed = db;
     committed.commit(first.result_and_state.state);
-    counted_as_charged(&run(committed, apply.clone()), "committed");
+    let outcome = run(committed, apply);
+    assert!(outcome.result.is_success(), "{:?}", outcome.result);
+    assert_eq!(outcome.gas.state, account + delegation);
+    assert_eq!(outcome.usage.state_growth, 1);
+    assert_eq!(outcome.usage.write_records, 1);
+}
 
+/// The same two transactions on one journal that is not finalized in between differ from the
+/// committed path, in simulation only: revm's flag of the call's touch outlives the call's
+/// transaction, so the application finds the authority touched, not new, and charges the
+/// delegation alone, counts no rise, and still one write record. A node commits between
+/// transactions, so this is not the chain's answer.
+#[test]
+fn test_an_authority_touched_on_one_unfinalized_journal_is_charged_the_delegation_only() {
+    use revm::ExecuteEvm;
+    if state_is_free() {
+        return;
+    }
+    let (_, delegation) = account_and_delegation();
+    let touch = call(CALLER, AUTHORITY_1, U256::ZERO, BELOW_CAP);
+    let mut apply = authorizing(A, U256::ZERO, &[(Some(AUTHORITY_1), 0, 0)]);
+    apply.0.base.nonce = 1;
+    let db = funded().account_code(A, Bytes::from_static(&[STOP]));
     let context =
         crate::common::context(db).with_tx_runtime_limits(EvmTxRuntimeLimits::no_limits());
     let mut evm = MegaEvm::new(context);
     assert!(ExecuteEvm::transact_one(&mut evm, touch).expect("valid").is_success());
-    counted_as_charged(&evm.execute_transaction(apply).expect("valid"), "one journal");
+    let outcome = evm.execute_transaction(apply).expect("valid");
+    assert!(outcome.result.is_success(), "{:?}", outcome.result);
+    assert_eq!(outcome.gas.state, delegation);
+    assert_eq!(outcome.usage.state_growth, 0);
+    assert_eq!(outcome.usage.write_records, 1);
 }
 
 /// The state gas an authority costs is charged before the first frame, from the transaction's
