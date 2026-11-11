@@ -14,10 +14,11 @@
 //!
 //! # The block rules of the Karst base
 //!
-//! - **An activation block admits only deposits.** The caller sets
-//!   [`no_user_tx_activation_block`](MegaBlockExecutionCtx::no_user_tx_activation_block) from the
-//!   chain's schedule ([`MegaHardforks::admits_only_deposits`]), and a user transaction in such a
-//!   block is refused before it executes. This mirrors alloy-op-evm's flag of the same name.
+//! - **An activation block admits only deposits.** The executor works out whether a fork activates
+//!   in the block from the chain's schedule ([`MegaHardforks::admits_only_deposits`]), the block's
+//!   own timestamp and the parent's, which the caller supplies with
+//!   [`MegaBlockExecutionCtx::with_parent_timestamp`]. A user transaction in such a block is
+//!   refused before it executes. This mirrors alloy-op-evm's rule of the same name.
 //! - **The data-availability footprint is a block limit.** Each non-deposit transaction's footprint
 //!   is its compressed size times the footprint gas scalar the L1 block contract holds, accumulated
 //!   against the block's gas limit and reported as the block's blob gas used. With no scalar in
@@ -138,7 +139,7 @@ use crate::{
 /// What the node hands block execution beside the EVM.
 ///
 /// It carries what the pre-block calls need (the parent hash and the parent beacon block root, as
-/// alloy-op-evm does), the block's own extra data, the two activation-block flags and the
+/// alloy-op-evm does), the block's own extra data, the parent block's timestamp and the
 /// builder's packing policy.
 #[derive(Clone, Debug, Default)]
 pub struct MegaBlockExecutionCtx {
@@ -148,21 +149,16 @@ pub struct MegaBlockExecutionCtx {
     pub parent_beacon_block_root: Option<B256>,
     /// The block's extra data.
     pub extra_data: Bytes,
-    /// Whether this block admits only deposit transactions because a fork activates in it.
+    /// The parent block's timestamp.
     ///
-    /// The caller sets it from the chain's schedule with
-    /// [`MegaHardforks::admits_only_deposits`], which needs the parent block's timestamp; `false`
-    /// skips the rule.
-    pub no_user_tx_activation_block: bool,
-    /// Whether Satin activates in this block, which makes the pre-block step check the system
-    /// contracts and the EIP-7997 factory.
+    /// With the chain's schedule and the block's own timestamp it decides whether a fork
+    /// activates in this block, which makes the block admit only deposits, and whether Satin
+    /// does, which makes the pre-block step check the system contracts and the EIP-7997 factory.
+    /// The executor works both out itself.
     ///
-    /// The caller sets it from the chain's schedule with
-    /// [`MegaHardforks::is_satin_activation_block`], which needs the parent block's timestamp, as
-    /// it sets [`no_user_tx_activation_block`](Self::no_user_tx_activation_block); `false`
-    /// skips the check. The two differ: an Optimism fork at or after Jovian also makes a block
-    /// deposit-only.
-    pub satin_activation_block: bool,
+    /// `None` is a block with no parent to compare against, such as a genesis block: neither
+    /// rule applies to it. A caller that executes a block with a parent must supply it.
+    pub parent_timestamp: Option<u64>,
     /// The builder's packing policy: the limits only a builder applies, and a cap on the block's
     /// data-size budget below the protocol's ([`BlockLimits`]).
     ///
@@ -172,7 +168,8 @@ pub struct MegaBlockExecutionCtx {
 }
 
 impl MegaBlockExecutionCtx {
-    /// A context for a block that activates no fork.
+    /// A context for a block with no known parent timestamp; supply it with
+    /// [`with_parent_timestamp`](Self::with_parent_timestamp).
     pub const fn new(
         parent_hash: B256,
         parent_beacon_block_root: Option<B256>,
@@ -183,21 +180,15 @@ impl MegaBlockExecutionCtx {
             parent_hash,
             parent_beacon_block_root,
             extra_data,
-            no_user_tx_activation_block: false,
-            satin_activation_block: false,
+            parent_timestamp: None,
             block_limits,
         }
     }
 
-    /// Marks this block one that admits only deposit transactions.
-    pub const fn with_no_user_tx_activation_block(mut self, activation_block: bool) -> Self {
-        self.no_user_tx_activation_block = activation_block;
-        self
-    }
-
-    /// Marks this block the one in which Satin activates.
-    pub const fn with_satin_activation_block(mut self, activation_block: bool) -> Self {
-        self.satin_activation_block = activation_block;
+    /// Sets the parent block's timestamp, from which the executor works out whether a fork
+    /// activates in this block.
+    pub const fn with_parent_timestamp(mut self, parent_timestamp: u64) -> Self {
+        self.parent_timestamp = Some(parent_timestamp);
         self
     }
 }
@@ -379,6 +370,32 @@ where
     /// ([`ProtocolLimits::for_spec`]).
     pub const fn protocol_limits(&self) -> &ProtocolLimits {
         &self.protocol_limits
+    }
+
+    /// Whether this block admits only deposit transactions because a fork activates in it: a
+    /// fork of the schedule is active at the block's timestamp and not at its parent's.
+    ///
+    /// `false` when the context carries no parent timestamp.
+    pub fn admits_only_deposits(&self) -> bool {
+        self.ctx
+            .parent_timestamp
+            .is_some_and(|parent| self.spec.admits_only_deposits(parent, self.block_timestamp()))
+    }
+
+    /// Whether Satin activates in this block, which makes the pre-block step check the system
+    /// contracts and the EIP-7997 factory.
+    ///
+    /// The two answers differ: an Optimism fork at or after Jovian also makes a block
+    /// deposit-only. `false` when the context carries no parent timestamp.
+    pub fn is_satin_activation_block(&self) -> bool {
+        self.ctx.parent_timestamp.is_some_and(|parent| {
+            self.spec.is_satin_activation_block(parent, self.block_timestamp())
+        })
+    }
+
+    /// The block's own timestamp, from its environment.
+    fn block_timestamp(&self) -> u64 {
+        self.evm.ctx().block().timestamp().saturating_to()
     }
 
     /// Holds this block to `limits` in place of the spec's: a counterfactual of a tool's or a
@@ -616,11 +633,11 @@ where
     /// does not succeed refuses the block before its state is committed.
     ///
     /// The check is made once, in the block in which Satin activates
-    /// ([`MegaBlockExecutionCtx::satin_activation_block`]): each of the seven predeploys must hold
-    /// the code Satin expects, and its account is committed as a read-only entry; any other block
-    /// reads none of them. Satin deploys and upgrades nothing: a chain reaches it through the
-    /// legacy forks, which leave the six system contracts at the versions Satin runs, and the
-    /// EIP-7997 factory is OP's predeploy.
+    /// (see [`MegaBlockExecutor::is_satin_activation_block`]): each of the seven predeploys must
+    /// hold the code Satin expects, and its account is committed as a read-only entry; any
+    /// other block reads none of them. Satin deploys and upgrades nothing: a chain reaches it
+    /// through the legacy forks, which leave the six system contracts at the versions Satin
+    /// runs, and the EIP-7997 factory is OP's predeploy.
     ///
     /// The registry's role changes come after. Its pending slots are read and committed as a
     /// read-only state whatever they say, and when a change is due in this block the
@@ -655,7 +672,7 @@ where
 
         // The EIP-2935 / EIP-4788 calls above do not depend on these predeploys: they target
         // their own contracts, not the MegaETH system addresses or the factory.
-        if self.ctx.satin_activation_block {
+        if self.is_satin_activation_block() {
             for spec in system_contract_specs() {
                 let state =
                     check_system_contract(self.evm.db_mut(), &spec).map_err(
@@ -899,7 +916,7 @@ where
 
         // A block that activates a fork carries the chain's own transactions only, so a user
         // transaction in it is refused before anything runs.
-        if self.ctx.no_user_tx_activation_block && !is_deposit {
+        if self.admits_only_deposits() && !is_deposit {
             return Err(MegaBlockExecutionError::UnexpectedNonDepositTxInActivationBlock.into());
         }
 

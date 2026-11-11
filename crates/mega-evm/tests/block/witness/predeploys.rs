@@ -71,21 +71,17 @@ fn test_an_activation_block_replays() {
     let mut db = common::database();
     db.set_account_code(CONTRACT, slot_writer());
     let activation = || {
-        Case::new("activation block", db.clone())
-            .ctx(
-                common::unlimited_ctx()
-                    .with_no_user_tx_activation_block(true)
-                    .with_satin_activation_block(true),
-            )
-            .tx(deposit(
-                CALLER,
-                alloy_primitives::TxKind::Call(CONTRACT),
-                0,
-                U256::ZERO,
-                slot(1),
-                write_gas(),
-            ))
-            .tx(call(0, CONTRACT, slot(2), write_gas()))
+        let mut case = Case::new("activation block", db.clone()).ctx(common::activation_ctx());
+        case.spec = common::activation_spec();
+        case.tx(deposit(
+            CALLER,
+            alloy_primitives::TxKind::Call(CONTRACT),
+            0,
+            U256::ZERO,
+            slot(1),
+            write_gas(),
+        ))
+        .tx(call(0, CONTRACT, slot(2), write_gas()))
     };
     let replay = activation().run();
     let run = &replay.recorded;

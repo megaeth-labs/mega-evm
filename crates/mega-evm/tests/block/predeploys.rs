@@ -22,13 +22,10 @@ use revm::{
     context::result::ExecutionResult, database::State, primitives::KECCAK_EMPTY, state::EvmState,
 };
 
-use crate::common::{self, executor, named_accounts, recovered, tx, unlimited_ctx};
-
-/// The context of the block in which Satin activates, as a node sets it from the schedule and
-/// the parent's timestamp: deposit-only, and the check of the predeploys.
-fn activation_ctx() -> MegaBlockExecutionCtx {
-    unlimited_ctx().with_no_user_tx_activation_block(true).with_satin_activation_block(true)
-}
+use crate::common::{
+    self, activation_ctx, activation_spec, executor_with_spec, named_accounts, recovered, tx,
+    unlimited_ctx,
+};
 
 /// The states the pre-block steps of a block over `state` held to `ctx` committed, in order, as a
 /// commit hook on `state` receives them.
@@ -37,7 +34,7 @@ fn start(
     ctx: MegaBlockExecutionCtx,
 ) -> Result<Vec<EvmState>, BlockExecutionError> {
     let committed = CommittedStates::install(state);
-    let mut executor = executor(state, ctx);
+    let mut executor = executor_with_spec(state, ctx, activation_spec());
     executor.apply_pre_execution_changes()?;
     assert_eq!(executor.gas().execution, 0);
     assert_eq!(executor.gas().state, 0);
@@ -122,7 +119,7 @@ fn test_no_other_block_reads_a_predeploy() {
         mega_evm::MegaBlockExecutor::new(
             evm,
             ctx,
-            common::chain_spec(),
+            common::activation_spec(),
             alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder::default(),
         )
         .apply_pre_execution_changes()
@@ -138,7 +135,7 @@ fn test_no_other_block_reads_a_predeploy() {
 fn refused(db: MemoryDatabase, at: Address) -> MegaBlockExecutionError {
     let mut state = State::builder().with_database(db).build();
     let committed = CommittedStates::install(&mut state);
-    let mut executor = executor(&mut state, activation_ctx());
+    let mut executor = executor_with_spec(&mut state, activation_ctx(), activation_spec());
     let error = executor.apply_pre_execution_changes().expect_err("the block is refused");
     let delivered = named_accounts(&committed.states());
     let position = system_contract_specs().iter().position(|spec| spec.address == at).unwrap();
@@ -237,7 +234,7 @@ fn test_an_activation_block_without_the_expected_code_is_refused() {
 #[test]
 fn test_a_create2_round_trip_through_the_factory() {
     let mut state = common::state();
-    let mut executor = executor(&mut state, unlimited_ctx());
+    let mut executor = common::executor(&mut state, unlimited_ctx());
     executor.apply_pre_execution_changes().expect("the block starts");
 
     let salt = B256::repeat_byte(0x11);

@@ -11,8 +11,8 @@ use mega_evm::{test_utils::rex6_predeploys, BlockLimits, MegaBlockExecutionCtx, 
 use revm::{database::State, Database};
 
 use crate::common::{
-    self, deposit_tx, empty_call_gas, executor, executor_with_env, unlimited_ctx, user_tx,
-    BLOCK_NUMBER, CALLER,
+    self, deposit_tx, empty_call_gas, executor_with_env, executor_with_spec, unlimited_ctx,
+    user_tx, BLOCK_NUMBER, CALLER,
 };
 
 /// The seven predeploys are as the state held them before the blocks: the code and the nonce.
@@ -104,10 +104,8 @@ fn next_block_env() -> EvmEnv<MegaSpecId> {
 fn test_the_block_after_an_activation_block_packs_a_user_transaction() {
     let mut state = common::state();
     let nonce = {
-        let ctx = unlimited_ctx()
-            .with_no_user_tx_activation_block(true)
-            .with_satin_activation_block(true);
-        let mut executor = executor(&mut state, ctx);
+        let mut executor =
+            executor_with_spec(&mut state, common::activation_ctx(), common::activation_spec());
         executor.apply_pre_execution_changes().expect("the activation block starts");
         executor
             .execute_transaction(&deposit_tx(Bytes::new(), empty_call_gas()))
