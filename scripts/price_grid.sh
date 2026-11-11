@@ -6,6 +6,11 @@
 #   scripts/price_grid.sh --full           the whole grid (CPSB_AXIS x CPHB_AXIS, and EXTRA_POINTS)
 #   scripts/price_grid.sh CPSB/CPHB ...    the points named, e.g. 312.5/20 5000/300
 #
+# Any of them takes `--shard I/N` (1 <= I <= N) to run only every Nth point of the selection,
+# starting at the Ith, so N runs with I = 1..N cover the selection exactly once between them: the
+# CI job runs the full grid as four such shards in parallel. `--list` prints the selected points,
+# one per line, and exits without building or running anything.
+#
 # A point is a cost per state byte and a cost per history byte, as `MEGA_SATIN_CPSB` and
 # `MEGA_SATIN_CPHB` take them (a decimal with at most three places); `-` on either side leaves that
 # variable unset, which is the constant. The suite is built once with the `satin-price-override`
@@ -43,7 +48,37 @@ SNAPSHOT_SKIPPED="snapshot comparison skipped"
 cd "$(dirname "$0")/.." || exit 1
 OUT_DIR="${OUT_DIR:-target/price-grid}"
 
-case "${1:-}" in
+shard=""
+list_only=false
+selection=()
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --shard)
+            shard="${2:-}"
+            [ "$#" -ge 2 ] || { echo "error: --shard takes I/N" >&2; exit 2; }
+            shift 2
+            ;;
+        --list)
+            list_only=true
+            shift
+            ;;
+        *)
+            selection+=("$1")
+            shift
+            ;;
+    esac
+done
+if [ -n "$shard" ]; then
+    shard_index="${shard%/*}"
+    shard_count="${shard#*/}"
+    if ! [[ "$shard_index" =~ ^[0-9]+$ && "$shard_count" =~ ^[0-9]+$ ]] ||
+        [ "$shard_index" -lt 1 ] || [ "$shard_index" -gt "$shard_count" ]; then
+        echo "error: --shard takes I/N with 1 <= I <= N, got '$shard'" >&2
+        exit 2
+    fi
+fi
+
+case "${selection[0]:-}" in
     --pr)
         points="$PR_POINTS"
         ;;
@@ -57,13 +92,32 @@ case "${1:-}" in
         points="$points $EXTRA_POINTS"
         ;;
     "" | -h | --help)
-        sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'
+        sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'
         exit 2
         ;;
     *)
-        points="$*"
+        points="${selection[*]}"
         ;;
 esac
+
+if [ -n "$shard" ]; then
+    kept=""
+    position=0
+    for point in $points; do
+        if [ $((position % shard_count + 1)) -eq "$shard_index" ]; then
+            kept="$kept $point"
+        fi
+        position=$((position + 1))
+    done
+    points="$kept"
+fi
+
+if $list_only; then
+    for point in $points; do
+        echo "$point"
+    done
+    exit 0
+fi
 
 rm -rf "$OUT_DIR"
 mkdir -p "$OUT_DIR"
@@ -120,7 +174,7 @@ done
 
 if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
     {
-        echo "## mega-evm at other byte prices"
+        echo "## mega-evm at other byte prices${shard:+ (shard $shard)}"
         echo
         echo "$summary"
     } >>"$GITHUB_STEP_SUMMARY"

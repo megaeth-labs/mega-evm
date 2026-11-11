@@ -11,6 +11,22 @@ name: Byte-price grid
 # default branch, which has no such workflow, so a nightly full grid ran nowhere and points outside
 # the five of the quick mode (scripts/price_grid.sh --pr, kept for local use) went unchecked.
 #
+# The grid runs as four parallel shards of `scripts/price_grid.sh --full --shard I/4`, which together
+# cover the 73 points exactly once; the point list lives in the script alone.
+#
+# A pull request that changes documentation alone skips the run: every changed file must be under
+# docs/ or be a Markdown file outside crates/ and bin/ (scripts/pull_request_needs_ci.sh), and any
+# other change runs it. The `byte-price grid` job always runs and reports: it passes when every
+# shard passed, or when the run was skipped, so the check a branch rule can require is never left
+# pending by a skipped run.
+#
+# Timeouts. The one measurement on a GitHub runner is run 40804560952 of the five-point mode on
+# ubuntu-24.04: 53 to 57 seconds per point and 2 min 11 s to build with a warm cache. A shard has
+# 18 or 19 points, so about 17 minutes of tests at that rate, and a cold build is a few minutes
+# more: about 25 to 30 minutes projected. The 60-minute limit is about twice that projection. It
+# is a projection, not a measurement of a full shard: a suite that grows by half again, or a
+# runner twice as slow as that run, still fits; a suite twice as large does not.
+#
 # The run at the constants is the `test` job of build-and-test.yml.
 
 on:
@@ -25,12 +41,50 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  price-grid:
-    name: byte-price grid
+  changes:
+    name: changes that need the run
     runs-on: ubuntu-24.04
-    # The full grid runs the suite 73 times: about 16 minutes on a warm local machine, so the build
-    # and a slower runner fit well within the limit.
-    timeout-minutes: 90
+    timeout-minutes: 10
+    outputs:
+      run: ${{ steps.diff.outputs.run }}
+    steps:
+      - uses: actions/checkout@v4
+        if: github.event_name == 'pull_request'
+        with:
+          # The merge commit and its parents; the first parent is the base it merges into.
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Skip a pull request that changes documentation alone
+        id: diff
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" != pull_request ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! git rev-parse --verify -q 'HEAD^2' > /dev/null; then
+            echo "::warning::HEAD is not the pull request's merge commit; running"
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # The allowlist is in the script: only docs/ and Markdown outside crates/ and bin/ skip.
+          run=$(scripts/pull_request_needs_ci.sh HEAD^1 HEAD)
+          echo "runs: $run"
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+
+  price-grid:
+    name: byte-price grid shard ${{ matrix.shard }}/4
+    needs: changes
+    if: needs.changes.outputs.run == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -42,13 +96,41 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
 
-      - name: Run the suite at each point
-        run: scripts/price_grid.sh --full
+      - name: Run the suite at this shard's points
+        run: scripts/price_grid.sh --full --shard ${{ matrix.shard }}/4
 
       - name: Upload the logs of a failing run
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: price-grid-logs
+          name: price-grid-logs-${{ matrix.shard }}
           path: target/price-grid/
           retention-days: 7
+
+  gate:
+    name: byte-price grid
+    needs: [changes, price-grid]
+    # Always, a cancelled run included: a required check that is skipped counts as passed.
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Report the outcome
+        env:
+          CHANGES: ${{ needs.changes.result }}
+          RUN: ${{ needs.changes.outputs.run }}
+          RESULT: ${{ needs.price-grid.result }}
+        run: |
+          if [ "$CHANGES" != success ]; then
+            echo "::error::could not tell whether the run was needed: the changes job ended $CHANGES"
+            exit 1
+          fi
+          if [ "$RUN" != true ]; then
+            echo "only documentation changed; the run was skipped"
+            exit 0
+          fi
+          if [ "$RESULT" != success ]; then
+            echo "::error::the run ended $RESULT"
+            exit 1
+          fi
+          echo "passed"
