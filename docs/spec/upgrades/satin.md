@@ -74,8 +74,8 @@ The changes, in the order this page records them:
   The EIP-8037 cap `TX_MAX_TOTAL_GAS_LIMIT` = 2^32 − 1 MUST NOT be applied either.
   A block builder MAY refuse a larger declared gas limit as building policy, which a node validating a block does not apply (see [Block Limits](#20-block-limits)).
 - A node MUST enable four opcodes that Osaka does not have: `DUPN` (`0xE6`), `SWAPN` (`0xE7`) and `EXCHANGE` (`0xE8`) from [EIP-8024](https://eips.ethereum.org/EIPS/eip-8024), and `SLOTNUM` (`0x4B`) from [EIP-7843](https://eips.ethereum.org/EIPS/eip-7843).
-  `SLOTNUM` MUST push the block's slot number, an unsigned 64-bit integer the node supplies with the block.
-  The slot number has no absent value: a block for which the node supplies no other number runs with slot number zero, which `SLOTNUM` pushes like any other.
+  `SLOTNUM` MUST push zero, whatever slot number the block environment carries: the value is the engine's own and depends on no field the node supplies.
+  The read is still a read of volatile data: it is marked, detention applies after it, and it is refused when volatile-data access is disabled.
 - The Karst block rules apply to MegaETH blocks:
   - A block in which Satin activates, or in which an Optimism fork at or after Jovian in the Optimism fork order activates, MUST contain only deposit transactions; a non-deposit transaction in it makes the block invalid.
     A fork activates in a block when it is active at the block's timestamp and not at the parent block's, as the chain configuration schedules it; a fork the configuration does not schedule never activates.
@@ -1399,8 +1399,8 @@ The witness is defined by what the block's execution returns and exports, and a 
   The pre-block phase's reads land in the states it commits, one per step, in order: the two EIP calls' states, in Satin's activation block each predeploy's read-only entry, the registry's pending slots the due-change decision read, the `applyPendingChanges()` call's state, and last the L1 block info.
   Each state is committed whole, read-only entries included, and a node MUST collect the states as they are committed: what a commit keeps of a state is only what it changed, which holds none of the read-only entries.
   `BLOCKHASH` reads the chain's history outside the journal and its reads are exported; a SALT bucket's capacity and the oracle service's answer are read outside the database and are exported or recorded.
-  The header, the chain configuration — the schedule — the parent hash, the parent beacon block root, the extra data, whether the block admits only deposits (see [Base Layer](#1-base-layer-optimism-karst-ethereum-osaka)), whether Satin activates in it, and the block's slot number are inputs a validator is given beside the witness.
-  `SLOTNUM` pushes the slot number the node supplies, so a validator MUST be given the number the building node supplied, zero included.
+  The header, the chain configuration — the schedule — the parent hash, the parent beacon block root, the extra data, whether the block admits only deposits (see [Base Layer](#1-base-layer-optimism-karst-ethereum-osaka)), and whether Satin activates in it are inputs a validator is given beside the witness.
+  `SLOTNUM` pushes zero, so a validator needs no slot number.
 - **The L1 block info.**
   A non-deposit transaction is priced against the L1 block contract (`0x4200000000000000000000000000000000000015`): its L1 base fee slot (1), its Ecotone fee scalars slot (3), its Ecotone blob base fee slot (7), its operator fee scalars slot (8), which also holds the DA footprint gas scalar, and, only when the Ecotone scalars are empty (the blob base fee scalar and the eight bytes of the two scalars zero), its L1 fee overhead slot (5).
   These reads are made on the block's state, not through a transaction's journal, so they land in no transaction's returned state.
