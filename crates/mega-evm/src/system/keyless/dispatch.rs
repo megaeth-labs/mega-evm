@@ -518,7 +518,7 @@ mod tests {
             ("DELEGATECALL", frame(0, at, CallScheme::DelegateCall, decodable())),
             // The scheme alone refuses these: every other condition holds.
             ("CALLCODE", frame(0, at, CallScheme::CallCode, decodable())),
-            ("another selector", frame(0, at, call, other_selector.clone())),
+            ("another selector", frame(0, at, call, other_selector)),
             ("undecodable arguments", frame(0, at, call, undecodable())),
             ("no selector", frame(0, at, call, Bytes::from_static(&[0xde, 0xad]))),
         ];
