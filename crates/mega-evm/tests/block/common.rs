@@ -129,7 +129,13 @@ pub(crate) fn activation_spec() -> MegaHardforkConfig {
 /// [`activation_spec`]: its parent came one second before the activation, so the block admits
 /// only deposits and checks the predeploys.
 pub(crate) fn activation_ctx() -> MegaBlockExecutionCtx {
-    unlimited_ctx().with_parent_timestamp(BLOCK_TIMESTAMP - 1)
+    MegaBlockExecutionCtx::new(
+        B256::ZERO,
+        Some(B256::ZERO),
+        Bytes::new(),
+        BlockLimits::no_limits(),
+        Some(BLOCK_TIMESTAMP - 1),
+    )
 }
 
 /// The loosest limits a block could be held to while a read of volatile data still detains:
@@ -153,7 +159,7 @@ pub(crate) const fn loosest_tx() -> EvmTxRuntimeLimits {
 /// Cancun is active, so the block carries a parent beacon block root; without one the EIP-4788
 /// pre-block call refuses the block.
 pub(crate) fn block_ctx(policy: BlockLimits) -> MegaBlockExecutionCtx {
-    MegaBlockExecutionCtx::new(B256::ZERO, Some(B256::ZERO), Bytes::new(), policy)
+    MegaBlockExecutionCtx::new(B256::ZERO, Some(B256::ZERO), Bytes::new(), policy, None)
 }
 
 /// The context of a block packed under no building policy, as a validator executes one.

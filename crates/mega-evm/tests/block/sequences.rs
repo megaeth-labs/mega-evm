@@ -47,6 +47,7 @@ fn record_parent(
         Some(B256::ZERO),
         Bytes::new(),
         BlockLimits::no_limits(),
+        None,
     );
     let mut executor = executor_with_env(state, ctx, env);
     executor.apply_pre_execution_changes().expect("the block starts");

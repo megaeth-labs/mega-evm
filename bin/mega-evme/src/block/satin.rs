@@ -72,15 +72,13 @@ pub(super) fn execute(
     // parent's timestamp. Without the timestamp it applies none, which is right only where no
     // fork activates in the block, so any other block is refused here.
     admits_only_deposits(&hardforks, header.number, parent_timestamp, header.timestamp)?;
-    let mut block_ctx = MegaBlockExecutionCtx::new(
+    let block_ctx = MegaBlockExecutionCtx::new(
         header.parent_hash,
         header.parent_beacon_block_root,
         header.extra_data.clone(),
         BlockLimits::default(),
+        parent_timestamp,
     );
-    if let Some(parent_timestamp) = parent_timestamp {
-        block_ctx = block_ctx.with_parent_timestamp(parent_timestamp);
-    }
 
     let result = {
         let mut db = State::builder().with_database(SatinDb(state)).with_bundle_update().build();

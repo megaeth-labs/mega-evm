@@ -439,8 +439,8 @@ impl Chain {
             header.parent_beacon_block_root,
             header.extra_data.clone(),
             BlockLimits::no_limits(),
-        )
-        .with_parent_timestamp(self.head_timestamp);
+            Some(self.head_timestamp),
+        );
         let mut executor =
             MegaBlockExecutor::new(evm, ctx, self.spec.clone(), OpAlloyReceiptBuilder::default())
                 .with_protocol_limits(limits());

@@ -17,8 +17,8 @@
 //! - **An activation block admits only deposits.** The executor works out whether a fork activates
 //!   in the block from the chain's schedule ([`MegaHardforks::admits_only_deposits`]), the block's
 //!   own timestamp and the parent's, which the caller supplies with
-//!   [`MegaBlockExecutionCtx::with_parent_timestamp`]. A user transaction in such a block is
-//!   refused before it executes. This mirrors alloy-op-evm's rule of the same name.
+//!   [`MegaBlockExecutionCtx::parent_timestamp`]. A user transaction in such a block is refused
+//!   before it executes. This mirrors alloy-op-evm's rule of the same name.
 //! - **The data-availability footprint is a block limit.** Each non-deposit transaction's footprint
 //!   is its compressed size times the footprint gas scalar the L1 block contract holds, accumulated
 //!   against the block's gas limit and reported as the block's blob gas used. With no scalar in
@@ -141,7 +141,7 @@ use crate::{
 /// It carries what the pre-block calls need (the parent hash and the parent beacon block root, as
 /// alloy-op-evm does), the block's own extra data, the parent block's timestamp and the
 /// builder's packing policy.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct MegaBlockExecutionCtx {
     /// The parent block's hash, which the EIP-2935 pre-block call records.
     pub parent_hash: B256,
@@ -168,28 +168,19 @@ pub struct MegaBlockExecutionCtx {
 }
 
 impl MegaBlockExecutionCtx {
-    /// A context for a block with no known parent timestamp; supply it with
-    /// [`with_parent_timestamp`](Self::with_parent_timestamp).
+    /// A context for a block whose parent block is at `parent_timestamp`.
+    ///
+    /// `None` is a block with no parent to compare against, such as a genesis block: neither
+    /// activation-block rule applies to it. A block that has a parent must pass its timestamp,
+    /// since a block executed without it silently skips both rules.
     pub const fn new(
         parent_hash: B256,
         parent_beacon_block_root: Option<B256>,
         extra_data: Bytes,
         block_limits: BlockLimits,
+        parent_timestamp: Option<u64>,
     ) -> Self {
-        Self {
-            parent_hash,
-            parent_beacon_block_root,
-            extra_data,
-            parent_timestamp: None,
-            block_limits,
-        }
-    }
-
-    /// Sets the parent block's timestamp, from which the executor works out whether a fork
-    /// activates in this block.
-    pub const fn with_parent_timestamp(mut self, parent_timestamp: u64) -> Self {
-        self.parent_timestamp = Some(parent_timestamp);
-        self
+        Self { parent_hash, parent_beacon_block_root, extra_data, parent_timestamp, block_limits }
     }
 }
 
@@ -1054,7 +1045,13 @@ mod tests {
             .with_block(BlockEnv { gas_limit: 30_000_000, ..Default::default() });
         let mut executor = MegaBlockExecutor::new(
             MegaEvm::new(ctx),
-            MegaBlockExecutionCtx::default(),
+            MegaBlockExecutionCtx::new(
+                B256::ZERO,
+                None,
+                Bytes::new(),
+                BlockLimits::default(),
+                None,
+            ),
             MegaHardforkConfig::default().with_all_activated(),
             alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder::default(),
         );
@@ -1096,7 +1093,7 @@ mod tests {
         let policy = BlockLimits::no_limits().with_block_txs_data_limit(u64::MAX);
         let executor = MegaBlockExecutor::new(
             MegaEvm::new(ctx),
-            MegaBlockExecutionCtx::new(B256::ZERO, None, Bytes::new(), policy),
+            MegaBlockExecutionCtx::new(B256::ZERO, None, Bytes::new(), policy, None),
             MegaHardforkConfig::default().with_all_activated(),
             alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder::default(),
         );
@@ -1122,6 +1119,7 @@ mod tests {
                 None,
                 Bytes::new(),
                 BlockLimits::no_limits().with_block_txs_data_limit(5),
+                None,
             ),
             MegaHardforkConfig::default().with_all_activated(),
             alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder::default(),

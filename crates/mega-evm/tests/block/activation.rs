@@ -2,7 +2,7 @@
 //!
 //! Block execution works out for itself whether a block admits only deposits and whether it is
 //! Satin's activation block, from its chain schedule, the block's own timestamp and the parent
-//! block's timestamp ([`MegaBlockExecutionCtx::with_parent_timestamp`]), which is all a node
+//! block's timestamp ([`MegaBlockExecutionCtx::new`]), which is all a node
 //! supplies. The tests here build each block's context from the parent's timestamp alone and run
 //! the block: a user transaction is refused exactly in the blocks the rule names, and a deposit
 //! runs in every block.
@@ -10,7 +10,7 @@
 use alloy_evm::block::{BlockExecutionError, BlockExecutor, BlockValidationError};
 use alloy_hardforks::{EthereumHardfork, ForkCondition};
 use alloy_op_hardforks::OpHardfork;
-use alloy_primitives::{Bytes, U256};
+use alloy_primitives::{Bytes, B256, U256};
 use mega_evm::{
     system::SYSTEM_CONTRACT_COUNT, test_utils::CommittedStates, BlockLimits, MegaBlockExecutionCtx,
     MegaBlockExecutionError, MegaHardfork, MegaHardforkConfig,
@@ -36,7 +36,13 @@ fn schedule(satin: u64) -> MegaHardforkConfig {
 /// executor works out from its schedule and the block's own timestamp whether a fork activates
 /// in the block.
 fn node_ctx(parent_timestamp: u64) -> MegaBlockExecutionCtx {
-    block_ctx(BlockLimits::no_limits()).with_parent_timestamp(parent_timestamp)
+    MegaBlockExecutionCtx::new(
+        B256::ZERO,
+        Some(B256::ZERO),
+        Bytes::new(),
+        BlockLimits::no_limits(),
+        Some(parent_timestamp),
+    )
 }
 
 /// Whether `error` is the activation-block refusal.
@@ -246,7 +252,7 @@ fn test_an_absent_parent_timestamp_applies_neither_activation_rule() {
     };
 
     let absent = block_ctx(BlockLimits::no_limits());
-    assert_eq!(absent.parent_timestamp, None, "a context starts with no parent timestamp");
+    assert_eq!(absent.parent_timestamp, None, "the helper names no parent");
     assert_eq!(run(absent), (false, false, 0), "no parent: neither rule");
     assert_eq!(
         run(node_ctx(at - 1)),

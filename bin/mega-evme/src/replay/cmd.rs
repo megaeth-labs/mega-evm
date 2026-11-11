@@ -451,8 +451,8 @@ impl Cmd {
             ctx.block.header.parent_beacon_block_root(),
             ctx.block.header.extra_data().clone(),
             BlockLimits::default(),
-        )
-        .with_parent_timestamp(ctx.parent_block.header.timestamp());
+            Some(ctx.parent_block.header.timestamp()),
+        );
 
         let start = Instant::now();
         // The tracer is attached only for `--trace`: otherwise preceding transactions would be
