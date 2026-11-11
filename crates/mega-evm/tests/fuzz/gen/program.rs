@@ -667,7 +667,7 @@ fn end() -> impl Strategy<Value = End> {
         3 => (0u16..=100).prop_map(|len| End::Return { len }),
         3 => (0u16..=100).prop_map(|len| End::Revert { len }),
         1 => Just(End::Invalid),
-        2 => target().prop_map(|to| End::Selfdestruct { to }),
+        3 => target().prop_map(|to| End::Selfdestruct { to }),
         1 => Just(End::Spin),
         1 => Just(End::Fallthrough),
     ]
@@ -681,6 +681,15 @@ pub(crate) struct Program {
 }
 
 impl Program {
+    /// The addresses the program's `CREATE2` ops land on when `deployer` runs it.
+    pub(crate) fn create2_addresses(&self, deployer: Address) -> Vec<Address> {
+        Creations::of(&self.ops)
+            .0
+            .into_iter()
+            .map(|(salt, init_hash)| deployer.create2(B256::left_padding_from(&[salt]), init_hash))
+            .collect()
+    }
+
     /// The program's bytecode.
     pub(crate) fn assemble(&self) -> Vec<u8> {
         let creations = Creations::of(&self.ops);
