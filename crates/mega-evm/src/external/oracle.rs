@@ -31,6 +31,11 @@ pub trait OracleEnv: Debug + Unpin {
     /// earlier in the transaction. The slot is loaded whatever the answer, so a node that replays
     /// a block without the service prices and witnesses it as the node that built the block did.
     ///
+    /// Only a transaction that is neither a deposit nor a Mega System Transaction asks. A system
+    /// call, a deposit and a Mega System Transaction never do, and their reads use the loaded
+    /// value: none of them can have a value the service gave written on the chain before it, as a
+    /// node that replays the block without the service needs.
+    ///
     /// A frame whose regular gas, the part gas detention withholds included, cannot pay the read's
     /// cold access, and a frame whose volatile-data access is switched off, read nothing and do not
     /// ask. A detained frame that holds the gas but may not spend it does ask, and the read's
