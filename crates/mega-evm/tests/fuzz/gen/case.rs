@@ -61,10 +61,12 @@ impl Case {
     /// system address, the fixed accounts with their programs, the delegation, and, for a keyless
     /// deployment, its signer's account and what its deploy address holds.
     ///
-    /// An account that would hold nothing — no balance, nonce, code or slot — is left out, as no
-    /// chain past EIP-161 holds one: revm's EIP-7702 application counts an account its database
-    /// holds as existing, empty or not, where a value transfer counts an empty one as new, so an
-    /// empty account in the pre-state would make the two disagree on a state no chain reaches.
+    /// An account that would hold nothing — no balance, nonce, code or slot — is left out. One that
+    /// holds slots and nothing else is installed, its slots holding zero or not: an account empty
+    /// under EIP-161 whose leaf the state holds, as a genesis allocation can leave one. The sites
+    /// that add an account decide it by two rules: an applied EIP-7702 authority is new only where
+    /// the state holds no account, so this one exists, and every other site counts an account
+    /// empty under EIP-161 as new.
     pub(crate) fn database(&self) -> MemoryDatabase {
         let mut db = MemoryDatabase::default().rex6_predeploys(SYSTEM_ADDRESS);
         let world = &self.world;

@@ -4,7 +4,10 @@
 //! states what the spec says of the outcome. A property that does not hold by design is stated
 //! as what does hold, and says so.
 
-use std::{collections::BTreeMap, sync::Mutex};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Mutex,
+};
 
 use alloy_primitives::{Address, U256};
 use mega_evm::{
@@ -436,6 +439,10 @@ fn fee_credits(
 /// credits are taken out of its balance — a fee credit is no rise. The sender's account is the
 /// body's, and is a rise only as the caller a deposit-like transaction created.
 ///
+/// An applied EIP-7702 authority is decided by existence instead: it is a rise only where the
+/// world held no account at its address, and one the world held empty under EIP-161 is no new
+/// account. Every other site that adds an account counts an empty one as new.
+///
 /// An account the transaction created and destroyed keeps none of its slots, and its leaf only
 /// where the world held it as an account empty under EIP-161: the creation added that account and
 /// the destruction does not take a leaf back that existed at the start. One the world did not hold
@@ -453,6 +460,8 @@ pub(crate) fn check_state_growth(case: &Case) -> Result<(), proptest::test_runne
     let deposit_like =
         tx.0.deposit.source_hash != alloy_primitives::B256::ZERO || tx.caller() == SYSTEM_ADDRESS;
     let mut pre = case.database();
+    let authorities: BTreeSet<Address> =
+        applied_authorizations(case).into_iter().map(|(authority, _)| authority).collect();
     let mut expected = 0;
     for (address, account) in &outcome.state {
         if destroyed_in_the_transaction(account) {
@@ -467,6 +476,13 @@ pub(crate) fn check_state_growth(case: &Case) -> Result<(), proptest::test_runne
             .count();
         expected += slots as u64;
         if *address == tx.caller() && !deposit_like {
+            continue;
+        }
+        // An authority is decided by existence: one whose account the world held, empty or not, is
+        // no new account, and its application leaves it with a nonce, so no later site in the
+        // transaction adds it either. Where the list was skipped or taken back, the account stands
+        // as the world held it, which is no rise whichever test decides it.
+        if authorities.contains(address) && leaf_at_start(&mut pre, *address).is_some() {
             continue;
         }
         if pre_account(&mut pre, *address).is_some() {
