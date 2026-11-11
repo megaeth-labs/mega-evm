@@ -10,7 +10,9 @@ use alloy_primitives::{address, Address, Bytes, TxKind, B256, U256};
 use alloy_sol_types::SolCall;
 use mega_evm::{
     constants::{ORACLE_ACCESS_COMPUTE_GAS, TX_GAS_LIMIT_CAP},
-    system::{IOracle, ORACLE_CONTRACT_ADDRESS},
+    system::{
+        IOracle, MEGA_SYSTEM_ADDRESS, MEGA_SYSTEM_TRANSACTION_SOURCE_HASH, ORACLE_CONTRACT_ADDRESS,
+    },
     test_utils::{
         op_transaction, zero_fee_l1_block_info, BytecodeBuilder, MemoryDatabase, ReplayingOracleEnv,
     },
@@ -828,4 +830,185 @@ fn test_reads_in_a_nested_oracle_frame_are_cold_and_ask() {
         assert_eq!(evm.inspector().costs, vec![(0, cold), (1, cold), (1, cold)]);
         assert_eq!(service.seen(), vec![Seen::Read(SLOT); 3]);
     }
+}
+
+/* ---------- which executions ask the service ---------- */
+
+/// Code for the Oracle's own frame that reads [`SLOT`] once and returns the word it read and what
+/// the read cost: the push of the slot, the `SLOAD` and the `GAS` after it.
+fn read_and_price() -> Bytes {
+    BytecodeBuilder::default()
+        .append(GAS)
+        .push_u256(SLOT)
+        // [g0, value, g1]: the value at 0, g0 - g1 at 0x20.
+        .append_many([SLOAD, GAS, SWAP1, PUSH0, MSTORE, SWAP1, SUB])
+        .push_number(0x20_u8)
+        .append(MSTORE)
+        .push_number(0x40_u8)
+        .append_many([PUSH0, RETURN])
+        .build()
+}
+
+/// What [`read_and_price`] reports for a read charged as a cold access.
+fn cold_read() -> u64 {
+    let params = mega_evm::satin_gas_params();
+    3 + params.warm_storage_read_cost() + params.cold_storage_additional_cost() + 2
+}
+
+/// A database whose Oracle runs [`read_and_price`] on [`SLOT`] holding [`STATE_VALUE`], whose
+/// [`CONTRACT`] calls the Oracle and returns what it answered, and whose registry names
+/// [`MEGA_SYSTEM_ADDRESS`] the system address.
+fn reading_db() -> MemoryDatabase {
+    db_with_state()
+        .account_code(ORACLE_CONTRACT_ADDRESS, read_and_price())
+        .account_code(CONTRACT, calls_with(CALL, ORACLE_CONTRACT_ADDRESS, &[], 0))
+        .sequencer_registry(MEGA_SYSTEM_ADDRESS)
+}
+
+/// The word [`read_and_price`] read and what the read cost, out of a successful transaction to
+/// the Oracle, or, `through_contract`, to [`CONTRACT`], which returns the call's status first.
+fn read_of(run: &Run, through_contract: bool) -> (U256, u64) {
+    assert!(run.outcome.result.is_success(), "{:?}", run.outcome.result);
+    let output = run.outcome.result.output().cloned().unwrap_or_default();
+    let words = if through_contract {
+        let (status, data) = split_outcome(&output);
+        assert!(status, "the call to the Oracle failed");
+        data.to_vec()
+    } else {
+        output.to_vec()
+    };
+    (U256::from_be_slice(&words[..32]), U256::from_be_slice(&words[32..64]).to::<u64>())
+}
+
+/// `tx` as a deposit carrying `source_hash`: no fee.
+fn as_deposit(mut tx: MegaTransaction, source_hash: B256) -> MegaTransaction {
+    tx.0.deposit.source_hash = source_hash;
+    tx.0.base.gas_price = 0;
+    tx
+}
+
+/// A legacy call of the Oracle from `caller`, with the chain id the default configuration runs.
+fn legacy_call_of_the_oracle(caller: Address) -> MegaTransaction {
+    OpTx(op_transaction(TxEnv {
+        caller,
+        kind: TxKind::Call(ORACLE_CONTRACT_ADDRESS),
+        gas_limit: GAS_LIMIT,
+        chain_id: Some(1),
+        ..Default::default()
+    }))
+}
+
+/// A deposit asks the oracle service nothing: an `SLOAD` in the Oracle's own frame pushes the
+/// slot's value on the chain, over the value the service would give, and the deposit records no
+/// answer. Every deposit of a block precedes the block's other transactions, so no Mega System
+/// Transaction could put a value the service gave on the chain before the deposit reads it.
+///
+/// The rule covers the deposit's every frame, a nested Oracle frame as much as its own call, and
+/// every deposit: a user's, and one handed to the engine carrying the source hash the engine
+/// stamps on a promoted Mega System Transaction. Only the question and the record go: the read
+/// is loaded, priced and marked as the same read by a user's transaction is — the slot is in the
+/// state, the read pays the cold access, and gas detention holds a user's deposit under the
+/// Oracle's cap at the same limit. A deposit carrying the promotion's source hash is the
+/// protocol's own, which is not detained, whatever it reads.
+#[test]
+fn test_a_deposit_asks_the_oracle_service_nothing() {
+    let user_deposit = B256::repeat_byte(0x22);
+    for (source_hash, through_contract) in
+        [(user_deposit, false), (user_deposit, true), (MEGA_SYSTEM_TRANSACTION_SOURCE_HASH, false)]
+    {
+        let detained = source_hash == user_deposit;
+        let case = format!("source hash {source_hash}, through a contract: {through_contract}");
+        let to = if through_contract { CONTRACT } else { ORACLE_CONTRACT_ADDRESS };
+        let service = Service::holding(SLOT, SERVICE_VALUE);
+        let deposit =
+            run(reading_db(), &service, as_deposit(call_tx(to, [], U256::ZERO), source_hash));
+
+        assert_eq!(
+            read_of(&deposit, through_contract),
+            (STATE_VALUE, cold_read()),
+            "{case}: the chain's value, priced cold"
+        );
+        assert!(service.seen().is_empty(), "{case}: the service was not asked");
+        assert!(deposit.outcome.oracle_reads.is_empty(), "{case}: and no answer is recorded");
+        assert!(deposit.evm_reads.is_empty(), "{case}");
+        let slot = &deposit.outcome.state[&ORACLE_CONTRACT_ADDRESS].storage[&SLOT];
+        assert_eq!(slot.original_value, STATE_VALUE, "{case}: the slot was loaded");
+
+        // The same read by a user's transaction, which the service answers.
+        let served = Service::holding(SLOT, SERVICE_VALUE);
+        let user = run(reading_db(), &served, call_tx(to, [], U256::ZERO));
+        assert_eq!(read_of(&user, through_contract), (SERVICE_VALUE, cold_read()), "{case}");
+        assert_eq!(user.accessed, VolatileDataAccess::ORACLE, "{case}: the user's read is marked");
+        if detained {
+            assert_eq!((deposit.accessed, deposit.limit), (user.accessed, user.limit), "{case}");
+        } else {
+            assert_eq!((deposit.accessed, deposit.limit), (VolatileDataAccess::empty(), None));
+        }
+    }
+}
+
+/// A Mega System Transaction asks the oracle service nothing: it is the sequencer's write of the
+/// values the service gave, and a value served to its own read would need another one before it.
+/// The engine promotes the legacy transaction the sequencer sends to a deposit; its read in the
+/// Oracle's own frame pushes the slot's value on the chain, is priced as a cold access and loads
+/// the slot, and no answer is recorded.
+#[test]
+fn test_a_mega_system_transaction_asks_the_oracle_service_nothing() {
+    let service = Service::holding(SLOT, SERVICE_VALUE);
+    let run = run(reading_db(), &service, legacy_call_of_the_oracle(MEGA_SYSTEM_ADDRESS));
+
+    assert_eq!(read_of(&run, false), (STATE_VALUE, cold_read()), "the chain's value, priced cold");
+    assert!(service.seen().is_empty(), "the service was not asked");
+    assert!(run.outcome.oracle_reads.is_empty(), "and no answer is recorded");
+    assert!(run.evm_reads.is_empty());
+    let slot = &run.outcome.state[&ORACLE_CONTRACT_ADDRESS].storage[&SLOT];
+    assert_eq!(slot.original_value, STATE_VALUE, "the slot was loaded");
+}
+
+/// A transaction that is neither a deposit nor a Mega System Transaction is still answered by
+/// the oracle service, and its answer recorded: a user's, and one the pre-block calls' caller
+/// sends, which is the protocol's own for every other rule but not one of the two the service
+/// must not answer.
+#[test]
+fn test_a_transaction_that_is_no_deposit_is_still_answered_by_the_oracle_service() {
+    for caller in [CALLER, alloy_eips::eip4788::SYSTEM_ADDRESS] {
+        let service = Service::holding(SLOT, SERVICE_VALUE);
+        let run = run(reading_db(), &service, legacy_call_of_the_oracle(caller));
+
+        assert_eq!(read_of(&run, false), (SERVICE_VALUE, cold_read()), "{caller}");
+        assert_eq!(service.seen(), vec![Seen::Read(SLOT)], "{caller}: the service was asked");
+        let read = OracleRead { slot: SLOT, answer: Some(SERVICE_VALUE) };
+        assert_eq!(run.outcome.oracle_reads, [read], "{caller}: and its answer recorded");
+        assert_eq!(run.evm_reads, [read], "{caller}");
+    }
+}
+
+/// A system call asks the oracle service nothing: its read in the Oracle's own frame pushes the
+/// slot's value on the chain, is priced as a cold access, and records no answer, so the call is
+/// a function of the state a stateless validator is given.
+#[test]
+fn test_a_system_call_asks_the_oracle_service_nothing() {
+    let service = Service::holding(SLOT, SERVICE_VALUE);
+    let envs: ExternalEnvs<Envs> =
+        ExternalEnvs { salt_env: EmptyExternalEnv, oracle_env: service.clone() };
+    let ctx = MegaContext::new_with_external_envs(reading_db(), MegaSpecId::SATIN, envs)
+        .with_block(block())
+        .with_chain(zero_fee_l1_block_info());
+    let mut evm = MegaEvm::new(ctx);
+    let result = alloy_evm::Evm::transact_system_call(
+        &mut evm,
+        alloy_eips::eip4788::SYSTEM_ADDRESS,
+        ORACLE_CONTRACT_ADDRESS,
+        Bytes::new(),
+    )
+    .expect("the system call runs");
+
+    assert!(result.result.is_success(), "{:?}", result.result);
+    let output = result.result.output().cloned().unwrap_or_default();
+    let read = (U256::from_be_slice(&output[..32]), U256::from_be_slice(&output[32..64]));
+    assert_eq!(read, (STATE_VALUE, U256::from(cold_read())), "the chain's value, priced cold");
+    assert!(service.seen().is_empty(), "the service was not asked");
+    assert!(evm.oracle_reads().is_empty(), "and no answer is recorded");
+    let slot = &result.state[&ORACLE_CONTRACT_ADDRESS].storage[&SLOT];
+    assert_eq!(slot.original_value, STATE_VALUE, "the slot was loaded");
 }

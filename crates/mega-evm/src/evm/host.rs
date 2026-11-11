@@ -641,9 +641,10 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// and it is in the transaction's state, which a stateless witness is built from, even when
     /// the environment's value was the one used.
     ///
-    /// A system call does not ask the environment, whatever it holds: its read answers the chain's
-    /// slot, so the call is a function of the state a stateless validator is given (see
-    /// [`MegaContext::is_system_call`]).
+    /// A system call, a deposit and a Mega System Transaction do not ask the environment, whatever
+    /// it holds: their reads answer the chain's slot, its present value, a write the Oracle's own
+    /// frame made earlier included, and are loaded, priced and marked as any other read (see
+    /// [`MegaContext::asks_oracle_service`]).
     ///
     /// A frame whose regular gas, the part detention withholds included, cannot pay the cold
     /// access reads nothing and asks nothing, as revm's own skipped cold load does. A detained
@@ -653,7 +654,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// It is a read of volatile data: it is refused while the frame's volatile-data access is off,
     /// and marked for gas detention, under the Oracle's cap, once it succeeded.
     ///
-    /// The read and the answer are recorded on the context for the transaction's outcome
+    /// A read that asks is recorded, with the answer, on the context for the transaction's outcome
     /// ([`OracleReadRecord`](crate::OracleReadRecord)): the answer is in no database, so a
     /// stateless validator is given the included transactions' reads in place of the service.
     fn oracle_sload(
@@ -671,14 +672,15 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
             false,
         )?
         .data;
-        // A system call reads the chain: it asks the service nothing and records no answer, and
-        // the read is priced and loaded as any other.
-        let answer = if self.is_system_call() {
-            None
-        } else {
+        // A system call, a deposit and a Mega System Transaction read the chain: they ask the
+        // service nothing and record no answer, and the read is priced, loaded and marked as any
+        // other.
+        let answer = if self.asks_oracle_service() {
             let answer = self.external_envs().oracle_env.get_oracle_storage(key);
             self.oracle_reads.record(key, answer);
             answer
+        } else {
+            None
         };
         self.detention.observe(VolatileDataAccess::ORACLE);
         Ok(StateLoad::new(answer.unwrap_or(loaded), true))
