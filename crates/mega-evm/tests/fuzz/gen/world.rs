@@ -299,7 +299,8 @@ pub(crate) fn limits() -> impl Strategy<Value = Limits> {
 pub(crate) struct BlockShape {
     /// The base fee: zero, or seven, which a free transaction is refused under.
     pub(crate) basefee: u64,
-    /// The slot number `SLOTNUM` reads, zero for a block that leaves it unset.
+    /// The block environment's slot number, which `SLOTNUM` ignores: it pushes zero whatever this
+    /// holds.
     pub(crate) slot_num: u64,
     /// Whether the block carries a blob price; one that does not refuses every transaction but a
     /// deposit on its header.

@@ -30,7 +30,7 @@ A call or creation forwards at most `remaining − remaining × 2 / 100` of its 
 
 The gas schedule is Amsterdam's, EIP-8038's state-access prices included, with two changes: the EIP-8037 state-gas entries are rebuilt from MegaETH's own cost per state byte, so a new storage slot draws 97,920 state gas and a new account 183,600, and a byte of deployed code is priced at MegaETH's cost per history byte.
 The schedule also brings the Amsterdam opcodes (`DUPN`, `SWAPN`, `EXCHANGE`, `SLOTNUM`) and raises the code-size limits to 512 KiB of contract and 1 MiB of initcode.
-`SLOTNUM` pushes the slot number the node supplies in `BlockEnv::slot_num`, zero when it leaves it unset.
+`SLOTNUM` pushes zero whatever `BlockEnv::slot_num` holds; the read is still a volatile one, marked for detention and refused where volatile access is off.
 Satin takes EIP-7708 from Amsterdam too: every value movement — a transaction's value, a value `CALL`, a creation's endowment, a `SELFDESTRUCT`'s balance moved to another account — emits a `Transfer(from, to, amount)` log from `0xff…fe` into the receipt, in execution order among the contracts' own logs.
 A deposit's value is logged and its mint is not, and a destruction to itself burns the balance without a log.
 Its byte prices are an input: the `satin-price-override` feature, off by default, lets a measurement build install other ones.
