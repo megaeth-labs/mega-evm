@@ -15,10 +15,12 @@ use mega_evm::{
 use revm::{
     bytecode::opcode::{CALL, CALLCODE, DELEGATECALL, STATICCALL},
     context::result::ResultAndState,
+    primitives::TxKind,
 };
 
 use crate::common::{
-    block, call_tx, calls_with, run, steer, system_db, with_contract, CALLER, CONTRACT,
+    block, call_tx, call_tx_with_gas, calls_with, run, steer, system_db, with_contract, CALLER,
+    CONTRACT,
 };
 
 /// A topic and payload the tests send.
@@ -61,6 +63,15 @@ fn run_with_oracle_under(
     tx: MegaTransaction,
     limits: EvmTxRuntimeLimits,
 ) -> (MegaTransactionOutcome, Vec<RecordedHint>) {
+    try_run_with_oracle_under(db, tx, limits).expect("the transaction is valid")
+}
+
+/// [`run_with_oracle_under`] for a transaction that may be refused: `None` when it is.
+fn try_run_with_oracle_under(
+    db: MemoryDatabase,
+    tx: MegaTransaction,
+    limits: EvmTxRuntimeLimits,
+) -> Option<(MegaTransactionOutcome, Vec<RecordedHint>)> {
     let envs = TestExternalEnvs::<Infallible>::new();
     let ctx = MegaContext::new_with_external_envs(
         db,
@@ -70,8 +81,8 @@ fn run_with_oracle_under(
     .with_block(block())
     .with_chain(zero_fee_l1_block_info())
     .with_tx_runtime_limits(limits);
-    let outcome = MegaEvm::new(ctx).execute_transaction(tx).expect("the transaction is valid");
-    (outcome, envs.recorded_hints())
+    let outcome = MegaEvm::new(ctx).execute_transaction(tx).ok()?;
+    Some((outcome, envs.recorded_hints()))
 }
 
 /// A `sendHint` transaction reaches the oracle service with the caller, the topic and the
@@ -132,11 +143,42 @@ fn test_a_static_call_forwards_the_hint() {
     assert_eq!(hints[0].from, CONTRACT, "the frame that called is the sender of the hint");
 }
 
-/// A call that carries value forwards nothing: `sendHint` is not payable, so the call reverts
-/// in the bytecode and the hint would be one the caller never sent.
+/// A call that carries value is judged on its gas like any other, and a call that requests none
+/// still holds the value call's stipend, so its hint is admitted. `sendHint` is not payable, so
+/// the bytecode refuses the value; the hint is a message to the service and was already sent, and
+/// its bytes stay counted.
 #[test]
-fn test_a_value_bearing_call_forwards_nothing() {
+fn test_a_value_bearing_call_forwards_its_hint() {
+    use revm::bytecode::opcode::{POP, PUSH0, REVERT};
+
     let data = send_hint(b"paid");
+    let code = BytecodeBuilder::default()
+        .mstore(0x0, &data)
+        .push_number(0_u64) // retSize
+        .push_number(0_u64) // retOffset
+        .push_number(data.len() as u64) // argsSize
+        .push_number(0_u64) // argsOffset
+        .push_number(1_u64) // value
+        .push_address(ORACLE_CONTRACT_ADDRESS)
+        .push_number(0_u64) // gas: none requested, the stipend is all the call holds
+        .append(CALL)
+        .append(POP)
+        .append_many([PUSH0, PUSH0, REVERT])
+        .build();
+    let (result, hints, usage) =
+        run_with_oracle(with_contract(code), call_tx(CONTRACT, [], U256::ZERO));
+
+    assert!(!result.result.is_success(), "the frame that sent the hint reverted");
+    assert_eq!(hints.len(), 1, "the hint reached the service");
+    assert_eq!(hints[0].from, CONTRACT);
+    assert_eq!(usage.data_size, nested_hint(data.len() as u64), "and its bytes stay counted");
+}
+
+/// The bytecode refuses the value of a value-bearing call that holds gas, as before: the hint is
+/// forwarded and the call reports failure.
+#[test]
+fn test_a_value_bearing_call_with_gas_forwards_its_hint_and_the_bytecode_refuses() {
+    let data = send_hint(b"paid with gas");
     let code = calls_with(CALL, ORACLE_CONTRACT_ADDRESS, &data, 1);
     let (result, hints, usage) =
         run_with_oracle(with_contract(code), call_tx(CONTRACT, [], U256::ZERO));
@@ -144,12 +186,63 @@ fn test_a_value_bearing_call_forwards_nothing() {
     let outcome = result.result.output().cloned().unwrap_or_default();
     let (status, _) = crate::common::split_outcome(&outcome);
     assert!(!status, "the bytecode refuses the value");
-    assert!(hints.is_empty());
-    assert_eq!(
-        usage.data_size,
-        nested_hint(0),
-        "nothing was materialised for a hint that is not forwarded"
-    );
+    assert_eq!(hints.len(), 1);
+    assert_eq!(usage.data_size, nested_hint(data.len() as u64));
+}
+
+/// A transaction's own value call has no stipend and is judged on its first frame's whole gas:
+/// one gas admits the hint, and so do the stipend's 2,300 and 2,301. The smallest gas limit that
+/// does is found by search, since the first frame's gas is what the limit leaves after the
+/// intrinsic and start charges, which depend on the byte prices; a legacy transaction and a
+/// deposit alike.
+#[test]
+fn test_a_transactions_own_value_hint_is_admitted_on_one_gas_and_more() {
+    let data = send_hint(b"own");
+    let funded = || system_db().account_balance(ORACLE_CONTRACT_ADDRESS, U256::from(1));
+    let legacy = |gas: u64| call_tx_with_gas(ORACLE_CONTRACT_ADDRESS, &data, U256::from(1), gas);
+    let deposit = |gas: u64| {
+        let mut tx = crate::system_tx::deposit_tx(
+            CALLER,
+            TxKind::Call(ORACLE_CONTRACT_ADDRESS),
+            U256::from(1),
+            1,
+        );
+        tx.0.base.data = data.clone();
+        tx.0.base.gas_limit = gas;
+        tx
+    };
+    type Build<'a> = &'a dyn Fn(u64) -> MegaTransaction;
+    let forwarded = |build: Build<'_>, gas: u64| {
+        // A gas limit the transaction is refused at runs nothing.
+        try_run_with_oracle_under(funded(), build(gas), EvmTxRuntimeLimits::no_limits())
+            .is_some_and(|(_, hints)| !hints.is_empty())
+    };
+    for (name, build) in [("legacy", &legacy as Build<'_>), ("deposit", &deposit as Build<'_>)] {
+        // The smallest gas limit whose first frame holds any gas at all.
+        let (mut low, mut high) = (21_000_u64, 30_000_000_u64);
+        assert!(forwarded(build, high), "{name}: a large limit forwards");
+        while low < high {
+            let mid = low + (high - low) / 2;
+            if forwarded(build, mid) {
+                high = mid;
+            } else {
+                low = mid + 1;
+            }
+        }
+        let one_gas = high;
+        assert!(!forwarded(build, one_gas - 1), "{name}: no gas in the first frame, no hint");
+        for frame_gas in [1_u64, 2_300, 2_301] {
+            let (outcome, hints) = run_with_oracle_under(
+                funded(),
+                build(one_gas + frame_gas - 1),
+                EvmTxRuntimeLimits::no_limits(),
+            );
+            let case = format!("{name}: {frame_gas} gas");
+            assert_eq!(hints.len(), 1, "{case}: the hint reached the service");
+            assert_eq!(hints[0].from, CALLER, "{case}");
+            assert!(outcome.usage.data_size >= data.len() as u64, "{case}: and it is counted");
+        }
+    }
 }
 
 /// A call forwarded no gas forwards nothing: it cannot run the contract either, so its hint

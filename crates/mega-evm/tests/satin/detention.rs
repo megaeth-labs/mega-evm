@@ -837,7 +837,8 @@ fn test_the_history_contract_reads_the_block_number_and_the_beacon_roots_contrac
 }
 
 /// A read answers with the block's own field: the Host marks the read and serves the value it
-/// loaded, whether or not the read caps anything.
+/// loaded, whether or not the read caps anything. `SLOTNUM` is the exception: it is marked like the
+/// others but pushes zero, whatever slot number the block carries.
 #[test]
 fn test_a_read_answers_with_the_blocks_field() {
     let reads = [
@@ -848,7 +849,8 @@ fn test_a_read_answers_with_the_blocks_field() {
         (GASLIMIT, U256::from(10_000_000_000_u64)),
         (BASEFEE, U256::from(1)),
         (BLOBBASEFEE, U256::from(3)),
-        (SLOTNUM, U256::from(9)),
+        // The block carries a slot number of 9; the engine pushes zero whatever it is.
+        (SLOTNUM, U256::ZERO),
     ];
     let mut code = BytecodeBuilder::default();
     for (slot, (opcode, _)) in reads.iter().enumerate() {

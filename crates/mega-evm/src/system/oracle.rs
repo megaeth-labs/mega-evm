@@ -43,20 +43,21 @@ pub use mega_system_contracts::oracle::IOracle;
 /// effect rather than an answer. The Oracle's storage methods are ordinary code, and reading
 /// its storage through the node's oracle service is the Host's business.
 ///
-/// Three conditions admit a hint, and none is a statement about the frame that runs afterwards:
+/// Two conditions admit a hint, and none is a statement about the frame that runs afterwards:
 ///
 /// - the call was forwarded gas. A call with none cannot run the dispatcher of the bytecode at all,
-///   so its hint would be a free message to the service;
-/// - the call carries no value. `sendHint` is not payable, so a value-bearing call reverts in the
-///   bytecode and its hint would be one the caller never sent;
+///   so its hint would be a free message to the service. The gas is the message's whole gas limit,
+///   the stipend of a value-transferring call included, which the call helper has added by then; a
+///   transaction's own call has no stipend and is judged on its first frame's whole gas. The value
+///   itself does not matter: `sendHint` is not payable, so the bytecode refuses a value-bearing
+///   call, but the hint is a message to the service and has been sent;
 /// - the calling frame may read volatile data. A hint is how a contract asks the oracle service for
 ///   what it will read from the Oracle's storage, and a frame whose volatile-data access
 ///   `MegaAccessControl` switched off — its own switch, or one a frame above it set — cannot read
 ///   it. Its hint is dropped, not refused: the call runs the bytecode as any other, because a hint
 ///   is a message to the service, not state, and dropping it changes nothing the call returns.
 ///
-/// The gas and switch conditions are the legacy engine's, carried over; the value condition is
-/// new. A hint that fails any of them is neither forwarded nor counted.
+/// A hint that fails either condition is neither forwarded nor counted.
 ///
 /// Gas above zero does not promise that the bytecode succeeds: a hint forwarded with one gas
 /// reaches the service and the frame it was sent from then runs out of gas. A forwarded hint is a
@@ -84,7 +85,6 @@ pub(crate) fn intercept<DB: Database, ExtEnvs: ExternalEnvTypes>(
 ) -> Option<FrameResult> {
     let selector = peek_selector(&inputs.input, ctx)?;
     if selector != IOracle::sendHintCall::SELECTOR ||
-        inputs.transfers_value() ||
         inputs.gas_limit == 0 ||
         depth.checked_sub(1).is_some_and(|caller| ctx.detention.is_access_disabled(caller))
     {

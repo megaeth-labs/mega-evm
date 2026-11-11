@@ -198,10 +198,10 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
 
     #[inline]
     fn slot_num(&self) -> U256 {
-        if !self.read_block_env(VolatileDataAccess::SLOT_NUM) {
-            return Default::default();
-        }
-        self.inner.slot_num()
+        // The read is volatile (marked, refusable) but its value is the engine's own: zero,
+        // whatever slot number the block environment carries.
+        self.read_block_env(VolatileDataAccess::SLOT_NUM);
+        U256::ZERO
     }
 
     /// Loads the slot; a slot of the Oracle's storage is read through the oracle environment
