@@ -2,7 +2,7 @@
 # Runs the mega-evm test suite at state and history byte prices other than the constants.
 #
 # Usage:
-#   scripts/price_grid.sh --pr             the pull-request points (PR_POINTS below)
+#   scripts/price_grid.sh --pr             five quick points (PR_POINTS below)
 #   scripts/price_grid.sh --full           the whole grid (CPSB_AXIS x CPHB_AXIS, and EXTRA_POINTS)
 #   scripts/price_grid.sh CPSB/CPHB ...    the points named, e.g. 312.5/20 5000/300
 #
