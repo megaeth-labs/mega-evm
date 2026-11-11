@@ -5,8 +5,8 @@ expression: "serde_json::json!({\n    \"summary\":\n    {\n        \"cases\": ca
 {
   "cases": [
     "rule: value @ 50000000 | keccak256=0x70efa1acc6606a24ed2001d41f9e6ac401ef411f46c929dee5043aa06be58810",
-    "rule: value, arguments that do not decode @ 50000000 | keccak256=0x67d4381e1b358e4694b07b0a18728c4e6e3f1c91077391acab6ceed782e46d29",
-    "rule: arguments that do not decode @ 50000000 | keccak256=0xd2827c7aec63978452165c7595a034877c8771d7e504b7dea3f3fbc0aa15b5db",
+    "rule: value, arguments that do not decode @ 50000000 | keccak256=0x6401f75c56ae5ba4720369e22bb4fae524a0d92109200d1b814890f050b4deb7",
+    "rule: arguments that do not decode @ 50000000 | keccak256=0xf200f388d13c3181bef7bd920c142d7682efb6a66a337cd89380d9c322b302e4",
     "rule: malformed transaction @ 50000000 | keccak256=0x53e169618aad04c59acaa0e61bf9a259e42b3994e3df64ec789329dd04a03472",
     "rule: a trailing byte @ 50000000 | keccak256=0x562d6c884cab4c6ca986bead04dc90661c3dd59026842d504f1a785f109ebde9",
     "rule: not a creation @ 50000000 | keccak256=0x3931ffdc0411acf5f321a32fd6fbd0c8b9cd6fc15367d7c222838b2fc4ea9543",
@@ -70,8 +70,8 @@ expression: "serde_json::json!({\n    \"summary\":\n    {\n        \"cases\": ca
     "no contract code @ 50000000 | keccak256=0xd070c6166a53661bc3203f16a69707d9e8846b3c1737d22cbfff5a7a5f6f67c8",
     "a system call @ 50000000 | keccak256=0x23867bfad6c1f95ee8422b2c15dfb47ab157163fecdb69f6e142f50971b86ea2",
     "rule: value @ 400000000 | keccak256=0xb00b12499990c15c1599808de7903b34b5ed9beb8673675a5a9aa77fafa9015b",
-    "rule: value, arguments that do not decode @ 400000000 | keccak256=0xab45a43f5e1a4faa1af944c4016c3dce4436e6ec00814fc78ad3897c791321f2",
-    "rule: arguments that do not decode @ 400000000 | keccak256=0xdc686f081e53b20b0eb44e645c0efc0a34c584ebccc694f6ba79c6f9a0cedcdf",
+    "rule: value, arguments that do not decode @ 400000000 | keccak256=0x3dcf58fea56c393d9432b8d0ddb70ab27c94f1f397297097116ab93d288638d9",
+    "rule: arguments that do not decode @ 400000000 | keccak256=0x1e85d077ef72d33c8bedeef7ab6a25396d2045a316422c35a003947d831b924a",
     "rule: malformed transaction @ 400000000 | keccak256=0xa14ab3686735b259326aeefd8ffde19e7d03ca5f6710a8278d3c20b3588941c7",
     "rule: a trailing byte @ 400000000 | keccak256=0xe3dd6f5f1d180e13aa45ac712b48ae4124f1f24283214c1aa69d30174cb444e1",
     "rule: not a creation @ 400000000 | keccak256=0x228398e161b11148e9c04b5732a72a116f61e8682066063a104ac1065d76ba47",
@@ -145,9 +145,9 @@ expression: "serde_json::json!({\n    \"summary\":\n    {\n        \"cases\": ca
     "rule: init code over the limit @ 2000000000 | keccak256=0xf7949b8ae857d9eb689ab1a96b0795d150698f13795c880b330fe388ca949434"
   ],
   "summary": {
-    "bytes": 2443212,
+    "bytes": 2451324,
     "cases": 139,
-    "lines": 11452,
+    "lines": 11482,
     "runs": 556
   }
 }

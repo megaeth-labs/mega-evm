@@ -174,15 +174,69 @@ fn test_the_overhead_does_not_depend_on_the_payload() {
     }
 }
 
-/// Admission is the selector alone here too: a payload too short to hold the arguments the ABI
-/// names is still dispatched and charged, and the deployment rejects what it cannot decode with
-/// `MalformedEncoding()`.
+/// A call is recognised only once its arguments decode as `(bytes, uint256)`: a payload too short
+/// to hold them, an offset that points past the data, and a length that runs past it are not
+/// dispatched. The deployed bytecode runs and its decoder reverts with empty data, and the
+/// overhead is not charged.
 #[test]
-fn test_a_truncated_payload_is_still_dispatched() {
-    let truncated: Bytes =
-        KEYLESS_DEPLOY.iter().copied().chain([0_u8; 16]).collect::<Vec<_>>().into();
-    let dispatched = run_with(system_db(), truncated.clone(), GAS_LIMIT, no_limits());
+fn test_arguments_that_do_not_decode_are_not_dispatched() {
+    let selector = KEYLESS_DEPLOY.to_vec();
+    let word = |value: u64| U256::from(value).to_be_bytes::<32>().to_vec();
+    let well_formed = keyless_deploy(b"a transaction").to_vec();
+
+    let mut offset_past_the_data = selector.clone();
+    offset_past_the_data.extend(word(0x1000));
+    offset_past_the_data.extend(word(1_000_000));
+    let mut length_past_the_data = selector.clone();
+    length_past_the_data.extend(word(0x40));
+    length_past_the_data.extend(word(1_000_000));
+    length_past_the_data.extend(word(32));
+    let cases = [
+        ("short", [selector.clone(), vec![0_u8; 16]].concat()),
+        ("selector alone", selector.clone()),
+        ("offset past the data", offset_past_the_data),
+        ("length past the data", length_past_the_data),
+        ("cut inside the bytes", well_formed[..well_formed.len() - 40].to_vec()),
+    ];
+    for (name, input) in cases {
+        let data = Bytes::from(input);
+        for gas_limit in GAS_LIMITS {
+            let outcome = run_with(system_db(), data.clone(), gas_limit, no_limits());
+            let ExecutionResult::Revert { output, .. } = &outcome.result else {
+                panic!("{name}: the bytecode did not revert: {:?}", outcome.result);
+            };
+            assert!(output.is_empty(), "{name}: the bytecode's decoder reverts with empty data");
+            let [total, regular, ..] = beyond(&outcome, &reference(data.clone(), gas_limit));
+            assert!(
+                total < KEYLESS_DEPLOY_OVERHEAD_GAS && regular < KEYLESS_DEPLOY_OVERHEAD_GAS,
+                "{name} at {gas_limit}: paid {total} beyond a plain call, an overhead it does not \
+                 owe",
+            );
+        }
+    }
+}
+
+/// Bytes after a valid encoding do not prevent the recognition: the call is dispatched and pays
+/// the overhead, and the deployment rejects what the first argument carries.
+#[test]
+fn test_bytes_after_a_valid_encoding_are_still_dispatched() {
+    let mut data = keyless_deploy(b"a transaction").to_vec();
+    data.extend([0xab; 5]);
+    let data = Bytes::from(data);
+    let dispatched = run_with(system_db(), data.clone(), GAS_LIMIT, no_limits());
     assert_eq!(refusal(&dispatched), KeylessDeployError::MalformedEncoding);
-    let [total, ..] = beyond(&dispatched, &reference(truncated, GAS_LIMIT));
+    let [total, ..] = beyond(&dispatched, &reference(data, GAS_LIMIT));
     assert_eq!(total, KEYLESS_DEPLOY_OVERHEAD_GAS);
+}
+
+/// A call that carries value and whose arguments do not decode is not dispatched either: the
+/// bytecode runs and refuses the value itself, with the empty revert data of a non-payable
+/// method, and no overhead is charged.
+#[test]
+fn test_a_value_call_whose_arguments_do_not_decode_runs_the_bytecode() {
+    let truncated: Bytes = KEYLESS_DEPLOY.iter().copied().chain([0_u8; 16]).collect();
+    let result = run(system_db(), call_tx(KEYLESS_DEPLOY_ADDRESS, truncated, U256::from(1)));
+    assert!(!result.result.is_success());
+    assert!(revert_data(&result).is_empty());
+    assert!(result.result.gas().total_gas_spent() < KEYLESS_DEPLOY_OVERHEAD_GAS);
 }

@@ -632,8 +632,8 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
             }
         }
         let keyless = keyless::is_dispatched(&self.inner.ctx, &frame_init);
-        let answer = if keyless {
-            keyless::ready(&mut self.inner.ctx, &mut frame_init)?.map(Answer::new)
+        let answer = if let Some(call) = &keyless {
+            keyless::ready(&mut self.inner.ctx, &mut frame_init, call)?.map(Answer::new)
         } else {
             self.intercept(&frame_init)
         };
@@ -671,8 +671,8 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
             ctx.detention.on_frame_run(&mut frame.interpreter.gas, depth);
             let first = if verdict.exceeded_limit() {
                 Some(stop_action(ctx, frame, &verdict))
-            } else if keyless {
-                Some(keyless::start(ctx, frame)?)
+            } else if let Some(call) = &keyless {
+                Some(keyless::start(ctx, frame, call)?)
             } else {
                 None
             };
@@ -687,7 +687,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
             }
             return Ok(ItemOrResult::Item(self.inner.frame_stack.get()));
         };
-        debug_assert!(!keyless, "revm builds a keylessDeploy call's frame");
+        debug_assert!(keyless.is_none(), "revm builds a keylessDeploy call's frame");
         if let PrecompileHold::Clamped(withheld) = hold {
             Detention::restore_forward(result.interpreter_result_mut(), withheld);
         }
