@@ -330,6 +330,44 @@ fn test_an_authority_an_earlier_transaction_touched_is_charged_as_new_when_commi
     assert_eq!(outcome.usage.write_records, 1);
 }
 
+/// An account the database holds empty under EIP-161 — nonce zero, no balance, no code, and
+/// storage holding nothing — exists for an authorization and is new for a value transfer: an
+/// authority is new only where the state holds no account at its address, while a transaction's
+/// value counts an empty recipient as new as it counts an absent one. The authorization charges the
+/// delegation's bytes alone and counts no rise, and still writes the account, one record; the
+/// value charges the new account and counts the rise.
+#[test]
+fn test_an_account_the_database_holds_empty_is_new_to_a_value_transfer_and_not_to_an_authority() {
+    if state_is_free() {
+        return;
+    }
+    let (account, delegation) = account_and_delegation();
+    let held_empty = || {
+        funded().account_code(A, Bytes::from_static(&[STOP])).account_storage(
+            AUTHORITY_1,
+            U256::ZERO,
+            U256::ZERO,
+        )
+    };
+    let held = revm::Database::basic(&mut held_empty(), AUTHORITY_1).expect("in memory");
+    assert!(
+        held.is_some_and(|info| info.is_empty()),
+        "the database holds the authority's account, empty"
+    );
+
+    let authorized = run(held_empty(), authorizing(A, U256::ZERO, &[(Some(AUTHORITY_1), 0, 0)]));
+    assert!(authorized.result.is_success(), "{:?}", authorized.result);
+    assert_eq!(authorized.state[&AUTHORITY_1].info.nonce, 1, "the authorization applied");
+    assert_eq!(authorized.gas.state, delegation, "the delegation's bytes, and no new account");
+    assert_eq!(authorized.usage.state_growth, 0, "the authority existed");
+    assert_eq!(authorized.usage.write_records, 1, "the authority's record");
+
+    let paid = run(held_empty(), call(CALLER, AUTHORITY_1, U256::from(1), BELOW_CAP));
+    assert!(paid.result.is_success(), "{:?}", paid.result);
+    assert_eq!(paid.gas.state, account, "the new account");
+    assert_eq!(paid.usage.state_growth, 1, "the empty recipient is a new account");
+}
+
 /// The same two transactions on one journal that is not finalized in between differ from the
 /// committed path, in simulation only: revm's flag of the call's touch outlives the call's
 /// transaction, so the application finds the authority touched, not new, and charges the
