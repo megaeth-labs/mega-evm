@@ -420,7 +420,9 @@ mod tests {
         let mut account = touched(AccountInfo::default());
         account.mark_created();
         let mut db = MemoryDatabase::default();
-        db.commit([(created, account)].into_iter().collect());
+        let mut changes = EvmState::default();
+        changes.insert(created, account);
+        db.commit(changes);
         assert!(db.basic(created).unwrap().is_some(), "a created account is not cleared");
     }
 }
