@@ -80,7 +80,7 @@ The changes, in the order this page records them:
   - A block in which Satin activates, or in which an Optimism fork at or after Jovian in the Optimism fork order activates, MUST contain only deposit transactions; a non-deposit transaction in it makes the block invalid.
     A fork activates in a block when it is active at the block's timestamp and not at the parent block's, as the chain configuration schedules it; a fork the configuration does not schedule never activates.
     The rule covers Jovian, Karst and every later Optimism fork the chain configuration schedules.
-    A Mega System Transaction is a legacy transaction, so it is refused in such a block too, and the Satin activation block owes none: nothing writes the [Oracle](#16-oracle-storage-reads-and-hints) in it, because the only transactions the block admits are deposits, and a deposit from the system address is a failed deposit that runs no call (see [The Live System Address](#17-the-live-system-address)).
+    A Mega System Transaction is a legacy transaction, so it is refused in such a block too, and the Satin activation block owes none. A deposit from the system address is a failed deposit that runs no call (see [The Live System Address](#17-the-live-system-address)), but a deposit can still write the [Oracle](#16-oracle-storage-reads-and-hints) in that block through code running at the live system address, a contract or an EIP-7702 delegator, because the Oracle tests only its immediate caller.
     Nor does any Oracle read in that block ask the oracle service, since a deposit asks it nothing: every read pushes the slot's value on the chain.
   - Each non-deposit transaction's data-availability footprint — its compressed size times the footprint gas scalar held by the L1 block contract — MUST accumulate against the block's gas limit, and the block MUST report the sum as its blob gas used.
     A transaction whose footprint does not fit in what the block has left MUST NOT be included.
@@ -1522,8 +1522,11 @@ A node, a stateless validator and a replay tool must agree on everything below, 
   Neither is an input a caller can omit or set: the caller supplies the parent block's timestamp, and nothing else.
   A block admits only deposits when a MegaETH fork, Satin itself, or an Optimism fork at or after Jovian in the Optimism fork order, is active at the block's timestamp and not at the parent's (see [Base Layer](#1-base-layer-optimism-karst-ethereum-osaka)); a user transaction in such a block is refused before it runs.
   A block builder and a validator MUST give block execution the MegaETH schedule, since a node that knows only the Optimism schedule cannot tell that Satin activates, and a stateless validator is given the parent block's timestamp beside the witness.
+  Both are decided once, when the block starts.
   A block with no parent, such as a genesis block, is executed with an explicit absence of the parent timestamp: block execution applies neither rule to it.
-  A block that has a parent and is executed without its timestamp therefore runs as one that admits non-deposit transactions, so an implementation MUST supply it for every block but the first.
+  It accepts the absence only where no parent could change that, which is where every fork the schedule activates is active from genesis, or none is active at the block yet.
+  Where a fork the schedule activates after genesis is active at the block, whether it activates in the block depends on the parent's timestamp, and block execution refuses the block with an error that names the missing timestamp instead of running it as one that admits non-deposit transactions.
+  An implementation MUST therefore supply the parent timestamp for every block that has a parent, the block right after genesis included, since that block can be the activation block.
   Satin's activation block is told apart from the other deposit-only blocks, since an Optimism fork's activation block admits only deposits too: only Satin's makes the pre-block step check the predeploys (see [System Calls and Pre-Block Calls](#18-system-calls-and-pre-block-calls)).
   A block that is not Satin's activation block checks no predeploy, and runs on a state that may lack them.
 - **The L1 block information.**

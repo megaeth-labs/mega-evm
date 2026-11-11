@@ -14,8 +14,11 @@ use mega_evm::{
 };
 use revm::{
     bytecode::opcode::{CALL, CALLCODE, DELEGATECALL, STATICCALL},
-    context::result::ResultAndState,
+    context::{result::ResultAndState, CfgEnv},
+    context_interface::ContextTr,
+    interpreter::{interpreter::EthInterpreter, CallInputs, CallOutcome},
     primitives::TxKind,
+    Inspector,
 };
 
 use crate::common::{
@@ -174,6 +177,98 @@ fn test_a_value_bearing_call_forwards_its_hint() {
     assert_eq!(usage.data_size, nested_hint(data.len() as u64), "and its bytes stay counted");
 }
 
+/// Code that calls the Oracle with `data`, one unit of value and no requested gas, and returns
+/// the call's status followed by its return data. The contract holds no balance, so the call
+/// cannot be funded.
+fn unfunded_value_hint_call(data: &[u8]) -> Bytes {
+    use revm::bytecode::opcode::{ADD, MSTORE, RETURN, RETURNDATACOPY, RETURNDATASIZE};
+
+    BytecodeBuilder::default()
+        .mstore(0x0, data)
+        .push_number(0_u64) // retSize
+        .push_number(0_u64) // retOffset
+        .push_number(data.len() as u64) // argsSize
+        .push_number(0_u64) // argsOffset
+        .push_number(1_u64) // value
+        .push_address(ORACLE_CONTRACT_ADDRESS)
+        .push_number(0_u64) // gas: none requested, the stipend is all the call holds
+        .append(CALL)
+        // memory[0..32] = the call's status
+        .push_number(0_u64)
+        .append(MSTORE)
+        // memory[32..] = the return data
+        .append(RETURNDATASIZE)
+        .push_number(0_u64)
+        .push_number(32_u64)
+        .append(RETURNDATACOPY)
+        .append(RETURNDATASIZE)
+        .push_number(32_u64)
+        .append(ADD)
+        .push_number(0_u64)
+        .append(RETURN)
+        .build()
+}
+
+/// The database of the unfunded value-hint cases: a contract with the code of
+/// [`unfunded_value_hint_call`] and no balance.
+fn unfunded_contract_db(data: &[u8]) -> MemoryDatabase {
+    system_db().account_code(CONTRACT, unfunded_value_hint_call(data))
+}
+
+/// A value-bearing `sendHint` whose caller cannot fund the value is intercepted before revm
+/// starts the call and checks the funds: the hint is forwarded and its input counted, then the
+/// call fails for the funds with empty return data and moves no value, and the Oracle's bytecode
+/// never runs.
+#[test]
+fn test_an_unfunded_value_hint_is_forwarded_and_then_fails_for_funds() {
+    let data = send_hint(b"unfunded");
+    let (result, hints, usage) =
+        run_with_oracle(unfunded_contract_db(&data), call_tx(CONTRACT, [], U256::ZERO));
+
+    assert!(result.result.is_success(), "the contract survives the failed call");
+    let returned = result.result.output().cloned().unwrap_or_default();
+    let (status, return_data) = crate::common::split_outcome(&returned);
+    assert!(!status, "the call fails for funds");
+    assert!(return_data.is_empty(), "with empty return data");
+    assert_eq!(
+        hints,
+        vec![RecordedHint { from: CONTRACT, topic: TOPIC, data: Bytes::from_static(b"unfunded") }],
+        "the hint reached the service",
+    );
+    assert_eq!(usage.data_size, nested_hint(data.len() as u64), "and its input is counted");
+    assert_eq!(usage.data_size, mega_evm::TX_BODY_SIZE + data.len() as u64);
+    let balance =
+        |address| result.state.get(&address).map_or(U256::ZERO, |account| account.info.balance);
+    assert_eq!(balance(CONTRACT), U256::ZERO, "no value moved from the caller");
+    assert_eq!(balance(ORACLE_CONTRACT_ADDRESS), U256::ZERO, "and none reached the Oracle");
+}
+
+/// The same unfunded call under a data-size limit its input would cross is answered with the
+/// stop, not with the funds failure: nothing is forwarded and nothing is counted.
+#[test]
+fn test_an_unfunded_value_hint_over_the_limit_is_answered_with_the_stop() {
+    let data = send_hint(b"unfunded");
+    let limit = nested_hint(data.len() as u64) - 1;
+    let (outcome, hints) = run_with_oracle_under(
+        unfunded_contract_db(&data),
+        call_tx(CONTRACT, [], U256::ZERO),
+        EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(limit),
+    );
+
+    assert!(outcome.result.is_success(), "the contract catches the stop: {:?}", outcome.result);
+    let returned = outcome.result.output().cloned().unwrap_or_default();
+    let (status, return_data) = crate::common::split_outcome(&returned);
+    assert!(!status, "the call was stopped");
+    assert_eq!(
+        return_data,
+        MegaLimitExceeded { kind: LimitKind::DataSize.as_u8(), limit }.abi_encode().as_slice(),
+        "with the stop, not the funds failure's empty data",
+    );
+    assert!(hints.is_empty(), "nothing is forwarded");
+    assert_eq!(outcome.usage.data_size, nested_hint(0), "and nothing is counted");
+    assert_eq!(outcome.limit_exceeded, None, "a stop below is no stop of the transaction");
+}
+
 /// The bytecode refuses the value of a value-bearing call that holds gas, as before: the hint is
 /// forwarded and the call reports failure.
 #[test]
@@ -190,11 +285,59 @@ fn test_a_value_bearing_call_with_gas_forwards_its_hint_and_the_bytecode_refuses
     assert_eq!(usage.data_size, nested_hint(data.len() as u64));
 }
 
+/// Records the gas the first frame of the Oracle call holds: the gas limit of the call as the
+/// interceptor sees it, which an inspector's `call` hook is handed before the engine decides the
+/// start.
+#[derive(Debug, Default)]
+struct OracleCallGas {
+    gas_limits: Vec<u64>,
+}
+
+impl<CTX: ContextTr> Inspector<CTX, EthInterpreter> for OracleCallGas {
+    fn call(&mut self, _context: &mut CTX, inputs: &mut CallInputs) -> Option<CallOutcome> {
+        if inputs.target_address == ORACLE_CONTRACT_ADDRESS {
+            self.gas_limits.push(inputs.gas_limit);
+        }
+        None
+    }
+}
+
+/// Runs `tx` against a recording oracle environment with the calldata floor off, and returns the
+/// outcome, the hints and the gas the Oracle call's frame held.
+///
+/// The floor is off so that the gas limit alone decides how much gas the first frame holds: with
+/// it on, a transaction of this calldata must carry a limit that leaves the first frame thousands
+/// of gas unless history gas is charged beside it, which neither a deposit nor a zero byte price
+/// does, and the boundary below that would be unreachable.
+fn run_observing_first_frame(
+    db: MemoryDatabase,
+    tx: MegaTransaction,
+) -> (MegaTransactionOutcome, Vec<RecordedHint>, u64) {
+    let envs = TestExternalEnvs::<Infallible>::new();
+    let ctx = MegaContext::new_with_external_envs(
+        db,
+        MegaSpecId::SATIN,
+        ExternalEnvs::from(envs.clone()),
+    )
+    .with_cfg(CfgEnv::new_with_spec(MegaSpecId::SATIN).with_disable_eip7623(true))
+    .with_block(block())
+    .with_chain(zero_fee_l1_block_info())
+    .with_tx_runtime_limits(EvmTxRuntimeLimits::no_limits());
+    let mut evm = MegaEvm::new(ctx).with_inspector(OracleCallGas::default());
+    let outcome = evm.execute_transaction(tx).expect("the transaction is valid");
+    let [first_frame_gas] = evm.inspector().gas_limits[..] else {
+        panic!("the Oracle was called once: {:?}", evm.inspector().gas_limits);
+    };
+    (outcome, envs.recorded_hints(), first_frame_gas)
+}
+
 /// A transaction's own value call has no stipend and is judged on its first frame's whole gas:
-/// one gas admits the hint, and so do the stipend's 2,300 and 2,301. The smallest gas limit that
-/// does is found by search, since the first frame's gas is what the limit leaves after the
-/// intrinsic and start charges, which depend on the byte prices; a legacy transaction and a
-/// deposit alike.
+/// none drops the hint, and one gas, the stipend's 2,300 and 2,301 admit it. A legacy transaction
+/// and a deposit alike.
+///
+/// The first frame's gas is what the transaction's limit leaves after the intrinsic charges, which
+/// depend on the byte prices, so the limit is derived from a probe run that observes the gas the
+/// frame held, and each run is held to the gas it was meant to hold.
 #[test]
 fn test_a_transactions_own_value_hint_is_admitted_on_one_gas_and_more() {
     let data = send_hint(b"own");
@@ -212,35 +355,30 @@ fn test_a_transactions_own_value_hint_is_admitted_on_one_gas_and_more() {
         tx
     };
     type Build<'a> = &'a dyn Fn(u64) -> MegaTransaction;
-    let forwarded = |build: Build<'_>, gas: u64| {
-        // A gas limit the transaction is refused at runs nothing.
-        try_run_with_oracle_under(funded(), build(gas), EvmTxRuntimeLimits::no_limits())
-            .is_some_and(|(_, hints)| !hints.is_empty())
-    };
     for (name, build) in [("legacy", &legacy as Build<'_>), ("deposit", &deposit as Build<'_>)] {
-        // The smallest gas limit whose first frame holds any gas at all.
-        let (mut low, mut high) = (21_000_u64, 30_000_000_u64);
-        assert!(forwarded(build, high), "{name}: a large limit forwards");
-        while low < high {
-            let mid = low + (high - low) / 2;
-            if forwarded(build, mid) {
-                high = mid;
-            } else {
-                low = mid + 1;
-            }
-        }
-        let one_gas = high;
-        assert!(!forwarded(build, one_gas - 1), "{name}: no gas in the first frame, no hint");
-        for frame_gas in [1_u64, 2_300, 2_301] {
-            let (outcome, hints) = run_with_oracle_under(
-                funded(),
-                build(one_gas + frame_gas - 1),
-                EvmTxRuntimeLimits::no_limits(),
-            );
+        const PROBE: u64 = 1_000_000;
+        let (_, _, probed) = run_observing_first_frame(funded(), build(PROBE));
+        let before_the_frame = PROBE - probed;
+
+        let mut dropped_size = None;
+        for frame_gas in [0_u64, 1, 2_300, 2_301] {
             let case = format!("{name}: {frame_gas} gas");
+            let (outcome, hints, held) =
+                run_observing_first_frame(funded(), build(before_the_frame + frame_gas));
+            assert_eq!(held, frame_gas, "{case}: the first frame holds the gas it was built for");
+            if frame_gas == 0 {
+                assert!(hints.is_empty(), "{case}: a call without gas drops the hint");
+                dropped_size = Some(outcome.usage.data_size);
+                continue;
+            }
             assert_eq!(hints.len(), 1, "{case}: the hint reached the service");
             assert_eq!(hints[0].from, CALLER, "{case}");
-            assert!(outcome.usage.data_size >= data.len() as u64, "{case}: and it is counted");
+            assert_eq!(
+                outcome.usage.data_size - dropped_size.expect("the zero-gas run came first"),
+                data.len() as u64,
+                "{case}: and exactly its input is counted beside what the transaction keeps \
+                 without the hint",
+            );
         }
     }
 }

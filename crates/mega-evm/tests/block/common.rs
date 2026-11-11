@@ -138,6 +138,19 @@ pub(crate) fn activation_ctx() -> MegaBlockExecutionCtx {
     )
 }
 
+/// The context of a block that follows the activation block under [`activation_spec`]: its parent
+/// is at [`BLOCK_TIMESTAMP`], where Satin is already active, so the block is an ordinary one that
+/// admits user transactions and checks no predeploy.
+pub(crate) fn after_activation_ctx() -> MegaBlockExecutionCtx {
+    MegaBlockExecutionCtx::new(
+        B256::ZERO,
+        Some(B256::ZERO),
+        Bytes::new(),
+        BlockLimits::no_limits(),
+        Some(BLOCK_TIMESTAMP),
+    )
+}
+
 /// The loosest limits a block could be held to while a read of volatile data still detains:
 /// every limit unlimited, and gas detention's caps one below the most compute a transaction can
 /// spend, which no transaction of a block this size reaches. For a test that holds a block to

@@ -13,8 +13,19 @@ name: Randomized tests, long mode
 # Every pull request runs all of it, and so does a dispatch. There is no schedule and no dispatch
 # alone: GitHub fires a scheduled workflow only from the default branch, and accepts a dispatch
 # only for a workflow the default branch has, which has no such workflow, so a run triggered either
-# way ran nowhere on the Satin integration branch. There is no path filter either, so a change to
-# the engine, a generator or a property all run it.
+# way ran nowhere on the Satin integration branch. There is no path filter on the trigger, which
+# would leave a required check pending; a pull request that changes documentation alone is skipped
+# by the `changes` job instead (every changed file under docs/ or a Markdown file outside crates/
+# and bin/, scripts/pull_request_needs_ci.sh), and any other change runs everything. The `long
+# mode` job always runs and reports: it passes when both jobs below passed, or when the run was
+# skipped.
+#
+# The debug and release runs are separate jobs of a matrix and run in parallel, beside the price
+# comparison. Timeouts are projections from local runs scaled by 3.7, the ratio of a GitHub runner
+# to the local machine seen on the byte-price grid: the debug run takes 400 s locally, about 25
+# minutes there, plus a cold build; the release run 120 s, about 8 minutes; the price comparison is
+# under a minute locally after a release build, a few minutes there. The 60-minute limit on the
+# properties is about twice the debug projection; none is measured on a runner at this seed.
 #
 # The two inputs of a dispatch, and how they meet the long mode:
 #
@@ -50,8 +61,44 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    name: changes that need the run
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      run: ${{ steps.diff.outputs.run }}
+    steps:
+      - uses: actions/checkout@v4
+        if: github.event_name == 'pull_request'
+        with:
+          # The merge commit and its parents; the first parent is the base it merges into.
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Skip a pull request that changes documentation alone
+        id: diff
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" != pull_request ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! git rev-parse --verify -q 'HEAD^2' > /dev/null; then
+            echo "::warning::HEAD is not the pull request's merge commit; running"
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # The allowlist is in the script: only docs/ and Markdown outside crates/ and bin/ skip.
+          run=$(scripts/pull_request_needs_ci.sh HEAD^1 HEAD)
+          echo "runs: $run"
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+
   seed:
     name: the run's seed
+    needs: changes
+    if: needs.changes.outputs.run == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
@@ -71,9 +118,7 @@ jobs:
     name: long mode (${{ matrix.profile }})
     needs: seed
     runs-on: ubuntu-24.04
-    # Measured locally at one seed on a warm machine: the release run takes 2 minutes and the debug
-    # run 7 (400 s), each after a build of a minute or less. A runner three times slower with a cold
-    # build (about 15 minutes) still finishes within 40 minutes.
+    # See the header: about 25 minutes projected for debug, 8 for release.
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -107,7 +152,7 @@ jobs:
     name: state and history gas along the byte prices
     needs: seed
     runs-on: ubuntu-24.04
-    # Measured locally: the three runs take under a minute after the build, which is the cost.
+    # See the header: the three runs take under a minute locally after the build.
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
@@ -136,3 +181,32 @@ jobs:
 
       - name: Compare the records
         run: python3 scripts/fuzz_price_monotonic.py target/price-low.txt target/price-high.txt
+
+  gate:
+    name: long mode
+    needs: [changes, long, price-monotonicity]
+    # Always, a cancelled run included: a required check that is skipped counts as passed.
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Report the outcome
+        env:
+          CHANGES: ${{ needs.changes.result }}
+          RUN: ${{ needs.changes.outputs.run }}
+          LONG: ${{ needs.long.result }}
+          PRICE: ${{ needs.price-monotonicity.result }}
+        run: |
+          if [ "$CHANGES" != success ]; then
+            echo "::error::could not tell whether the run was needed: the changes job ended $CHANGES"
+            exit 1
+          fi
+          if [ "$RUN" != true ]; then
+            echo "only documentation changed; the run was skipped"
+            exit 0
+          fi
+          if [ "$LONG" != success ] || [ "$PRICE" != success ]; then
+            echo "::error::the run ended: long mode $LONG, price comparison $PRICE"
+            exit 1
+          fi
+          echo "passed"

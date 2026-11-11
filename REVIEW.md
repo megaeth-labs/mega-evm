@@ -145,6 +145,7 @@ These checks guard every change to the Satin engine.
 ### Byte-price grid
 
 - `.github/workflows/price-grid.yml` runs the `mega-evm` suite at byte prices other than the constants, through `scripts/price_grid.sh`: a cost per state byte and a cost per history byte per point, each run with `--no-fail-fast`.
+  The full grid runs as four parallel shards (`--full --shard I/4`) of one point list kept in the script, and a pull request that changes documentation alone skips it under the same allowlist; the `byte-price grid` job always runs and reports.
 - On a pull request and on dispatch it runs the whole grid: CPSB 0, 1, 312.5, 700, 1530, 2000, 5000 and 10000 by CPHB 0, 1, 20, 50, 88, 100, 200, 300 and 1000, and 0.001 on both.
   It has no schedule, because a scheduled run would fire only from the default branch.
 - It is not a required check.
@@ -157,6 +158,8 @@ These checks guard every change to the Satin engine.
 - The bounded fuzz run is part of the `test` and `test-release` checks.
 - `.github/workflows/fuzz.yml` runs the long mode on every pull request and on dispatch: every property at fifty times its bounded count, in debug and in release, and the byte-price record at two prices compared by `scripts/fuzz_price_monotonic.py`, all from one seed the run draws and prints in the step summary.
   It has no schedule and no path filter, because a scheduled or dispatch-only workflow would never run on this line (GitHub needs the workflow on the default branch for either).
+  A pull request that changes documentation alone is skipped, by an allowlist: every changed file must be under `docs/` or be a Markdown file outside `crates/` and `bin/` (`scripts/pull_request_needs_ci.sh`); any other change runs it.
+  The `long mode` job always runs and reports, so a skipped run does not leave a required check pending.
 - It is not a required check.
   A failure prints the seed and the case count that reproduce it and the minimal case; it is a defect in the engine or a property to correct, never a seed to avoid.
 - Locally, `MEGA_FUZZ_LONG=1 MEGA_FUZZ_SEED=<seed> cargo test [--release] -p mega-evm --test fuzz -- --nocapture`.
@@ -194,11 +197,11 @@ These checks guard every change to the Satin engine.
 ### Scheduled workflows
 
 - GitHub fires a `schedule` trigger only from the default branch's copy of a workflow, so the schedules in `satin`'s copies (nightly mutation, doc-audit, the weekly execution-spec run) stay inert until `satin` is the default branch.
-- Run them on `satin` by hand: `gh workflow run <workflow>.yml --ref satin` runs `satin`'s copy of the workflow on `satin`'s head, so none of them needs a `ref` input.
+- `price-grid.yml` and `fuzz.yml` are not in that list: they have no schedule, and a dispatch needs the workflow on the default branch, so neither can be dispatched on `satin` and both run on every pull request instead.
+- Run the others on `satin` by hand: `gh workflow run <workflow>.yml --ref satin` runs `satin`'s copy of the workflow on `satin`'s head, so none of them needs a `ref` input.
   - `mutation.yml`: the whole-crate cargo-mutants run and suppression hygiene.
   - `exec-spec.yml`: the execution-spec fixtures at the pinned fork tag.
   - `doc-audit.yml`: the documentation audit of `satin`'s docs.
-  - `price-grid.yml`: the whole byte-price grid.
 
 ## Dev tools and test infrastructure
 

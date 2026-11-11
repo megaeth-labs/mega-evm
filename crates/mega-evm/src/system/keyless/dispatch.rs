@@ -63,8 +63,12 @@ pub(crate) struct Started {
 /// declare, and arguments that do not decode run the deployed bytecode and are charged nothing: a
 /// `keylessDeploy` call a contract makes reaches the method body and its `NotIntercepted()`, an
 /// undeclared selector finds no function and no fallback, so it reverts with empty data, and
-/// arguments that do not decode revert with empty data in the method's own decoder. Bytes after a
-/// valid encoding do not prevent the decoding.
+/// arguments that do not decode revert with empty data in the method's own decoder.
+///
+/// The arguments are accepted exactly when the contract's own calldata decoder for `(bytes,
+/// uint256)` accepts them: a head of at least 64 bytes, an offset and a length below 2^64, and the
+/// offset plus 32 plus the length within the input; no padding and no canonical offset is required,
+/// and trailing bytes are allowed.
 ///
 /// The depth is tested first: every frame below the transaction's own leaves after one
 /// comparison. The decoded call is handed on, so the rules do not decode the arguments again.

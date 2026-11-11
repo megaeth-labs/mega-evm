@@ -149,7 +149,7 @@ pub(super) fn execute(
 /// its parent came ([`admits_only_deposits`]).
 pub(super) fn needs_parent_timestamp(chain_id: u64, timestamp: u64) -> Result<bool> {
     let hardforks = satin_schedule(chain_id, timestamp)?;
-    Ok(hardforks.admits_only_deposits(0, timestamp))
+    Ok(hardforks.activation_depends_on_parent(timestamp))
 }
 
 /// Whether block `number`, at `timestamp`, admits only deposits under `hardforks`, as a node works
@@ -169,7 +169,7 @@ fn admits_only_deposits(
 ) -> Result<bool> {
     match parent_timestamp {
         Some(parent_timestamp) => Ok(hardforks.admits_only_deposits(parent_timestamp, timestamp)),
-        None if !hardforks.admits_only_deposits(0, timestamp) => Ok(false),
+        None if !hardforks.activation_depends_on_parent(timestamp) => Ok(false),
         None => Err(EvmeError::Other(format!(
             "block {number}: a fork its schedule activates is active at its timestamp, and \
              whether the fork activates in this block depends on its parent's timestamp, which \
