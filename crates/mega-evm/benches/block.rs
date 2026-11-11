@@ -182,7 +182,7 @@ fn block_ctx() -> MegaBlockExecutionCtx {
         Some(PARENT_BEACON_ROOT),
         Bytes::new(),
         BlockLimits::default(),
-        None,
+        Some(BLOCK_TIMESTAMP - 1),
     )
 }
 

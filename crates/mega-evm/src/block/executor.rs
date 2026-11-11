@@ -17,8 +17,10 @@
 //! - **An activation block admits only deposits.** The executor works out whether a fork activates
 //!   in the block from the chain's schedule ([`MegaHardforks::admits_only_deposits`]), the block's
 //!   own timestamp and the parent's, which the caller supplies with
-//!   [`MegaBlockExecutionCtx::parent_timestamp`]. A user transaction in such a block is refused
-//!   before it executes. This mirrors alloy-op-evm's rule of the same name.
+//!   [`MegaBlockExecutionCtx::parent_timestamp`]. Both rules are decided once, when the executor is
+//!   built. A user transaction in such a block is refused before it executes. This mirrors
+//!   alloy-op-evm's rule of the same name. A block with a parent whose timestamp the caller leaves
+//!   out is refused where the omission could change the answer.
 //! - **The data-availability footprint is a block limit.** Each non-deposit transaction's footprint
 //!   is its compressed size times the footprint gas scalar the L1 block contract holds, accumulated
 //!   against the block's gas limit and reported as the block's blob gas used. With no scalar in
@@ -156,8 +158,11 @@ pub struct MegaBlockExecutionCtx {
     /// does, which makes the pre-block step check the system contracts and the EIP-7997 factory.
     /// The executor works both out itself.
     ///
-    /// `None` is a block with no parent to compare against, such as a genesis block: neither
-    /// rule applies to it. A caller that executes a block with a parent must supply it.
+    /// `None` is a block with no parent to compare against, such as a genesis block, and neither
+    /// rule applies to it. It is accepted only where no parent could change that: when every fork
+    /// the schedule activates is active from genesis. Where one could, executing the block fails
+    /// with [`MegaBlockExecutionError::MissingParentTimestamp`], since the block would otherwise
+    /// run as an ordinary one. A caller that executes a block with a parent must supply it.
     pub parent_timestamp: Option<u64>,
     /// The builder's packing policy: the limits only a builder applies, and a cap on the block's
     /// data-size budget below the protocol's ([`BlockLimits`]).
@@ -171,8 +176,9 @@ impl MegaBlockExecutionCtx {
     /// A context for a block whose parent block is at `parent_timestamp`.
     ///
     /// `None` is a block with no parent to compare against, such as a genesis block: neither
-    /// activation-block rule applies to it. A block that has a parent must pass its timestamp,
-    /// since a block executed without it silently skips both rules.
+    /// activation-block rule applies to it. A block that has a parent must pass its timestamp:
+    /// where the schedule activates a fork after genesis, executing the block without it fails
+    /// with [`MegaBlockExecutionError::MissingParentTimestamp`].
     pub const fn new(
         parent_hash: B256,
         parent_beacon_block_root: Option<B256>,
@@ -189,6 +195,17 @@ impl MegaBlockExecutionCtx {
 pub enum MegaBlockExecutionError {
     /// A block that activates a fork carries a transaction that is not a deposit.
     UnexpectedNonDepositTxInActivationBlock,
+    /// The context names no parent timestamp for a block whose activation rules depend on it: a
+    /// fork the schedule activates after genesis is active at the block, and whether it activates
+    /// in this block, which makes the block deposit-only and, for Satin, makes the pre-block step
+    /// check the predeploys, is decided by the parent's timestamp.
+    ///
+    /// The caller's omission, not a verdict on the block: an internal error. Executing the block
+    /// without the timestamp would run it as an ordinary block.
+    MissingParentTimestamp {
+        /// The block's own timestamp.
+        block_timestamp: u64,
+    },
     /// A transaction's data-availability footprint does not fit in what the block has left.
     TransactionDaFootprintAboveGasLimit {
         /// The footprint of the transaction that does not fit.
@@ -234,6 +251,12 @@ impl fmt::Display for MegaBlockExecutionError {
             Self::UnexpectedNonDepositTxInActivationBlock => {
                 f.write_str("unexpected non-deposit transaction in fork activation block")
             }
+            Self::MissingParentTimestamp { block_timestamp } => write!(
+                f,
+                "the parent block's timestamp is missing: a fork the schedule activates after \
+                 genesis is active at the block's timestamp {block_timestamp}, and whether it \
+                 activates in this block depends on the parent's timestamp"
+            ),
             Self::TransactionDaFootprintAboveGasLimit {
                 transaction_da_footprint,
                 available_block_da_footprint,
@@ -262,12 +285,13 @@ impl core::error::Error for MegaBlockExecutionError {}
 
 impl From<MegaBlockExecutionError> for BlockExecutionError {
     /// A block refused for what the node itself does is an internal error: an outcome the builder
-    /// let go stale says nothing about the block, and a node must not mark a block invalid because
-    /// of its own choices. Every other
-    /// refusal is a verdict on the block, a validation error.
+    /// let go stale and a parent timestamp the caller left out say nothing about the block, and a
+    /// node must not mark a block invalid because of its own choices. Every other refusal is a
+    /// verdict on the block, a validation error.
     fn from(error: MegaBlockExecutionError) -> Self {
         match error {
-            MegaBlockExecutionError::StaleOutcome { .. } => Self::other(error),
+            MegaBlockExecutionError::StaleOutcome { .. } |
+            MegaBlockExecutionError::MissingParentTimestamp { .. } => Self::other(error),
             MegaBlockExecutionError::UnexpectedNonDepositTxInActivationBlock |
             MegaBlockExecutionError::TransactionDaFootprintAboveGasLimit { .. } |
             MegaBlockExecutionError::UnexpectedSystemContractCode { .. } |
@@ -296,6 +320,19 @@ pub struct MegaBlockExecutor<E, R: OpReceiptBuilder, Spec> {
     limiter: BlockLimiter,
     /// The limits the protocol holds this block to: the spec's.
     protocol_limits: ProtocolLimits,
+    /// Which activation rules apply to this block, decided once when the block starts, or why
+    /// they cannot be decided.
+    activation: Result<ActivationRules, MegaBlockExecutionError>,
+}
+
+/// The two rules a fork's activation puts on a block, decided from the schedule, the block's
+/// timestamp and its parent's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ActivationRules {
+    /// A fork activates in the block, so it admits only deposits.
+    admits_only_deposits: bool,
+    /// Satin activates in the block, so the pre-block step checks the predeploys.
+    satin_activation_block: bool,
 }
 
 impl<E, R: OpReceiptBuilder, Spec> MegaBlockExecutor<E, R, Spec> {
@@ -351,10 +388,47 @@ where
         receipt_builder: R,
     ) -> Self {
         let block_gas_limit = evm.ctx().block().gas_limit();
+        let block_timestamp = evm.ctx().block().timestamp().saturating_to();
         let protocol_limits = ProtocolLimits::for_spec(evm.ctx().spec());
         evm.set_tx_runtime_limits(protocol_limits.tx_runtime_limits);
         let limiter = BlockLimiter::new(ctx.block_limits.within(&protocol_limits), block_gas_limit);
-        Self { spec, receipt_builder, ctx, evm, receipts: Vec::new(), limiter, protocol_limits }
+        let activation = Self::activation_rules(&spec, ctx.parent_timestamp, block_timestamp);
+        Self {
+            spec,
+            receipt_builder,
+            ctx,
+            evm,
+            receipts: Vec::new(),
+            limiter,
+            protocol_limits,
+            activation,
+        }
+    }
+
+    /// The activation rules of the block at `block_timestamp` whose parent is at
+    /// `parent_timestamp`, decided once for the block.
+    ///
+    /// Without the parent's timestamp the rules are known only where no parent could change
+    /// them: no fork the schedule activates after genesis is active at the block
+    /// ([`MegaHardforks::activation_depends_on_parent`]), so neither rule applies. That is a block
+    /// with no parent, such as a genesis block, or a chain whose forks are all active from the
+    /// start. Any other block is refused with [`MegaBlockExecutionError::MissingParentTimestamp`],
+    /// since running it as an ordinary block would silently skip both rules.
+    fn activation_rules(
+        spec: &Spec,
+        parent_timestamp: Option<u64>,
+        block_timestamp: u64,
+    ) -> Result<ActivationRules, MegaBlockExecutionError> {
+        match parent_timestamp {
+            Some(parent) => Ok(ActivationRules {
+                admits_only_deposits: spec.admits_only_deposits(parent, block_timestamp),
+                satin_activation_block: spec.is_satin_activation_block(parent, block_timestamp),
+            }),
+            None if !spec.activation_depends_on_parent(block_timestamp) => {
+                Ok(ActivationRules { admits_only_deposits: false, satin_activation_block: false })
+            }
+            None => Err(MegaBlockExecutionError::MissingParentTimestamp { block_timestamp }),
+        }
     }
 
     /// The limits the protocol holds this block to: the spec's
@@ -366,27 +440,19 @@ where
     /// Whether this block admits only deposit transactions because a fork activates in it: a
     /// fork of the schedule is active at the block's timestamp and not at its parent's.
     ///
-    /// `false` when the context carries no parent timestamp.
-    pub fn admits_only_deposits(&self) -> bool {
-        self.ctx
-            .parent_timestamp
-            .is_some_and(|parent| self.spec.admits_only_deposits(parent, self.block_timestamp()))
+    /// `false` when the context carries no parent timestamp and no parent could change the answer,
+    /// and [`MegaBlockExecutionError::MissingParentTimestamp`] when one could.
+    pub fn admits_only_deposits(&self) -> Result<bool, MegaBlockExecutionError> {
+        self.activation.clone().map(|rules| rules.admits_only_deposits)
     }
 
     /// Whether Satin activates in this block, which makes the pre-block step check the system
     /// contracts and the EIP-7997 factory.
     ///
     /// The two answers differ: an Optimism fork at or after Jovian also makes a block
-    /// deposit-only. `false` when the context carries no parent timestamp.
-    pub fn is_satin_activation_block(&self) -> bool {
-        self.ctx.parent_timestamp.is_some_and(|parent| {
-            self.spec.is_satin_activation_block(parent, self.block_timestamp())
-        })
-    }
-
-    /// The block's own timestamp, from its environment.
-    fn block_timestamp(&self) -> u64 {
-        self.evm.ctx().block().timestamp().saturating_to()
+    /// deposit-only. Decided as [`admits_only_deposits`](Self::admits_only_deposits) is.
+    pub fn is_satin_activation_block(&self) -> Result<bool, MegaBlockExecutionError> {
+        self.activation.clone().map(|rules| rules.satin_activation_block)
     }
 
     /// Holds this block to `limits` in place of the spec's: a counterfactual of a tool's or a
@@ -638,6 +704,9 @@ where
     /// it is validated, after these steps are committed, and nothing inside the block can
     /// change it again.
     fn apply_pre_execution_changes(&mut self) -> Result<(), BlockExecutionError> {
+        // A block whose activation rules cannot be decided is refused before anything runs.
+        self.admits_only_deposits()?;
+
         // The block starts with empty block-hash and bucket records, so what they hold at the end
         // is what this block read.
         self.evm.clear_accessed_block_hashes();
@@ -663,7 +732,7 @@ where
 
         // The EIP-2935 / EIP-4788 calls above do not depend on these predeploys: they target
         // their own contracts, not the MegaETH system addresses or the factory.
-        if self.is_satin_activation_block() {
+        if self.is_satin_activation_block()? {
             for spec in system_contract_specs() {
                 let state =
                     check_system_contract(self.evm.db_mut(), &spec).map_err(
@@ -907,7 +976,7 @@ where
 
         // A block that activates a fork carries the chain's own transactions only, so a user
         // transaction in it is refused before anything runs.
-        if self.admits_only_deposits() && !is_deposit {
+        if self.admits_only_deposits()? && !is_deposit {
             return Err(MegaBlockExecutionError::UnexpectedNonDepositTxInActivationBlock.into());
         }
 

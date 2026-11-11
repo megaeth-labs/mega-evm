@@ -1522,8 +1522,11 @@ A node, a stateless validator and a replay tool must agree on everything below, 
   Neither is an input a caller can omit or set: the caller supplies the parent block's timestamp, and nothing else.
   A block admits only deposits when a MegaETH fork, Satin itself, or an Optimism fork at or after Jovian in the Optimism fork order, is active at the block's timestamp and not at the parent's (see [Base Layer](#1-base-layer-optimism-karst-ethereum-osaka)); a user transaction in such a block is refused before it runs.
   A block builder and a validator MUST give block execution the MegaETH schedule, since a node that knows only the Optimism schedule cannot tell that Satin activates, and a stateless validator is given the parent block's timestamp beside the witness.
+  Both are decided once, when the block starts.
   A block with no parent, such as a genesis block, is executed with an explicit absence of the parent timestamp: block execution applies neither rule to it.
-  A block that has a parent and is executed without its timestamp therefore runs as one that admits non-deposit transactions, so an implementation MUST supply it for every block but the first.
+  It accepts the absence only where no parent could change that, which is where every fork the schedule activates is active from genesis, or none is active at the block yet.
+  Where a fork the schedule activates after genesis is active at the block, whether it activates in the block depends on the parent's timestamp, and block execution refuses the block with an error that names the missing timestamp instead of running it as one that admits non-deposit transactions.
+  An implementation MUST therefore supply the parent timestamp for every block that has a parent, the block right after genesis included, since that block can be the activation block.
   Satin's activation block is told apart from the other deposit-only blocks, since an Optimism fork's activation block admits only deposits too: only Satin's makes the pre-block step check the predeploys (see [System Calls and Pre-Block Calls](#18-system-calls-and-pre-block-calls)).
   A block that is not Satin's activation block checks no predeploy, and runs on a state that may lack them.
 - **The L1 block information.**

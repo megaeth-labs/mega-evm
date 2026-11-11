@@ -23,8 +23,8 @@ use revm::{
 };
 
 use crate::common::{
-    self, activation_ctx, activation_spec, executor_with_spec, named_accounts, recovered, tx,
-    unlimited_ctx,
+    self, activation_ctx, activation_spec, after_activation_ctx, executor_with_spec,
+    named_accounts, recovered, tx, unlimited_ctx,
 };
 
 /// The states the pre-block steps of a block over `state` held to `ctx` committed, in order, as a
@@ -89,7 +89,7 @@ fn test_the_activation_block_reads_the_seven_predeploys_once() {
     let l1_block = &activation[3 + held.len()][&L1_BLOCK_CONTRACT];
     assert!(!l1_block.is_touched() && !l1_block.is_created(), "the L1 block info is read only");
 
-    let next = start(&mut state, unlimited_ctx()).expect("the next block starts");
+    let next = start(&mut state, after_activation_ctx()).expect("the next block starts");
     assert_eq!(named_accounts(&next), expected_accounts(false), "no other block reads them");
     for (address, info, _) in held {
         let now = revm::Database::basic(&mut state, address).unwrap().expect("still there");
@@ -124,7 +124,7 @@ fn test_no_other_block_reads_a_predeploy() {
         )
         .apply_pre_execution_changes()
     };
-    start_on(unlimited_ctx()).expect("an ordinary block reads no predeploy");
+    start_on(after_activation_ctx()).expect("an ordinary block reads no predeploy");
     let error = start_on(activation_ctx()).expect_err("the activation block reads the Oracle");
     assert!(matches!(error, BlockExecutionError::Internal(_)), "{error:?}");
     assert!(error.to_string().contains("injected basic() error"), "{error}");
