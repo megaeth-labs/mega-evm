@@ -529,7 +529,7 @@ mod tests {
         assert!(jovian_late.activation_depends_on_parent(100), "an Optimism fork counts too");
 
         // Whatever the parent, a schedule that does not depend on it answers `false`.
-        for config in [late.clone(), satin_at(0), MegaHardforkConfig::default()] {
+        for config in [late, satin_at(0), MegaHardforkConfig::default()] {
             for block in [1, 99, 100, 500] {
                 if !config.activation_depends_on_parent(block) {
                     for parent in 0..=block {
