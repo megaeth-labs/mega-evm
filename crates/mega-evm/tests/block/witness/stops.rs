@@ -252,7 +252,15 @@ fn test_a_short_list_that_runs_out_of_gas_part_way_loads_every_authority() {
     assert_ne!(first_authority, second_authority);
     let mut db = common::database();
     db.set_account_code(CONTRACT, slot_writer());
-    let gas = 60_000 + common::body_history(0) + common::new_account_state_gas();
+    if common::state_is_free() {
+        // With no price on a new account, the gas that pays the first authority pays the second.
+        return;
+    }
+    // The body's history including the two authorizations, the history of the two authorities'
+    // write records, and one account's state gas: room for the first authority and not the second.
+    let gas = 60_000 +
+        common::body_history(2 * mega_evm::AUTHORIZATION_SIZE + 2 * mega_evm::WRITE_RECORD_SIZE) +
+        common::new_account_state_gas();
     let case = Case::new("short list out of gas", db).tx(eip7702(
         0,
         CONTRACT,
