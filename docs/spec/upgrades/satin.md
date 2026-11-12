@@ -115,7 +115,8 @@ The precompile set MUST be Karst's, with KZG point evaluation at MegaETH's price
 
 An input over an Optimism pairing or MSM size limit fails the call before any gas check, a call forwarded no gas included; like every precompile call that fails, it consumes all the gas forwarded to it.
 ModExp MUST first charge its 500-gas minimum, then the rest of its Osaka formula price with each length saturated to 64 bits, and only then check EIP-7823's 1,024-byte bound on each length.
-A call that cannot pay the minimum MUST fail before reading the lengths; a formula price beyond any representable gas limit MUST fail out of gas even at the maximum gas limit.
+A call that cannot pay the minimum MUST fail before reading the lengths.
+The formula price MUST saturate at 2^64 − 1; a gas limit equal to that saturated price passes the gas check and then fails the size bound.
 Gas detention MUST use that same formula price for an over-bound input, so a price above the allowance but within the forwarded gas stops the call before its size check.
 KZG point evaluation keeps its Rex6 semantics: a call given less than 100,000 gas fails with an out-of-gas before any verification runs, and a successful call is charged exactly 100,000.
 A KZG call given at least 100,000 gas that fails otherwise — an input of the wrong length, a versioned hash that does not match the commitment, a proof that does not verify — consumes all the gas forwarded to it, not 100,000.

@@ -652,7 +652,7 @@ mod tests {
                 Some(u64::MAX),
                 "position={position}"
             );
-            for gas in [0, 499, 500, 100_000, u64::MAX - 1, u64::MAX] {
+            for gas in [0, 499, 500, 100_000, u64::MAX - 1] {
                 let result = run(address, Bytes::copy_from_slice(&input), gas);
                 assert_eq!(
                     result.result,
@@ -661,6 +661,10 @@ mod tests {
                 );
                 assert_eq!(result.gas.remaining(), 0, "position={position}, gas={gas}");
             }
+            // Like go-ethereum, a u64::MAX gas limit pays the saturated price before the bound.
+            let result = run(address, Bytes::copy_from_slice(&input), u64::MAX);
+            assert_eq!(result.result, InstructionResult::PrecompileError, "position={position}");
+            assert_eq!(result.gas.remaining(), 0, "position={position}");
         }
     }
 
