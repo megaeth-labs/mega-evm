@@ -27,11 +27,12 @@
 //!   state the scalar is zero and the rule costs nothing. This mirrors alloy-op-evm's Jovian DA
 //!   footprint block limit.
 //! - **The L1 block info is read lazily, by the transaction that prices against it.** Block
-//!   execution fetches nothing: op-revm's handler reads the L1 block contract when it deducts the
-//!   caller of the first non-deposit transaction, which is after the block's own L1 info deposit
-//!   has committed, so every transaction prices against the values that deposit set. An empty L1
-//!   block contract reads as zeroes, not as an error, and a caller that placed its own info for
-//!   this block keeps it. alloy-op-evm's executor pre-loads no info either.
+//!   execution fetches nothing before the block's transactions: op-revm's handler reads the L1
+//!   block contract when it deducts the caller of the first non-deposit transaction, which is after
+//!   the block's own L1 info deposit has committed, so every transaction prices against the values
+//!   that deposit set. An empty L1 block contract reads as zeroes, not as an error, and a caller
+//!   that placed its own info for this block keeps it. alloy-op-evm's executor pre-loads no info
+//!   either.
 //!
 //! # Committing an outcome
 //!
@@ -53,27 +54,27 @@
 //! # The witness is what the block commits
 //!
 //! Each pre-block step — the EIP-2935 call, the EIP-4788 call, the activation block's read of each
-//! predeploy, the read of the `SequencerRegistry`'s pending changes, the `applyPendingChanges()`
-//! call and the read of the L1 block info the block's transactions are priced against — produces an
-//! [`EvmState`], and this executor commits each one on its own, in that order, before the first
-//! transaction; every committed transaction's returned state follows. A read is a read-only entry
-//! of its step's state: an account neither touched nor created, its slots unchanged. The sequence
-//! of committed states, with the exported block hashes and buckets, is the witness a stateless
-//! client needs. A node takes it with a commit hook on revm's `State` (`State::set_state_hook`),
-//! which `commit` hands every state whole, before the cache drops the accounts the state did not
-//! touch. The block's transitions and bundle keep only what a state changed, so a witness taken
-//! from them would miss the read-only entries — the activation block's predeploys, the registry's
-//! pending slots, the L1 block info.
+//! predeploy, the read of the `SequencerRegistry`'s pending changes and the `applyPendingChanges()`
+//! call — produces an [`EvmState`], and this executor commits each one on its own, in that order,
+//! before the first transaction; every committed transaction's returned state follows. A read is a
+//! read-only entry of its step's state: an account neither touched nor created, its slots
+//! unchanged. The sequence of committed states, with the exported block hashes and buckets, is the
+//! witness a stateless client needs. A node takes it with a commit hook on revm's `State`
+//! (`State::set_state_hook`), which `commit` hands every state whole, before the cache drops the
+//! accounts the state did not touch. The block's transitions and bundle keep only what a state
+//! changed, so a witness taken from them would miss the read-only entries — the activation block's
+//! predeploys, the registry's pending slots, the L1 block info.
 //!
-//! The L1 block info is read here because nothing else puts it in a state: op-revm prices the
-//! block's first non-deposit transaction against the L1 block contract's slots read on the
-//! database itself, and this executor reads the DA footprint gas scalar the same way before every
-//! non-deposit transaction, so neither read lands in a transaction's returned state. The
-//! pre-block entry carries the account and every slot either read can reach, as the chain held
-//! them before the block ([`read_l1_block_info`]) — the L1 fee overhead among them, which
-//! op-revm reads only when the scalars the block's deposits left are empty; the block's own L1
-//! attributes deposit, when it has one, carries the values it writes over them in its own
-//! returned state.
+//! The L1 block info is read outside every transaction's journal: op-revm prices the block's first
+//! non-deposit transaction other than a Mega System Transaction against the L1 block contract's
+//! slots read on the database itself, and this executor reads the DA footprint gas scalar the same
+//! way before every non-deposit transaction, so neither read lands in a transaction's returned
+//! state. The executor adds them to it: once each per block, the account and every slot either read
+//! reached are read-only entries of the returned state of the first transaction that read them —
+//! the L1 fee overhead among them only when the scalars the fee computation found are empty —
+//! beside, never in place of, what the transaction's own execution put there. Nothing of the
+//! contract is read before the block's transactions, so a block that reads none of it does not
+//! fail when the database cannot serve it.
 //!
 //! # The pre-block system calls
 //!
@@ -110,11 +111,12 @@ use alloy_evm::{
 use alloy_op_evm::block::{receipt_builder::OpReceiptBuilder, OpTxEnv};
 use alloy_primitives::{Address, Bytes, TxHash, B256};
 use op_alloy_consensus::OpDepositReceipt;
-use op_revm::{
-    constants::L1_BLOCK_CONTRACT, transaction::deposit::DEPOSIT_TRANSACTION_TYPE, L1BlockInfo,
-};
+use op_revm::transaction::deposit::DEPOSIT_TRANSACTION_TYPE;
 use revm::{
-    context::{result::ResultAndState, Block, ContextTr},
+    context::{
+        result::{EVMError, ResultAndState},
+        Block, ContextTr,
+    },
     database::DatabaseCommitExt,
     state::{AccountInfo, EvmState},
     DatabaseCommit, Inspector,
@@ -126,7 +128,10 @@ pub type MegaFinishedBlock<DB, INSP, ExtEnvs, R> =
     (MegaEvm<DB, INSP, ExtEnvs>, MegaBlockExecutionResult<<R as OpReceiptBuilder>::Receipt>);
 
 use crate::{
-    block::{eips, read_l1_block_info},
+    block::{
+        eips,
+        l1_block_info::{read_fee_info, read_footprint_gas_scalar, L1BlockRead, L1BlockReport},
+    },
     estimated_da_size,
     system::{
         check_system_contract, classify_system_transaction, is_apply_pending_changes_due,
@@ -135,7 +140,7 @@ use crate::{
     },
     BlockGasCounters, BlockLimiter, BlockLimits, BucketId, ExternalEnvTypes,
     MegaBlockExecutionResult, MegaBlockTxResult, MegaContext, MegaEvm, MegaHardforks,
-    MegaTransaction, MegaTransactionExt, ProtocolLimits,
+    MegaTransaction, MegaTransactionError, MegaTransactionExt, ProtocolLimits,
 };
 
 /// What the node hands block execution beside the EVM.
@@ -323,6 +328,9 @@ pub struct MegaBlockExecutor<E, R: OpReceiptBuilder, Spec> {
     /// Which activation rules apply to this block, decided once when the block starts, or why
     /// they cannot be decided.
     activation: Result<ActivationRules, MegaBlockExecutionError>,
+    /// What the block's committed transactions reported of the L1 block contract, which their
+    /// fee computation and footprint read outside their journal.
+    l1_block_report: L1BlockReport,
 }
 
 /// The two rules a fork's activation puts on a block, decided from the schedule, the block's
@@ -402,6 +410,7 @@ where
             limiter,
             protocol_limits,
             activation,
+            l1_block_report: L1BlockReport::default(),
         }
     }
 
@@ -487,22 +496,57 @@ where
         self.evm.inspector()
     }
 
-    /// The data-availability footprint gas scalar the L1 block contract holds.
+    /// The data-availability footprint gas scalar the L1 block contract holds, and, while no
+    /// committed transaction reported the read, what it found, for the transaction's report.
     ///
     /// Read per transaction, as the fork's rule is stated: the block's own L1 info transaction
     /// may set it, and the transactions after it are held to the value it set. It is a read of
     /// the block's state, made between transactions, so it lands in no transaction's returned
-    /// state; the pre-block phase's read of the same slot ([`read_l1_block_info`]) is what puts
-    /// it in the pre-block states a witness is built from, and this read finds it in the state
-    /// cache that read filled, or the value the L1 info transaction committed over it.
-    fn da_footprint_gas_scalar(&mut self) -> Result<u64, BlockExecutionError> {
-        // Load the L1 block account into the cache first; a database that has never seen it
-        // cannot serve its storage.
-        let db = self.evm.ctx_mut().db_mut();
-        db.basic(L1_BLOCK_CONTRACT).map_err(BlockExecutionError::other)?;
-        L1BlockInfo::fetch_da_footprint_gas_scalar(db)
-            .map(u64::from)
-            .map_err(BlockExecutionError::other)
+    /// state: the first transaction that made it reports it
+    /// ([`report_l1_block_reads`](Self::report_l1_block_reads)). A read that fails is an internal
+    /// error, whether or not the database declares it fatal: the block makes it for the
+    /// transaction, outside the transaction's execution.
+    fn da_footprint_gas_scalar(
+        &mut self,
+    ) -> Result<(u64, Option<L1BlockRead>), BlockExecutionError> {
+        let record = self.l1_block_report.reports_footprint();
+        let (scalar, read) = read_footprint_gas_scalar(self.evm.ctx_mut().db_mut(), record)
+            .map_err(BlockExecutionError::other)?;
+        Ok((u64::from(scalar), read))
+    }
+
+    /// Adds to `state`, the returned state of the non-deposit transaction `tx_hash`, what the
+    /// transaction read of the L1 block contract outside its journal that no committed
+    /// transaction reported yet, as read-only entries: `footprint`, the footprint read made before
+    /// it ran, and, when the fee computation `priced` it, the fee read, made again here, on the
+    /// state it ran on, which a state cache serves from op-revm's own fetch.
+    ///
+    /// A failed fee read is a failed read of the transaction's execution, as op-revm's fetch
+    /// inside it is: an internal error when the database declares it fatal, an invalid block when
+    /// it does not.
+    fn report_l1_block_reads(
+        &mut self,
+        state: &mut EvmState,
+        footprint: Option<L1BlockRead>,
+        priced: bool,
+        tx_hash: TxHash,
+    ) -> Result<(), BlockExecutionError> {
+        let fee = if priced && self.l1_block_report.reports_fee() {
+            let number = self.evm.block().number();
+            let spec = self.evm.ctx().spec().into_op_spec();
+            let read =
+                read_fee_info(self.evm.ctx_mut().db_mut(), number, spec).map_err(|error| {
+                    BlockExecutionError::evm(
+                        EVMError::<DB::Error, MegaTransactionError>::Database(error),
+                        tx_hash,
+                    )
+                })?;
+            Some(read)
+        } else {
+            None
+        };
+        self.l1_block_report.add_to(state, footprint.iter().chain(&fee));
+        Ok(())
     }
 
     /// Commits `state` to the database.
@@ -668,19 +712,17 @@ where
 
     /// Runs what a block does before its transactions.
     ///
-    /// In order: the reset of the block-hash and bucket records, the EIP-2935
-    /// and EIP-4788 pre-block calls, in the block in which Satin activates the check of the
-    /// predeploys, the `SequencerRegistry`'s due role changes and the read of the L1 block info.
-    /// Each step's state is committed here, on its own and read-only entries included, rather
-    /// than inside its helper, so a commit hook on the database sees every step's read and write
-    /// set. The sequence of committed states is the witness a stateless client needs.
+    /// In order: the reset of the block-hash and bucket records and of what the block reported of
+    /// the L1 block contract, the EIP-2935 and EIP-4788 pre-block calls, in the block in which
+    /// Satin activates the check of the predeploys, and the `SequencerRegistry`'s due role
+    /// changes. Each step's state is committed here, on its own and read-only entries included,
+    /// rather than inside its helper, so a commit hook on the database sees every step's read and
+    /// write set. The sequence of committed states is the witness a stateless client needs.
     ///
-    /// The transactions are not priced against the read made here. op-revm's handler fetches the
-    /// L1 block info when it deducts the caller of the first non-deposit transaction, which is
-    /// after the block's own L1 info deposit has committed; pricing from this read would price
-    /// every transaction of the block against the parent block's values. The read here puts the
-    /// L1 block contract's account and every slot that fetch can reach in the pre-block states,
-    /// and nothing else.
+    /// Nothing reads the L1 block contract here. op-revm's handler fetches the L1 block info when
+    /// it deducts the caller of the first non-deposit transaction, which is after the block's own
+    /// L1 info deposit has committed, and the first transaction that reads it reports what it read
+    /// in its own returned state.
     ///
     /// The EIP-2935 and EIP-4788 calls run before the check. They write the parent hash and the
     /// parent beacon root into their own contracts (`0x0…2935` and `0x0…4788`), which are not
@@ -708,9 +750,10 @@ where
         self.admits_only_deposits()?;
 
         // The block starts with empty block-hash and bucket records, so what they hold at the end
-        // is what this block read.
+        // is what this block read, and with nothing of the L1 block contract reported.
         self.evm.clear_accessed_block_hashes();
         self.evm.clear_accessed_bucket_ids();
+        self.l1_block_report = L1BlockReport::default();
 
         let state = eips::transact_blockhashes_contract_call(
             &self.spec,
@@ -764,16 +807,6 @@ where
             let ResultAndState { state, .. } = transact_apply_pending_changes(&mut self.evm)?;
             self.commit(state);
         }
-
-        // The L1 block info the transactions are priced against is read on the database itself,
-        // by op-revm once per block and by `execute` before every non-deposit transaction, so it
-        // lands in no transaction's state. Read here, it is in the pre-block states instead:
-        // every slot those reads can reach, because which ones they reach is decided by the state
-        // the block's deposits leave, not by this one. The read fills the state cache, and its
-        // commit changes nothing: a commit hook receives the read-only entry, and the cache keeps
-        // no transition for it.
-        let state = read_l1_block_info(self.evm.db_mut()).map_err(BlockExecutionError::other)?;
-        self.commit(state);
 
         Ok(())
     }
@@ -839,7 +872,14 @@ where
         }
         self.limiter.post_execution_update(&output.block_usage());
 
-        let MegaBlockTxResult { tx_type, is_deposit, depositor_nonce, inner, .. } = output;
+        let MegaBlockTxResult {
+            tx_type,
+            is_deposit,
+            is_system_transaction,
+            depositor_nonce,
+            inner,
+            ..
+        } = output;
         let gas = inner.gas;
         let cumulative_gas_used = self.limiter.block_gas_used;
         let ResultAndState { result, state } = inner.result_and_state;
@@ -874,6 +914,9 @@ where
             },
         );
 
+        if !is_deposit {
+            self.l1_block_report.committed(&state, !is_system_transaction);
+        }
         self.commit(state);
 
         GasOutput::with_state_gas(gas.gas_used, gas.state)
@@ -1024,12 +1067,13 @@ where
 
         // A deposit is exempt from the data-availability footprint of the block, as it is from
         // its data-availability size.
-        let da_footprint = if is_deposit {
-            0
+        let (da_footprint, footprint_read) = if is_deposit {
+            (0, None)
         } else {
-            let footprint = da_size.saturating_mul(self.da_footprint_gas_scalar()?);
+            let (scalar, read) = self.da_footprint_gas_scalar()?;
+            let footprint = da_size.saturating_mul(scalar);
             self.check_da_footprint(footprint)?;
-            footprint
+            (footprint, read)
         };
 
         // The sender's account as the transaction executes against it, read before execution: a
@@ -1044,10 +1088,21 @@ where
         // The transaction runs under the block's limits, whatever was set on the EVM since the
         // last one.
         self.evm.set_tx_runtime_limits(self.protocol_limits.tx_runtime_limits);
-        let outcome = self
+        let mut outcome = self
             .evm
             .execute_transaction(tx_env)
             .map_err(|err| BlockExecutionError::evm(err, tx_hash))?;
+        // What the transaction read of the L1 block contract outside its journal: the footprint
+        // read, and the fee read of every non-deposit transaction but a Mega System Transaction,
+        // which pays no L1 fee.
+        if !is_deposit {
+            self.report_l1_block_reads(
+                &mut outcome.result_and_state.state,
+                footprint_read,
+                !is_system_transaction,
+                tx_hash,
+            )?;
+        }
 
         let result = MegaBlockTxResult {
             tx_type: inner.tx_type(),

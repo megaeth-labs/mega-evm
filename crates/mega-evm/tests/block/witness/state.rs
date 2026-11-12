@@ -1,10 +1,11 @@
 //! State-changing mechanisms through the harness: an EIP-7702 delegation and its replacement, a
 //! creation, the two shapes of `SELFDESTRUCT`, a value transfer that creates its recipient, and
-//! deposits — with the L1 block info a user transaction is priced against, which the pre-block
-//! phase carries, and which a block cannot start without.
+//! deposits — with the L1 block info a transaction is priced against and the footprint scalar it
+//! is held to, which the first transaction that reads them reports, and which nothing reads
+//! before the block's transactions.
 
 use alloy_evm::{
-    block::{BlockExecutionError, BlockExecutor},
+    block::{BlockExecutionError, BlockExecutor, BlockValidationError},
     EvmFactory,
 };
 use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
@@ -22,14 +23,14 @@ use revm::{
     bytecode::opcode::{CODECOPY, PUSH0, RETURN},
     context_interface::cfg::GasId,
     database::State,
-    state::{Account, AccountInfo, Bytecode},
+    state::{Account, AccountInfo, Bytecode, EvmState},
 };
 
 use super::{
     basics::{slot, slot_writer, write_gas},
     harness::{
         assert_same_run, authorization, call, call_with_value, create, deposit, eip7702, Case,
-        Oracle, Run,
+        Oracle, Run, Tx, TxSnapshot,
     },
 };
 use crate::{
@@ -236,7 +237,7 @@ fn l1_info() -> [(U256, U256); 4] {
 }
 
 /// The L1 fee overhead the chain holds, which the pricing reads only when the scalars it finds
-/// are empty, and the pre-block entry carries whatever they hold.
+/// are empty.
 const OVERHEAD: U256 = U256::from_limbs([188, 0, 0, 0]);
 
 /// A chain holding the L1 block contract with `code`, the info of [`l1_info`] and the overhead,
@@ -252,23 +253,45 @@ fn chain_with_l1_info(code: Bytes) -> MemoryDatabase {
     db
 }
 
-/// The L1 block info entry of a run's pre-block states: the last state the pre-block steps
-/// committed, and the one entry in it.
-fn l1_entry(run: &Run) -> &Account {
-    let state = run.pre_block.last().expect("a pre-block state");
-    assert_eq!(state.len(), 1, "the L1 block contract alone");
-    state.get(&L1_BLOCK_CONTRACT).expect("the L1 block info is the last state")
+/// The L1 block contract's entry in `state`.
+fn l1_account(state: &EvmState) -> &Account {
+    state.get(&L1_BLOCK_CONTRACT).expect("the state names the L1 block contract")
 }
 
-/// A deposit minting to a fresh depositor: the depositor's absent account is read (for the
-/// receipt's nonce and as the caller), created and priced, and the deposit writes its slot. A
-/// block of deposits alone prices no transaction against the L1 block info; the pre-block phase
-/// reads it all the same, here from a chain that does not hold the contract, which the entry
-/// records as not existing without a slot read.
+/// Asserts `account` is a read-only entry — neither touched nor created — holding exactly
+/// `slots`, each unchanged at its value.
+fn assert_read_only(what: &str, account: &Account, slots: &[(U256, U256)]) {
+    assert!(!account.is_touched() && !account.is_created(), "{what}: a read-only entry");
+    let named: Vec<_> = account.storage.keys().copied().collect();
+    assert_eq!(account.storage.len(), slots.len(), "{what}: the slots named: {named:?}");
+    for (slot, value) in slots {
+        let entry = account.storage.get(slot).unwrap_or_else(|| panic!("{what}: no slot {slot}"));
+        assert_eq!(entry.present_value, *value, "{what}: slot {slot}");
+        assert!(!entry.is_changed(), "{what}: slot {slot} is unchanged");
+    }
+}
+
+/// How many of the states `run` committed name the L1 block contract's `slot`, or its account
+/// when `slot` is `None`.
+fn times_named(run: &Run, slot: Option<U256>) -> usize {
+    run.committed
+        .iter()
+        .filter_map(|state| state.get(&L1_BLOCK_CONTRACT))
+        .filter(|account| slot.is_none_or(|slot| account.storage.contains_key(&slot)))
+        .count()
+}
+
+/// Whether any pre-block state of `run` names the L1 block contract.
+fn pre_block_names_l1(run: &Run) -> bool {
+    run.pre_block.iter().any(|state| state.contains_key(&L1_BLOCK_CONTRACT))
+}
+
+/// A block of deposits alone prices nothing against the L1 block info and has no footprint, so
+/// nothing of the L1 block contract is read: no pre-block state and no transaction's state names
+/// it, and the database is asked for neither its account nor a slot. The block replays.
 #[test]
-fn test_a_deposit_only_block_replays_and_reads_no_l1_slot() {
-    let mut db = common::database();
-    db.set_account_code(CONTRACT, slot_writer());
+fn test_a_block_of_deposits_reads_nothing_of_the_l1_block_contract() {
+    let db = chain_with_l1_info(Bytes::from(vec![0x00]));
     // The first deposit also pays for the account the engine creates for its caller.
     let replay = Case::new("deposits", db)
         .tx(deposit(
@@ -286,47 +309,85 @@ fn test_a_deposit_only_block_replays_and_reads_no_l1_slot() {
     assert_eq!(run.tx(0).depositor_nonce, Some(0));
     assert_eq!(run.tx(1).depositor_nonce, Some(1), "the nonce the first deposit left");
     assert_eq!(run.record.accounts.get(&DEPOSITOR), Some(&None));
-    assert!(l1_entry(run).is_loaded_as_not_existing(), "the chain holds no L1 block contract");
-    assert_eq!(run.record.accounts.get(&L1_BLOCK_CONTRACT), Some(&None), "read once, pre-block");
+    assert!(!pre_block_names_l1(run), "no pre-block read of the L1 block contract");
+    assert_eq!(times_named(run, None), 0, "no state names it");
+    assert!(!run.record.accounts.contains_key(&L1_BLOCK_CONTRACT), "its account is not read");
     assert!(
         !run.record.storage.keys().any(|(address, _)| *address == L1_BLOCK_CONTRACT),
-        "no slot of an absent contract is read"
+        "nor is a slot of it"
     );
     if !common::state_is_free() {
         assert!(run.bucket_ids.len() >= 2, "the depositor's bucket and the slots'");
     }
 }
 
-/// A user transaction is priced against the L1 block info, which is read on the database itself
-/// and not through the transaction's journal: the L1 block contract is in no transaction's state,
-/// and the pre-block phase carries its account and slots as read-only entries with the chain's
-/// values, so a witness built from the states holds what the transaction's L1 fee, operator fee
-/// and footprint were computed from. The entry holds the overhead beside them, which the pricing
-/// does not read while the scalars are set: the pre-block read is the one read of it.
+/// Nothing reads the L1 block contract before the block's transactions, so a database that
+/// cannot serve its account or one of its slots starts the block and runs a block of deposits,
+/// which reads none of them.
 #[test]
-fn test_a_user_transaction_is_priced_against_the_l1_info_the_pre_block_state_carries() {
+fn test_a_block_that_reads_no_l1_slot_runs_on_a_database_that_cannot_serve_one() {
+    let refusals = [
+        ("the account", Some(L1_BLOCK_CONTRACT), None),
+        ("the L1 base fee", None, Some((L1_BLOCK_CONTRACT, L1_BASE_FEE_SLOT))),
+        ("the overhead", None, Some((L1_BLOCK_CONTRACT, L1_OVERHEAD_SLOT))),
+        ("the footprint scalar", None, Some((L1_BLOCK_CONTRACT, OPERATOR_FEE_SCALARS_SLOT))),
+    ];
+    for (what, account, refused) in refusals {
+        let mut db = ErrorInjectingDatabase::new(chain_with_l1_info(Bytes::from(vec![0x00])));
+        db.fail_on_account = account;
+        db.fail_on_storage = refused;
+        let mut state = State::builder().with_database(db).with_bundle_update().build();
+        let evm = MegaEvmFactory::new().create_evm(&mut state, common::evm_env());
+        let mut executor = MegaBlockExecutor::new(
+            evm,
+            common::unlimited_ctx(),
+            common::chain_spec(),
+            OpAlloyReceiptBuilder::default(),
+        );
+        executor.apply_pre_execution_changes().unwrap_or_else(|err| panic!("{what}: {err}"));
+        let tx = deposit(
+            DEPOSITOR,
+            TxKind::Call(CONTRACT),
+            1_000_000_000,
+            U256::ZERO,
+            slot(9),
+            write_gas() + common::new_account_state_gas(),
+        );
+        executor.execute_transaction(&tx).unwrap_or_else(|err| panic!("{what}: {err}"));
+        executor.finish().unwrap_or_else(|err| panic!("{what}: {err}"));
+    }
+}
+
+/// A user transaction is priced against the L1 block info and held to the footprint by its
+/// scalar, both read on the database itself and not through the transaction's journal. The first
+/// transaction that reads them reports them, as read-only entries of its own state: the account
+/// and the four slots its fee and footprint were computed from, with the chain's values. The
+/// overhead, which the pricing does not read while the scalars are set, is not read, and no
+/// pre-block state names the contract. The block replays from both witnesses.
+#[test]
+fn test_the_first_transaction_priced_reports_the_l1_info_it_read() {
     let db = chain_with_l1_info(Bytes::from(vec![0x00]));
     let replay = Case::new("l1 info", db).tx(call(0, CONTRACT, slot(1), write_gas())).run();
     let run = &replay.recorded;
     let tx = run.tx(0);
     assert!(tx.result.is_success(), "{:?}", tx.result);
-    assert!(!tx.state.contains_key(&L1_BLOCK_CONTRACT), "in no transaction's state");
+    assert!(!pre_block_names_l1(run), "no pre-block read of the L1 block contract");
 
-    let account = l1_entry(run);
-    assert!(!account.is_touched() && !account.is_created(), "a read-only entry");
+    let account = l1_account(&tx.state);
+    assert_read_only("the transaction's report", account, &l1_info());
     assert_eq!(account.info.code_hash, alloy_primitives::keccak256([0x00]));
-    let held = l1_info().into_iter().chain([(L1_OVERHEAD_SLOT, OVERHEAD)]);
-    assert_eq!(account.storage.len(), held.clone().count(), "the slots the pricing can read");
-    for (slot, value) in held {
-        let entry = account.storage.get(&slot).expect("every slot of the set");
-        assert_eq!(entry.present_value, value, "{slot}");
-        assert!(!entry.is_changed(), "{slot} is unchanged");
+    for (slot, value) in l1_info() {
         assert_eq!(
             run.record.storage.get(&(L1_BLOCK_CONTRACT, slot)),
             Some(&value),
-            "{slot} was read from the database, before the transactions"
+            "{slot} was read from the database"
         );
     }
+    assert_eq!(
+        run.record.storage.get(&(L1_BLOCK_CONTRACT, L1_OVERHEAD_SLOT)),
+        None,
+        "the overhead the set scalars leave unread is not read"
+    );
 
     let footprint_scalar = u64::from(PARENT_FOOTPRINT_SCALAR);
     assert_eq!(
@@ -340,27 +401,96 @@ fn test_a_user_transaction_is_priced_against_the_l1_info_the_pre_block_state_car
 }
 
 /// With the Ecotone scalars empty before the block the pricing reads the overhead at the first
-/// transaction it prices; the pre-block entry holds the same five slots as with set scalars, the
-/// overhead among them, and the block replays.
+/// transaction it prices, which reports it beside the other four slots, and the block replays.
 #[test]
-fn test_the_overhead_is_in_the_entry_when_the_scalars_are_empty() {
+fn test_the_overhead_is_reported_when_the_scalars_are_empty() {
     let mut db = chain_with_l1_info(Bytes::from(vec![0x00]));
     db.set_account_storage(L1_BLOCK_CONTRACT, ECOTONE_L1_FEE_SCALARS_SLOT, U256::ZERO);
     let replay = Case::new("l1 overhead", db).tx(call(0, CONTRACT, slot(1), write_gas())).run();
     let run = &replay.recorded;
     assert!(run.tx(0).result.is_success(), "{:?}", run.tx(0).result);
-    let account = l1_entry(run);
-    assert_eq!(account.storage.len(), l1_info().len() + 1, "the same set as with set scalars");
-    let overhead = account.storage.get(&L1_OVERHEAD_SLOT).expect("in the entry");
-    assert_eq!(overhead.present_value, OVERHEAD);
-    assert!(!overhead.is_changed());
+    let mut read = l1_info().to_vec();
+    read[1].1 = U256::ZERO;
+    read.push((L1_OVERHEAD_SLOT, OVERHEAD));
+    assert_read_only("the transaction's report", l1_account(&run.tx(0).state), &read);
     assert_eq!(run.record.storage.get(&(L1_BLOCK_CONTRACT, L1_OVERHEAD_SLOT)), Some(&OVERHEAD));
 }
 
+/// Two transactions are priced against the same L1 block info and read the same footprint scalar:
+/// the first reports the account and the slots, and the second, whose reads they are too, reports
+/// nothing again. The block replays.
+#[test]
+fn test_only_the_first_transaction_that_reads_the_l1_info_reports_it() {
+    let db = chain_with_l1_info(Bytes::from(vec![0x00]));
+    let replay = Case::new("two readers", db)
+        .tx(call(0, CONTRACT, slot(1), write_gas()))
+        .tx(call(1, CONTRACT, slot(2), write_gas()))
+        .run();
+    let run = &replay.recorded;
+    assert!(run.tx(0).result.is_success() && run.tx(1).result.is_success());
+    assert_read_only("the first reader", l1_account(&run.tx(0).state), &l1_info());
+    assert!(!run.tx(1).state.contains_key(&L1_BLOCK_CONTRACT), "the second reports nothing");
+    assert_eq!(times_named(run, None), 1, "the account is named once");
+    for (slot, _) in l1_info() {
+        assert_eq!(times_named(run, Some(slot)), 1, "slot {slot} is named once");
+    }
+}
+
+/// A candidate the builder executes and drops reports what it read, but its state is not
+/// committed: the first transaction of the block reports it in its place. The block replays.
+#[test]
+fn test_a_dropped_first_reader_leaves_the_report_to_the_next() {
+    let db = chain_with_l1_info(Bytes::from(vec![0x00]));
+    let replay = Case::new("dropped first reader", db)
+        .tx(call(0, CONTRACT, slot(1), write_gas()))
+        .dropped(0)
+        .tx(call(0, CONTRACT, slot(2), write_gas()))
+        .run();
+    let run = &replay.recorded;
+    assert!(run.refusal(0).contains("dropped"), "{}", run.refusal(0));
+    assert!(run.tx(1).result.is_success(), "{:?}", run.tx(1).result);
+    assert_read_only("the first included reader", l1_account(&run.tx(1).state), &l1_info());
+    assert_eq!(times_named(run, None), 1);
+}
+
+/// A Mega System Transaction pays no L1 fee, so no fee computation prices it, but the block
+/// reads the footprint scalar before it as before every non-deposit transaction: as the block's
+/// first reader it reports the account and the scalar's slot alone. The user transaction after
+/// it, the first the fee computation prices, reports the fee's other slots, and not the scalar's
+/// again. Alone in its block, the system transaction reports the same. Both blocks replay.
+#[test]
+fn test_a_mega_system_transaction_reports_the_footprint_scalar_it_reads() {
+    let footprint = [(OPERATOR_FEE_SCALARS_SLOT, parent_scalars_word())];
+
+    let db = chain_with_l1_info(Bytes::from(vec![0x00]));
+    let replay = Case::new("system transaction alone", db).tx(common::system_tx()).run();
+    let run = &replay.recorded;
+    assert!(run.tx(0).result.is_success(), "{:?}", run.tx(0).result);
+    assert_eq!(run.tx(0).gas.history, 0, "the protocol's own transaction");
+    assert_read_only("the system transaction", l1_account(&run.tx(0).state), &footprint);
+    assert_eq!(run.tx(0).da_footprint, run.tx(0).da_size * u64::from(PARENT_FOOTPRINT_SCALAR));
+
+    let db = chain_with_l1_info(Bytes::from(vec![0x00]));
+    let replay = Case::new("system transaction first", db)
+        .tx(common::system_tx())
+        .tx(call(0, CONTRACT, slot(1), write_gas()))
+        .run();
+    let run = &replay.recorded;
+    assert!(run.tx(0).result.is_success() && run.tx(1).result.is_success());
+    assert_read_only("the system transaction", l1_account(&run.tx(0).state), &footprint);
+    let fee: Vec<_> =
+        l1_info().into_iter().filter(|(slot, _)| *slot != OPERATOR_FEE_SCALARS_SLOT).collect();
+    assert_read_only("the first transaction priced", l1_account(&run.tx(1).state), &fee);
+    for (slot, _) in l1_info() {
+        assert_eq!(times_named(run, Some(slot)), 1, "slot {slot} is named once");
+    }
+}
+
 /// The production shape: the L1 attributes deposit comes first and writes the block's info over
-/// the parent's. The pre-block entry holds the parent's values, the deposit's own returned state
-/// holds the write, and the transaction after the deposit is priced against the write; so
-/// everything its footprint was computed from is in one of the block's states.
+/// the parent's. The deposit's own returned state holds the write, and reads nothing for a fee or
+/// a footprint; the transaction after it is priced against the write and reports what it read,
+/// the deposit's values, as read-only entries. Everything its fee and footprint were computed
+/// from is in one of the block's states.
 #[test]
 fn test_the_l1_attributes_deposit_first_prices_the_transactions_after_it() {
     let db = chain_with_l1_info(l1_block_setter());
@@ -380,12 +510,16 @@ fn test_the_l1_attributes_deposit_first_prices_the_transactions_after_it() {
     assert!(run.tx(0).result.is_success(), "{:?}", run.tx(0).result);
     assert!(run.tx(1).result.is_success(), "{:?}", run.tx(1).result);
 
-    let before = l1_entry(run).storage.get(&OPERATOR_FEE_SCALARS_SLOT).expect("in the entry");
-    assert_eq!(before.present_value, parent_scalars_word(), "the parent's info, pre-block");
-    let written = &run.tx(0).state[&L1_BLOCK_CONTRACT].storage[&OPERATOR_FEE_SCALARS_SLOT];
+    let deposit = l1_account(&run.tx(0).state);
+    assert_eq!(deposit.storage.len(), 1, "the deposit's state names its write alone");
+    let written = &deposit.storage[&OPERATOR_FEE_SCALARS_SLOT];
     assert_eq!(written.original_value, parent_scalars_word());
     assert_eq!(written.present_value, word, "the deposit's state carries the write");
     assert_eq!(run.tx(0).da_footprint, 0, "a deposit has no footprint");
+
+    let mut read = l1_info();
+    read[3].1 = word;
+    assert_read_only("the transaction after the deposit", l1_account(&run.tx(1).state), &read);
 
     let tx = run.tx(1);
     assert_eq!(
@@ -420,24 +554,29 @@ fn scalars_emptied_in_the_block(overhead: U256) -> Case {
 }
 
 /// The scalars are set before the block and a deposit empties them, so the L1 info the next
-/// transaction is priced against is fetched with empty scalars and reads the overhead. No
-/// transaction's state names that slot: the deposit wrote the scalars alone, and the fetch is not
-/// in the user transaction's journal. The pre-block entry carries the overhead whatever the
-/// scalars hold before the block, so the channel witness holds it and the block replays.
+/// transaction is priced against is fetched with empty scalars and reads the overhead. The
+/// deposit wrote the scalars alone, and names no overhead: the user transaction reports it, once,
+/// as a read-only entry of its own state, with the other slots it read, so the channel witness
+/// holds it and the block replays.
 #[test]
-fn test_a_deposit_emptying_the_scalars_leaves_the_overhead_in_the_witness() {
+fn test_a_deposit_emptying_the_scalars_has_the_next_transaction_report_the_overhead() {
     let case = scalars_emptied_in_the_block(OVERHEAD);
     let recorded = case.record();
     assert!(recorded.tx(0).result.is_success(), "{:?}", recorded.tx(0).result);
     assert!(recorded.tx(1).result.is_success(), "{:?}", recorded.tx(1).result);
 
-    let written = &recorded.tx(0).state[&L1_BLOCK_CONTRACT].storage;
+    let written = &l1_account(&recorded.tx(0).state).storage;
     let scalars = &written[&ECOTONE_L1_FEE_SCALARS_SLOT];
     assert_eq!(scalars.original_value, fee_scalars_word(1_000_000, 1_000_000), "set before");
     assert_eq!(scalars.present_value, U256::ZERO, "the deposit emptied the scalars");
     assert!(!written.contains_key(&L1_OVERHEAD_SLOT), "the deposit's state names no overhead");
+
     let tx = recorded.tx(1);
-    assert!(!tx.state.contains_key(&L1_BLOCK_CONTRACT), "nor does the transaction after it");
+    let mut read = l1_info().to_vec();
+    read[1].1 = U256::ZERO;
+    read.push((L1_OVERHEAD_SLOT, OVERHEAD));
+    assert_read_only("the transaction after the deposit", l1_account(&tx.state), &read);
+    assert_eq!(times_named(&recorded, Some(L1_OVERHEAD_SLOT)), 1, "the overhead, once");
     assert!(
         tx.state.get(&L1_FEE_RECIPIENT).is_none_or(|vault| vault.info.balance.is_zero()),
         "priced against the scalars the deposit left: no L1 fee"
@@ -449,43 +588,82 @@ fn test_a_deposit_emptying_the_scalars_leaves_the_overhead_in_the_witness() {
     );
 
     let witness = case.channel_witness(&recorded);
-    let channel = case.replay(&witness, &recorded.included(), Oracle::Recorded);
-    assert!(
-        channel.txs[1].is_ok(),
-        "the transaction after the deposit replays from the channel witness: {:?}",
-        channel.txs[1].as_ref().err()
-    );
     assert_eq!(
         witness.storage.get(&(L1_BLOCK_CONTRACT, L1_OVERHEAD_SLOT)),
         Some(&OVERHEAD),
-        "which holds the overhead"
+        "the channel witness holds the overhead"
     );
-    let entry = l1_entry(&recorded).storage.get(&L1_OVERHEAD_SLOT).expect("in the entry");
-    assert_eq!(entry.present_value, OVERHEAD, "named by the pre-block entry, with set scalars");
+    let channel = case.replay(&witness, &recorded.included(), Oracle::Recorded);
+    assert_same_run("scalars emptied in the block (channel witness)", &recorded, &channel);
 
     case.run();
 }
 
+/// The L1 block contract's entry of a transaction's state, taken out, so two runs that read other
+/// values there can be compared on everything else.
+fn without_l1_entry(run: &Run) -> Vec<Result<TxSnapshot, String>> {
+    let mut txs = run.txs.clone();
+    for tx in txs.iter_mut().flatten() {
+        if !tx.is_deposit {
+            tx.state.remove(&L1_BLOCK_CONTRACT);
+        }
+    }
+    txs
+}
+
 /// The overhead is a slot the block must be able to read, and nothing more: the fee of a
 /// transaction priced with empty scalars does not take it in, so the same block on a chain that
-/// holds another overhead produces the same transactions, receipts and state changes.
+/// holds another overhead produces the same transactions, receipts and state changes; only the
+/// value its report carries differs.
 #[test]
 fn test_the_overhead_a_block_reads_decides_no_result() {
     let held = scalars_emptied_in_the_block(OVERHEAD).run().recorded;
     let zero = scalars_emptied_in_the_block(U256::ZERO).run().recorded;
-    assert_eq!(l1_entry(&held).storage[&L1_OVERHEAD_SLOT].present_value, OVERHEAD);
-    assert_eq!(l1_entry(&zero).storage[&L1_OVERHEAD_SLOT].present_value, U256::ZERO);
-    assert_eq!(held.txs, zero.txs, "the transactions");
+    let overhead =
+        |run: &Run| l1_account(&run.tx(1).state).storage[&L1_OVERHEAD_SLOT].present_value;
+    assert_eq!(overhead(&held), OVERHEAD);
+    assert_eq!(overhead(&zero), U256::ZERO);
+    assert_eq!(without_l1_entry(&held), without_l1_entry(&zero), "the transactions");
     assert_eq!(held.receipts, zero.receipts, "the receipts");
     assert_eq!(held.bundle, zero.bundle, "the state changes");
     assert_eq!((held.gas_used, held.blob_gas_used), (zero.gas_used, zero.blob_gas_used));
 }
 
-/// The entry's other condition: a chain that does not hold the L1 block contract has it recorded
-/// as not existing, with no slot. A deposit that creates the account in the block does not turn
-/// its slots into database reads: the slots of an account the block created are the block's own,
-/// so the transaction priced after the deposit reads none from the chain, and the witness, which
-/// holds the account as absent and no slot of it, replays the block.
+/// A transaction whose own execution writes the L1 block contract keeps its write: code at the
+/// contract that empties the scalars, called by the first transaction the fee computation prices.
+/// Its state names the account as the call left it, touched, and the scalars' slot as it wrote it,
+/// from the set scalars it was priced with to zero; the report adds the other slots it read as
+/// read-only entries and replaces neither. The block replays.
+#[test]
+fn test_a_transaction_that_writes_the_l1_block_contract_keeps_its_write() {
+    let db = chain_with_l1_info(scalars_emptier());
+    let replay = Case::new("a reader that writes the L1 block contract", db)
+        .tx(call(0, L1_BLOCK_CONTRACT, Bytes::new(), creation_gas()))
+        .run();
+    let run = &replay.recorded;
+    let tx = run.tx(0);
+    assert!(tx.result.is_success(), "{:?}", tx.result);
+    let account = l1_account(&tx.state);
+    assert!(account.is_touched(), "the call's own entry, not a read-only one");
+    let scalars = &account.storage[&ECOTONE_L1_FEE_SCALARS_SLOT];
+    assert_eq!(scalars.original_value, fee_scalars_word(1_000_000, 1_000_000), "priced on it");
+    assert_eq!(scalars.present_value, U256::ZERO, "the transaction's write stands");
+    for (slot, value) in l1_info() {
+        if slot == ECOTONE_L1_FEE_SCALARS_SLOT {
+            continue;
+        }
+        let entry = account.storage.get(&slot).unwrap_or_else(|| panic!("slot {slot} reported"));
+        assert_eq!(entry.present_value, value, "slot {slot}");
+        assert!(!entry.is_changed(), "slot {slot} is read only");
+    }
+    assert_eq!(account.storage.len(), l1_info().len(), "no overhead: the scalars were set");
+}
+
+/// The entry's other condition: a chain that does not hold the L1 block contract. A deposit that
+/// creates the account in the block does not turn its slots into database reads: the slots of an
+/// account the block created are the block's own, so the transaction priced after the deposit
+/// reads none from the chain, and the witness, which holds the account as absent and no slot of
+/// it, replays the block.
 #[test]
 fn test_a_deposit_creating_the_l1_block_contract_adds_no_slot_read() {
     let mut db = common::database();
@@ -503,9 +681,12 @@ fn test_a_deposit_creating_the_l1_block_contract_adds_no_slot_read() {
     let recorded = case.record();
     assert!(recorded.tx(0).result.is_success(), "{:?}", recorded.tx(0).result);
     assert!(recorded.tx(1).result.is_success(), "{:?}", recorded.tx(1).result);
-    assert!(l1_entry(&recorded).is_loaded_as_not_existing(), "absent before the block");
-    let created = &recorded.tx(0).state[&L1_BLOCK_CONTRACT];
+    assert!(!pre_block_names_l1(&recorded), "no pre-block read of the L1 block contract");
+    let created = l1_account(&recorded.tx(0).state);
     assert_eq!(created.info.balance, U256::from(1_000), "the deposit created the account");
+    let reported = l1_account(&recorded.tx(1).state);
+    assert!(!reported.is_touched(), "the transaction after it reports the account read-only");
+    assert_eq!(recorded.record.accounts.get(&L1_BLOCK_CONTRACT), Some(&None), "absent before");
     assert!(
         !recorded.record.storage.keys().any(|(address, _)| *address == L1_BLOCK_CONTRACT),
         "no slot of it is read from the database, before the deposit or after"
@@ -520,33 +701,77 @@ fn test_a_deposit_creating_the_l1_block_contract_adds_no_slot_read() {
     case.run();
 }
 
-/// The pre-block read of the L1 block info is made for every block, so a database that cannot
-/// serve the contract's account, or one of the five slots of a contract the chain holds, cannot
-/// start the block: the read fails before the first transaction, whatever the block holds — a
-/// block of deposits alone, which prices nothing against the contract, included — and so does a
-/// read of the overhead beside set scalars, which no transaction of the block would make. The
-/// failure is the node's database's, not a verdict on the block: an internal error.
+/// A block on `db` that starts, then executes `tx`.
+fn execute_one<DB>(db: DB, tx: &Tx) -> Result<(), BlockExecutionError>
+where
+    DB: alloy_evm::Database + revm::DatabaseCommit,
+{
+    let evm = MegaEvmFactory::new().create_evm(db, common::evm_env());
+    let mut executor = MegaBlockExecutor::new(
+        evm,
+        common::unlimited_ctx(),
+        common::chain_spec(),
+        OpAlloyReceiptBuilder::default(),
+    );
+    executor.apply_pre_execution_changes().expect("nothing reads the L1 block contract yet");
+    executor.execute_transaction(tx).map(drop)
+}
+
+/// A database over the L1 info that cannot serve the L1 block contract's `slot`, or its account
+/// when `slot` is `None`.
+fn refusing(slot: Option<U256>) -> ErrorInjectingDatabase {
+    let mut db = ErrorInjectingDatabase::new(chain_with_l1_info(Bytes::from(vec![0x00])));
+    match slot {
+        Some(slot) => db.fail_on_storage = Some((L1_BLOCK_CONTRACT, slot)),
+        None => db.fail_on_account = Some(L1_BLOCK_CONTRACT),
+    }
+    db
+}
+
+/// The L1 base fee is read by the fee computation alone, inside the transaction's execution: a
+/// database that cannot serve it gives the transaction no outcome, and the failure is reported as
+/// any failed read of a transaction's execution is, by whether the database declares it fatal —
+/// an internal error when it does, an invalid block when it does not. The block starts all the
+/// same: nothing reads the slot before the transaction.
 #[test]
-fn test_a_database_that_cannot_serve_the_l1_entry_fails_the_block_as_internal() {
-    let refusals = [
-        ("the account", Some(L1_BLOCK_CONTRACT), None),
-        ("the L1 base fee", None, Some((L1_BLOCK_CONTRACT, L1_BASE_FEE_SLOT))),
-        ("the overhead beside set scalars", None, Some((L1_BLOCK_CONTRACT, L1_OVERHEAD_SLOT))),
+fn test_a_failed_fee_read_is_routed_as_the_transactions_own() {
+    let tx = call(0, CONTRACT, slot(1), write_gas());
+
+    let mut state = State::builder()
+        .with_database(refusing(Some(L1_BASE_FEE_SLOT)))
+        .with_bundle_update()
+        .build();
+    let err = execute_one(&mut state, &tx).expect_err("the L1 base fee cannot be read");
+    assert!(matches!(err, BlockExecutionError::Internal(_)), "fatal: {err:?}");
+
+    let err = execute_one(common::NotFatal(refusing(Some(L1_BASE_FEE_SLOT))), &tx)
+        .expect_err("the L1 base fee cannot be read");
+    assert!(
+        matches!(err, BlockExecutionError::Validation(BlockValidationError::EVM { .. })),
+        "not fatal: {err:?}"
+    );
+}
+
+/// The footprint scalar is read by the block before a non-deposit transaction runs, outside its
+/// execution: a database that cannot serve the L1 block contract's account or the scalar's slot
+/// fails the block as an internal error, whether or not it declares the error fatal, before an
+/// ordinary transaction and before a Mega System Transaction alike. The block starts all the
+/// same: nothing reads them before the transaction.
+#[test]
+fn test_a_failed_footprint_read_is_an_internal_error() {
+    let txs = [
+        ("a user transaction", call(0, CONTRACT, slot(1), write_gas())),
+        ("a Mega System Transaction", common::system_tx()),
     ];
-    for (what, account, slot) in refusals {
-        let mut db = ErrorInjectingDatabase::new(chain_with_l1_info(Bytes::from(vec![0x00])));
-        db.fail_on_account = account;
-        db.fail_on_storage = slot;
-        let mut state = State::builder().with_database(db).with_bundle_update().build();
-        let evm = MegaEvmFactory::new().create_evm(&mut state, common::evm_env());
-        let mut executor = MegaBlockExecutor::new(
-            evm,
-            common::unlimited_ctx(),
-            common::chain_spec(),
-            OpAlloyReceiptBuilder::default(),
-        );
-        let err = executor.apply_pre_execution_changes().expect_err(what);
-        assert!(matches!(err, BlockExecutionError::Internal(_)), "{what}: {err:?}");
-        assert!(err.to_string().contains(&L1_BLOCK_CONTRACT.to_string()), "{what}: {err}");
+    for (what, tx) in &txs {
+        for slot in [None, Some(OPERATOR_FEE_SCALARS_SLOT)] {
+            let err = execute_one(common::NotFatal(refusing(slot)), tx)
+                .expect_err("the footprint scalar cannot be read");
+            assert!(matches!(err, BlockExecutionError::Internal(_)), "{what}, {slot:?}: {err:?}");
+            assert!(
+                err.to_string().contains(&L1_BLOCK_CONTRACT.to_string()),
+                "{what}, {slot:?}: {err}"
+            );
+        }
     }
 }

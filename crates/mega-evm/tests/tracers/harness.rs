@@ -571,9 +571,10 @@ pub(crate) fn assert_root_gas_used_is_the_receipt(traced: &Traced) {
 ///
 /// One read is outside every transaction's state by design, and is the only one excused: op-revm
 /// reads the L1 block contract's account and the slots of `L1_BLOCK_INFO_SLOTS` on the database
-/// itself, not through the journal, to price a transaction's L1 fee. Block execution hands
-/// exactly those keys to the witness as a pre-block read (`read_l1_block_info`). The excuse is
-/// those keys, read or not, and nothing else.
+/// itself, not through the journal, to price a transaction's L1 fee. A transaction run on its own
+/// reports them nowhere; block execution adds the keys its fee computation and footprint read to
+/// the state of the first transaction of the block that read them. The excuse is those keys, read
+/// or not, and nothing else.
 ///
 /// An account the engine read without its code — the `SequencerRegistry`'s, which every
 /// transaction's validation reads by its code hash — is named with the code the pre-state holds,
