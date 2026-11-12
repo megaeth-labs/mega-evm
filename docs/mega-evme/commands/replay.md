@@ -255,7 +255,7 @@ The exit code is 0, 1 when a block could not be replayed, or 2 when `--verify` i
 `--override.spec Satin` runs every block as it would run on Satin: every transaction as signed, on the state its parent block left, under Satin's protocol limits, or those `--override.limits` gives, with no building policy of a block builder applied.
 A transaction the Satin engine refuses (it cannot pay for its gas, or a block budget is full) is reported `refused` and left out, and the block goes on.
 A transaction signed with a gas limit sized for legacy costs can run out of gas on Satin: that is the counterfactual's answer, not a tool fault.
-`--override.spec Satin` runs no block as Satin's activation block, so it checks no predeploy; what it reads beyond the legacy replay is the L1 fee overhead slot, which every Satin block reads with the rest of the L1 block info.
+`--override.spec Satin` runs no block as Satin's activation block, so it checks no predeploy, and it reads the L1 block contract as the legacy replay does, when a transaction is priced against it or held to its footprint; what it reads beyond the legacy replay is only what a transaction's Satin run reads on a path the chain's run did not take.
 
 ## Transaction Overrides
 
