@@ -1414,8 +1414,10 @@ fn stop_before_the_first_frame<DB: Database, ExtEnvs: ExternalEnvTypes>(
 /// every other authority loaded once, with its code, and skipped when that code is not a
 /// delegation; a nonce compared with the authority's effective one, which the simulation bumps
 /// for each entry it accepts — and the totals it would keep are held to the transaction's KV and
-/// state-growth limits. The stop when they cross one, KV updates first; `None` when they fit, or
-/// when the list is too short to cross either.
+/// state-growth limits. The stop when they cross one, KV updates first; `None` when they fit.
+/// Every list is simulated, whatever its length, so the authorities the witness holds do not
+/// depend on whether the list could cross a limit or on where its application would run out of
+/// gas.
 ///
 /// The simulation writes nothing and warms nothing: the loads are taken back to a journal mark,
 /// which leaves the accounts in the transaction's state, cold, so a stateless witness holds every
@@ -1424,10 +1426,6 @@ fn hold_authorization_list<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
 ) -> Result<Option<LimitCheck>, DB::Error> {
     if ctx.tx().tx_type() != TransactionType::Eip7702 {
-        return Ok(None);
-    }
-    let entries = ctx.tx().authorization_list_len() as u64;
-    if !ctx.additional_limit.authorization_list_may_cross(entries) {
         return Ok(None);
     }
     let (records, created) = simulate_authorization_list(ctx)?;
