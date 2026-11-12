@@ -585,7 +585,7 @@ fn refused(access: VolatileDataAccess) -> (InstructionResult, Bytes) {
 /// The refusal follows what the Host loads, whichever way the call reaches it: the beneficiary
 /// behind an EIP-7702 delegation, the beneficiary with a delegation of its own, and the
 /// beneficiary's own frame destroying itself are refused; a call that loads no volatile data
-/// proceeds.
+/// proceeds, and so does an `EXTCODECOPY` of another account with every operand on the stack.
 #[test]
 fn test_a_refusal_follows_what_the_host_loads() {
     let beneficiary = refused(VolatileDataAccess::BENEFICIARY_BALANCE);
@@ -605,6 +605,19 @@ fn test_a_refusal_follows_what_the_host_loads() {
         .account_code(OTHER, BytecodeBuilder::default().stop().build())
         .account_code(CHILD, call(BytecodeBuilder::default(), CALL, OTHER).stop().build());
     assert_eq!(refused_child(db), (InstructionResult::Stop, Bytes::new()), "no volatile load");
+
+    // A copy of another account's code, its four operands on the stack.
+    let copy = BytecodeBuilder::default()
+        .push_number(1_u8)
+        .append_many([PUSH0, PUSH0])
+        .push_address(OTHER)
+        .append(EXTCODECOPY)
+        .stop()
+        .build();
+    let db = MemoryDatabase::default()
+        .account_code(OTHER, BytecodeBuilder::default().stop().build())
+        .account_code(CHILD, copy);
+    assert_eq!(refused_child(db), (InstructionResult::Stop, Bytes::new()), "EXTCODECOPY");
 }
 
 /// The beneficiary's own frame destroying itself reads and clears the beneficiary's balance:
@@ -630,8 +643,8 @@ fn test_the_beneficiary_destroying_itself_is_refused() {
 }
 
 /// An opcode that fails before it loads anything keeps its own failure: a `SELFDESTRUCT` in the
-/// beneficiary's own frame or a `CALL` to the beneficiary short of operands halts with a stack
-/// underflow, not a refusal.
+/// beneficiary's own frame, a `CALL` to the beneficiary or an `EXTCODECOPY` of it short of
+/// operands halts with a stack underflow, not a refusal.
 #[test]
 fn test_a_stack_underflow_is_not_a_refusal() {
     let db = MemoryDatabase::default()
@@ -651,6 +664,11 @@ fn test_a_stack_underflow_is_not_a_refusal() {
         .build();
     let db = MemoryDatabase::default().account_code(CHILD, partial_call);
     assert_eq!(refused_child(db).0, InstructionResult::StackUnderflow, "CALL");
+
+    let partial_copy =
+        BytecodeBuilder::default().push_address(BENEFICIARY).append(EXTCODECOPY).build();
+    let db = MemoryDatabase::default().account_code(CHILD, partial_copy);
+    assert_eq!(refused_child(db).0, InstructionResult::StackUnderflow, "EXTCODECOPY");
 }
 
 /// A database failure on an account an opcode loads surfaces as an error of the transaction, with
