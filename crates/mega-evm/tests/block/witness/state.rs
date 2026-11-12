@@ -11,7 +11,7 @@ use alloy_evm::{
 use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
 use alloy_primitives::{address, Address, Bytes, TxKind, U256};
 use mega_evm::{
-    test_utils::{BytecodeBuilder, ErrorInjectingDatabase, MemoryDatabase},
+    test_utils::{zero_fee_l1_block_info, BytecodeBuilder, ErrorInjectingDatabase, MemoryDatabase},
     MegaBlockExecutor, MegaEvmFactory,
 };
 use op_revm::constants::{
@@ -874,12 +874,19 @@ fn test_a_deposit_creating_the_l1_block_contract_adds_no_slot_read() {
     case.run();
 }
 
-/// A block on `db` that starts, then executes `tx`.
-fn execute_one<DB>(db: DB, tx: &Tx) -> Result<(), BlockExecutionError>
+/// A block on `db` that starts, then executes `tx`, optionally using fee information already
+/// cached for this block so the transaction itself needs no fee lookup.
+fn execute_one<DB>(db: DB, tx: &Tx, cached_fees: bool) -> Result<(), BlockExecutionError>
 where
     DB: alloy_evm::Database + revm::DatabaseCommit,
 {
-    let evm = MegaEvmFactory::new().create_evm(db, common::evm_env());
+    let mut evm = MegaEvmFactory::new().create_evm(db, common::evm_env());
+    if cached_fees {
+        evm.ctx_mut().modify_chain(|chain| {
+            *chain = zero_fee_l1_block_info();
+            chain.l2_block = Some(U256::from(common::BLOCK_NUMBER));
+        });
+    }
     let mut executor = MegaBlockExecutor::new(
         evm,
         common::unlimited_ctx(),
@@ -914,15 +921,38 @@ fn test_a_failed_fee_read_is_routed_as_the_transactions_own() {
         .with_database(refusing(Some(L1_BASE_FEE_SLOT)))
         .with_bundle_update()
         .build();
-    let err = execute_one(&mut state, &tx).expect_err("the L1 base fee cannot be read");
+    let err = execute_one(&mut state, &tx, false).expect_err("the L1 base fee cannot be read");
     assert!(matches!(err, BlockExecutionError::Internal(_)), "fatal: {err:?}");
 
-    let err = execute_one(common::NotFatal(refusing(Some(L1_BASE_FEE_SLOT))), &tx)
+    let err = execute_one(common::NotFatal(refusing(Some(L1_BASE_FEE_SLOT))), &tx, false)
         .expect_err("the L1 base fee cannot be read");
     assert!(
         matches!(err, BlockExecutionError::Validation(BlockValidationError::EVM { .. })),
         "not fatal: {err:?}"
     );
+}
+
+/// Cached fee information lets execution finish, but the outcome still needs the fee read for
+/// its witness. A failure to collect that read has the transaction's fatal/nonfatal routing.
+#[test]
+fn test_a_failed_fee_witness_read_with_cached_fees_has_no_outcome() {
+    let tx = call(0, CONTRACT, slot(1), write_gas());
+    let mut state = State::builder()
+        .with_database(refusing(Some(L1_BASE_FEE_SLOT)))
+        .with_bundle_update()
+        .build();
+
+    let fatal = execute_one(&mut state, &tx, true).expect_err("the witness lacks the base fee");
+    assert!(matches!(fatal, BlockExecutionError::Internal(_)), "fatal: {fatal:?}");
+    assert!(fatal.to_string().contains(&L1_BLOCK_CONTRACT.to_string()), "{fatal}");
+
+    let not_fatal = execute_one(common::NotFatal(refusing(Some(L1_BASE_FEE_SLOT))), &tx, true)
+        .expect_err("the witness lacks the base fee");
+    assert!(
+        matches!(not_fatal, BlockExecutionError::Validation(BlockValidationError::EVM { .. })),
+        "not fatal: {not_fatal:?}"
+    );
+    assert!(not_fatal.to_string().contains(&L1_BLOCK_CONTRACT.to_string()), "{not_fatal}");
 }
 
 /// The footprint scalar is read by the block before a non-deposit transaction runs, outside its
@@ -938,7 +968,7 @@ fn test_a_failed_footprint_read_is_an_internal_error() {
     ];
     for (what, tx) in &txs {
         for slot in [None, Some(OPERATOR_FEE_SCALARS_SLOT)] {
-            let err = execute_one(common::NotFatal(refusing(slot)), tx)
+            let err = execute_one(common::NotFatal(refusing(slot)), tx, false)
                 .expect_err("the footprint scalar cannot be read");
             assert!(matches!(err, BlockExecutionError::Internal(_)), "{what}, {slot:?}: {err:?}");
             assert!(

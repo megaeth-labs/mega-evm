@@ -27,8 +27,9 @@ use revm::{
     },
     context::{
         result::{ExecutionResult, HaltReason},
-        TxEnv,
+        JournalTr, TxEnv,
     },
+    context_interface::{ContextTr, Host},
     interpreter::{interpreter::EthInterpreter, interpreter_types::Jumps, Interpreter},
     Inspector,
 };
@@ -148,6 +149,80 @@ fn returned_word(run: &Run) -> U256 {
 /// A database holding the system contracts, with `SLOT` of the Oracle at `STATE_VALUE`.
 fn db_with_state() -> MemoryDatabase {
     system_db().account_storage(ORACLE_CONTRACT_ADDRESS, SLOT, STATE_VALUE)
+}
+
+/// A tool reading through the Host receives the same service answer as an opcode, with the
+/// chain's slot loaded into the journal and every read reported as cold.
+#[test]
+fn test_host_oracle_reads_use_the_service_and_load_the_chains_value() {
+    let service = Service::holding(SLOT, SERVICE_VALUE);
+    let envs = ExternalEnvs::<Envs> { salt_env: EmptyExternalEnv, oracle_env: service.clone() };
+    let mut ctx = MegaContext::new_with_external_envs(db_with_state(), MegaSpecId::SATIN, envs);
+    ctx.journal_mut().load_account(ORACLE_CONTRACT_ADDRESS).unwrap();
+
+    let first = Host::sload_skip_cold_load(&mut ctx, ORACLE_CONTRACT_ADDRESS, SLOT, false)
+        .expect("the tool requests the read");
+    let second = Host::sload_skip_cold_load(&mut ctx, ORACLE_CONTRACT_ADDRESS, SLOT, false)
+        .expect("a repeated read still asks the service");
+
+    assert_eq!((first.data, second.data), (SERVICE_VALUE, SERVICE_VALUE));
+    assert!(first.is_cold && second.is_cold);
+    assert_eq!(service.seen(), vec![Seen::Read(SLOT), Seen::Read(SLOT)]);
+    assert_eq!(
+        ctx.journal().state[&ORACLE_CONTRACT_ADDRESS].storage[&SLOT].present_value,
+        STATE_VALUE,
+        "the service answer does not overwrite the chain's slot"
+    );
+}
+
+/// A tool that elects to skip a cold Oracle read asks neither the journal nor the service.
+#[test]
+fn test_host_skipped_oracle_read_loads_no_slot_and_asks_no_service() {
+    let service = Service::holding(SLOT, SERVICE_VALUE);
+    let envs = ExternalEnvs::<Envs> { salt_env: EmptyExternalEnv, oracle_env: service.clone() };
+    let mut ctx = MegaContext::new_with_external_envs(db_with_state(), MegaSpecId::SATIN, envs);
+    ctx.journal_mut().load_account(ORACLE_CONTRACT_ADDRESS).unwrap();
+
+    let result = Host::sload_skip_cold_load(&mut ctx, ORACLE_CONTRACT_ADDRESS, SLOT, true);
+
+    assert!(matches!(result, Err(revm::context_interface::host::LoadError::ColdLoadSkipped)));
+    assert!(service.seen().is_empty());
+    assert!(ctx.journal().state[&ORACLE_CONTRACT_ADDRESS].storage.is_empty());
+}
+
+/// An Oracle SLOAD with no slot operand halts on its stack before it can ask or be refused.
+#[test]
+fn test_oracle_sload_without_an_operand_halts_before_reading_or_refusing() {
+    for disabled in [false, true] {
+        let service = Service::holding(SLOT, SERVICE_VALUE);
+        let db = db_with_state().account_code(
+            ORACLE_CONTRACT_ADDRESS,
+            BytecodeBuilder::default().append(SLOAD).build(),
+        );
+        let run = run_under(
+            db,
+            &service,
+            EvmTxRuntimeLimits::default(),
+            |ctx| if disabled { ctx.with_volatile_access_disabled_from(0) } else { ctx },
+            call_tx(ORACLE_CONTRACT_ADDRESS, [], U256::ZERO),
+        );
+
+        assert!(
+            matches!(
+                run.outcome.result,
+                ExecutionResult::Halt {
+                    reason: MegaHaltReason::Base(HaltReason::StackUnderflow),
+                    ..
+                }
+            ),
+            "access disabled {disabled}: {:?}",
+            run.outcome.result
+        );
+        assert!(service.seen().is_empty(), "access disabled {disabled}");
+        assert!(run.accessed.is_empty(), "access disabled {disabled}");
+        assert!(run.evm_reads.is_empty(), "access disabled {disabled}");
+        assert!(run.outcome.state[&ORACLE_CONTRACT_ADDRESS].storage.is_empty());
+    }
 }
 
 /// Code that reads `SLOT` twice and returns what each read cost: the price of `GAS`, of pushing

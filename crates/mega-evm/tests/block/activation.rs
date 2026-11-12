@@ -269,6 +269,15 @@ fn test_an_absent_parent_timestamp_is_refused_where_it_could_change_the_answer()
     assert_eq!(executor.is_satin_activation_block(), Err(missing.clone()));
     let error = executor.apply_pre_execution_changes().expect_err("the block does not start");
     assert_eq!(internal(&error), Some(&missing), "an internal error: the caller's omission");
+    assert_eq!(
+        internal(&error).unwrap().to_string(),
+        format!(
+            "the parent block's timestamp is missing: a fork the schedule activates after \
+             genesis is active at the block's timestamp {at}, and whether it activates in this \
+             block depends on the parent's timestamp"
+        ),
+        "the diagnostic identifies the missing context and the affected block"
+    );
     let error = executor
         .execute_transaction(&deposit_tx(Bytes::new(), empty_call_gas()))
         .expect_err("not even a deposit runs");
