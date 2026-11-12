@@ -6,11 +6,11 @@ mod common;
 
 use std::path::Path;
 
-use alloy_primitives::{Address, B256, U256};
+use alloy_primitives::{Address, B256};
 use common::blocks::{
     block_path, cache_copy, cache_copy_for_satin, code_of, factory_account, fixtures, is_deposit,
-    overhead_slot, read_block, refused_for_block_gas, run_evme, satin_genesis, set_overhead,
-    timestamp_of, write_block, BLOCKS, FACTORY, L1_BLOCK,
+    overhead_slot, read_block, refused_for_block_gas, run_evme, satin_genesis, timestamp_of,
+    write_block, BLOCKS, FACTORY, L1_BLOCK,
 };
 use mega_evm::{system::MEGA_SYSTEM_ADDRESS, MegaSpecId, ProtocolLimits};
 use serde_json::Value;
@@ -95,15 +95,16 @@ fn test_the_legacy_leg_replays_recorded_blocks_as_the_chain_did() {
     assert_eq!(std::fs::read(block_path(cache.path(), BLOCKS[0])).unwrap(), before);
 }
 
-/// A Satin replay of a recorded block reads what the recording lacks: offline, the block fails
-/// and names the first of them it met, and the exit code is 1. A counterfactual block is not
-/// Satin's activation block, so it reads no predeploy, and its miss is the L1 fee overhead, which
-/// the pre-block read of the L1 block info reads beside the fee scalars the recording holds set.
-/// Satin's activation block — under a genesis file that activates Satin at the block, whose
-/// parent came a second earlier — checks the predeploys first, and its miss is the EIP-7997
-/// factory.
+/// A Satin replay of a recorded block reads what the recording lacks only in Satin's activation
+/// block. A counterfactual block is not Satin's activation block, so it reads no predeploy, and it
+/// reads the L1 block contract as the legacy engine does, when a transaction is priced against it
+/// or held to its footprint: the L1 fee overhead, which the recording lacks, is not read beside
+/// the fee scalars the recording holds set, so every recorded block replays offline. Satin's
+/// activation block — under a genesis file that activates Satin at the block, whose parent came a
+/// second earlier — checks the predeploys first: offline, it fails, names the EIP-7997 factory it
+/// met, and the exit code is 1.
 #[test]
-fn test_a_read_the_recording_lacks_fails_the_block_offline() {
+fn test_a_satin_replay_reads_beyond_the_recording_only_in_its_activation_block() {
     let refusal = |dir: &Path, args: &[&str]| {
         let run = replay(BLOCKS[0], dir, args);
         assert_eq!(run.code, 1);
@@ -113,8 +114,14 @@ fn test_a_read_the_recording_lacks_fails_the_block_offline() {
     };
 
     let cache = cache_copy();
-    let error = refusal(cache.path(), &["--override.spec", "Satin"]);
-    assert!(error.contains(&format!("storage {L1_BLOCK:#x}[{}]", overhead_slot())), "{error}");
+    for number in BLOCKS {
+        let block = read_block(cache.path(), number);
+        let l1_block = block.prestate.accounts.get(&L1_BLOCK).expect("every block reads it");
+        assert!(!l1_block.storage.contains_key(&overhead_slot()), "no recording holds it");
+        let run = replay(number, cache.path(), &["--override.spec", "Satin"]);
+        assert_eq!(run.code, 0, "block {number}: {}", run.stderr);
+        assert_eq!(blocks_of(&run.records())[0]["engine"], "satin");
+    }
 
     let dir = tempfile::tempdir().unwrap();
     let mut block = read_block(cache.path(), BLOCKS[0]);
@@ -162,36 +169,14 @@ fn test_the_satin_counterfactual_of_recorded_blocks() {
     }
 }
 
-/// Whatever the L1 fee overhead holds, the Satin rows of the recorded blocks are the same: the
-/// blocks' fee scalars are set, so no transaction is priced with it, and the pre-block read that
-/// reads it is no transaction.
-#[test]
-fn test_the_overhead_does_not_change_the_satin_rows() {
-    let zero = cache_copy_for_satin();
-    let set = cache_copy_for_satin();
-    for number in BLOCKS {
-        let mut block = read_block(set.path(), number);
-        set_overhead(&mut block, U256::from(188));
-        write_block(set.path(), number, &block);
-    }
-    for number in BLOCKS {
-        let rows = |dir: &Path| {
-            let run = replay(number, dir, &["--override.spec", "Satin"]);
-            assert_eq!(run.code, 0, "{}", run.stderr);
-            run.records()
-        };
-        assert_eq!(rows(zero.path()), rows(set.path()), "block {number}");
-    }
-}
-
 /// [S18] A block fetched over RPC replays as the chain did, is written to the block cache with
 /// what its replay read beyond the trace, and then replays offline from the cache. The mock
 /// serves the recorded responses, and the trace is the recorded pre-state as one transaction's
-/// sighting. The Satin replay, a counterfactual and so no activation block, reads one slot the
-/// recording lacks, the L1 fee overhead its pre-block read of the L1 block info reads, and the
-/// cache keeps it; it reads no predeploy, so the cache holds no EIP-7997 factory.
+/// sighting. The Satin replay, a counterfactual and so no activation block, reads nothing the
+/// trace lacks: no predeploy, so the cache holds no EIP-7997 factory, and no L1 fee overhead,
+/// which no transaction of the block is priced with, so the cache holds none.
 ///
-/// Expected values: independent (the chain's own receipts, and the one pre-block read).
+/// Expected values: independent (the chain's own receipts, and the trace's reads).
 #[tokio::test(flavor = "multi_thread")]
 async fn test_a_block_fetched_over_rpc_is_cached_and_replays_offline() {
     let number = BLOCKS[2];
@@ -206,9 +191,9 @@ async fn test_a_block_fetched_over_rpc_is_cached_and_replays_offline() {
 
     let run = replay(number, cache.path(), &["--rpc", &uri, "--override.spec", "Satin"]);
     assert_eq!(run.code, 0, "{}", run.stderr);
-    assert_eq!(blocks_of(&run.records())[0]["rpc_reads"], 1, "the L1 fee overhead came over RPC");
+    assert_eq!(blocks_of(&run.records())[0]["rpc_reads"], 0, "nothing beyond the trace");
 
-    // Offline now: the cache holds the block, and the overhead the Satin replay read.
+    // Offline now: the cache holds the block, and nothing the trace did not hold.
     drop(server);
     let run = replay(number, cache.path(), &["--verify"]);
     assert_eq!(run.code, 0, "{}", run.stderr);
@@ -218,7 +203,7 @@ async fn test_a_block_fetched_over_rpc_is_cached_and_replays_offline() {
     assert_eq!(blocks_of(&run.records())[0]["rpc_reads"], 0);
     let cached = read_block(cache.path(), number).prestate;
     assert!(!cached.accounts.contains_key(&FACTORY), "no predeploy was read");
-    assert_eq!(cached.accounts[&L1_BLOCK].storage.get(&overhead_slot()), Some(&U256::ZERO));
+    assert_eq!(cached.accounts[&L1_BLOCK].storage.get(&overhead_slot()), None, "nor the overhead");
 }
 
 /// `--override.limits` replays a Satin block under other protocol limits: the fields it names
@@ -487,7 +472,7 @@ enum Parent {
 }
 
 /// A mock of the chain serving the recorded `number` block, its receipts, its pre-state as a
-/// trace, and the reads Satin's pre-block changes make beyond it; the parent block's header is
+/// trace, and the read Satin's activation block makes beyond it; the parent block's header is
 /// what `parent` says.
 async fn recorded_chain(number: u64, parent: Parent) -> wiremock::MockServer {
     use wiremock::{matchers, Mock, MockServer, ResponseTemplate};
@@ -550,8 +535,8 @@ async fn recorded_chain(number: u64, parent: Parent) -> wiremock::MockServer {
     respond("eth_getBlockReceipts", recorded.receipts.clone()).mount(&server).await;
     respond("debug_traceBlockByNumber", trace).mount(&server).await;
     // The parent state of what the trace does not hold: the factory, as the chain holds it
-    // ([`factory_account`]), which Satin's activation block checks, and the L1 fee overhead, which
-    // is zero.
+    // ([`factory_account`]), which Satin's activation block checks; any other account or slot
+    // asked for is empty.
     let factory = factory_account();
     let per_account = |method: &'static str, factory_value: Value, other: Value| {
         Mock::given(matchers::method("POST"))

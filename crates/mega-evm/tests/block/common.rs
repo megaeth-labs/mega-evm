@@ -468,3 +468,55 @@ pub(crate) fn incompressible(len: usize) -> Bytes {
             .collect::<Vec<u8>>(),
     )
 }
+
+/// A database error that is not fatal, as a read an EIP-7928 block access list does not cover
+/// raises: a failed read of a transaction's execution that carries it is a verdict on the block,
+/// an invalid block, rather than an internal error.
+#[derive(Debug)]
+pub(crate) struct NotFatalError(String);
+
+impl core::fmt::Display for NotFatalError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl core::error::Error for NotFatalError {}
+
+impl revm::context::DBErrorMarker for NotFatalError {
+    fn is_fatal(&self) -> bool {
+        false
+    }
+}
+
+/// An [`ErrorInjectingDatabase`](mega_evm::test_utils::ErrorInjectingDatabase) whose refusals are
+/// not fatal. A block runs on it directly: revm's `State` declares every error of the database
+/// below it fatal, so a not-fatal error reaches block execution only from a database it runs on.
+#[derive(Debug)]
+pub(crate) struct NotFatal(pub(crate) mega_evm::test_utils::ErrorInjectingDatabase);
+
+impl revm::Database for NotFatal {
+    type Error = NotFatalError;
+
+    fn basic(&mut self, address: Address) -> Result<Option<revm::state::AccountInfo>, Self::Error> {
+        self.0.basic(address).map_err(|error| NotFatalError(error.to_string()))
+    }
+
+    fn code_by_hash(&mut self, code_hash: B256) -> Result<revm::state::Bytecode, Self::Error> {
+        self.0.code_by_hash(code_hash).map_err(|error| NotFatalError(error.to_string()))
+    }
+
+    fn storage(&mut self, address: Address, index: U256) -> Result<U256, Self::Error> {
+        self.0.storage(address, index).map_err(|error| NotFatalError(error.to_string()))
+    }
+
+    fn block_hash(&mut self, number: u64) -> Result<B256, Self::Error> {
+        self.0.block_hash(number).map_err(|error| NotFatalError(error.to_string()))
+    }
+}
+
+impl revm::DatabaseCommit for NotFatal {
+    fn commit(&mut self, changes: EvmState) {
+        self.0.commit(changes);
+    }
+}

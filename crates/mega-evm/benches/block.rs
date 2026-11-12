@@ -49,7 +49,6 @@ use mega_evm::{
     BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutor, MegaEvmFactory, MegaHardforkConfig,
     MegaSpecId, MegaTransactionOutcome, MegaTxEnvelope,
 };
-use op_revm::constants::L1_BLOCK_CONTRACT;
 use revm::{
     bytecode::opcode::{CALLDATALOAD, SSTORE},
     context::{BlockEnv, CfgEnv},
@@ -286,9 +285,8 @@ fn steady_database() -> MemoryDatabase {
 }
 
 /// Asserts that the pre-block changes of the bench's block on `db` are a steady block's: the two
-/// calls, which write their contracts, then the reads of the registry's pending changes and of the
-/// L1 block info, and no read of a predeploy, which only Satin's activation block makes. Each step
-/// names one account.
+/// calls, which write their contracts, then the read of the registry's pending changes, and no
+/// read of a predeploy, which only Satin's activation block makes. Each step names one account.
 fn assert_steady_pre_block(db: &MemoryDatabase) {
     let states = pre_block_states(db.clone(), BLOCK_NUMBER);
     let named: Vec<_> = states
@@ -300,12 +298,7 @@ fn assert_steady_pre_block(db: &MemoryDatabase) {
         .collect();
     assert_eq!(
         named,
-        [
-            HISTORY_STORAGE_ADDRESS,
-            BEACON_ROOTS_ADDRESS,
-            SEQUENCER_REGISTRY_ADDRESS,
-            L1_BLOCK_CONTRACT
-        ],
+        [HISTORY_STORAGE_ADDRESS, BEACON_ROOTS_ADDRESS, SEQUENCER_REGISTRY_ADDRESS],
         "a steady block reads no predeploy"
     );
     // Outside every measured section: both calls wrote the contract the bench seeded.
