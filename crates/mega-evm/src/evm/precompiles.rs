@@ -609,13 +609,59 @@ mod tests {
     /// A `ModExp` header of `base_len`, `exp_len` and `mod_len`, followed by the operands.
     fn modexp_input(base: &[u8], exponent: &[u8], modulus: &[u8]) -> Bytes {
         let mut input = std::vec![0u8; 96];
-        input[31] = base.len() as u8;
-        input[63] = exponent.len() as u8;
-        input[95] = modulus.len() as u8;
+        input[..32].copy_from_slice(&U256::from(base.len()).to_be_bytes::<32>());
+        input[32..64].copy_from_slice(&U256::from(exponent.len()).to_be_bytes::<32>());
+        input[64..96].copy_from_slice(&U256::from(modulus.len()).to_be_bytes::<32>());
         input.extend_from_slice(base);
         input.extend_from_slice(exponent);
         input.extend_from_slice(modulus);
         Bytes::from(input)
+    }
+
+    #[test]
+    fn test_modexp_over_bound_input_is_priced_before_its_size_check() {
+        let address = *revm::precompile::modexp::OSAKA.address();
+        let input = modexp_input(&[0; 1_025], &[0], &[0]);
+        // EIP-7883: 2 * ceil(1025 / 8)^2, with one iteration for a zero exponent.
+        let price = 2 * 129_u64.pow(2);
+        let priced = PricedPrecompiles::default();
+        assert_eq!(priced.price(&satin_precompiles_map(), &address, &input), Some(price));
+
+        for (gas, expected) in [
+            (499, InstructionResult::PrecompileOOG),
+            (500, InstructionResult::PrecompileOOG),
+            (price - 1, InstructionResult::PrecompileOOG),
+            (price, InstructionResult::PrecompileError),
+            (price + 1, InstructionResult::PrecompileError),
+        ] {
+            let result = run(address, input.clone(), gas);
+            assert_eq!(result.result, expected, "gas={gas}");
+            assert_eq!(result.gas.remaining(), 0, "gas={gas}: a halt burns the forward");
+        }
+    }
+
+    #[test]
+    fn test_modexp_unpayable_lengths_run_out_of_gas() {
+        let address = *revm::precompile::modexp::OSAKA.address();
+        for position in 0..3 {
+            let mut input = modexp_input(&[0], &[0], &[0]).to_vec();
+            input[position * 32..(position + 1) * 32]
+                .copy_from_slice(&(U256::from(1) << 64_usize).to_be_bytes::<32>());
+            assert_eq!(
+                PricedPrecompiles::default().price(&satin_precompiles_map(), &address, &input),
+                Some(u64::MAX),
+                "position={position}"
+            );
+            for gas in [0, 499, 500, 100_000, u64::MAX - 1, u64::MAX] {
+                let result = run(address, Bytes::copy_from_slice(&input), gas);
+                assert_eq!(
+                    result.result,
+                    InstructionResult::PrecompileOOG,
+                    "position={position}, gas={gas}"
+                );
+                assert_eq!(result.gas.remaining(), 0, "position={position}, gas={gas}");
+            }
+        }
     }
 
     /// `ModExp` is the Osaka entry: a one-byte exponentiation costs the Osaka 500-gas minimum,
