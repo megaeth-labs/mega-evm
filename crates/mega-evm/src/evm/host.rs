@@ -416,8 +416,9 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
     /// such a creation calls it without the address it would take, which makes none either. A
     /// start revm then refuses past the call-stack limit makes no records, and the charge comes
     /// back when it returns, as does what a frame that ran did not keep. A value the caller cannot
-    /// fund makes no record either, and is priced none here, so its charge is nothing: only a
-    /// value call's history allowance is parked for it, and comes back when it returns.
+    /// fund makes no record and is priced none here, so it is charged nothing: only a value
+    /// call's history allowance, which is no gas, is parked for it, and closes with the start when
+    /// it returns.
     ///
     /// A charge the caller cannot pay, or a price that does not fit in a `u64`, fails the opcode
     /// with an out-of-gas and starts no frame, even where revm would have refused the start. The
