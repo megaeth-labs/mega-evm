@@ -317,15 +317,20 @@ impl L1BlockReport {
             if self.account && fresh.is_empty() {
                 continue;
             }
-            added.account |= !state.contains_key(&L1_BLOCK_CONTRACT);
-            let account =
-                state.entry(L1_BLOCK_CONTRACT).or_insert_with(|| match read.account.clone() {
+            let account = state.entry(L1_BLOCK_CONTRACT).or_insert_with(|| {
+                added.account = true;
+                match read.account.clone() {
                     Some(info) => Account::from(info),
                     None => Account::new_not_existing(TransactionId::ZERO),
-                });
+                }
+            });
             for (slot, value) in fresh {
-                if !account.storage.contains_key(&slot) {
-                    account.storage.insert(slot, EvmStorageSlot::new(value, TransactionId::ZERO));
+                let mut inserted = false;
+                account.storage.entry(slot).or_insert_with(|| {
+                    inserted = true;
+                    EvmStorageSlot::new(value, TransactionId::ZERO)
+                });
+                if inserted {
                     added.slots.push(slot);
                 }
             }
