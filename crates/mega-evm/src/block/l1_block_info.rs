@@ -24,15 +24,30 @@
 //! alone reads nothing of the contract, and a slot neither read reaches — the overhead beside set
 //! scalars — is not read at all.
 //!
+//! Which transaction is the first is the block's order, which the commits make: a builder may
+//! execute several candidates before it commits any, or commit an outcome another executor of the
+//! block executed. So every outcome carries what it read ([`L1BlockReads`]) beside its returned
+//! state, whatever its executor had reported, and the executor that commits it decides, from what
+//! it has itself committed ([`L1BlockReport`]), what the committed state reports. The returned
+//! state carries the report its executor would make if it committed the outcome next; a commit
+//! takes that out again and adds what its own report lacks, so the committed states report each
+//! key once, with the first committed transaction that read it.
+//!
 //! What the fee computation read is decided by the block, not by whether this node's op-revm
-//! fetched the info for it: the fee read is made again, through op-revm's own fetch, once the
-//! transaction ran and before it is committed, on the state it ran on, which a node's state cache
-//! serves without a database read once op-revm made its own. A validator that replays the block
-//! fetches the info at the same transaction and reads the same keys.
+//! fetched the info for it: op-revm fetches it once per block, at the first transaction it prices,
+//! and prices every later one from what it fetched, and the fee read is made again, through
+//! op-revm's own fetch, once that transaction ran and before it is committed, on the state it ran
+//! on, which a node's state cache serves without a database read once op-revm made its own, and
+//! carried by every transaction the executor prices in the block. A validator that replays the
+//! block fetches the info at its first such transaction and reads the same keys.
 
 #[cfg(not(feature = "std"))]
 use alloc as std;
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+    vec::Vec,
+};
 
 use alloy_primitives::{Address, B256, U256};
 use op_revm::{
@@ -73,17 +88,17 @@ pub(crate) struct L1BlockRead {
     slots: BTreeMap<U256, U256>,
 }
 
-/// A database that answers from the one it wraps and, when it records, keeps what it answered
-/// about the L1 block contract.
+/// A database that answers from the one it wraps and keeps what it answered about the L1 block
+/// contract.
 struct Recording<'a, DB> {
     db: &'a mut DB,
-    read: Option<L1BlockRead>,
+    read: L1BlockRead,
 }
 
 impl<'a, DB> Recording<'a, DB> {
-    /// Answers from `db`, recording when `record` says so.
-    fn new(db: &'a mut DB, record: bool) -> Self {
-        Self { db, read: record.then(L1BlockRead::default) }
+    /// Answers from `db`.
+    const fn new(db: &'a mut DB) -> Self {
+        Self { db, read: L1BlockRead { account: None, slots: BTreeMap::new() } }
     }
 }
 
@@ -92,8 +107,8 @@ impl<DB: Database> Database for Recording<'_, DB> {
 
     fn basic(&mut self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
         let info = self.db.basic(address)?;
-        if let Some(read) = self.read.as_mut().filter(|_| address == L1_BLOCK_CONTRACT) {
-            read.account.clone_from(&info);
+        if address == L1_BLOCK_CONTRACT {
+            self.read.account.clone_from(&info);
         }
         Ok(info)
     }
@@ -104,8 +119,8 @@ impl<DB: Database> Database for Recording<'_, DB> {
 
     fn storage(&mut self, address: Address, index: U256) -> Result<U256, Self::Error> {
         let value = self.db.storage(address, index)?;
-        if let Some(read) = self.read.as_mut().filter(|_| address == L1_BLOCK_CONTRACT) {
-            read.slots.insert(index, value);
+        if address == L1_BLOCK_CONTRACT {
+            self.read.slots.insert(index, value);
         }
         Ok(value)
     }
@@ -117,16 +132,15 @@ impl<DB: Database> Database for Recording<'_, DB> {
 
 /// Reads the data-availability footprint gas scalar as block execution reads it before a
 /// non-deposit transaction runs: the L1 block contract's account, then the scalar's slot, decoded
-/// as op-revm decodes it. With `record`, also what the read found, for the transaction's report.
+/// as op-revm decodes it; and what the read found, for the transaction's report.
 ///
 /// # Errors
 ///
 /// The database's, when a read fails.
 pub(crate) fn read_footprint_gas_scalar<DB: Database>(
     db: &mut DB,
-    record: bool,
-) -> Result<(u16, Option<L1BlockRead>), DB::Error> {
-    let mut db = Recording::new(db, record);
+) -> Result<(u16, L1BlockRead), DB::Error> {
+    let mut db = Recording::new(db);
     // Load the account first: a database that has never seen it cannot serve its storage.
     db.basic(L1_BLOCK_CONTRACT)?;
     let scalar = L1BlockInfo::fetch_da_footprint_gas_scalar(&mut db)?;
@@ -146,11 +160,74 @@ pub(crate) fn read_fee_info<DB: Database>(
     number: U256,
     spec: OpSpecId,
 ) -> Result<L1BlockRead, DB::Error> {
-    let mut db = Recording::new(db, true);
+    let mut db = Recording::new(db);
     if db.basic(L1_BLOCK_CONTRACT)?.is_some() {
         L1BlockInfo::try_fetch(&mut db, number, spec)?;
     }
-    Ok(db.read.unwrap_or_default())
+    Ok(db.read)
+}
+
+/// What a transaction read of the L1 block contract outside its journal, carried with its outcome
+/// until a block executor commits it, and what the report of the executor that executed it added
+/// to its returned state.
+///
+/// A deposit reads nothing; every other transaction the footprint, made before it ran; and a
+/// transaction the fee computation priced the fee read too. Each read is carried whole, whatever
+/// its executor had reported, so the executor that commits the outcome can report what it has not.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct L1BlockReads {
+    /// The footprint read: `Some` for every non-deposit transaction.
+    footprint: Option<L1BlockRead>,
+    /// The fee read: `Some` for a transaction the fee computation priced. One read serves every
+    /// transaction the fee computation prices in the block, so its outcomes share it.
+    fee: Option<Arc<L1BlockRead>>,
+    /// The entries the report of the executor that executed the transaction added to its returned
+    /// state.
+    added: Added,
+}
+
+impl L1BlockReads {
+    /// The reads of a non-deposit transaction: the `footprint` read, and the `fee` read when the
+    /// fee computation priced it.
+    pub(crate) const fn new(footprint: L1BlockRead, fee: Option<Arc<L1BlockRead>>) -> Self {
+        Self { footprint: Some(footprint), fee, added: Added::NONE }
+    }
+
+    /// Whether these are the reads of a transaction that is a deposit when `is_deposit`, and that
+    /// the fee computation priced when `priced`: none for a deposit, the footprint read for every
+    /// other transaction, and the fee read for one the fee computation priced.
+    pub(crate) const fn are_of(&self, is_deposit: bool, priced: bool) -> bool {
+        self.footprint.is_some() != is_deposit && self.fee.is_some() == (!is_deposit && priced)
+    }
+}
+
+/// The entries a report added to a transaction's returned state: the L1 block contract's account,
+/// when the state named none, and the slots it added.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Added {
+    /// Whether the report added the account, and so every slot under it.
+    account: bool,
+    /// The slots the report added.
+    slots: Vec<U256>,
+}
+
+impl Added {
+    /// Nothing added.
+    const NONE: Self = Self { account: false, slots: Vec::new() };
+
+    /// Takes these entries out of `state`, which leaves what the transaction's own execution put
+    /// there.
+    fn take_out(&self, state: &mut EvmState) {
+        if self.account {
+            state.remove(&L1_BLOCK_CONTRACT);
+        } else if let Some(account) =
+            state.get_mut(&L1_BLOCK_CONTRACT).filter(|_| !self.slots.is_empty())
+        {
+            for slot in &self.slots {
+                account.storage.remove(slot);
+            }
+        }
+    }
 }
 
 /// What block execution has reported of the L1 block contract in the states it committed in the
@@ -158,7 +235,9 @@ pub(crate) fn read_fee_info<DB: Database>(
 ///
 /// The footprint read is reported with the first non-deposit transaction committed, and the fee
 /// read with the first committed transaction the fee computation priced, each without the keys a
-/// committed state of a transaction that read the contract named already.
+/// committed state of a transaction that read the contract named already. It is the committing
+/// executor's: an outcome executed elsewhere, or before another commit, is reported by what the
+/// executor that commits it has committed.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct L1BlockReport {
     /// Whether a committed transaction reported the footprint read.
@@ -174,25 +253,57 @@ pub(crate) struct L1BlockReport {
 impl L1BlockReport {
     /// Whether the footprint read is still to be reported: no transaction that made it was
     /// committed yet.
-    pub(crate) const fn reports_footprint(&self) -> bool {
+    const fn reports_footprint(&self) -> bool {
         !self.footprint
     }
 
     /// Whether the fee read is still to be reported: no transaction the fee computation priced was
     /// committed yet.
-    pub(crate) const fn reports_fee(&self) -> bool {
+    const fn reports_fee(&self) -> bool {
         !self.fee
+    }
+
+    /// Adds to `state`, the returned state of the transaction that made `reads`, what this report
+    /// would add if the transaction were committed next, and keeps on `reads` what it added, which
+    /// a commit takes out again ([`commit`](Self::commit)).
+    pub(crate) fn report(&self, state: &mut EvmState, reads: &mut L1BlockReads) {
+        reads.added = self.add(state, reads);
+    }
+
+    /// Settles `state`, the returned state of the non-deposit transaction that made `reads`, which
+    /// this report's executor commits, and records what it reports: it takes out what the report
+    /// of the executor that executed it added, adds what this report lacks, and marks the reads
+    /// `state` now reports ([`committed`](Self::committed)), the fee read when the fee computation
+    /// `priced` the transaction.
+    ///
+    /// Committed where it executed and before anything else was committed, the outcome is
+    /// committed as it was returned: the two reports are one.
+    pub(crate) fn commit(&mut self, state: &mut EvmState, reads: &L1BlockReads, priced: bool) {
+        reads.added.take_out(state);
+        self.add(state, reads);
+        self.committed(state, priced);
+    }
+
+    /// Adds to `state` what `reads` found that this report lacks — the footprint read while no
+    /// committed transaction reported it, the fee read while no committed transaction the fee
+    /// computation priced did — and answers what it added.
+    fn add(&self, state: &mut EvmState, reads: &L1BlockReads) -> Added {
+        let footprint = reads.footprint.as_ref().filter(|_| self.reports_footprint());
+        let fee = reads.fee.as_deref().filter(|_| self.reports_fee());
+        self.add_to(state, footprint.into_iter().chain(fee))
     }
 
     /// Adds to `state`, a transaction's returned state, what `reads` found that no committed state
     /// named yet, as read-only entries: the account as found, and each slot found of an account the
     /// state holds. An entry `state` holds already is left as it is, so the transaction's own load
-    /// of the contract, or its write to it, stands; a slot to report goes under it.
-    pub(crate) fn add_to<'a>(
+    /// of the contract, or its write to it, stands; a slot to report goes under it. Answers what it
+    /// added.
+    fn add_to<'a>(
         &self,
         state: &mut EvmState,
         reads: impl IntoIterator<Item = &'a L1BlockRead>,
-    ) {
+    ) -> Added {
+        let mut added = Added::NONE;
         for read in reads {
             let fresh: BTreeMap<U256, U256> = match read.account {
                 Some(_) => read
@@ -206,28 +317,27 @@ impl L1BlockReport {
             if self.account && fresh.is_empty() {
                 continue;
             }
+            added.account |= !state.contains_key(&L1_BLOCK_CONTRACT);
             let account =
                 state.entry(L1_BLOCK_CONTRACT).or_insert_with(|| match read.account.clone() {
                     Some(info) => Account::from(info),
                     None => Account::new_not_existing(TransactionId::ZERO),
                 });
             for (slot, value) in fresh {
-                account
-                    .storage
-                    .entry(slot)
-                    .or_insert_with(|| EvmStorageSlot::new(value, TransactionId::ZERO));
+                if !account.storage.contains_key(&slot) {
+                    account.storage.insert(slot, EvmStorageSlot::new(value, TransactionId::ZERO));
+                    added.slots.push(slot);
+                }
             }
         }
+        added
     }
 
     /// Records what the committed `state` of a non-deposit transaction reported: the footprint
     /// read, which every non-deposit transaction makes, and, when the fee computation `priced` it,
-    /// the fee read; and the keys of the contract `state` names, which are in the witness from now
-    /// on.
-    pub(crate) fn committed(&mut self, state: &EvmState, priced: bool) {
-        if self.fee || (self.footprint && !priced) {
-            return;
-        }
+    /// the fee read; and the keys of the contract `state` names, its own entries among them, which
+    /// are in the witness from now on, so no later report names them again.
+    fn committed(&mut self, state: &EvmState, priced: bool) {
         self.footprint = true;
         self.fee |= priced;
         if let Some(account) = state.get(&L1_BLOCK_CONTRACT) {
@@ -326,24 +436,21 @@ mod tests {
             let read = read_fee_info(&mut db, U256::from(9), spec).expect("no slot is read");
             assert_eq!(read, L1BlockRead::default(), "absent, with no slot");
         }
-        let (scalar, footprint) = read_footprint_gas_scalar(&mut MemoryDatabase::default(), true)
+        let (scalar, footprint) = read_footprint_gas_scalar(&mut MemoryDatabase::default())
             .expect("an absent contract holds a zero scalar");
         assert_eq!(scalar, 0);
         let mut state = EvmState::default();
-        L1BlockReport::default().add_to(&mut state, footprint.iter());
+        L1BlockReport::default().add_to(&mut state, [&footprint]);
         let account = &state[&L1_BLOCK_CONTRACT];
         assert!(account.is_loaded_as_not_existing() && !account.is_touched());
         assert!(account.storage.is_empty(), "no slot of an absent account");
     }
 
-    /// The footprint read decodes the scalar as op-revm does, and records what it read only when
-    /// asked: the account and the scalar's slot.
+    /// The footprint read decodes the scalar as op-revm does, and records what it read: the
+    /// account and the scalar's slot.
     #[test]
-    fn test_the_footprint_read_records_only_when_asked() {
-        let (scalar, read) = read_footprint_gas_scalar(&mut chain(scalars()), false).unwrap();
-        assert_eq!((scalar, read), (400, None));
-        let (scalar, read) = read_footprint_gas_scalar(&mut chain(scalars()), true).unwrap();
-        let read = read.expect("recorded");
+    fn test_the_footprint_read_records_the_account_and_the_scalars_slot() {
+        let (scalar, read) = read_footprint_gas_scalar(&mut chain(scalars())).unwrap();
         assert_eq!(scalar, 400);
         assert!(read.account.is_some());
         assert_eq!(read.slots, BTreeMap::from([(OPERATOR_FEE_SCALARS_SLOT, footprint_word())]));
@@ -387,18 +494,18 @@ mod tests {
     #[test]
     fn test_what_a_committed_state_reported_is_not_reported_again() {
         let spec = crate::MegaSpecId::SATIN.into_op_spec();
-        let (_, footprint) = read_footprint_gas_scalar(&mut chain(scalars()), true).unwrap();
+        let (_, footprint) = read_footprint_gas_scalar(&mut chain(scalars())).unwrap();
         let fee = read_fee_info(&mut chain(scalars()), U256::from(9), spec).unwrap();
         let mut report = L1BlockReport::default();
         assert!(report.reports_footprint() && report.reports_fee());
 
         let mut system = EvmState::default();
-        report.add_to(&mut system, footprint.iter());
+        report.add_to(&mut system, [&footprint]);
         report.committed(&system, false);
         assert!(!report.reports_footprint() && report.reports_fee());
 
         let mut priced = EvmState::default();
-        report.add_to(&mut priced, footprint.iter().chain([&fee]));
+        report.add_to(&mut priced, [&footprint, &fee]);
         let slots: BTreeSet<_> = priced[&L1_BLOCK_CONTRACT].storage.keys().copied().collect();
         assert_eq!(
             slots,
@@ -410,5 +517,157 @@ mod tests {
         let mut later = EvmState::default();
         report.add_to(&mut later, [&fee]);
         assert!(later.is_empty(), "nothing is left to report");
+    }
+
+    /// The reads of a priced transaction on [`chain`]: its footprint read and its fee read.
+    fn priced_reads() -> L1BlockReads {
+        let spec = crate::MegaSpecId::SATIN.into_op_spec();
+        let (_, footprint) = read_footprint_gas_scalar(&mut chain(scalars())).unwrap();
+        let fee = read_fee_info(&mut chain(scalars()), U256::from(9), spec).unwrap();
+        L1BlockReads::new(footprint, Some(Arc::new(fee)))
+    }
+
+    /// A report after a priced transaction's commit: nothing is left to report.
+    fn reported() -> L1BlockReport {
+        let mut report = L1BlockReport::default();
+        let mut state = EvmState::default();
+        report.commit(&mut state, &priced_reads(), true);
+        assert!(!report.reports_footprint() && !report.reports_fee());
+        report
+    }
+
+    /// A transaction's own entry of the contract: the account touched, and the scalars' slot
+    /// written from the chain's value to zero.
+    fn own_entry() -> EvmState {
+        let mut own = Account::from(chain(scalars()).basic(L1_BLOCK_CONTRACT).unwrap().unwrap());
+        own.status = AccountStatus::Touched;
+        let mut written = EvmStorageSlot::new(scalars(), TransactionId::ZERO);
+        written.present_value = U256::ZERO;
+        own.storage.insert(ECOTONE_L1_FEE_SCALARS_SLOT, written);
+        EvmState::from_iter([(L1_BLOCK_CONTRACT, own)])
+    }
+
+    /// A commit by the executor that executed the transaction, with nothing committed in between,
+    /// leaves the returned state as it was: both reports are one.
+    #[test]
+    fn test_a_commit_on_the_report_that_executed_changes_nothing() {
+        for (report, own) in [
+            (L1BlockReport::default(), EvmState::default()),
+            (L1BlockReport::default(), own_entry()),
+            (reported(), EvmState::default()),
+            (reported(), own_entry()),
+        ] {
+            let mut reads = priced_reads();
+            let mut state = own.clone();
+            report.report(&mut state, &mut reads);
+            let returned = state.clone();
+            report.clone().commit(&mut state, &reads, true);
+            assert_eq!(state, returned);
+        }
+    }
+
+    /// An outcome executed on a report that had reported nothing, committed on one that reported
+    /// everything, loses every entry its executor's report added and keeps its own; one executed on
+    /// a report that had reported everything, committed on one that reported nothing, gets every
+    /// read added under its own entry, which it replaces in nothing.
+    #[test]
+    fn test_a_commit_takes_out_what_the_executing_report_added_and_adds_what_its_own_lacks() {
+        for own in [EvmState::default(), own_entry()] {
+            let mut reads = priced_reads();
+            let mut state = own.clone();
+            L1BlockReport::default().report(&mut state, &mut reads);
+            assert_eq!(state[&L1_BLOCK_CONTRACT].storage.len(), 4, "reported where executed");
+            reported().commit(&mut state, &reads, true);
+            assert_eq!(state, own, "nothing reported where committed, the own entry kept");
+
+            let mut reads = priced_reads();
+            let mut state = own.clone();
+            reported().report(&mut state, &mut reads);
+            assert_eq!(state, own, "nothing reported where executed");
+            let mut report = L1BlockReport::default();
+            report.commit(&mut state, &reads, true);
+            let mut expected = own.clone();
+            L1BlockReport::default().add_to(
+                &mut expected,
+                [reads.footprint.as_ref().unwrap(), reads.fee.as_deref().unwrap()],
+            );
+            assert_eq!(state, expected, "reported where committed");
+            if !own.is_empty() {
+                let account = &state[&L1_BLOCK_CONTRACT];
+                assert!(account.is_touched(), "the own account stands");
+                assert_eq!(
+                    account.storage[&ECOTONE_L1_FEE_SCALARS_SLOT],
+                    own[&L1_BLOCK_CONTRACT].storage[&ECOTONE_L1_FEE_SCALARS_SLOT],
+                    "the own write stands"
+                );
+            }
+            assert!(!report.reports_footprint() && !report.reports_fee(), "and marked");
+        }
+    }
+
+    /// A deposit reads nothing, every other transaction the footprint, and one the fee
+    /// computation priced the fee too.
+    #[test]
+    fn test_the_reads_are_of_the_transaction_that_made_them() {
+        let none = L1BlockReads::default();
+        let footprint = L1BlockReads::new(L1BlockRead::default(), None);
+        let priced = priced_reads();
+        assert!(none.are_of(true, false) && none.are_of(true, true));
+        assert!(!none.are_of(false, false) && !none.are_of(false, true));
+        assert!(footprint.are_of(false, false) && !footprint.are_of(false, true));
+        assert!(priced.are_of(false, true) && !priced.are_of(false, false));
+        assert!(!footprint.are_of(true, false) && !priced.are_of(true, true));
+    }
+
+    /// The recording database answers every read as the database it wraps — the code by hash and
+    /// the block hashes, which no read of the contract asks for, included — and records what it
+    /// answered about the contract alone.
+    #[test]
+    fn test_the_recording_answers_as_the_database_it_wraps() {
+        let mut db = chain(scalars());
+        let mut wrapped = chain(scalars());
+        let mut recording = Recording::new(&mut db);
+        let code_hash = alloy_primitives::keccak256([0x00]);
+        let code = wrapped.code_by_hash(code_hash).unwrap();
+        assert!(!code.is_empty(), "the chain holds the contract's code");
+        assert_eq!(recording.code_by_hash(code_hash).unwrap(), code);
+        let hash = wrapped.block_hash(7).unwrap();
+        assert_ne!(hash, B256::ZERO);
+        assert_eq!(recording.block_hash(7).unwrap(), hash);
+        let other = Address::with_last_byte(9);
+        assert_eq!(recording.basic(other).unwrap(), wrapped.basic(other).unwrap());
+        assert_eq!(recording.storage(other, U256::from(1)).unwrap(), U256::ZERO);
+        assert_eq!(recording.read, L1BlockRead::default(), "nothing of the contract was read");
+
+        let mut db = ErrorInjectingDatabase::new(chain(scalars()));
+        db.fail_on_code_by_hash = Some(code_hash);
+        db.fail_on_block_hash = Some(7);
+        let mut recording = Recording::new(&mut db);
+        assert!(recording.code_by_hash(code_hash).is_err(), "a failed read stays one");
+        assert!(recording.block_hash(7).is_err(), "a failed read stays one");
+    }
+
+    /// A committed state's own entries of the contract are in the witness from its commit on, so
+    /// no later report names them again, whichever read was still to be reported: a Mega System
+    /// Transaction whose own execution read the L1 base fee leaves the fee read that slot to skip.
+    #[test]
+    fn test_a_committed_states_own_entries_are_not_reported_again() {
+        let reads = priced_reads();
+        let mut report = L1BlockReport::default();
+        let mut system = EvmState::default();
+        report.add_to(&mut system, [reads.footprint.as_ref().unwrap()]);
+        report.committed(&system, false);
+        let mut own = system.clone();
+        own.get_mut(&L1_BLOCK_CONTRACT)
+            .unwrap()
+            .storage
+            .insert(L1_BASE_FEE_SLOT, EvmStorageSlot::new(U256::from(1_001), TransactionId::ZERO));
+        report.committed(&own, false);
+        assert!(!report.reports_footprint() && report.reports_fee());
+
+        let mut priced = EvmState::default();
+        report.add_to(&mut priced, [reads.fee.as_deref().unwrap()]);
+        let slots: BTreeSet<_> = priced[&L1_BLOCK_CONTRACT].storage.keys().copied().collect();
+        assert_eq!(slots, [ECOTONE_L1_FEE_SCALARS_SLOT, ECOTONE_L1_BLOB_BASE_FEE_SLOT].into());
     }
 }
