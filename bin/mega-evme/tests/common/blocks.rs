@@ -12,7 +12,7 @@ use std::{
     sync::OnceLock,
 };
 
-use alloy_primitives::{address, Address, B256, U256};
+use alloy_primitives::{address, Address, B256};
 use mega_evme::block::{CachedBlock, PreAccount};
 use serde_json::Value;
 
@@ -32,9 +32,8 @@ pub(crate) fn factory_account() -> PreAccount {
     }
 }
 
-/// The L1 block contract, whose L1 fee overhead slot Satin's pre-block changes read with the
-/// rest of the L1 block info, whatever the fee scalars hold. The legacy engine reads the slot
-/// only when the scalars are empty, which they are not on these blocks, so no recording holds it.
+/// The L1 block contract, whose L1 fee overhead slot either engine reads only when the fee
+/// scalars are empty, which they are not on these blocks, so no recording holds it.
 pub(crate) const L1_BLOCK: Address = address!("0x4200000000000000000000000000000000000015");
 
 /// The L1 fee overhead slot of [`L1_BLOCK`].
@@ -90,9 +89,7 @@ pub(crate) fn cache_copy() -> tempfile::TempDir {
 
 /// A copy of the recorded block cache in which every block's pre-state holds what a Satin replay
 /// reads beyond the recording: the factory, as the chain holds it ([`factory_account`], its code
-/// in the cache's code store), which only Satin's activation block reads, and the L1 fee overhead,
-/// zero, as the chain held it. `block_replay.rs` shows the overhead's value changes no transaction
-/// row.
+/// in the cache's code store), which only Satin's activation block reads.
 pub(crate) fn cache_copy_for_satin() -> tempfile::TempDir {
     let dir = cache_copy();
     let factory = factory_account();
@@ -102,16 +99,9 @@ pub(crate) fn cache_copy_for_satin() -> tempfile::TempDir {
     for number in BLOCKS {
         let mut block = read_block(dir.path(), number);
         block.prestate.accounts.insert(FACTORY, factory.clone());
-        set_overhead(&mut block, U256::ZERO);
         write_block(dir.path(), number, &block);
     }
     dir
-}
-
-/// Has `block`'s pre-state hold `value` as the L1 fee overhead.
-pub(crate) fn set_overhead(block: &mut CachedBlock, value: U256) {
-    let l1_block = block.prestate.accounts.get_mut(&L1_BLOCK).expect("every block reads it");
-    l1_block.storage.insert(overhead_slot(), value);
 }
 
 fn copy_dir(from: &Path, to: &Path) {
