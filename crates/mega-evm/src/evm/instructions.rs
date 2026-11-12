@@ -172,6 +172,7 @@ pub(crate) fn mega_instructions<DB: Database, ExtEnvs: ExternalEnvTypes>(
 
 /// `table` as the interpreter charges it with the read wrappers installed: the static gas of every
 /// opcode the wrappers run is theirs to charge, so the interpreter's entry is zero.
+#[cfg(any(test, feature = "test-utils"))]
 pub(crate) fn without_read_static_gas(mut table: GasTable) -> GasTable {
     for opcode in READ_OPCODES {
         table[opcode as usize] = 0;
