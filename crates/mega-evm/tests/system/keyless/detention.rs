@@ -506,10 +506,11 @@ fn reads_the_oracle(rounds: u16) -> Bytes {
 
 /// A constructor reads the Oracle's storage as any frame does: it gets the service's value when
 /// the service answers and the chain's otherwise, at the same price either way, and the read is
-/// volatile, under the Oracle's cap. Past a cap of 1,000, the constructor stops at its write of
+/// volatile, under the Oracle's cap. Past a cap of 5,000, the constructor stops at its write of
 /// what it read — a fresh, cold slot, whose dynamic charge of 22,000 no such cap pays — after the
-/// Oracle's return and the constructor's `POP`, push, `MLOAD`, `PUSH0` and `SSTORE`'s static gas,
-/// and the call answers the creation's stop, deploying nothing.
+/// `SLOAD`'s cold access, which the read is made before, the rest of the Oracle's frame, and the
+/// constructor's `POP`, push, `MLOAD`, `PUSH0` and `SSTORE`'s static gas, and the call answers the
+/// creation's stop, deploying nothing.
 #[test]
 fn test_a_constructor_reads_the_oracle_as_any_frame_does() {
     let deployment = Deployment::new(reads_the_oracle(1_000));
@@ -552,10 +553,10 @@ fn test_a_constructor_reads_the_oracle_as_any_frame_does() {
                 .with_inspector(OracleTail::default());
         evm.execute_transaction(tx()).expect("the transaction is valid");
         let tail = evm.inspector().tail();
-        let left = crossing_left(1_000, &[tail, 2, 3, 3, 2, 100, 22_000], &[]);
+        let left = crossing_left(5_000, &[2_100, tail, 2, 3, 3, 2, 100, 22_000], &[]);
         assert!(left > 0, "the write is the charge that crosses: {left}");
 
-        let stopped = run_tx(oracle_context(db(), service.clone(), 1_000), tx(), true);
+        let stopped = run_tx(oracle_context(db(), service.clone(), 5_000), tx(), true);
         assert_creation_stopped(&stopped, &deployment, gas_limit, left);
         assert_eq!(stopped.accessed, VolatileDataAccess::ORACLE);
     }

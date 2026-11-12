@@ -232,6 +232,31 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
         self.priced_precompiles.record_foreign();
     }
 
+    /// Replaces the static opcode prices the EVM charges with `table`: the test tooling's
+    /// neutral configuration installs a fixture fork's. The opcodes that can read volatile data
+    /// charge theirs in their read wrappers, which read them from the context; the instruction
+    /// table carries the rest.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) fn replace_static_gas_table(
+        &mut self,
+        table: revm::interpreter::instructions::GasTable,
+    ) {
+        self.inner.ctx.set_read_static_gas(table);
+        *self.inner.instruction.gas_table_mut() = instructions::without_read_static_gas(table);
+    }
+
+    /// The static opcode prices the EVM charges: the instruction table's, and for the opcodes
+    /// that can read volatile data the ones their read wrappers charge.
+    #[cfg(test)]
+    pub(crate) fn static_gas_table(&self) -> revm::interpreter::instructions::GasTable {
+        let mut table = *self.inner.instruction.gas_table();
+        for opcode in instructions::READ_OPCODES {
+            table[opcode as usize] =
+                u16::try_from(self.inner.ctx.read_static_gas(opcode)).unwrap_or(u16::MAX);
+        }
+        table
+    }
+
     /// Enforces `limits` on every transaction this EVM runs from now on.
     ///
     /// Every EVM already runs under its spec's limits
