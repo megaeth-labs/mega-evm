@@ -38,10 +38,9 @@
 //! block's encoded size, so the transactions after it find the room it used. The one limit that
 //! holds a deposit is the block's gas limit, which is the header's.
 //!
-//! A Mega System Transaction, the protocol's own oracle update, which the sequencer must be able
-//! to include whatever the block holds, is refused by none of those limits either and counts as a
-//! deposit does. Its envelope is legacy, so it also counts towards the block's data-availability
-//! size, and the data-availability footprint, which the executor checks, holds it.
+//! A Mega System Transaction has a legacy envelope: every packing budget and building-policy
+//! check holds it as any other non-deposit transaction. It counts towards every budget, including
+//! the block's data-availability size and footprint, which the executor checks.
 //!
 //! The per-transaction limits the block installs on the EVM are not block limits: they hold a
 //! deposit's own execution the way they hold any transaction's, and a deposit that crosses one is
@@ -111,17 +110,16 @@ pub struct ProtocolLimits {
     /// data size, per transaction and per frame, and gas detention's two caps.
     pub tx_runtime_limits: EvmTxRuntimeLimits,
     /// The most data-size bytes a block's transactions may keep together. The transaction that
-    /// reaches it is packed; after it, only a deposit or a Mega System Transaction is.
+    /// reaches it is packed; after it, only a deposit is.
     pub block_txs_data_limit: u64,
     /// The most write records a block's transactions may keep together: their KV count. The
-    /// transaction that reaches it is packed; after it, only a deposit or a Mega System
-    /// Transaction is. A file without it takes the default spec's.
+    /// transaction that reaches it is packed; after it, only a deposit is. A file without it takes
+    /// the default spec's.
     #[serde(default = "default_block_kv_update_limit")]
     pub block_kv_update_limit: u64,
     /// The most new accounts and new slots a block's transactions may keep together: their state
-    /// growth. The transaction that reaches it is packed; after it, only a deposit or a Mega
-    /// System Transaction is. The block's gas limit does not stand in for it. A file without it
-    /// takes the default spec's.
+    /// growth. The transaction that reaches it is packed; after it, only a deposit is. The block's
+    /// gas limit does not stand in for it. A file without it takes the default spec's.
     #[serde(default = "default_block_state_growth_limit")]
     pub block_state_growth_limit: u64,
 }
@@ -227,7 +225,7 @@ impl ProtocolLimits {
 ///   [`block_kv_update_limit`](Self::block_kv_update_limit) and
 ///   [`block_state_growth_limit`](Self::block_state_growth_limit) are the builder's caps on the
 ///   protocol's packing budgets: the block executor holds a block to the smaller of each pair. None
-///   of them refuses a deposit or a Mega System Transaction.
+///   of them refuses a deposit.
 ///
 /// The block's gas limit is not here: it is the header's, which the block executor takes from the
 /// block environment ([`BlockLimiter::block_gas_limit`]).
@@ -428,9 +426,9 @@ impl BlockLimiter {
     /// Whether `tx` may execute in this block.
     ///
     /// Checks the transaction against its own limits, and against what the block has left; a
-    /// transaction that is `packing_exempt` — a deposit, or a Mega System Transaction — is held to
-    /// the block's gas limit alone, to no limit only a builder applies and not to the data-size
-    /// limit. It reads the counters and changes nothing;
+    /// deposit is held to the block's gas limit alone, to no building policy or packing budget.
+    /// Every non-deposit transaction, including a Mega System Transaction, is held to all checks.
+    /// It reads the counters and changes nothing;
     /// [`post_execution_update`](Self::post_execution_update) advances the counters once the
     /// transaction commits.
     ///
@@ -446,11 +444,11 @@ impl BlockLimiter {
         gas_limit: u64,
         tx_size: u64,
         da_size: u64,
-        packing_exempt: bool,
+        is_deposit: bool,
     ) -> Result<(), BlockExecutionError> {
-        // Of the limits checked here, a packing-exempt transaction is held to the block's gas limit
+        // Of the limits checked here, a deposit is held to the block's gas limit
         // alone (see the module's documentation on deposits).
-        if !packing_exempt && gas_limit > self.limits.tx_gas_limit {
+        if !is_deposit && gas_limit > self.limits.tx_gas_limit {
             return Err(invalid_tx(
                 tx_hash,
                 MegaTxLimitExceededError::TransactionGasLimit {
@@ -468,9 +466,9 @@ impl BlockLimiter {
             .into());
         }
 
-        // Nothing below refuses a packing-exempt transaction; `post_execution_update` still counts
+        // Nothing below refuses a deposit; `post_execution_update` still counts
         // it.
-        if packing_exempt {
+        if is_deposit {
             return Ok(());
         }
 

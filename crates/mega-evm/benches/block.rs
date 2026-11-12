@@ -12,7 +12,7 @@
 //!   detention's caps, with no building policy on top (`BlockLimits::default()`);
 //! - from a fresh `State` over that database, as a node starts each block.
 //!
-//! Three workloads of `N` transactions each, whose per-transaction work beyond the transaction
+//! Four workloads of `N` transactions each, whose per-transaction work beyond the transaction
 //! itself is the executor's own: the admission checks, the size estimates, the limits, the
 //! counters, the receipt and the commit.
 //!
@@ -25,6 +25,9 @@
 //!   that already holds tokens, on the token `contracts/Token.sol` builds: a block of the commonest
 //!   contract call there is. Each reads and writes two balances and emits one `Transfer` log, so it
 //!   carries two write records and a log through the counters.
+//!
+//! - `system_updates`: legacy calls from the live system address that write fresh Oracle slots,
+//!   exercising the same admission and commit checks as user transactions.
 //!
 //! The measurement runs `apply_pre_execution_changes`, the transactions and `finish` — the whole
 //! block a node executes — and hands the state back, so dropping it is not measured. One more arm,
@@ -42,9 +45,10 @@ use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
 use alloy_primitives::{
     address, b256, hex, keccak256, Address, Bytes, Signature, TxKind, B256, U256,
 };
+use alloy_sol_types::SolCall;
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use mega_evm::{
-    system::{MEGA_SYSTEM_ADDRESS, SEQUENCER_REGISTRY_ADDRESS},
+    system::{IOracle, MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS, SEQUENCER_REGISTRY_ADDRESS},
     test_utils::{BytecodeBuilder, CommittedStates, MemoryDatabase},
     BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutor, MegaEvmFactory, MegaHardforkConfig,
     MegaSpecId, MegaTransactionOutcome, MegaTxEnvelope,
@@ -322,6 +326,27 @@ fn bench_block(c: &mut Criterion) {
         ("storage_writes", transactions(WRITER, 0, 300_000, slot_calldata), 1),
         // The sender's balance and the recipient's.
         ("erc20_transfers", token_transfers(), 2),
+        (
+            "system_updates",
+            (0..N)
+                .map(|nonce| {
+                    transaction(
+                        MEGA_SYSTEM_ADDRESS,
+                        nonce,
+                        ORACLE_CONTRACT_ADDRESS,
+                        0,
+                        500_000,
+                        IOracle::setSlotCall {
+                            slot: U256::from(nonce),
+                            value: B256::repeat_byte(1),
+                        }
+                        .abi_encode()
+                        .into(),
+                    )
+                })
+                .collect(),
+            1,
+        ),
     ];
 
     let mut group = c.benchmark_group("block");

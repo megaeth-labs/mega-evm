@@ -269,9 +269,8 @@ pub struct MegaBlockTxResult<T> {
     pub is_deposit: bool,
     /// Whether the transaction is a Mega System Transaction: a legacy call from the live system
     /// address, which the engine runs as the protocol's own. The block decided it before the
-    /// transaction ran, from the registry's system address, and a delayed commit makes the same
-    /// decision. Like a deposit it is never refused by the data-size packing budget or by the
-    /// builder's policy, and counts towards them.
+    /// transaction ran, from the registry's system address. Its legacy envelope is held to the
+    /// packing budgets and the builder's policy, at admission and at a delayed commit alike.
     pub is_system_transaction: bool,
     /// The nonce the depositor had before execution, which the deposit receipt reports. `Some`
     /// only for a deposit.

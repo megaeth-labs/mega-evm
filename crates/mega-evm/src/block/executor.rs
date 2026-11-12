@@ -583,7 +583,7 @@ where
             output.gas_limit,
             output.tx_size,
             output.da_size,
-            output.is_deposit || output.is_system_transaction,
+            output.is_deposit,
         )?;
         self.check_da_footprint(output.da_footprint)
     }
@@ -1057,13 +1057,7 @@ where
         // transaction here but refused there.
         let is_system_transaction = !is_deposit && self.is_system_transaction(&tx_env)?;
 
-        self.limiter.pre_execution_check(
-            tx_hash,
-            gas_limit,
-            tx_size,
-            da_size,
-            is_deposit || is_system_transaction,
-        )?;
+        self.limiter.pre_execution_check(tx_hash, gas_limit, tx_size, da_size, is_deposit)?;
 
         // A deposit is exempt from the data-availability footprint of the block, as it is from
         // its data-availability size.

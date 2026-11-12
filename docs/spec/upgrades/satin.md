@@ -26,7 +26,7 @@ Compute is regular gas, bounded by the execution cap and by [gas detention](../e
 Every limit, data size, KV updates, state growth and detention's compute limit, stops the frame that crosses it with a revert carrying `MegaLimitExceeded(kind, limit)`: the frame's caller can catch the stop and carry on within what the limits leave, and a transaction whose own frame is stopped pays only for what ran.
 Detention holds each frame's spendable regular gas inside the frame's own gas, so a transaction that read volatile data runs exactly as it would have without the read until a regular charge needs the gas it is not allowed to spend.
 
-Satin also brings EIP-7708 transfer logs, deploys a `keylessDeploy` transaction as a native creation instead of in a sandbox, runs system calls on at most 30,000,000 of regular gas with the rest as reservoir, has a system-address transaction read the live system address itself, and makes the block's data-size, KV and state-growth limits packing budgets that never refuse a deposit or a Mega System Transaction.
+Satin also brings EIP-7708 transfer logs, deploys a `keylessDeploy` transaction as a native creation instead of in a sandbox, runs system calls on at most 30,000,000 of regular gas with the rest as reservoir, has a system-address transaction read the live system address itself, and makes the block's data-size, KV and state-growth limits packing budgets that exempt deposits and hold Mega System Transactions as any other non-deposit transaction.
 
 Satin follows [Rex6](rex6.md) on the spec ladder, so every **Previous behavior** below is Rex6's.
 Satin does not add to the Rex6 rules one by one: it restates the execution layer, and a Rex6 rule this page does not carry over does not apply under Satin.
@@ -1321,15 +1321,12 @@ The transaction is skipped in any case.
   Such a builder MUST NOT commit a candidate whose sender's nonce or balance — the system address's, for a Mega System Transaction — another commit moved since the candidate executed: committing it would write the sender's account over what that commit did.
   Any other state a candidate read and a commit since changed is the builder's to account for, by executing the candidate again; a candidate that read the Oracle executed before a Mega System Transaction that writes it, committed after that transaction, commits the value it read.
 - A deposit, a transaction whose envelope is a deposit, MUST NOT be refused by any of the three, and MUST count towards each.
-  A Mega System Transaction MUST NOT be refused by any of the three either, nor by a building policy, and MUST count towards each, so the oracle update the sequencer must be able to include is never skipped for a budget the block's other transactions used up.
-  The exemption covers KV and state growth for the same reason it covers data size: a deposit is derived from L1 and must be included, and a Mega System Transaction is the sequencer's own update.
-  Refusing either for KV or state growth alone would make the same transaction valid on the data-size budget and skippable on another block limit.
-  Rex6 skipped every later candidate, deposits included, once any of these counters was at or above its limit.
-  Satin does not.
-  The block decides that before the transaction runs, from its envelope and the live system address (see [The Live System Address](#17-the-live-system-address)): a legacy transaction of the system shape sent from that address.
-  A transaction from that address of another shape is no Mega System Transaction here; the block treats it as any other transaction, and it is invalid as [The Live System Address](#17-the-live-system-address) states.
-  A Mega System Transaction is still held to the block gas limit, and, its envelope being legacy, to the block's data-availability footprint, which it counts towards with its data-availability size.
-  The exemption is from the three packing budgets and from building policy.
+  The block decides this from the envelope before execution.
+  A deposit is derived from L1 and must be included even after a packing budget is reached.
+  Rex6 skipped every later candidate, deposits included, once any of these counters was at or above its limit; Satin exempts deposits.
+  A Mega System Transaction MUST be held to all three packing budgets and to building policy, and MUST count towards each as any other non-deposit transaction does.
+  The system transaction that reaches or crosses a budget is included; any later non-deposit transaction MUST be skipped before execution.
+  A Mega System Transaction is also held to the block gas limit and, its envelope being legacy, to the block's data-availability footprint.
 - Execution gas, state gas and history gas have no block limit beyond the block gas limit.
   State gas prices the state a block adds, and `BLOCK_STATE_GROWTH_LIMIT` counts it.
   The block gas limit does not stand in for that count: at `m = 1`, 1,000 fresh slots cost 97,920,000 state gas, and a block gas limit above that does not stop the 1,001st.
@@ -1341,7 +1338,7 @@ The transaction is skipped in any case.
 - A block builder MAY pack tighter, as building policy: it MAY refuse a transaction for its declared gas limit, its encoded size or its data-availability size, hold the block to an encoded-size or data-availability budget, and hold any of the three packing budgets below the protocol's value, never above it.
   A builder MAY still pack fewer transactions than the protocol budgets allow, by not selecting them.
   A building policy MUST NOT refuse a deposit, which the block derived from L1 must include: none of those per-transaction limits and budgets applies to one.
-  It MUST NOT refuse a Mega System Transaction either: none of them applies to one, and a policy's cap on a packing budget does not.
+  Every such policy applies to a Mega System Transaction as to any other non-deposit transaction, including a policy's cap on a packing budget.
   A deposit counts towards the block's encoded size and not towards its data-availability size; a Mega System Transaction counts towards both; the block gas limit holds either as it holds every transaction.
   A node validating a block MUST NOT apply a building policy, and a policy never changes what a packed block computes: it only decides which transactions the builder packs.
 - Satin sets no limit on a transaction's or a block's encoded size; a block-size rule of the base layer, where a chain adopts one, is the node's to apply and is not one of these limits.
@@ -1376,12 +1373,12 @@ A transaction MUST be skipped for the current block, and MAY be included in a la
 
 - its declared gas limit does not fit in the block's remaining gas;
 - its data-availability footprint does not fit in what the block's gas limit has left for footprints;
-- it is neither a deposit nor a Mega System Transaction and the block has reached its data-size limit, its KV-update limit, or its state-growth limit (see [Block Limits](#20-block-limits));
+- it is not a deposit and the block has reached its data-size limit, its KV-update limit, or its state-growth limit (see [Block Limits](#20-block-limits));
 - it is not a deposit and the block activates Satin or an Optimism fork at or after Jovian in the Optimism fork order, as the chain configuration schedules it (see [Base Layer](#1-base-layer-optimism-karst-ethereum-osaka)).
 
 A block that contains a transaction it should have skipped is invalid.
 
-A block builder MAY also skip a transaction other than a deposit or a Mega System Transaction under its own building policy (see [Block Limits](#20-block-limits)): a per-transaction declared-gas, encoded-size or data-availability limit, a block encoded-size or data-availability budget, or any of the three packing budgets held below the protocol's value.
+A block builder MAY also skip any non-deposit transaction, a Mega System Transaction included, under its own building policy (see [Block Limits](#20-block-limits)): a per-transaction declared-gas, encoded-size or data-availability limit, a block encoded-size or data-availability budget, or any of the three packing budgets held below the protocol's value.
 A transaction over a builder's per-transaction limit never fits that builder's blocks, and the builder MAY drop it.
 A block is not invalid for a transaction a building policy would have skipped.
 
@@ -1572,8 +1569,9 @@ A node, a stateless validator and a replay tool must agree on everything below, 
   A builder that executes a transaction and commits it after other commits MUST commit through the checked commit (`commit_transaction_outcome`), which refuses an outcome whose sender's nonce or balance another commit moved (see [Block Limits](#20-block-limits)).
   The refusal is an internal error of the node (`MegaBlockExecutionError::StaleOutcome`), not a verdict on the block or the transaction: the builder executes the transaction again.
 - **Packing a Mega System Transaction.**
-  A block's data-size, KV and state-growth budgets, and a builder's policy, never refuse one (see [Block Limits](#20-block-limits)), so a builder has no reason to skip it for any of them and requeue the transaction that triggered it; the block gas limit and the data-availability footprint still hold it, and a builder keeps room for both.
-  The execution result tells a node which transactions the block treated so: `MegaBlockTxResult::is_system_transaction`, beside `is_deposit`, which stays the envelope's.
+  A block's data-size, KV and state-growth budgets, the builder's policy, the block gas limit and the data-availability footprint all hold it (see [Block Limits](#20-block-limits)).
+  If the system transaction does not fit, the builder MUST leave it out of this block, together with any reader that needs the values it would persist.
+  The execution result identifies a Mega System Transaction with `MegaBlockTxResult::is_system_transaction`; `is_deposit` stays the envelope's and alone determines exemption from packing budgets and building policy.
 - **Reporting a limit stop.**
   A stop is a revert whose output is `MegaLimitExceeded(kind, limit)`, and a contract can revert with the same bytes, as can a caller that re-raises the stop a frame below it returned.
   Execution reports the crossing that produced the result of the transaction's own frame: the transaction's data-size, KV or state-growth limit, gas detention's compute limit, or that frame's own budget in data size, KV or state growth.
