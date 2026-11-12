@@ -8,9 +8,11 @@
 //!
 //! The executor reads the limits every node must agree on from [`ProtocolLimits::for_spec`], for
 //! the spec the EVM executes, installs their per-transaction half on the EVM before every
-//! transaction, and holds the block to their data-size budget. A node passes none of them. The
-//! node's context adds only the builder's policy ([`BlockLimits`]), which can tighten the budget
-//! and never loosen it; a validator leaves it at its default.
+//! transaction, and holds the block to their three packing budgets — data size, KV updates and
+//! state growth — which refuse every non-deposit transaction once one is reached, a Mega System
+//! Transaction included. A node passes none of them. The node's context adds only the builder's
+//! policy ([`BlockLimits`]), which can tighten the budgets and never loosen them, and holds every
+//! non-deposit transaction alike; a validator leaves it at its default.
 //!
 //! # The block rules of the Karst base
 //!
@@ -70,11 +72,19 @@
 //! slots read on the database itself, and this executor reads the DA footprint gas scalar the same
 //! way before every non-deposit transaction, so neither read lands in a transaction's returned
 //! state. The executor adds them to it: once each per block, the account and every slot either read
-//! reached are read-only entries of the returned state of the first transaction that read them —
-//! the L1 fee overhead among them only when the scalars the fee computation found are empty —
-//! beside, never in place of, what the transaction's own execution put there. Nothing of the
-//! contract is read before the block's transactions, so a block that reads none of it does not
+//! reached are read-only entries of the returned state of the first transaction committed that
+//! read them — the L1 fee overhead among them only when the scalars the fee computation found are
+//! empty — beside, never in place of, what the transaction's own execution put there. Nothing of
+//! the contract is read before the block's transactions, so a block that reads none of it does not
 //! fail when the database cannot serve it.
+//!
+//! Which transaction is first is decided at the commit, by what the committing executor has
+//! committed, so it does not depend on which executor executed an outcome or in which order the
+//! builder executed its candidates. Every outcome carries its reads of the contract beside its
+//! returned state, whatever its executor had reported; its returned state carries what its
+//! executor would report if it committed it next, and the commit takes that out and adds what its
+//! own report lacks. An outcome committed where it executed, before anything else was committed,
+//! is committed as it was returned.
 //!
 //! # The pre-block system calls
 //!
@@ -89,14 +99,16 @@
 //! The pre-block step does not read the live system address, but it is what leaves the registry
 //! naming this block's address. The executor reads the address off the block's state before every
 //! non-deposit transaction, to decide before the transaction runs whether it is a Mega System
-//! Transaction, which the data-size budget and the builder's policy do not refuse. Every
-//! transaction, a deposit included, then reads the same slot into its own journal when it is
+//! Transaction: one pays no L1 fee, so the fee computation does not price it and it reports the
+//! footprint read alone, and a delayed commit checks the system address's account as its sender's.
+//! The packing budgets and the builder's policy hold it as any other non-deposit transaction.
+//! Every transaction, a deposit included, then reads the same slot into its own journal when it is
 //! validated.
 
 #[cfg(not(feature = "std"))]
 use alloc as std;
 use core::fmt;
-use std::{boxed::Box, collections::BTreeMap, string::String, vec::Vec};
+use std::{boxed::Box, collections::BTreeMap, string::String, sync::Arc, vec::Vec};
 
 use alloy_consensus::{Eip658Value, Header, Transaction, TransactionEnvelope, TxReceipt};
 use alloy_eips::{eip7685::Requests, Encodable2718, Typed2718};
@@ -130,7 +142,9 @@ pub type MegaFinishedBlock<DB, INSP, ExtEnvs, R> =
 use crate::{
     block::{
         eips,
-        l1_block_info::{read_fee_info, read_footprint_gas_scalar, L1BlockRead, L1BlockReport},
+        l1_block_info::{
+            read_fee_info, read_footprint_gas_scalar, L1BlockRead, L1BlockReads, L1BlockReport,
+        },
     },
     estimated_da_size,
     system::{
@@ -331,6 +345,10 @@ pub struct MegaBlockExecutor<E, R: OpReceiptBuilder, Spec> {
     /// What the block's committed transactions reported of the L1 block contract, which their
     /// fee computation and footprint read outside their journal.
     l1_block_report: L1BlockReport,
+    /// What the fee computation read of the L1 block contract in this block, once this executor
+    /// executed a transaction it prices: what every transaction it prices in the block is priced
+    /// from.
+    l1_fee_read: Option<Arc<L1BlockRead>>,
 }
 
 /// The two rules a fork's activation puts on a block, decided from the schedule, the block's
@@ -411,6 +429,7 @@ where
             protocol_limits,
             activation,
             l1_block_report: L1BlockReport::default(),
+            l1_fee_read: None,
         }
     }
 
@@ -496,57 +515,69 @@ where
         self.evm.inspector()
     }
 
-    /// The data-availability footprint gas scalar the L1 block contract holds, and, while no
-    /// committed transaction reported the read, what it found, for the transaction's report.
+    /// The data-availability footprint gas scalar the L1 block contract holds, and what the read
+    /// found, for the transaction's report.
     ///
     /// Read per transaction, as the fork's rule is stated: the block's own L1 info transaction
     /// may set it, and the transactions after it are held to the value it set. It is a read of
     /// the block's state, made between transactions, so it lands in no transaction's returned
-    /// state: the first transaction that made it reports it
+    /// state: the first transaction committed that made it reports it
     /// ([`report_l1_block_reads`](Self::report_l1_block_reads)). A read that fails is an internal
     /// error, whether or not the database declares it fatal: the block makes it for the
     /// transaction, outside the transaction's execution.
-    fn da_footprint_gas_scalar(
-        &mut self,
-    ) -> Result<(u64, Option<L1BlockRead>), BlockExecutionError> {
-        let record = self.l1_block_report.reports_footprint();
-        let (scalar, read) = read_footprint_gas_scalar(self.evm.ctx_mut().db_mut(), record)
+    fn da_footprint_gas_scalar(&mut self) -> Result<(u64, L1BlockRead), BlockExecutionError> {
+        let (scalar, read) = read_footprint_gas_scalar(self.evm.ctx_mut().db_mut())
             .map_err(BlockExecutionError::other)?;
         Ok((u64::from(scalar), read))
     }
 
-    /// Adds to `state`, the returned state of the non-deposit transaction `tx_hash`, what the
-    /// transaction read of the L1 block contract outside its journal that no committed
-    /// transaction reported yet, as read-only entries: `footprint`, the footprint read made before
-    /// it ran, and, when the fee computation `priced` it, the fee read, made again here, on the
-    /// state it ran on, which a state cache serves from op-revm's own fetch.
-    ///
-    /// A failed fee read is a failed read of the transaction's execution, as op-revm's fetch
-    /// inside it is: an internal error when the database declares it fatal, an invalid block when
-    /// it does not.
+    /// What the non-deposit transaction `tx_hash` read of the L1 block contract outside its
+    /// journal, which its outcome carries: `footprint`, the footprint read made before it ran,
+    /// and, when the fee computation `priced` it, the fee read
+    /// ([`l1_fee_read`](Self::l1_fee_read)). Adds to `state`, its returned state, what of them
+    /// no transaction this executor committed reported yet, as read-only entries: what its
+    /// commit reports when nothing is committed before it, which a commit settles again.
     fn report_l1_block_reads(
         &mut self,
         state: &mut EvmState,
-        footprint: Option<L1BlockRead>,
+        footprint: L1BlockRead,
         priced: bool,
         tx_hash: TxHash,
-    ) -> Result<(), BlockExecutionError> {
-        let fee = if priced && self.l1_block_report.reports_fee() {
-            let number = self.evm.block().number();
-            let spec = self.evm.ctx().spec().into_op_spec();
-            let read =
-                read_fee_info(self.evm.ctx_mut().db_mut(), number, spec).map_err(|error| {
-                    BlockExecutionError::evm(
-                        EVMError::<DB::Error, MegaTransactionError>::Database(error),
-                        tx_hash,
-                    )
-                })?;
-            Some(read)
-        } else {
-            None
-        };
-        self.l1_block_report.add_to(state, footprint.iter().chain(&fee));
-        Ok(())
+    ) -> Result<L1BlockReads, BlockExecutionError> {
+        let fee = if priced { Some(self.l1_fee_read(tx_hash)?) } else { None };
+        let mut reads = L1BlockReads::new(footprint, fee);
+        self.l1_block_report.report(state, &mut reads);
+        Ok(reads)
+    }
+
+    /// What the fee computation read of the L1 block contract to price the transaction `tx_hash`.
+    ///
+    /// The fee computation reads the contract once per block, at the first transaction it prices,
+    /// and prices every later one from what it read. So the read is made once, after the first
+    /// transaction this executor executes that the computation prices ran, on the state it ran on,
+    /// through op-revm's own fetch, which a state cache serves without a database read once op-revm
+    /// made its own; every transaction it prices in the block carries that read from then on, so an
+    /// outcome reports it wherever it is committed, and nothing reads a key the fee computation
+    /// did not.
+    ///
+    /// A failed read is a failed read of the transaction's execution, as op-revm's fetch inside it
+    /// is: an internal error when the database declares it fatal, an invalid block when it does
+    /// not.
+    fn l1_fee_read(&mut self, tx_hash: TxHash) -> Result<Arc<L1BlockRead>, BlockExecutionError> {
+        if let Some(read) = &self.l1_fee_read {
+            return Ok(Arc::clone(read));
+        }
+        let number = self.evm.block().number();
+        let spec = self.evm.ctx().spec().into_op_spec();
+        let read = read_fee_info(self.evm.ctx_mut().db_mut(), number, spec).map_err(|error| {
+            BlockExecutionError::evm(
+                EVMError::<DB::Error, MegaTransactionError>::Database(error),
+                tx_hash,
+            )
+        })?;
+        let read = Arc::new(read);
+        self.l1_fee_read = Some(Arc::clone(&read));
+        Ok(read)
     }
 
     /// Commits `state` to the database.
@@ -750,10 +781,11 @@ where
         self.admits_only_deposits()?;
 
         // The block starts with empty block-hash and bucket records, so what they hold at the end
-        // is what this block read, and with nothing of the L1 block contract reported.
+        // is what this block read, and with nothing of the L1 block contract read or reported.
         self.evm.clear_accessed_block_hashes();
         self.evm.clear_accessed_bucket_ids();
         self.l1_block_report = L1BlockReport::default();
+        self.l1_fee_read = None;
 
         let state = eips::transact_blockhashes_contract_call(
             &self.spec,
@@ -851,6 +883,12 @@ where
     /// an outcome whose sender's nonce or balance another commit moved since it executed; any
     /// other state the outcome read is the caller's to keep fresh.
     ///
+    /// What the transaction read of the L1 block contract outside its journal is reported here, by
+    /// what this executor has committed: the state committed is the returned state with the
+    /// entries its executor's report added taken out and the ones this executor's report lacks
+    /// added, which is the returned state itself for an outcome executed here and committed
+    /// before anything else.
+    ///
     /// # Panics
     ///
     /// In a debug build, when the block no longer has room for `output`, or when its sender's
@@ -878,11 +916,24 @@ where
             is_system_transaction,
             depositor_nonce,
             inner,
+            l1_block_reads,
             ..
         } = output;
         let gas = inner.gas;
         let cumulative_gas_used = self.limiter.block_gas_used;
-        let ResultAndState { result, state } = inner.result_and_state;
+        let ResultAndState { result, mut state } = inner.result_and_state;
+
+        // What the transaction read of the L1 block contract outside its journal is reported by
+        // what this executor committed, whichever executor executed it and whatever was committed
+        // since.
+        let priced = !is_system_transaction;
+        debug_assert!(
+            l1_block_reads.are_of(is_deposit, priced),
+            "the outcome's reads of the L1 block contract are not its transaction's"
+        );
+        if !is_deposit {
+            self.l1_block_report.commit(&mut state, &l1_block_reads, priced);
+        }
 
         self.receipts.push(
             match self.receipt_builder.build_receipt(ReceiptBuilderCtx {
@@ -914,9 +965,6 @@ where
             },
         );
 
-        if !is_deposit {
-            self.l1_block_report.committed(&state, !is_system_transaction);
-        }
         self.commit(state);
 
         GasOutput::with_state_gas(gas.gas_used, gas.state)
@@ -994,6 +1042,11 @@ where
     /// again when another commit moved what it read is the builder's responsibility: a builder
     /// that executes an Oracle-reading transaction, then executes and commits the system-address
     /// transaction that writes the Oracle before it, commits both.
+    ///
+    /// The outcome may have been executed by another executor of the block, or before another
+    /// outcome committed here: what it read of the L1 block contract outside its journal, which
+    /// it carries, is reported by what this executor has committed, once each per block, with the
+    /// first transaction committed here that read it.
     pub fn commit_transaction_outcome(
         &mut self,
         output: MegaBlockTxResult<<R::Transaction as TransactionEnvelope>::TxType>,
@@ -1067,7 +1120,7 @@ where
             let (scalar, read) = self.da_footprint_gas_scalar()?;
             let footprint = da_size.saturating_mul(scalar);
             self.check_da_footprint(footprint)?;
-            (footprint, read)
+            (footprint, Some(read))
         };
 
         // The sender's account as the transaction executes against it, read before execution: a
@@ -1089,14 +1142,15 @@ where
         // What the transaction read of the L1 block contract outside its journal: the footprint
         // read, and the fee read of every non-deposit transaction but a Mega System Transaction,
         // which pays no L1 fee.
-        if !is_deposit {
-            self.report_l1_block_reads(
+        let l1_block_reads = match footprint_read {
+            Some(footprint) => self.report_l1_block_reads(
                 &mut outcome.result_and_state.state,
-                footprint_read,
+                footprint,
                 !is_system_transaction,
                 tx_hash,
-            )?;
-        }
+            )?,
+            None => L1BlockReads::default(),
+        };
 
         let result = MegaBlockTxResult {
             tx_type: inner.tx_type(),
@@ -1112,6 +1166,7 @@ where
             sender_nonce: sender_before.nonce,
             sender_balance: sender_before.balance,
             inner: outcome,
+            l1_block_reads,
         };
         Ok(result)
     }

@@ -1417,7 +1417,11 @@ fn stop_before_the_first_frame<DB: Database, ExtEnvs: ExternalEnvTypes>(
 /// state-growth limits. The stop when they cross one, KV updates first; `None` when they fit.
 /// Every list is simulated, whatever its length, so the authorities the witness holds do not
 /// depend on whether the list could cross a limit or on where its application would run out of
-/// gas.
+/// gas — every list of a transaction held to a KV-update or a state-growth limit, which Satin's
+/// own limits always set. Limits that set neither hold the list to nothing, so it is not
+/// simulated and loads only what its application loads, as Ethereum's does: the neutral
+/// configuration's runner turns every limit off
+/// ([`AdditionalLimit::holds_authorization_list`](crate::AdditionalLimit)).
 ///
 /// The simulation writes nothing and warms nothing: the loads are taken back to a journal mark,
 /// which leaves the accounts in the transaction's state, cold, so a stateless witness holds every
@@ -1425,7 +1429,9 @@ fn stop_before_the_first_frame<DB: Database, ExtEnvs: ExternalEnvTypes>(
 fn hold_authorization_list<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
 ) -> Result<Option<LimitCheck>, DB::Error> {
-    if ctx.tx().tx_type() != TransactionType::Eip7702 {
+    if ctx.tx().tx_type() != TransactionType::Eip7702 ||
+        !ctx.additional_limit.holds_authorization_list()
+    {
         return Ok(None);
     }
     let (records, created) = simulate_authorization_list(ctx)?;

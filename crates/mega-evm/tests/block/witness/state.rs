@@ -453,6 +453,105 @@ fn test_a_dropped_first_reader_leaves_the_report_to_the_next() {
     assert_eq!(times_named(run, None), 1);
 }
 
+/// A second sender, funded on [`chain_with_free_l1_info`].
+const OTHER: Address = address!("0x4000000000000000000000000000000000000007");
+
+/// A chain holding the L1 block contract with `code` and nothing to charge: every slot the fee
+/// computation and the footprint read hold zero but the overhead, which the empty scalars have
+/// the fee computation read; the slot writer at [`CONTRACT`]; [`CALLER`] and [`OTHER`] funded.
+///
+/// A transaction at no gas price pays no fee on it, so an outcome executed on another state of
+/// the block — on another executor, or before another commit — credits the fee accounts as
+/// that state would: it is not stale for them, and the block it is committed into is the block a
+/// validator replays.
+fn chain_with_free_l1_info(code: Bytes) -> MemoryDatabase {
+    let mut db = common::database();
+    db.set_account_code(CONTRACT, slot_writer());
+    db.set_account_code(L1_BLOCK_CONTRACT, code);
+    db.set_account_storage(L1_BLOCK_CONTRACT, L1_OVERHEAD_SLOT, OVERHEAD);
+    db.set_account_balance(OTHER, U256::from(1_000_000_000_000_000_u64));
+    db
+}
+
+/// What the fee computation reads of [`chain_with_free_l1_info`], the footprint scalar's slot
+/// among it.
+fn free_l1_info() -> [(U256, U256); 5] {
+    [
+        (L1_BASE_FEE_SLOT, U256::ZERO),
+        (ECOTONE_L1_FEE_SCALARS_SLOT, U256::ZERO),
+        (L1_OVERHEAD_SLOT, OVERHEAD),
+        (ECOTONE_L1_BLOB_BASE_FEE_SLOT, U256::ZERO),
+        (OPERATOR_FEE_SCALARS_SLOT, U256::ZERO),
+    ]
+}
+
+/// A call from `sender` at `nonce` to `to` carrying `input`, at no gas price.
+fn free_call(sender: Address, nonce: u64, to: Address, input: Bytes) -> Tx {
+    common::legacy_from(sender, nonce, TxKind::Call(to), U256::ZERO, input, write_gas(), 0)
+}
+
+/// Asserts the block `run` committed names the L1 block contract's account and each slot of
+/// `read` exactly once, all of it in the state of the transaction at `index`, read only.
+fn assert_reported_once_by(run: &Run, index: usize, read: &[(U256, U256)]) {
+    assert_read_only("the first transaction committed", l1_account(&run.tx(index).state), read);
+    assert_eq!(times_named(run, None), 1, "the account is named once");
+    for (slot, _) in read {
+        assert_eq!(times_named(run, Some(*slot)), 1, "slot {slot} is named once");
+    }
+}
+
+/// A builder that executes on several executors of one block commits on this executor an
+/// outcome another executed after it had committed a transaction of its own, which reported the
+/// L1 block contract there. This executor has reported nothing: the transaction is the first it
+/// commits, so its committed state reports the account and every slot its fee and footprint
+/// reads reached, and the block replays from the witness built from what this executor committed.
+#[test]
+fn test_an_outcome_executed_on_another_executor_is_reported_where_it_is_committed() {
+    let db = chain_with_free_l1_info(Bytes::from(vec![0x00]));
+    let replay = Case::new("executed on another executor after it reported", db)
+        .tx(free_call(OTHER, 0, CONTRACT, slot(2)))
+        .executed_elsewhere(0, vec![free_call(CALLER, 0, CONTRACT, slot(1))])
+        .run();
+    let run = &replay.recorded;
+    assert!(run.tx(0).result.is_success(), "{:?}", run.tx(0).result);
+    assert_reported_once_by(run, 0, &free_l1_info());
+}
+
+/// The other way round: an outcome executed on another executor that had reported nothing, so
+/// its returned state carries the report there, is committed on this executor after a
+/// transaction of its own reported the contract. Its committed state names nothing of the
+/// contract, and the block replays.
+#[test]
+fn test_an_outcome_executed_on_another_executor_reports_nothing_this_one_reported() {
+    let db = chain_with_free_l1_info(Bytes::from(vec![0x00]));
+    let replay = Case::new("executed on another executor before it reported", db)
+        .tx(free_call(CALLER, 0, CONTRACT, slot(1)))
+        .tx(free_call(OTHER, 0, CONTRACT, slot(2)))
+        .executed_elsewhere(1, Vec::new())
+        .run();
+    let run = &replay.recorded;
+    assert!(run.tx(0).result.is_success() && run.tx(1).result.is_success());
+    assert!(!run.tx(1).state.contains_key(&L1_BLOCK_CONTRACT), "the second reports nothing");
+    assert_reported_once_by(run, 0, &free_l1_info());
+}
+
+/// Two candidates executed before either is committed both read the L1 block contract while no
+/// committed transaction had reported it. The first committed reports it; the second, committed
+/// after it, reports nothing again, and the block replays.
+#[test]
+fn test_two_candidates_executed_before_either_is_committed_report_once() {
+    let db = chain_with_free_l1_info(Bytes::from(vec![0x00]));
+    let replay = Case::new("two candidates executed before either is committed", db)
+        .tx(free_call(CALLER, 0, CONTRACT, slot(1)))
+        .held(0)
+        .tx(free_call(OTHER, 0, CONTRACT, slot(2)))
+        .run();
+    let run = &replay.recorded;
+    assert!(run.tx(0).result.is_success() && run.tx(1).result.is_success());
+    assert!(!run.tx(1).state.contains_key(&L1_BLOCK_CONTRACT), "the second reports nothing");
+    assert_reported_once_by(run, 0, &free_l1_info());
+}
+
 /// A Mega System Transaction pays no L1 fee, so no fee computation prices it, but the block
 /// reads the footprint scalar before it as before every non-deposit transaction: as the block's
 /// first reader it reports the account and the scalar's slot alone. The user transaction after
@@ -657,6 +756,80 @@ fn test_a_transaction_that_writes_the_l1_block_contract_keeps_its_write() {
         assert!(!entry.is_changed(), "slot {slot} is read only");
     }
     assert_eq!(account.storage.len(), l1_info().len(), "no overhead: the scalars were set");
+}
+
+/// Code at the L1 block contract that sets the Ecotone scalars, which
+/// [`chain_with_free_l1_info`] holds empty: a write to a slot the fee computation reads.
+fn scalars_setter() -> Bytes {
+    BytecodeBuilder::default().sstore(ECOTONE_L1_FEE_SCALARS_SLOT, scalars_set()).stop().build()
+}
+
+/// The scalars [`scalars_setter`] writes.
+fn scalars_set() -> U256 {
+    fee_scalars_word(7, 9)
+}
+
+/// A transaction whose own execution writes a slot of the L1 block contract the fee computation
+/// reads keeps its write and its account, touched, in whatever order the builder executes and
+/// commits it beside another transaction, and on whichever executor it executed: committed before
+/// the other, the report adds the slots it does not hold as read-only entries under its own
+/// account; committed after it, the other reported every slot, and its state holds its own
+/// entries alone. Every ordering's block replays.
+#[test]
+fn test_a_transaction_that_writes_the_l1_block_contract_keeps_its_write_in_every_ordering() {
+    let writer = || free_call(CALLER, 0, L1_BLOCK_CONTRACT, Bytes::new());
+    let reader = || free_call(OTHER, 0, CONTRACT, slot(2));
+    let case = |name: &str, first: Tx, second: Tx| {
+        Case::new(name, chain_with_free_l1_info(scalars_setter())).tx(first).tx(second)
+    };
+    let orderings = [
+        ("writer first", case("writer first", writer(), reader()), 0),
+        ("reader first", case("reader first", reader(), writer()), 1),
+        ("writer held", case("writer held", writer(), reader()).held(0), 0),
+        ("reader held", case("reader held", reader(), writer()).held(0), 1),
+        (
+            "writer elsewhere, after the reader there",
+            case("writer elsewhere", writer(), reader()).executed_elsewhere(0, vec![reader()]),
+            0,
+        ),
+        (
+            "reader elsewhere, after the writer there",
+            case("reader elsewhere", reader(), writer()).executed_elsewhere(0, vec![writer()]),
+            1,
+        ),
+    ];
+    for (name, case, at) in orderings {
+        let run = case.run().recorded;
+        let reader_at = 1 - at;
+        assert!(run.tx(0).result.is_success() && run.tx(1).result.is_success(), "{name}");
+
+        let own = l1_account(&run.tx(at).state);
+        assert!(own.is_touched(), "{name}: the writer's own entry");
+        let written = &own.storage[&ECOTONE_L1_FEE_SCALARS_SLOT];
+        assert_eq!(written.original_value, U256::ZERO, "{name}: written over the empty scalars");
+        assert_eq!(written.present_value, scalars_set(), "{name}: the write stands");
+
+        let reported: Vec<_> = free_l1_info()
+            .into_iter()
+            .filter(|(slot, _)| *slot != ECOTONE_L1_FEE_SCALARS_SLOT)
+            .collect();
+        if at < reader_at {
+            for (slot, value) in &reported {
+                let entry = own.storage.get(slot).unwrap_or_else(|| panic!("{name}: slot {slot}"));
+                assert_eq!(entry.present_value, *value, "{name}: slot {slot}");
+                assert!(!entry.is_changed(), "{name}: slot {slot} is read only");
+            }
+            assert_eq!(own.storage.len(), free_l1_info().len(), "{name}: the slots named");
+            assert!(!run.tx(reader_at).state.contains_key(&L1_BLOCK_CONTRACT), "{name}");
+        } else {
+            assert_eq!(own.storage.len(), 1, "{name}: the writer's own slot alone");
+            let first = l1_account(&run.tx(reader_at).state);
+            assert_read_only(name, first, &free_l1_info());
+        }
+        for (slot, _) in reported {
+            assert_eq!(times_named(&run, Some(slot)), 1, "{name}: slot {slot} is named once");
+        }
+    }
 }
 
 /// The entry's other condition: a chain that does not hold the L1 block contract. A deposit that

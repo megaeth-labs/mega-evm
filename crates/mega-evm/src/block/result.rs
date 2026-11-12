@@ -12,7 +12,10 @@ use alloy_evm::{
 use alloy_primitives::{Address, TxHash, U256};
 use revm::context::result::{InvalidTransaction, ResultAndState};
 
-use crate::{BlockUsage, LimitUsage, MegaGasUsage, MegaHaltReason, MegaTransactionOutcome};
+use crate::{
+    block::l1_block_info::L1BlockReads, BlockUsage, LimitUsage, MegaGasUsage, MegaHaltReason,
+    MegaTransactionOutcome,
+};
 
 /// A block's gas, on the three ledgers its transactions spend on, and the history bytes they
 /// appended.
@@ -251,6 +254,11 @@ impl InvalidTxError for MegaBlockLimitExceededError {
 ///
 /// Everything execution itself produced travels as the embedded [`MegaTransactionOutcome`], so a
 /// dimension added there flows through without being declared again here.
+///
+/// It also carries what the transaction read of the L1 block contract outside its journal, which
+/// the executor that commits it reports in the committed state, whichever executor executed it.
+/// That record is the crate's own, so an outcome is only ever made by a block executor executing
+/// its transaction: one cannot be built by hand without the reads its commit must report.
 #[derive(Clone, Debug)]
 pub struct MegaBlockTxResult<T> {
     /// The transaction's type, which is what the receipt builder needs of it.
@@ -286,7 +294,14 @@ pub struct MegaBlockTxResult<T> {
     pub sender_balance: U256,
     /// The execution result, the post-state and what `MegaETH` counted, as execution produced
     /// them.
+    ///
+    /// The post-state of a non-deposit transaction carries, as read-only entries, what of the L1
+    /// block contract its executor would report if it committed it next; the commit settles them
+    /// against what the committing executor has reported.
     pub inner: MegaTransactionOutcome,
+    /// What the transaction read of the L1 block contract outside its journal, for the executor
+    /// that commits it to report.
+    pub(crate) l1_block_reads: L1BlockReads,
 }
 
 impl<T> MegaBlockTxResult<T> {
