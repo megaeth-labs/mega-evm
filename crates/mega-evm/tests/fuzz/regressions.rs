@@ -344,3 +344,41 @@ fn test_a_program_that_funds_the_account_it_then_creates_keeps_one_record_for_it
         );
     }
 }
+
+/// An EIP-7702 transaction that runs out of gas part-way through its authorization list, under
+/// the neutral configuration, loads what Ethereum and op-revm load: the list is held to no limit
+/// there, so it is not simulated, and the second authority, which the application never reached,
+/// is not in the state. Found by the neutral differential, where the simulation had loaded that
+/// authority as a cold, untouched account.
+#[test]
+fn test_a_neutral_authorization_list_that_runs_out_of_gas_loads_what_ethereum_loads() {
+    let mut world = plain_world();
+    world.caller.balance = Balance::Zero;
+    world.beneficiary = BeneficiaryIs::Fresh;
+    world.empty_leaves = EmptyLeaves { fresh: true, beneficiary: true, created: true };
+    let auth = |authority| Auth {
+        authority,
+        nonce_ok: true,
+        chain_ok: true,
+        recovers: true,
+        delegate: Delegate::Contract,
+    };
+    let case = Case {
+        world,
+        tx: Tx {
+            shape: Shape::Eip7702 {
+                to: Who::Caller,
+                auths: vec![auth(Who::Fresh), auth(Who::Contract)],
+            },
+            value: Value::Zero,
+            gas: GasTier::Tiny,
+            price: Price::Free,
+            nonce_ok: true,
+        },
+        main: stop(),
+        a: stop(),
+        b: stop(),
+    };
+    crate::differential::matches_ethereum(&case).unwrap_or_else(|error| panic!("{error}"));
+    crate::differential::matches_op_revm(&case).unwrap_or_else(|error| panic!("{error}"));
+}

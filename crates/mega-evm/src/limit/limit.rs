@@ -436,6 +436,19 @@ impl AdditionalLimit {
         self.created_caller = true;
     }
 
+    /// Whether the transaction's authorization list is held to a limit before it is applied: it
+    /// is when the transaction is held to a KV-update or a state-growth limit, which what the list
+    /// keeps counts towards ([`hold_authorization_list`](Self::hold_authorization_list)).
+    ///
+    /// Satin's own limits set both, so every list is decided before it is applied, whatever its
+    /// length. Only a configuration that sets neither — the limits a tool turns off, as the
+    /// execution-spec runner does for its neutral configuration — has nothing to hold the list
+    /// to, and decides nothing, so it loads nothing beyond what the list's application loads, as
+    /// Ethereum does.
+    pub(crate) const fn holds_authorization_list(&self) -> bool {
+        self.limits.tx_kv_update_limit != u64::MAX || self.limits.tx_state_growth_limit != u64::MAX
+    }
+
     /// The verdict on an authorization list that would keep `records` write records and create
     /// `created` accounts were it applied, before the first frame: KV updates first, then state
     /// growth, each against the transaction's limit, since no frame budget exists yet.
@@ -1179,5 +1192,31 @@ mod tests {
         let mut limit = AdditionalLimit::new(limits);
         limit.begin_transaction(TxClass::Ordinary, crate::TX_BODY_SIZE);
         limit.count_authorities(2, 0);
+    }
+
+    /// An authorization list is held to a limit before it is applied when the transaction is held
+    /// to a KV-update or a state-growth limit, and only then: the spec's limits hold it, so does
+    /// either limit alone, and limits that set neither, the data size and the detention caps aside,
+    /// do not.
+    #[test]
+    fn test_an_authorization_list_is_held_where_a_kv_or_state_growth_limit_is_set() {
+        let none = EvmTxRuntimeLimits::no_limits();
+        let cases = [
+            ("the spec's", EvmTxRuntimeLimits::default(), true),
+            ("KV updates alone", none.with_tx_kv_update_limit(500_000), true),
+            ("state growth alone", none.with_tx_state_growth_limit(1_000), true),
+            ("a limit of nothing", none.with_tx_state_growth_limit(0), true),
+            ("none", none, false),
+            (
+                "data size and detention alone",
+                none.with_tx_data_size_limit(1_000)
+                    .with_block_env_access_compute_gas_limit(1_000)
+                    .with_oracle_access_compute_gas_limit(1_000),
+                false,
+            ),
+        ];
+        for (name, limits, held) in cases {
+            assert_eq!(AdditionalLimit::new(limits).holds_authorization_list(), held, "{name}");
+        }
     }
 }
