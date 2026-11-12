@@ -37,11 +37,18 @@
 //! An opcode volatile whatever its operands — the block-environment opcodes, `BLOCKHASH` among
 //! them — is refused before its operands are read. One volatile for the account or the storage it
 //! reads is refused only once every operand it takes is on the stack, so one that fails on its
-//! operands fails as it would with access on; it is then refused when its target operand, its
-//! frame's own address, or a call target's one-hop EIP-7702 delegate is the block beneficiary, and
-//! an `SLOAD` when its frame's storage is the Oracle's. The delegate is read for the decision: the
-//! call target's account and code are loaded, so the read is in the transaction's state, and left
-//! as warm or cold as they were.
+//! operands fails as it would with access on; it is then refused when its target operand or its
+//! frame's own address is the block beneficiary, and an `SLOAD` when its frame's storage is the
+//! Oracle's.
+//!
+//! A call whose target operand is not the beneficiary reads nothing volatile unless its target's
+//! one-hop EIP-7702 delegate is the beneficiary, which only the target's code shows. The wrapper
+//! does not look it up: the call runs its own steps as with access on — its static gas, its
+//! memory, its value transfer, the load of its target, which a frame short of the cold access
+//! skips as an out-of-gas — and the Host refuses the load of the delegate when it is the
+//! beneficiary. The wrapper then puts back the gas the frame held when it reached the call and
+//! reverts the frame, so the refusal costs nothing, and the call reads its target only once it
+//! holds the gas to, as with access on.
 //!
 //! The Oracle's `SLOAD` is the one read made before any of its gas is charged: the slot is loaded,
 //! the oracle service asked and the read marked, at the compute before the opcode, and only then
@@ -181,7 +188,9 @@ pub(crate) fn without_read_static_gas(mut table: GasTable) -> GasTable {
 }
 
 /// `CALL`, `CALLCODE`, `DELEGATECALL` and `STATICCALL`, committing the read of the block
-/// beneficiary's account when the callee, or the EIP-7702 delegate it runs, is the beneficiary.
+/// beneficiary's account when the callee, or the EIP-7702 delegate it runs, is the beneficiary;
+/// with access off, refused for the callee before the call charges anything, and for the delegate
+/// where the call loads it.
 fn call<const KIND: u8, DB: Database, ExtEnvs: ExternalEnvTypes>(
     context: Ctx<'_, DB, ExtEnvs>,
 ) -> InstructionExecResult {
@@ -196,7 +205,9 @@ fn call<const KIND: u8, DB: Database, ExtEnvs: ExternalEnvTypes>(
 /// gas it held when it reached the opcode, before the opcode charges or checks anything. Otherwise
 /// the opcode's static gas is charged, as its own charge, as the interpreter charges every other
 /// opcode's, and `inner` runs; a read the opcode completed is committed, capping the frame at what
-/// the compute limit leaves it.
+/// the compute limit leaves it, and a load the Host refused — a call's EIP-7702 delegate that is
+/// the beneficiary — reverts the frame on the gas it held when it reached the opcode
+/// ([`settle_reads`]).
 ///
 /// A read the opcode did not complete — the opcode failed after the load — is dropped: it reached
 /// no computation, and the frame is failing anyway.
@@ -207,7 +218,7 @@ fn read_volatile<const OPCODE: u8, DB: Database, ExtEnvs: ExternalEnvTypes>(
 ) -> InstructionExecResult {
     let InstructionContext { interpreter, host } = context;
     let gas = if host.detention.is_refusing() {
-        if let Some(refused) = refused_read::<OPCODE, _, _>(interpreter, host)? {
+        if let Some(refused) = refused_read::<OPCODE, _, _>(interpreter, host) {
             return Err(refuse(interpreter, refused));
         }
         Some(interpreter.gas)
@@ -238,8 +249,8 @@ fn charge_static_gas(
 }
 
 /// What the opcode `OPCODE` would read that the running frame, whose volatile-data access is off,
-/// is refused, or `None` when it reads nothing volatile; decided from the opcode, its operands and
-/// its frame, before the opcode charges or checks anything.
+/// is refused, or `None` when its operands and its frame name nothing volatile; decided from the
+/// opcode, its operands and its frame, before the opcode charges or checks anything.
 ///
 /// - The block-environment opcodes, `BLOCKHASH` included, are volatile whatever their operands:
 ///   they are refused before their operands are read.
@@ -247,19 +258,17 @@ fn charge_static_gas(
 ///   volatile only for the account they read: with fewer operands on the stack than the opcode
 ///   takes, nothing is refused, and the opcode fails on them as it would with access on. They are
 ///   refused when their target operand is the block beneficiary, `SELFDESTRUCT` also when its frame
-///   runs as the beneficiary, and a call also when its target's one-hop EIP-7702 delegate is the
-///   beneficiary. `SELFBALANCE` is refused when its frame runs as the beneficiary.
+///   runs as the beneficiary. `SELFBALANCE` is refused when its frame runs as the beneficiary.
 ///
-/// The delegate is read for the decision ([`call_target_delegate`]), and the read is required: a
-/// database error fails the transaction with its cause, whatever the call would have done.
-///
-/// [`call_target_delegate`]: MegaContext::call_target_delegate
+/// A call whose target's one-hop EIP-7702 delegate is the beneficiary is not decided here: the
+/// target's code shows the delegate, and the call loads it only once it paid its own earlier steps
+/// and holds the target's access, so the Host refuses the delegate's load there.
 #[cold]
 #[inline(never)]
 fn refused_read<const OPCODE: u8, DB: Database, ExtEnvs: ExternalEnvTypes>(
     interpreter: &Interpreter<EthInterpreter>,
-    host: &mut MegaContext<DB, ExtEnvs>,
-) -> Result<Option<VolatileDataAccess>, InstructionResult> {
+    host: &MegaContext<DB, ExtEnvs>,
+) -> Option<VolatileDataAccess> {
     let block_env = match OPCODE {
         NUMBER => Some(VolatileDataAccess::BLOCK_NUMBER),
         TIMESTAMP => Some(VolatileDataAccess::TIMESTAMP),
@@ -273,7 +282,7 @@ fn refused_read<const OPCODE: u8, DB: Database, ExtEnvs: ExternalEnvTypes>(
         _ => None,
     };
     if block_env.is_some() {
-        return Ok(block_env);
+        return block_env;
     }
     let beneficiary = host.inner.block.beneficiary;
     let stack = &interpreter.stack;
@@ -289,23 +298,26 @@ fn refused_read<const OPCODE: u8, DB: Database, ExtEnvs: ExternalEnvTypes>(
         }
         CALL | CALLCODE | DELEGATECALL | STATICCALL => {
             let operands = if matches!(OPCODE, CALL | CALLCODE) { 7 } else { 6 };
-            match address(1) {
-                Some(target) if stack.len() >= operands => {
-                    target == beneficiary || host.call_target_delegate(target)? == Some(beneficiary)
-                }
-                _ => false,
-            }
+            stack.len() >= operands && address(1) == Some(beneficiary)
         }
         _ => false,
     };
-    Ok(reads_beneficiary.then_some(VolatileDataAccess::BENEFICIARY_BALANCE))
+    reads_beneficiary.then_some(VolatileDataAccess::BENEFICIARY_BALANCE)
 }
 
-/// The slow half of [`read_volatile`]: the Host observed a read.
+/// The slow half of [`read_volatile`]: the Host observed or refused a read.
 ///
-/// The Host refuses a load only where the wrapper did not refuse the read first, which no opcode
-/// reaches: every volatile load an opcode makes is one [`refused_read`] decides. Were one reached,
-/// the frame would be refused on the gas it held when it reached the opcode (`gas`).
+/// The Host refuses a load in a frame whose volatile-data access is off where the wrapper did not
+/// refuse the read first: a call's load of its target's EIP-7702 delegate when the delegate is the
+/// beneficiary. The call has then run its steps before the load — its static gas, its memory, its
+/// value transfer, the load of its target — and fails the load as a skipped cold load, before it
+/// charges its target's access, any state gas or its forward, and before the frame-start hook, so
+/// what it did is all in the frame's gas and memory. The frame is refused on the gas it held when
+/// it reached the opcode (`gas`), the spendable and withheld parts and the reservoir as they were,
+/// which takes back every charge; its revert takes back the target's warming, and leaves the
+/// target's account and code in the transaction's state. The memory the call expanded stays
+/// expanded until the frame's end, which follows at once; the gas's record of it is put back with
+/// the rest.
 #[inline(never)]
 fn settle_reads<DB: Database, ExtEnvs: ExternalEnvTypes>(
     interpreter: &mut Interpreter<EthInterpreter>,
@@ -314,9 +326,9 @@ fn settle_reads<DB: Database, ExtEnvs: ExternalEnvTypes>(
     gas: Option<Gas>,
 ) -> InstructionExecResult {
     let observed = host.detention.take_observed();
-    let refused = host.detention.take_refused();
-    debug_assert!(refused.is_none(), "a read the wrapper did not refuse first: {refused:?}");
-    if let Some(refused) = refused {
+    if let Some(refused) = host.detention.take_refused() {
+        // The Host refuses only while the frame refuses, so the wrapper kept the frame's gas.
+        debug_assert!(gas.is_some(), "a refusal in a frame whose access is on: {refused:?}");
         // The Host refuses a load before the opcode builds a frame, so no action is pending.
         if let Some(gas) = gas {
             interpreter.gas = gas;
