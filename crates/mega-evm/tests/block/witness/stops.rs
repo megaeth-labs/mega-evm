@@ -240,3 +240,44 @@ fn test_a_skipped_authorization_list_replays() {
 
     case.run();
 }
+
+/// A short authorization list whose transaction runs out of gas before the first frame, part-way
+/// through the application of the list: the gas pays the first authority's new account and not
+/// the second's. The engine decides the list by simulating it whole, whatever its length, so the
+/// witness holds the second authority although the application never reached it.
+#[test]
+fn test_a_short_list_that_runs_out_of_gas_part_way_loads_every_authority() {
+    let (first, first_authority) = authorization(CONTRACT, 0);
+    let (second, second_authority) = authorization(CALLER, 0);
+    assert_ne!(first_authority, second_authority);
+    let mut db = common::database();
+    db.set_account_code(CONTRACT, slot_writer());
+    let gas = 60_000 + common::body_history(0) + common::new_account_state_gas();
+    let case = Case::new("short list out of gas", db).tx(eip7702(
+        0,
+        CONTRACT,
+        slot(1),
+        vec![first, second],
+        gas,
+    ));
+    let recorded = case.record();
+    let witness = case.channel_witness(&recorded);
+    assert!(
+        matches!(
+            recorded.tx(0).result,
+            revm::context::result::ExecutionResult::Halt {
+                reason: op_revm::OpHaltReason::Base(
+                    revm::context::result::HaltReason::OutOfGas(_)
+                ),
+                ..
+            }
+        ),
+        "{:?}",
+        recorded.tx(0).result
+    );
+    for authority in [first_authority, second_authority] {
+        assert_eq!(recorded.record.accounts.get(&authority), Some(&None), "the list loaded it");
+        assert_eq!(witness.accounts.get(&authority), Some(&None), "the channel witness holds it");
+    }
+    case.run();
+}
