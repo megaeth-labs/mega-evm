@@ -22,21 +22,22 @@
 //! accessors, the account load when the account is the block beneficiary, the storage load when
 //! the storage is the Oracle's, and `SELFDESTRUCT` when either end is the beneficiary. A read is
 //! marked once the load succeeded, and the opcode's wrapper commits it once the opcode completed
-//! (see the `access` module). Every account opcode reaches the account load: `balance`,
-//! `load_account_delegated`, `load_account_code` and `load_account_code_hash` are the trait's own,
-//! built on it.
+//! (see the `access` module), but for the Oracle's, which its wrapper commits before it charges
+//! the read. Every account opcode reaches the account load: `balance`, `load_account_delegated`,
+//! `load_account_code` and `load_account_code_hash` are the trait's own, built on it.
 //!
-//! While volatile-data access is switched off for the running frame, the Host refuses those loads
-//! instead: an account or storage load fails as a skipped cold load, and a block-environment
-//! accessor answers zero. Nothing is loaded, and the opcode's wrapper turns the refusal into the
-//! frame's revert.
+//! While volatile-data access is switched off for the running frame, the opcode's wrapper refuses
+//! a volatile read before the opcode runs, so the Host loads none. Were one reached, the Host
+//! would refuse it: an account or storage load fails as a skipped cold load, and a
+//! block-environment accessor answers zero. Nothing is loaded, and the opcode's wrapper turns the
+//! refusal into the frame's revert.
 //!
 //! # The Oracle's storage
 //!
 //! A storage load whose owner is the Oracle reads the slot from the node's oracle service
 //! ([`OracleEnv`]) and falls back to the database for a slot the service has no value for. Every
 //! such read is priced as a cold access, because a node replaying a block cannot tell which of the
-//! two sources the node that built it read.
+//! two sources the node that built it read, and is made before that access is charged.
 //!
 //! # One hook prices every state charge
 //!
@@ -84,7 +85,7 @@ use std::format;
 
 use delegate::delegate;
 use revm::{
-    context::ContextTr,
+    context::{ContextTr, JournalTr},
     context_interface::{
         cfg::{gas::GasTracker, GasId, GasParams, StateGasCharge, StateGasSite},
         context::{ContextError, SStoreResult, SelfDestructResult, StateLoad},
@@ -94,10 +95,13 @@ use revm::{
         },
         journaled_state::AccountInfoLoad,
     },
+    interpreter::InstructionResult,
     primitives::{Address, Log, StorageKey, StorageValue, B256, U256},
+    state::Bytecode,
     Database,
 };
 
+use super::execution::{mark, revert_to};
 use crate::{
     charge_write_records_history, history_gas,
     limit::{DestroyedParts, HistoryBytes},
@@ -205,7 +209,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
     }
 
     /// Loads the slot; a slot of the Oracle's storage is read through the oracle environment
-    /// ([`oracle_sload`](Self::oracle_sload)).
+    /// ([`read_oracle_slot`](MegaContext::read_oracle_slot)).
     #[inline]
     fn sload_skip_cold_load(
         &mut self,
@@ -214,7 +218,12 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
         skip_cold_load: bool,
     ) -> Result<StateLoad<StorageValue>, LoadError> {
         if address == ORACLE_CONTRACT_ADDRESS {
-            return self.oracle_sload(key, skip_cold_load);
+            // `SLOAD` reads the Oracle's storage through its wrapper, before any of its charge; a
+            // tool's read of it comes here, and skips the read when it asks to.
+            if skip_cold_load {
+                return Err(LoadError::ColdLoadSkipped);
+            }
+            return self.read_oracle_slot(key).map(|value| StateLoad::new(value, true));
         }
         self.inner.sload_skip_cold_load(address, key, skip_cold_load)
     }
@@ -405,9 +414,11 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
     /// opcode that starts no frame — a creation the balance, the nonce or the depth refuses, an
     /// out-of-gas before the forward — never calls it, and makes no records; with EIP-8037 off,
     /// such a creation calls it without the address it would take, which makes none either. A
-    /// start revm then refuses — a value the caller cannot fund, a frame past the call-stack
-    /// limit — makes no records, and the charge comes back when it returns, as does what a
-    /// frame that ran did not keep.
+    /// start revm then refuses past the call-stack limit makes no records, and the charge comes
+    /// back when it returns, as does what a frame that ran did not keep. A value the caller cannot
+    /// fund makes no record and is priced none here, so it is charged nothing: only a value
+    /// call's history allowance, which is no gas, is parked for it, and closes with the start when
+    /// it returns.
     ///
     /// A charge the caller cannot pay, or a price that does not fit in a `u64`, fails the opcode
     /// with an out-of-gas and starts no frame, even where revm would have refused the start. The
@@ -646,25 +657,17 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// frame made earlier included, and are loaded, priced and marked as any other read (see
     /// [`MegaContext::asks_oracle_service`]).
     ///
-    /// A frame whose regular gas, the part detention withholds included, cannot pay the cold
-    /// access reads nothing and asks nothing, as revm's own skipped cold load does. A detained
-    /// frame that holds the gas but may not spend it does read and ask, and the charge then stops
-    /// the transaction at the compute limit.
+    /// The read is made before its cold access is charged, whatever gas the frame holds: `SLOAD`'s
+    /// wrapper reads, then charges, so a frame that cannot pay the access has read the slot and
+    /// asked the environment all the same, and so has one gas detention then stops.
     ///
-    /// It is a read of volatile data: it is refused while the frame's volatile-data access is off,
-    /// and marked for gas detention, under the Oracle's cap, once it succeeded.
+    /// It is a read of volatile data: marked for gas detention, under the Oracle's cap, once it
+    /// succeeded. A frame whose volatile-data access is off is refused it before it is made.
     ///
     /// A read that asks is recorded, with the answer, on the context for the transaction's outcome
     /// ([`OracleReadRecord`](crate::OracleReadRecord)): the answer is in no database, so a
     /// stateless validator is given the included transactions' reads in place of the service.
-    fn oracle_sload(
-        &mut self,
-        key: StorageKey,
-        skip_cold_load: bool,
-    ) -> Result<StateLoad<StorageValue>, LoadError> {
-        if self.detention.refuses(VolatileDataAccess::ORACLE) || skip_cold_load {
-            return Err(LoadError::ColdLoadSkipped);
-        }
+    pub(crate) fn read_oracle_slot(&mut self, key: StorageKey) -> Result<StorageValue, LoadError> {
         let loaded = revm::context_interface::Host::sload_skip_cold_load(
             &mut self.inner,
             ORACLE_CONTRACT_ADDRESS,
@@ -683,7 +686,36 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
             None
         };
         self.detention.observe(VolatileDataAccess::ORACLE);
-        Ok(StateLoad::new(answer.unwrap_or(loaded), true))
+        Ok(answer.unwrap_or(loaded))
+    }
+
+    /// The one-hop EIP-7702 delegate a call of `target` would follow, read for a frame whose
+    /// volatile-data access is off to decide, before the call charges or checks anything, whether
+    /// the call reads the block beneficiary's account: the address `target`'s code delegates to,
+    /// or `None` when its code is not a delegation.
+    ///
+    /// The read loads `target`'s account and code, and not the delegate's: it is in the
+    /// transaction's state, and so in a stateless witness, as the call's own load of its target
+    /// would be. It warms nothing: the journal is taken back to where it stood, so the account is
+    /// as warm or as cold as it was, and a call the read does not refuse pays its target's access
+    /// as it would with access on.
+    ///
+    /// The read is required: a database error is recorded as the transaction's, which fails with
+    /// it, and is never taken for a target without a delegate.
+    pub(crate) fn call_target_delegate(
+        &mut self,
+        target: Address,
+    ) -> Result<Option<Address>, InstructionResult> {
+        let journal = &mut self.inner.journaled_state;
+        let start = mark(journal);
+        let delegate = journal
+            .load_account_with_code(target)
+            .map(|account| account.data.info.code.as_ref().and_then(Bytecode::eip7702_address));
+        revert_to(journal, start);
+        delegate.map_err(|error| {
+            *self.error() = Err(ContextError::Db(error));
+            InstructionResult::FatalExternalError
+        })
     }
 }
 

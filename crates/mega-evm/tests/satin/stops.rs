@@ -1165,9 +1165,10 @@ fn pop_then_writes() -> Charges {
     Charges::default().then(&[2]).fresh_writes(slots_past_the_cap())
 }
 
-/// After the Oracle's read: its `POP`, its caller's, then the fresh slots.
+/// After the Oracle's read: the `SLOAD`'s cold access, which the read is made and committed
+/// before, as one charge; the Oracle's `POP`, its caller's, then the fresh slots.
 fn oracle_pops_then_writes() -> Charges {
-    Charges::default().then(&[2, 2]).fresh_writes(slots_past_the_cap())
+    Charges::default().then(&[2_100, 2, 2]).fresh_writes(slots_past_the_cap())
 }
 
 /// A frame that reads the block's timestamp and then writes the fresh slots stops at the
@@ -1246,18 +1247,19 @@ fn test_oracle_volatile_data_access_oog_does_not_consume_all_gas() {
 
 /// A contract that calls one that reads the Oracle's storage and then writes the fresh slots: the
 /// middle contract is stopped at the first write past the limit, and the outer contract resumes
-/// on what the limit leaves it: its `POP`, then its read of its own slot, whose cold access crosses
-/// the limit again and stops the transaction.
+/// on what the limit leaves it: its `POP`, then its read of its own slot — its static gas, then
+/// its cold surcharge, each its own charge — then a loop, whose charges cross the limit again
+/// wherever the middle contract's crossing left the outer one, and stop the transaction.
 #[test]
 fn test_parent_runs_out_of_gas_after_oracle_access() {
     let middle = writes_past_the_cap(call_oracle(BytecodeBuilder::default(), None));
     let outer =
         call_all(BytecodeBuilder::default(), B).append(POP).append_many([PUSH0, SLOAD, POP]);
     let db = MemoryDatabase::default()
-        .account_code(A, outer.stop().build())
+        .account_code(A, crate::detention::spin(outer))
         .account_code(B, middle.stop().build());
     // The middle contract's crossing, then the outer one's `POP`, `PUSH0` and cold `SLOAD`: its
-    // static gas, then the cold surcharge.
+    // static gas, then the cold surcharge; then its loop, in a memory of nothing.
     let left = oracle_pops_then_writes().left(ORACLE_ACCESS_COMPUTE_GAS);
     let params = mega_evm::satin_gas_params();
     let sload = [
@@ -1267,7 +1269,7 @@ fn test_parent_runs_out_of_gas_after_oracle_access() {
         params.get(GasId::cold_storage_additional_cost()),
         2,
     ];
-    let left = Charges::default().then(&sload).left(left);
+    let left = Charges::default().then(&sload).spin(0).left(left);
     let (_, accessed) = assert_detention_stop(with_oracle_read(db), detention_limits(), left);
     assert_eq!(accessed, mega_evm::VolatileDataAccess::ORACLE);
 }

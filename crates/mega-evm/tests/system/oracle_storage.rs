@@ -17,7 +17,7 @@ use mega_evm::{
         op_transaction, zero_fee_l1_block_info, BytecodeBuilder, MemoryDatabase, ReplayingOracleEnv,
     },
     volatile_data_access_disabled_revert_data, EmptyExternalEnv, EvmTxRuntimeLimits, ExternalEnvs,
-    LimitCheck, LimitKind, MegaContext, MegaEvm, MegaSpecId, MegaTransaction,
+    LimitCheck, LimitKind, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
     MegaTransactionOutcome, OracleEnv, OracleRead, VolatileDataAccess,
 };
 use revm::{
@@ -25,7 +25,10 @@ use revm::{
         CALL, CALLDATASIZE, DELEGATECALL, DUP2, GAS, JUMPDEST, JUMPI, MSTORE, POP, PUSH0, PUSH1,
         RETURN, SLOAD, SSTORE, STOP, SUB, SWAP1, TIMESTAMP,
     },
-    context::TxEnv,
+    context::{
+        result::{ExecutionResult, HaltReason},
+        TxEnv,
+    },
     interpreter::{interpreter::EthInterpreter, interpreter_types::Jumps, Interpreter},
     Inspector,
 };
@@ -287,8 +290,9 @@ fn test_every_oracle_read_is_cold() {
 }
 
 /// A read of the Oracle's storage is a read of volatile data under the Oracle's own cap: the
-/// limit it sets is the transaction's compute at the read — the push and the `SLOAD`, with its
-/// cold access — plus the Oracle's cap, not the block environment's.
+/// limit it sets is the transaction's compute at the read — the push before the `SLOAD`, the read
+/// being made before any of the `SLOAD`'s gas is charged — plus the Oracle's cap, not the block
+/// environment's.
 #[test]
 fn test_an_oracle_read_is_detained_under_the_oracles_cap() {
     let code = BytecodeBuilder::default().append_many([PUSH0, SLOAD, STOP]).build();
@@ -305,7 +309,7 @@ fn test_an_oracle_read_is_detained_under_the_oracles_cap() {
         );
         assert!(run.outcome.result.is_success());
         assert_eq!(run.accessed, VolatileDataAccess::ORACLE);
-        assert_eq!(run.limit, Some(2 + 2_100 + 5_000_000));
+        assert_eq!(run.limit, Some(2 + 5_000_000));
     }
 
     // Under the default limits the cap is the spec's.
@@ -314,7 +318,7 @@ fn test_an_oracle_read_is_detained_under_the_oracles_cap() {
         &Service::default(),
         call_tx(ORACLE_CONTRACT_ADDRESS, [], U256::ZERO),
     );
-    assert_eq!(run.limit, Some(2 + 2_100 + ORACLE_ACCESS_COMPUTE_GAS));
+    assert_eq!(run.limit, Some(2 + ORACLE_ACCESS_COMPUTE_GAS));
 }
 
 /// A hint reaches the oracle service before a read the transaction makes after it, so the read
@@ -401,36 +405,68 @@ fn test_a_read_outside_the_oracles_frame_is_an_ordinary_read() {
     assert_eq!(run.limit, None);
 }
 
-/// A frame that cannot pay the cold access reads nothing: it runs out of gas as revm's own
-/// skipped cold load does, the service is not asked, and nothing volatile was read.
-#[test]
-fn test_a_read_the_frame_cannot_pay_for_asks_nothing() {
-    let oracle = BytecodeBuilder::default().append_many([PUSH0, SLOAD, STOP]).build();
-    // The caller forwards 1,000 gas: enough for the push and the warm part of the `SLOAD`, not
-    // for its cold access.
-    let caller = BytecodeBuilder::default()
-        .append_many([PUSH0, PUSH0, PUSH0, PUSH0, PUSH0])
-        .push_address(ORACLE_CONTRACT_ADDRESS)
-        .push_number(1_000_u16)
-        .append(CALL)
-        .append_many([PUSH0, MSTORE])
-        .push_number(32_u8)
-        .append_many([PUSH0, RETURN])
-        .build();
-    let service = Service::holding(U256::ZERO, SERVICE_VALUE);
-    let db =
-        system_db().account_code(ORACLE_CONTRACT_ADDRESS, oracle).account_code(CONTRACT, caller);
-    let run = run(db, &service, call_tx(CONTRACT, [], U256::ZERO));
+/// The regular gas a call to `to` spends before its first instruction, with `to` running `STOP`:
+/// what a transaction to it is billed on the regular ledger, at the byte prices in effect.
+fn intrinsic(to: Address) -> u64 {
+    let db = system_db().account_code(to, BytecodeBuilder::default().stop().build());
+    let run = run(db, &Service::default(), call_tx(to, [], U256::ZERO));
+    assert!(run.outcome.result.is_success(), "{:?}", run.outcome.result);
+    run.outcome.gas.regular
+}
 
-    assert!(run.outcome.result.is_success());
-    assert_eq!(
-        U256::from_be_slice(run.outcome.result.output().unwrap()),
-        U256::ZERO,
-        "the call failed"
-    );
-    assert!(service.seen().is_empty(), "a read the frame cannot pay for asks nothing");
-    assert!(run.outcome.oracle_reads.is_empty(), "and records nothing");
-    assert_eq!(run.accessed, VolatileDataAccess::empty());
+/// A transaction to `to` whose own frame starts with `frame_gas` of regular gas: the gas limit
+/// covers the intrinsic regular gas and the body's history, which a transaction below the
+/// execution cap pays from its regular gas.
+fn tx_with_frame_gas(to: Address, frame_gas: u64) -> MegaTransaction {
+    tx_with_gas(to, &[], intrinsic(to) + crate::common::body_history(0) + frame_gas)
+}
+
+/// The Oracle's read is made before any of its gas is charged, the 100 of its warm base included:
+/// whatever the frame holds when it reaches the `SLOAD` — fewer than 100, from 100 to 2,099, the
+/// 2,100 exactly, or more — the slot is loaded, the service asked, and the read marked at the
+/// compute before the `SLOAD`, the push's 2, so its limit is 2 plus the Oracle's cap. Then the
+/// 2,100 is charged: a frame short of it runs out of gas at the `SLOAD`, the mark standing for the
+/// rest of the transaction, and one that holds it pushes the service's value.
+#[test]
+fn test_an_oracle_read_is_made_before_its_charge_at_every_gas() {
+    let code = BytecodeBuilder::default().append_many([PUSH0, SLOAD, PUSH0, MSTORE]);
+    let code = code.push_number(32_u8).append_many([PUSH0, RETURN]).build();
+    // The push, the `SLOAD`, and the `MSTORE` with its push and its memory, and the return's two
+    // pushes: what a frame that completes the read spends after it.
+    let after = 2 + 3 + 3 + 3 + 2;
+    for (left, completes) in [(50, false), (2_099, false), (2_100, true), (4_099, true)] {
+        let service = Service::holding(U256::ZERO, SERVICE_VALUE);
+        let db = system_db().account_code(ORACLE_CONTRACT_ADDRESS, code.clone());
+        let frame_gas = 2 + left + if completes { after } else { 0 };
+        let run = run(db, &service, tx_with_frame_gas(ORACLE_CONTRACT_ADDRESS, frame_gas));
+
+        assert_eq!(service.seen(), vec![Seen::Read(U256::ZERO)], "{left}: the service was asked");
+        assert_eq!(
+            run.outcome.oracle_reads,
+            [OracleRead { slot: U256::ZERO, answer: Some(SERVICE_VALUE) }],
+            "{left}: and the read recorded"
+        );
+        assert_eq!(run.accessed, VolatileDataAccess::ORACLE, "{left}: the read is marked");
+        assert_eq!(run.limit, Some(2 + ORACLE_ACCESS_COMPUTE_GAS), "{left}: before the SLOAD");
+        let oracle = run.outcome.state.get(&ORACLE_CONTRACT_ADDRESS).expect("the Oracle is read");
+        assert!(oracle.storage.contains_key(&U256::ZERO), "{left}: the slot is loaded");
+        if completes {
+            assert!(run.outcome.result.is_success(), "{left}: {:?}", run.outcome.result);
+            assert_eq!(U256::from_be_slice(run.outcome.result.output().unwrap()), SERVICE_VALUE);
+        } else {
+            assert!(
+                matches!(
+                    run.outcome.result,
+                    ExecutionResult::Halt {
+                        reason: MegaHaltReason::Base(HaltReason::OutOfGas(_)),
+                        ..
+                    }
+                ),
+                "{left}: {:?}",
+                run.outcome.result
+            );
+        }
+    }
 }
 
 /// A read refused because the frame's volatile-data access is off asks the service nothing: the
@@ -577,10 +613,9 @@ fn test_two_answers_for_one_slot_replay_only_from_the_record() {
 }
 
 /// A detained frame whose regular gas holds the cold access, but which may not spend it past the
-/// compute limit, reads and asks the service all the same: the read's charge then stops the
-/// transaction at the limit, and the Oracle read is not marked. A frame whose regular gas cannot
-/// hold the cold access at all asks nothing
-/// ([`test_a_read_the_frame_cannot_pay_for_asks_nothing`]).
+/// compute limit, reads, asks the service and marks the read all the same: the 2,100 is then one
+/// charge, the crossing, and stops the frame with none of it made, so the stop's compute is the
+/// compute before the `SLOAD` — the `TIMESTAMP`, its `POP` and the push — and the mark stands.
 #[test]
 fn test_a_detained_frame_that_may_not_spend_the_cold_access_asks_and_is_stopped() {
     let code = BytecodeBuilder::default().append_many([TIMESTAMP, POP, PUSH0, SLOAD, STOP]).build();
@@ -594,16 +629,52 @@ fn test_a_detained_frame_that_may_not_spend_the_cold_access_asks_and_is_stopped(
     );
 
     assert_eq!(service.seen(), vec![Seen::Read(U256::ZERO)], "the service was asked");
-    assert!(
-        matches!(
-            run.outcome.limit_exceeded,
-            Some(LimitCheck::ExceedsLimit { kind: LimitKind::ComputeGas, .. })
-        ),
-        "{:?}",
-        run.outcome.limit_exceeded
+    assert_eq!(
+        run.outcome.limit_exceeded,
+        Some(LimitCheck::ExceedsLimit {
+            kind: LimitKind::ComputeGas,
+            limit: 2 + 1_500,
+            used: 2 + 2 + 2,
+            frame_local: false,
+        }),
     );
-    assert_eq!(run.accessed, VolatileDataAccess::TIMESTAMP, "the Oracle read is not marked");
+    assert_eq!(
+        run.accessed,
+        VolatileDataAccess::TIMESTAMP | VolatileDataAccess::ORACLE,
+        "the Oracle read is marked"
+    );
     assert_eq!(run.limit, Some(2 + 1_500), "the timestamp's limit binds");
+}
+
+/// The Oracle's `SLOAD` charges its 2,100 as one charge, after the read; another contract's
+/// `SLOAD` charges its static 100 and then its cold access, each its own charge. Under a limit
+/// that leaves 1,000 spendable at the `SLOAD`, the Oracle's read is stopped at the compute before
+/// it, none of the 2,100 made, and the other contract's at the compute after its 100, which it
+/// could spend.
+#[test]
+fn test_the_oracles_cold_access_is_one_charge_and_another_sload_two() {
+    let code = BytecodeBuilder::default().append_many([TIMESTAMP, POP, PUSH0, SLOAD, STOP]).build();
+    // `TIMESTAMP` sets the limit at its compute, 2, plus the cap; the `POP` and the push leave the
+    // `SLOAD` 1,000 of it.
+    let cap = 1_000 + 2 + 2;
+    let stop = |at: Address| {
+        let run = run_under(
+            system_db().account_code(at, code.clone()),
+            &Service::default(),
+            EvmTxRuntimeLimits::default().with_block_env_access_compute_gas_limit(cap),
+            |ctx| ctx,
+            call_tx(at, [], U256::ZERO),
+        );
+        match run.outcome.limit_exceeded {
+            Some(LimitCheck::ExceedsLimit { kind: LimitKind::ComputeGas, limit, used, .. }) => {
+                assert_eq!(limit, 2 + cap);
+                used
+            }
+            other => panic!("{at}: expected the compute stop, got {other:?}"),
+        }
+    };
+    assert_eq!(stop(ORACLE_CONTRACT_ADDRESS), 2 + 2 + 2, "the Oracle: none of the 2,100");
+    assert_eq!(stop(OTHER), 2 + 2 + 2 + 100, "another contract: its static 100, then the stop");
 }
 
 /* ---------- which source answered leaves no trace ---------- */

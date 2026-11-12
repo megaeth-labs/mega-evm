@@ -74,6 +74,10 @@ pub struct MegaContext<DB: Database, ExtEnvs: ExternalEnvTypes = EmptyExternalEn
     /// Whether the context runs the neutral configuration. See [`MegaContext::with_neutral_cfg`].
     #[cfg(any(test, feature = "test-utils"))]
     neutral: bool,
+    /// The static opcode prices the read wrappers charge in place of Satin's, once the test
+    /// tooling installed a fixture fork's on the EVM. See [`MegaContext::read_static_gas`].
+    #[cfg(any(test, feature = "test-utils"))]
+    read_static_gas: Option<revm::interpreter::instructions::GasTable>,
 }
 
 impl<DB: Database> MegaContext<DB, EmptyExternalEnv> {
@@ -113,6 +117,8 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
             keyless_creation: None,
             #[cfg(any(test, feature = "test-utils"))]
             neutral: false,
+            #[cfg(any(test, feature = "test-utils"))]
+            read_static_gas: None,
         }
     }
 
@@ -197,6 +203,29 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     #[cfg(any(test, feature = "test-utils"))]
     pub const fn is_neutral(&self) -> bool {
         self.neutral
+    }
+
+    /// The static gas of `opcode`, one of the opcodes that can read volatile data, which its read
+    /// wrapper charges itself once it decided the read is not refused, in place of the
+    /// interpreter: Satin's, or, once the test tooling installed a fixture fork's static prices on
+    /// the EVM, the fork's.
+    #[inline(always)]
+    pub(crate) fn read_static_gas(&self, opcode: u8) -> u64 {
+        #[cfg(any(test, feature = "test-utils"))]
+        if let Some(table) = &self.read_static_gas {
+            return u64::from(table[opcode as usize]);
+        }
+        u64::from(super::instructions::SATIN_GAS_TABLE[opcode as usize])
+    }
+
+    /// Has the read wrappers charge `table`'s static prices: test tooling, with which an EVM takes
+    /// a fixture fork's static prices.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) const fn set_read_static_gas(
+        &mut self,
+        table: revm::interpreter::instructions::GasTable,
+    ) {
+        self.read_static_gas = Some(table);
     }
 
     /// Whether the context runs the neutral configuration: never outside the test tooling, which

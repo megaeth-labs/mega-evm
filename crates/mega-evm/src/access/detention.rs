@@ -166,10 +166,11 @@ impl FrameFigures {
 /// # Refused reads
 ///
 /// A frame in a subtree where volatile-data access is switched off does not read volatile data:
-/// the Host refuses the load and the opcode's wrapper reverts the frame with
-/// `VolatileDataAccessDisabled`. The switch is scoped to the frame that turned it off and the
-/// frames below it, and turns back on when that frame returns. `MegaAccessControl`'s interceptor
-/// steers it for the frame that calls the contract.
+/// the opcode's wrapper refuses the read before the opcode runs, and reverts the frame with
+/// `VolatileDataAccessDisabled`; the Host refuses a load it would mark all the same, which no
+/// opcode reaches. The switch is scoped to the frame that turned it off and the frames below it,
+/// and turns back on when that frame returns. `MegaAccessControl`'s interceptor steers it for the
+/// frame that calls the contract.
 ///
 /// # What is a read
 ///
@@ -321,15 +322,6 @@ impl Detention {
     #[inline]
     pub(crate) fn has_reads(&self) -> bool {
         !(self.observed.get() | self.refused.get()).is_empty()
-    }
-
-    /// Names a refusal the running opcode's Host calls made `access`, whichever load was refused:
-    /// the kind the opcode reads, for an opcode that loads another kind first.
-    #[inline]
-    pub(crate) fn name_refusal(&self, access: VolatileDataAccess) {
-        if !self.refused.get().is_empty() {
-            self.refused.set(access);
-        }
     }
 
     /// Takes what the Host refused for the running opcode, if it refused anything.
@@ -1237,11 +1229,9 @@ mod tests {
         assert!(!detention.enable_access(2), "a frame below cannot switch it back on");
         detention.begin_read();
         assert!(detention.refuses(VolatileDataAccess::BLOCK_NUMBER));
-        detention.name_refusal(VolatileDataAccess::BLOCK_HASH);
         detention.end_read();
-        assert_eq!(detention.take_refused(), Some(VolatileDataAccess::BLOCK_HASH));
-        detention.name_refusal(VolatileDataAccess::BLOCK_HASH);
-        assert_eq!(detention.take_refused(), None, "nothing refused, nothing named");
+        assert_eq!(detention.take_refused(), Some(VolatileDataAccess::BLOCK_NUMBER));
+        assert_eq!(detention.take_refused(), None, "a refusal is taken once");
 
         detention.on_frame_end(InstructionResult::Stop, &mut child, 1);
         assert!(!detention.is_access_disabled(1), "on again once the frame returned");

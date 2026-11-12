@@ -156,7 +156,8 @@ Every precompile of the Satin set is priced, op-revm's size-limited BN254 pairin
 A precompile the engine cannot price — a node's own, an address a node replaced — is run on what the limit leaves its frame, and one it does not pay is the crossing, whatever its price.
 A keyless deployment's call is the transaction's own frame, held to the limit as any frame is: the overhead and the `CREATE` opcode's regular gas it charges are compute whether a rule then refuses the call or its creation runs, and the creation runs under what the limit leaves it.
 Every other out-of-gas halts and burns as it would without the read.
-While `MegaAccessControl`'s switch is off for a frame, its volatile reads are refused: the frame reverts with `VolatileDataAccessDisabled`, having paid the opcode's static gas and nothing more.
+While `MegaAccessControl`'s switch is off for a frame, its volatile reads are refused before the opcode charges or checks anything: the frame reverts with `VolatileDataAccessDisabled` on the gas it held when it reached the opcode, also when that is below the opcode's static gas.
+An Oracle read is made before any of its 2,100 is charged: the slot is loaded, the oracle service asked and the read marked, and a frame that then cannot pay the charge runs out of gas with the mark standing.
 The error's argument is a `uint8`: a refused `SLOTNUM` names access type 12, which the contract's `VolatileDataAccessType` does not declare, so a Solidity handler must decode it as `uint8`, and `decode_volatile_data_access_disabled` decodes it on the Rust side.
 The two caps are runtime limits, 20,000,000 each by default; `EvmTxRuntimeLimits::no_limits()` leaves them unlimited, and a transaction whose caps are both unlimited is not detained.
 The protocol's own transactions and the system calls are not detained either.
