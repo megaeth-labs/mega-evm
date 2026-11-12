@@ -174,6 +174,10 @@ Each change is stated here in plain words with its reason; the specification has
   A call to the EIP-2935 history contract is a read of the block environment, through the `NUMBER` its `get` path executes before it loads the slot; an `SLOAD` of the storage the EIP-2935 and EIP-4788 pre-block calls wrote is state the block starts with, and is no read.
   A `CREATE` or `CREATE2` is neither marked nor refused for loading its creator or created address, the block beneficiary included.
   Why: volatile data is data the block, the sequencer or the oracle changes under the transaction; the blob hashes are the transaction's own, the history contract's answer depends on the block number it reads, the pre-block storage is fixed before the first transaction, and a creation's loads are the creation opcode's own checks under EIP-8037, as a value call's check of its caller's balance is.
+- **A call's EIP-7702 delegate is refused where the call loads it.**
+  With access off, a call whose target operand is the beneficiary is still refused before it charges anything; a call whose target delegates to the beneficiary is no longer looked up first, but runs its static gas, memory, value transfer and target load as with access on, and the Host refuses the delegate's load (`load_account_info_skip_cold_load`); `settle_reads` puts back the gas the frame held at the call and reverts it, which was a debug-asserted backstop before.
+  A frame that cannot reach the delegate (3,100 for a cold target, 200 for a warm one, with no input and no value) runs out of gas instead of being refused for free.
+  Why: the lookup before any charge loaded a cold target's account and code for a frame that could not pay its static gas, so an access-off loop read about one cold account per 160 gas into the witness where access on reads none; refusing at the load reads a target only for a frame that holds its access, as with access on.
 
 ### The stop and the configuration
 
