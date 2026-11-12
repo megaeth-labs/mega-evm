@@ -279,7 +279,8 @@ fn test_an_override_replays_a_satin_block_under_other_limits() {
         let kept = unlimited["satin"]["data_size"].as_u64();
         if from == MEGA_SYSTEM_ADDRESS {
             // The protocol's transactions carry gas limits close to the block's, so the gas the
-            // block has left may refuse one, as it may without the override; no limit does.
+            // block has left may refuse one, as it may without the override; the transaction's
+            // data-size limit does not.
             if tx["status"] == "refused" {
                 let reason = tx["reason"].as_str().unwrap();
                 assert!(reason.contains("blocks available gas"), "{reason}");
@@ -287,7 +288,7 @@ fn test_an_override_replays_a_satin_block_under_other_limits() {
             }
             assert!(
                 tx["satin"]["limit_exceeded"].is_null(),
-                "the protocol's transaction {} is held to no limit",
+                "the protocol's transaction {} is held to no per-transaction data-size limit",
                 tx["index"]
             );
             if tx["satin"]["data_size"].as_u64().unwrap() > limit {
@@ -311,8 +312,8 @@ fn test_an_override_replays_a_satin_block_under_other_limits() {
     }
     assert!(protocols > 0 && others > 0, "{protocols} {others}");
 
-    // The budget refuses every transaction after the one that reaches it but the protocol's own:
-    // a Mega System Transaction is never refused by it.
+    // The first deposit fills the budget. Every later non-deposit transaction is refused,
+    // including the system transactions that the recorded block holds.
     let (packed, block) = replay_under(Some(r#"{"blockTxsDataLimit":1}"#));
     let is_protocols = |index: usize| {
         let from: Address = sent[index]["from"].as_str().unwrap().parse().unwrap();
@@ -320,13 +321,10 @@ fn test_an_override_replays_a_satin_block_under_other_limits() {
     };
     let protocol_txs = (1..packed.len()).filter(|&index| is_protocols(index)).count();
     assert!(protocol_txs > 0, "the block holds Mega System Transactions");
-    assert_eq!(block["refused"], block["transactions"].as_u64().unwrap() - 1 - protocol_txs as u64,);
+    assert!(sent.iter().skip(1).all(|tx| tx["type"] != "0x7e"), "only the first is a deposit");
+    assert_eq!(block["refused"], block["transactions"].as_u64().unwrap() - 1);
     assert_eq!(packed[0], counterfactual[0], "the transaction that reaches the budget is packed");
-    for (index, tx) in packed.iter().enumerate().skip(1) {
-        if is_protocols(index) {
-            assert_ne!(tx["status"], "refused", "the budget does not refuse the protocol's: {tx}");
-            continue;
-        }
+    for tx in packed.iter().skip(1) {
         assert_eq!(tx["status"], "refused", "{tx}");
         let reason = tx["reason"].as_str().unwrap();
         assert!(reason.contains("Block transactions data limit reached"), "{reason}");

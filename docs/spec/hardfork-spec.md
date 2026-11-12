@@ -199,6 +199,6 @@ It restates MegaETH's execution rules on Optimism Karst (Ethereum Osaka) rather 
 - **[KeylessDeploy](system-contracts/keyless-deploy.md)** — the deployment runs as a native creation frame instead of a sandbox.
 - **System calls** — at most 30,000,000 of a system call's gas is regular gas, and the pre-block calls run before every block; the block in which Satin activates checks that the system contracts and the EIP-7997 factory hold the code Satin runs, and Satin deploys none of them.
 - **Live system address** — every transaction reads the [SequencerRegistry](system-contracts/sequencer-registry.md) itself, and a system-address transaction without the system shape is invalid.
-- **Block limits** — data size, KV updates and state growth are packing budgets that never refuse a deposit or a Mega System Transaction.
+- **Block limits** — data size, KV updates and state growth are packing budgets that exempt only deposits; Mega System Transactions obey those budgets and building policy.
 
 _See [Satin Network Upgrade](upgrades/satin.md) for the current state._

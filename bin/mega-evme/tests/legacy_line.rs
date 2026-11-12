@@ -179,3 +179,55 @@ fn test_the_lockfile_parser_reads_packages() {
     assert_eq!(compatibility_line("0.18.14"), "0.18");
     assert_eq!(compatibility_line("2.0.0-alpha.1"), "2");
 }
+
+/// The released Rex6 engine applies block admission to a system call's legacy envelope.
+/// Its exemption from per-transaction resource metering does not exempt block packing.
+#[cfg(feature = "legacy")]
+#[test]
+fn test_rex6_system_transaction_block_admission_is_unchanged() {
+    use mega_evm_legacy::{
+        alloy_primitives::{TxKind, B256},
+        check_if_mega_system_transaction, BlockLimiter, BlockLimits, MegaHardfork,
+        MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS,
+    };
+
+    assert!(check_if_mega_system_transaction(
+        MEGA_SYSTEM_ADDRESS,
+        0,
+        TxKind::Call(ORACLE_CONTRACT_ADDRESS),
+        MEGA_SYSTEM_ADDRESS,
+    ));
+    let limits = BlockLimits::from_hardfork_and_block_gas_limit(MegaHardfork::Rex6, 1_000_000_000);
+    for (name, limits, refusal) in [
+        ("data", limits.with_block_txs_data_limit(0), "Block transactions data limit reached"),
+        ("KV", limits.with_block_kv_update_limit(0), "Block KV update limit reached"),
+        ("growth", limits.with_block_state_growth_limit(0), "Block state growth limit reached"),
+        ("gas", limits.with_tx_gas_limit(0), "Transaction gas limit exceeded"),
+        (
+            "encoded tx",
+            limits.with_tx_encode_size_limit(0),
+            "Transaction encode size limit exceeded",
+        ),
+        (
+            "encoded block",
+            limits.with_block_txs_encode_size_limit(0),
+            "Block transactions encode size limit exceeded",
+        ),
+        (
+            "DA tx",
+            limits.with_tx_da_size_limit(0),
+            "Transaction data availability size limit exceeded",
+        ),
+        (
+            "DA block",
+            limits.with_block_da_size_limit(0),
+            "Block data availability size limit exceeded",
+        ),
+    ] {
+        let limiter = BlockLimiter::new(limits);
+        let error = limiter
+            .pre_execution_check(B256::ZERO, 100_000, 100, 100, false)
+            .expect_err("the legacy envelope is held to block admission");
+        assert!(error.to_string().contains(refusal), "{name}: {error}");
+    }
+}
