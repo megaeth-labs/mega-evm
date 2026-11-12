@@ -266,9 +266,7 @@ fn test_a_short_list_that_runs_out_of_gas_part_way_loads_every_authority() {
         matches!(
             recorded.tx(0).result,
             revm::context::result::ExecutionResult::Halt {
-                reason: op_revm::OpHaltReason::Base(
-                    revm::context::result::HaltReason::OutOfGas(_)
-                ),
+                reason: op_revm::OpHaltReason::Base(revm::context::result::HaltReason::OutOfGas(_)),
                 ..
             }
         ),

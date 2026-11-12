@@ -787,6 +787,7 @@ A deposit that runs to a success or a revert and creates its caller is the ordin
 - **Authorizations before the first frame.**
   Before the first frame, a node MUST decide the list by simulating [EIP-7702](https://eips.ethereum.org/EIPS/eip-7702) application in list order.
   The simulation writes nothing and warms nothing.
+  It MUST run for every list, whatever its length and whether or not the list could cross a limit, so that every authority whose entry passes the chain id, nonce and signature checks is loaded and a stateless witness holds it even when the transaction runs out of gas before the list is applied.
   An entry whose chain id is neither zero nor this chain's, whose nonce is 2^64 − 1, or whose signature does not recover an authority, is skipped, and its authority account is not read.
   Every other entry loads the authority's account, with its code.
   An authority account that holds code other than a delegation is skipped, and its simulated nonce is not bumped.
