@@ -1326,21 +1326,12 @@ fn test_an_access_off_memory_loop_pays_for_the_memory_it_grows() {
         .account_code(CONTRACT, calls_the_helper_while_it_can(HELPER, forward, 32))
         .account_code(HELPER, helper);
     let mut evm = MegaEvm::new(context(db)).with_inspector(Calls::default());
-    let started = std::time::Instant::now();
     let run = run_on(&mut evm, listing(CONTRACT, DELEGATOR, TX_GAS_LIMIT_CAP));
-    let elapsed = started.elapsed();
     assert!(run.outcome.result.is_success(), "{:?}", run.outcome.result);
     let calls = U256::from_be_slice(run.outcome.result.output().unwrap()).to::<u64>();
     let helpers: Vec<_> =
         evm.inspector().calls.iter().filter(|call| call.target == HELPER).collect();
     assert_eq!(helpers.len() as u64, calls);
-    let retained = helpers.iter().map(|call| call.spent).sum::<u64>() / calls;
-    println!(
-        "memory loop at the execution cap: {calls} calls, {} MiB grown, {retained} gas kept by \
-         each refused call, {} regular gas, {elapsed:?}",
-        (calls * u64::from(OUTPUT)) >> 20,
-        run.outcome.gas.regular,
-    );
     for call in &helpers {
         assert_eq!(
             (call.result, call.output.clone()),
@@ -1459,17 +1450,22 @@ fn test_a_detained_call_stack_reads_a_bounded_tail() {
 }
 
 /// Runs a transaction whose own frame reads the block's timestamp and then calls `CHILD`, holding
-/// 5,200 at its first call opcode, of which it may spend `spendable`, with access off from `CHILD`
-/// down. Returns the run and what [`AtTheCall`] recorded. The cap is derived from a run under
-/// another, which detains the child too: the child's spendable gas at the call is the cap less what
-/// the transaction computed since its read.
-fn run_detained_child(child: &Bytes, pushes: u64, spendable: u64, warm: bool) -> (Run, AtTheCall) {
-    const WHOLE: u64 = 5_200;
+/// `whole` at its first call opcode, of which it may spend `spendable`, with access off from
+/// `CHILD` down. Returns the run and what [`AtTheCall`] recorded. The cap is derived from a run
+/// under another, which detains the child too: the child's spendable gas at the call is the cap
+/// less what the transaction computed since its read.
+fn run_detained_child(
+    child: &Bytes,
+    pushes: u64,
+    whole: u64,
+    spendable: u64,
+    warm: bool,
+) -> (Run, AtTheCall) {
     // The parent stops once the call returned, which costs nothing of what the limit leaves it.
     let parent = op(BytecodeBuilder::default(), TIMESTAMP)
         .append_many([PUSH0; 5])
         .push_address(CHILD)
-        .push_number(pushes + WHOLE)
+        .push_number(pushes + whole)
         .append(CALL)
         .stop()
         .build();
@@ -1493,12 +1489,12 @@ fn run_detained_child(child: &Bytes, pushes: u64, spendable: u64, warm: bool) ->
     };
     // The call the transaction's own frame makes, a cold one, fits under it, and what the child may
     // spend at its call is below what it holds.
-    let first = cold_access() + WHOLE / 2;
+    let first = cold_access() + whole / 2;
     let (_, at_the_call) = run_under(first);
     let (first_spendable, _) = held(&at_the_call);
-    assert!(first_spendable < WHOLE, "the first run detains the child: {first_spendable}");
+    assert!(first_spendable < whole, "the first run detains the child: {first_spendable}");
     let (run, at_the_call) = run_under(first - first_spendable + spendable);
-    assert_eq!(held(&at_the_call), (spendable, WHOLE), "what the child holds at the call");
+    assert_eq!(held(&at_the_call), (spendable, whole), "what the child holds at the call");
     (run, at_the_call)
 }
 
@@ -1545,7 +1541,7 @@ fn test_a_refusal_at_the_delegate_pays_the_targets_access_within_the_compute_lim
         let case = format!("memory {with_memory}, listed {listed}, spendable {spendable}");
         let (child, pushes) =
             if with_memory { (&ranged, ranged_pushes) } else { (&plain, plain_pushes) };
-        let (run, at_the_call) = run_detained_child(child, pushes, spendable, listed);
+        let (run, at_the_call) = run_detained_child(child, pushes, 5_200, spendable, listed);
         let limit = run.limit.expect("the timestamp detains");
         let ending = if is_refused {
             refused(VolatileDataAccess::BENEFICIARY_BALANCE)
@@ -1557,6 +1553,74 @@ fn test_a_refusal_at_the_delegate_pays_the_targets_access_within_the_compute_lim
         assert_eq!(run.outcome.state.contains_key(&DELEGATOR), reads, "{case}: read");
         assert_eq!(run.accessed, VolatileDataAccess::TIMESTAMP, "{case}");
     }
+}
+
+/// A value call refused at its delegate always pays its cold surcharge: the value transfer it was
+/// charged from its spendable gas before the load, and is given back, leaves room for the
+/// surcharge there, so the surcharge is never gas detention's crossing. A value `CALL` of a cold
+/// delegator of the beneficiary, from a frame that cannot fund the value and holds 20,000 at the
+/// call, of which it may spend its static gas and the value transfer, 11,400, reaches the delegate
+/// and is refused, paying the cold access and handing back 17,000; one that may spend 11,399 is
+/// stopped at the value transfer, the charge that crosses, before its target is read, handing back
+/// 19,900, the value transfer not among what it spent.
+#[test]
+fn test_a_detained_value_call_refused_at_the_delegate_pays_its_surcharge() {
+    let warm = entry(GasId::warm_storage_read_cost());
+    let (child, pushes) = call_of(CALL, DELEGATOR, 1, 0);
+    let whole = 20_000;
+    let reach = warm + value_transfer();
+    // (what the child may spend, whether it is refused rather than stopped, what it hands back,
+    // whether it reads the delegator)
+    for (spendable, is_refused, returned, reads) in
+        [(reach, true, whole - cold_access(), true), (reach - 1, false, whole - warm, false)]
+    {
+        let (run, at_the_call) = run_detained_child(&child, pushes, whole, spendable, false);
+        let limit = run.limit.expect("the timestamp detains");
+        let ending = if is_refused {
+            refused(VolatileDataAccess::BENEFICIARY_BALANCE)
+        } else {
+            (InstructionResult::Revert, stop_data(limit))
+        };
+        assert_eq!(at_the_call.child, Some(ending), "{spendable}");
+        assert_eq!(at_the_call.returned, Some(returned), "{spendable}: handed back");
+        assert_eq!(run.outcome.state.contains_key(&DELEGATOR), reads, "{spendable}: read");
+    }
+}
+
+/// The identity precompile, whose address every transaction finds warm.
+const IDENTITY: Address = address!("0000000000000000000000000000000000000004");
+
+/// A call runs a precompile only once it reaches the precompile's dispatch, after its own steps,
+/// whatever code the state holds at the precompile's address. With access off, a `STATICCALL` of
+/// the identity precompile's address, which the state gives a delegation indicator naming the
+/// beneficiary, with an input of 64 bytes and an output range past it, is refused at the
+/// delegate's load: the address is warm, so the frame pays the warm access and the memory its
+/// ranges grew, four words, and the precompile never runs. With access on, the same call runs the
+/// precompile.
+#[test]
+fn test_a_precompile_address_delegating_to_the_beneficiary_is_refused_before_it_runs() {
+    let warm = entry(GasId::warm_storage_read_cost());
+    let child = call_with_ranges(BytecodeBuilder::default(), IDENTITY, (0, 64), (64, 64));
+    let db = || {
+        with_delegation(MemoryDatabase::default(), IDENTITY, BENEFICIARY)
+            .account_code(CONTRACT, calls_child(BytecodeBuilder::default(), None).stop().build())
+            .account_code(CHILD, child.clone())
+    };
+
+    let mut evm = MegaEvm::new(context(db()).with_volatile_access_disabled_from(1))
+        .with_inspector(AtTheCall::default());
+    let run = run_on(&mut evm, tx(CALLER, CONTRACT, BELOW));
+    assert!(run.outcome.result.is_success(), "{:?}", run.outcome.result);
+    let at_the_call = evm.inspector();
+    assert_eq!(at_the_call.child, Some(refused(VolatileDataAccess::BENEFICIARY_BALANCE)));
+    let (before, after) = (at_the_call.before.unwrap().0, at_the_call.after.unwrap().0);
+    assert_eq!(before.remaining() - after.remaining(), warm + memory_cost(4));
+
+    let mut evm = MegaEvm::new(context(db())).with_inspector(Calls::default());
+    let run = run_on(&mut evm, tx(CALLER, CONTRACT, BELOW));
+    assert!(run.outcome.result.is_success(), "{:?}", run.outcome.result);
+    let call = evm.inspector().calls.iter().find(|call| call.target == IDENTITY);
+    assert!(call.is_some_and(|call| call.precompile_ran), "with access on the precompile runs");
 }
 
 /// Contracts that load an account no transaction here funds, then do something else.
@@ -1676,7 +1740,7 @@ fn test_a_call_of_a_delegator_of_another_account_pays_as_with_access_on() {
     assert_eq!(spent(true), on, "access off");
 }
 
-/// The fresh addresses an amplification loop calls, none of which any account holds.
+/// The fresh addresses a loop of reads calls, none of which any account holds.
 fn fresh_addresses(count: u64) -> Vec<Address> {
     (0..count).map(|i| Address::from_word(B256::from(U256::from(0xa000_0000_u64 + i)))).collect()
 }
@@ -1732,14 +1796,14 @@ fn disables_volatile_access(code: BytecodeBuilder) -> BytecodeBuilder {
         .append_many([GAS, CALL, POP])
 }
 
-/// One run of an amplification loop: the regular gas the transaction spent, and how many of the
-/// loop's targets its database was asked for.
-struct Amplification {
+/// One run of a loop of reads: the regular gas the transaction spent, and how many of the loop's
+/// targets its database was asked for.
+struct ReadLoop {
     gas: u64,
     reads: usize,
 }
 
-impl Amplification {
+impl ReadLoop {
     fn run(db: MemoryDatabase, targets: &[Address]) -> Self {
         let record = SharedWitnessRecord::default();
         let outcome = MegaEvm::new(context(RecordingDatabase::new(db, record.clone())))
@@ -1749,11 +1813,6 @@ impl Amplification {
         let record = record.borrow();
         let reads = targets.iter().filter(|target| record.accounts.contains_key(*target)).count();
         Self { gas: outcome.gas.regular, reads }
-    }
-
-    /// The regular gas the transaction spent per target read, or `None` when it read none.
-    fn gas_per_read(&self) -> Option<u64> {
-        (self.reads > 0).then(|| self.gas / self.reads as u64)
     }
 }
 
@@ -1796,17 +1855,17 @@ fn test_an_access_off_loop_reads_no_account_it_does_not_pay_for() {
             .account_code(HELPER, helper.clone())
     };
 
-    let starved = Amplification::run(loop_db(true, pushes), &targets);
-    let starved_on = Amplification::run(loop_db(false, pushes), &targets);
-    let paying = Amplification::run(loop_db(true, pushes + cold_access()), &targets);
-    let paying_on = Amplification::run(loop_db(false, pushes + cold_access()), &targets);
+    let starved = ReadLoop::run(loop_db(true, pushes), &targets);
+    let starved_on = ReadLoop::run(loop_db(false, pushes), &targets);
+    let paying = ReadLoop::run(loop_db(true, pushes + cold_access()), &targets);
+    let paying_on = ReadLoop::run(loop_db(false, pushes + cold_access()), &targets);
 
     let (crossing, _) = calls_its_input(0x32_0000);
     let detained_start = disables_volatile_access(op(BytecodeBuilder::default(), TIMESTAMP));
     let detained_db = MemoryDatabase::default()
         .account_code(CONTRACT, calls_the_helper_for_each(detained_start, HELPER, &targets, None))
         .account_code(HELPER, crossing);
-    let detained = Amplification::run(detained_db, &targets);
+    let detained = ReadLoop::run(detained_db, &targets);
 
     let delegators = fresh_addresses(500);
     let mut delegators_db = MemoryDatabase::default()
@@ -1823,7 +1882,7 @@ fn test_an_access_off_loop_reads_no_account_it_does_not_pay_for() {
     for delegator in &delegators {
         delegators_db = with_delegation(delegators_db, *delegator, BENEFICIARY);
     }
-    let refused_reads = Amplification::run(delegators_db.clone(), &delegators);
+    let refused_reads = ReadLoop::run(delegators_db.clone(), &delegators);
     let delegators_on_db = delegators_db.account_code(
         CONTRACT,
         calls_the_helper_for_each(
@@ -1833,29 +1892,7 @@ fn test_an_access_off_loop_reads_no_account_it_does_not_pay_for() {
             Some(pushes + cold_access() + warm),
         ),
     );
-    let delegators_on = Amplification::run(delegators_on_db, &delegators);
-
-    println!(
-        "amplification over {} fresh addresses: starved helper reads {} at {:?} gas each \
-         (access on: {} for {} gas); paying helper reads {} at {:?} gas each (access on: {} at \
-         {:?}); detained helper reads {} for {} gas; {} delegators of the beneficiary read and \
-         refused at {:?} gas each (access on: {} at {:?})",
-        targets.len(),
-        starved.reads,
-        starved.gas_per_read(),
-        starved_on.reads,
-        starved_on.gas,
-        paying.reads,
-        paying.gas_per_read(),
-        paying_on.reads,
-        paying_on.gas_per_read(),
-        detained.reads,
-        detained.gas,
-        refused_reads.reads,
-        refused_reads.gas_per_read(),
-        delegators_on.reads,
-        delegators_on.gas_per_read(),
-    );
+    let delegators_on = ReadLoop::run(delegators_on_db, &delegators);
 
     assert_eq!(starved.reads, 0, "a helper short of its static gas reads nothing");
     assert_eq!(starved_on.reads, 0, "with access on either");
@@ -1870,7 +1907,7 @@ fn test_an_access_off_loop_reads_no_account_it_does_not_pay_for() {
     assert_eq!(detained.reads, 0, "a helper stopped at its memory reads nothing");
     assert_eq!(refused_reads.reads, delegators.len(), "a delegator of the beneficiary is read");
     assert_eq!(delegators_on.reads, delegators.len(), "as with access on");
-    assert!(refused_reads.gas_per_read().unwrap() > cold_access(), "for its cold access");
+    assert!(refused_reads.gas > delegators.len() as u64 * cold_access(), "for its cold access");
     // The two loops differ only in the call that switches access off, which the starved loops
     // measure.
     let disabling = starved.gas - starved_on.gas;
