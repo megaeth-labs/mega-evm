@@ -325,12 +325,20 @@ fn refused_read<const OPCODE: u8, DB: Database, ExtEnvs: ExternalEnvTypes>(
 /// range inside memory the frame already held, the record kept at the grown memory; then, when
 /// the Host found the target cold, the cold surcharge, as `BALANCE` charges it. That is the gas
 /// the frame held once its memory was grown, less the surcharge: the value transfer and the
-/// delegate's access are not paid. The first two charges were made from the same spendable gas
-/// already. A frame whose spendable part cannot pay the surcharge holds it in its withheld part —
-/// the call held its target's access and the delegate's warm access to reach the delegate — so
-/// the charge is gas detention's crossing, and the frame ends with the compute stop rather than
-/// the refusal. Otherwise it is refused: its revert takes back the target's warming, and leaves
-/// the target's account and code in the transaction's state.
+/// delegate's access are not paid. Gas detention reads compute off the frame's gas, so the charges
+/// made again count once, and the value transfer the restoration gave back counts as none.
+///
+/// The first two charges were made from the same spendable gas already. A frame whose spendable
+/// part cannot pay the surcharge holds it in its withheld part — the call held its target's access
+/// and the delegate's warm access to reach the delegate — so the charge is gas detention's
+/// crossing, and the frame ends with the compute stop rather than the refusal; no charge here can
+/// run out of gas. A value call's restored spendable part still holds the value transfer it paid
+/// before the load, which covers the surcharge, so a value call always pays it. Otherwise the frame
+/// is refused: its revert takes back the warming the frame made, and leaves the target's account
+/// and code in the transaction's state.
+///
+/// The target may be a precompile's address whose state holds a delegation: the refusal comes
+/// before the frame start that would dispatch the precompile, so it never runs.
 #[inline(never)]
 fn settle_reads<DB: Database, ExtEnvs: ExternalEnvTypes>(
     interpreter: &mut Interpreter<EthInterpreter>,
