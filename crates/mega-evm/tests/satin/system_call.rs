@@ -424,12 +424,12 @@ fn system_address_transaction(gas_limit: u64) -> (TxEnv, OpTransaction<TxEnv>) {
 /// deposit op-revm runs for it — never the system call's 30M split, which the rows between 30M and
 /// the cap would see.
 ///
-/// The one difference from op-revm's deposit is in the state: Satin's validation read the live
-/// system address out of the `SequencerRegistry`, a read-only entry holding the one slot.
+/// Satin also charges the body's history and reads the live system address from the registry.
+/// History draws from the reservoir first, just as for a user's transaction.
 #[test]
 fn test_a_system_address_transaction_is_split_by_the_execution_cap() {
     for (gas_limit, reservoir) in [
-        (1_000_000, 0),
+        (1_000_000, 0_u64),
         (100_000_000, 0),
         (TX_GAS_LIMIT_CAP, 0),
         (TX_GAS_LIMIT_CAP + 5_000_000, 5_000_000),
@@ -446,16 +446,13 @@ fn test_a_system_address_transaction_is_split_by_the_execution_cap() {
         let op_outcome = op_reference::transact(&mut op, deposit).expect("accepted");
 
         assert!(mega_outcome.result.is_success(), "{:?}", mega_outcome.result);
-        assert_eq!(mega_outcome.gas.history, 0);
-        assert_eq!(mega_outcome.gas.reservoir_remaining, reservoir, "{gas_limit}");
-        let mut satin = Settled {
-            result_and_state: mega_outcome.result_and_state,
-            reservoir_remaining: mega_outcome.gas.reservoir_remaining,
-        };
-        let registry =
-            satin.result_and_state.state.remove(&SEQUENCER_REGISTRY_ADDRESS).expect("the read");
-        assert!(!registry.is_touched(), "a read-only entry");
-        assert_eq!(registry.storage.keys().collect::<Vec<_>>(), [&CURRENT_SYSTEM_ADDRESS]);
-        assert_same(&satin, &op_outcome);
+        let history = crate::common::body_history(36);
+        assert_eq!(mega_outcome.gas.history, history);
+        assert_eq!(
+            mega_outcome.gas.reservoir_remaining,
+            reservoir.saturating_sub(history),
+            "{gas_limit}"
+        );
+        crate::equivalence::assert_same_but_history(&mega_outcome, &op_outcome);
     }
 }

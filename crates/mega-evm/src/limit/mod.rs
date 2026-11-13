@@ -151,9 +151,8 @@
 //! transaction ([`crate::system::is_system_originated`]) and a system call — the pre-block calls
 //! among them — are exempt ([`AdditionalLimit::is_exempt`]), sticky for the transaction, and the
 //! one place every stop comes from answers that they are within the limits whatever they cross:
-//! the data size, the KV updates, the state growth and the frame budgets. It is the set that pays
-//! no history gas, exempt for the same reason: the protocol's maintenance must not fail on a
-//! resource limit. What such a
+//! the data size, the KV updates, the state growth and the frame budgets. Only system calls pay
+//! no history gas; system-originated transactions pay for what they append. What such a
 //! transaction uses is counted all the same and reported in its usage and in the block's counters,
 //! as a deposit's is. A user's deposit is not in the set and is held to every limit.
 //!

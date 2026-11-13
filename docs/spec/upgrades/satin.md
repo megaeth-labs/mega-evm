@@ -370,7 +370,7 @@ Every EIP-8037 state charge MUST be `entry × m`:
 - The first effective `SELFDESTRUCT` of an account created in the same transaction refills state gas for each part the [destruction table](#the-destruction-table) names.
   EIP-8037 specifies that this destruction produces no state-gas refills.
 - The protocol's own transactions MUST be priced at `m = 1` whatever their buckets hold (see [The Protocol's Own Transactions](#19-the-protocols-own-transactions)).
-  A deposit that is not system-originated is not one of them and MUST be priced by bucket, although it pays no history gas (see [History Gas](#7-history-gas)).
+  A deposit that is not system-originated is not one of them and MUST be priced by bucket, and MUST pay history gas (see [History Gas](#7-history-gas)).
 
 At `m = 1` every state charge is the schedule's own number, so, unlike Rex6, a fresh slot or account in a minimum-size bucket is not free: it pays its state gas.
 
@@ -405,7 +405,7 @@ The bytes MUST be those of the byte table below, which is also the table the dat
 When each charge is made:
 
 - The body — `TX_BODY_SIZE`, the calldata, the access list and the authorizations — MUST be charged before execution, as intrinsic state gas: the reservoir pays it first and its excess the regular budget, and it is not part of the intrinsic regular gas the execution cap is validated against.
-  A gas limit that cannot cover it MUST make the transaction invalid (see [Two-Pool Gas](#4-two-pool-gas-eip-8037-replaces-the-dual-gas-model)).
+  A gas limit that cannot cover it MUST make an ordinary transaction invalid and a deposit a failed deposit (see [Two-Pool Gas](#4-two-pool-gas-eip-8037-replaces-the-dual-gas-model)).
   The body's history gas MUST NOT be reported on the state ledger.
 - The records of the applied EIP-7702 authorities, and the record the transaction's own frame makes (its value's recipient or its created account), MUST be charged before the first frame.
   A list the KV or state-growth limit skips has no authority records, and that history is not charged.
@@ -444,12 +444,16 @@ These MUST NOT pay history gas:
 
 - an [EIP-7708 transfer log](#14-eip-7708-transfer-logs), which is data size only;
 - an Oracle hint's payload, which goes to the oracle service rather than into a block;
-- any byte of a deposit transaction, of a system-originated transaction, or of a system call (see [The Protocol's Own Transactions](#19-the-protocols-own-transactions)).
-  For these the deposited-code history gas MUST be zero too.
-  The exemption is from history gas alone: a deposit that is not system-originated MUST still be priced by bucket (see [State Gas and SALT Pricing](#6-state-gas-and-salt-pricing)), held to every per-transaction limit and detained (see [The Protocol's Own Transactions](#19-the-protocols-own-transactions)).
+- any byte of a system call (see [The Protocol's Own Transactions](#19-the-protocols-own-transactions)).
+  Its deposited-code history gas MUST be zero too.
+
+A deposit and a system-originated transaction MUST pay history gas as any transaction does: for their body, calldata, logs, write records and deposited code.
+They MUST report their retained history bytes; a system call MUST report zero history bytes.
+A failed deposit MUST report its body and calldata as history bytes even when validation fails before those bytes are admitted, while reporting zero history gas.
+A deposit that is not system-originated MUST still be priced by bucket (see [State Gas and SALT Pricing](#6-state-gas-and-salt-pricing)), held to every per-transaction limit and detained (see [The Protocol's Own Transactions](#19-the-protocols-own-transactions)).
 
 The EIP-7623 floor is still computed and validated.
-At these prices it never raises the gas used of a transaction that pays history gas, because the history gas of the same bytes is higher; it can still raise that of a transaction exempt from history gas, a deposit or one of the protocol's own; and it does bind the figure a block counts on its execution ledger, `max(regular, floor)` (see [Two-Pool Gas](#4-two-pool-gas-eip-8037-replaces-the-dual-gas-model)).
+At these prices it never raises the gas used of a transaction that pays history gas, because the history gas of the same bytes is higher; it does bind the figure a block counts on its execution ledger, `max(regular, floor)` (see [Two-Pool Gas](#4-two-pool-gas-eip-8037-replaces-the-dual-gas-model)).
 Where it binds, the gas used is the floor, drawn from the whole gas limit, the reservoir included, and the transaction gets back its gas limit less the floor (see [Two-Pool Gas](#4-two-pool-gas-eip-8037-replaces-the-dual-gas-model)); a deposit, which paid nothing, is charged nothing either way, and only its receipt's and the block's figures move.
 
 ### 8. History Allowance Replaces the Storage Gas Stipend
@@ -1283,14 +1287,14 @@ Only a deposit carries a source hash: a transaction handed to a node with one is
 A system-originated transaction and every system call:
 
 - MUST be priced at `m = 1` and MUST NOT read a bucket capacity;
-- MUST pay no history gas, the body and deposited code included;
 - MUST NOT be stopped by any per-transaction limit or frame budget, data size, KV updates and state growth included;
 - MUST NOT be detained;
 - still have their usage counted.
 
 A system-originated transaction's usage is reported and counts towards the block's counters; the pre-block calls do not count towards the block's counters or limits.
 
-A deposit pays no history gas either (see [History Gas](#7-history-gas)), but a user's deposit is not system-originated: it is held to every per-transaction limit, detained, and priced by bucket (see [State Gas](#6-state-gas-and-salt-pricing)).
+A system call MUST pay no history gas; a system-originated transaction and a deposit MUST pay it as any transaction does (see [History Gas](#7-history-gas)).
+A user's deposit is not system-originated: it is held to every per-transaction limit, detained, and priced by bucket (see [State Gas](#6-state-gas-and-salt-pricing)).
 
 ### 20. Block Limits
 
@@ -1368,6 +1372,7 @@ A deposit MUST NOT be rejected for failing a validation check: a deposit that fa
 A read the node fails to make is not a validation check, for a deposit as for any transaction (below).
 A Mega System Transaction is a legacy transaction until it passes its own chain-id, nonce and EIP-3607 checks, so failing one of those is a rejection; once it passes them it runs as a deposit, and a check it fails after that includes it as a failed deposit.
 A failed deposit, one that fails a check, or whose execution halts, reports its whole gas limit as regular gas, and no state gas and no history gas on any ledger, the transaction's or the block's: the caller account it creates for a sender that did not exist carries no state gas, unlike the one a deposit that runs to a success or a revert creates (see [The Revert-Class Stop](#11-the-revert-class-stop)).
+Its body and calldata MUST still be reported as history bytes, including on a failure before body admission.
 That created account still counts as one of state growth, on the transaction's reported usage and on the block counter (see [Resource Limits](#10-resource-limits)).
 
 A transaction MUST be skipped for the current block, and MAY be included in a later one, when:
@@ -1533,7 +1538,8 @@ A node, a stateless validator and a replay tool must agree on everything below, 
   Whether a recipient, a created account or an authority is new is the state's to say: EIP-2780 charges it when the transaction runs, and a gas limit that cannot pay it runs out of gas rather than being refused.
   The history of the write records a transaction's start makes is charged when it runs too: one record for the recipient of its value (none for a recipient the transaction has changed already: the sender itself, or an authority it applied) or the account it creates, and one for each authority that applies other than the sender.
   So the least gas limit validation admits is not what a transaction needs: at that gas limit a transfer of value to another account runs out of gas on its recipient's record, and one to a new account needs that account's state gas as well.
-  A deposit and a Mega System Transaction pay no history gas; a pool that recognizes the latter, and refuses a transaction from the live system address without the system shape, needs the live system address from the state.
+  Deposits and Mega System Transactions MUST cover their body's history gas in the intrinsic check; a deposit that fails it MUST be included as a failed deposit.
+  A pool that recognizes a Mega System Transaction, and refuses a transaction from the live system address without the system shape, needs the live system address from the state.
   That address changes only in a block's pre-block step and then holds for the whole block, so a pool reads it again for every block, from the state after that block's pre-block changes.
   An address read from another state treats the old system address's transactions as the protocol's and the new one's as a user's, or the reverse.
   A deposit is never refused for failing validation: one that fails validation is included as a failed deposit, which bumps its sender's nonce and uses its whole gas limit.

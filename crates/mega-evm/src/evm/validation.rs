@@ -43,8 +43,7 @@ pub struct IntrinsicGas {
     pub state: u64,
     /// The history gas of the transaction's body: its envelope, the five write records every
     /// transaction makes, its calldata, access list and authorizations, at the cost per history
-    /// byte. Zero for a transaction exempt from history gas: a deposit and a system-address
-    /// transaction.
+    /// byte, for a deposit and a system-address transaction as for any other transaction.
     pub history: u64,
     /// The EIP-7623 calldata floor. The gas limit must cover it, and a transaction pays at least
     /// it. At the spec's byte prices a transaction that pays history gas pays more than the floor
@@ -94,7 +93,7 @@ impl IntrinsicGas {
 ///
 /// A deposit is validated as op-revm validates one: on its intrinsic gas, and on not being flagged
 /// as an L1 system transaction. A system-address transaction has its chain id checked and is
-/// promoted to a deposit. Neither pays history gas.
+/// promoted to a deposit. Both must cover their body's history gas.
 ///
 /// What is left to the state is left out: the sender's nonce, balance and code (EIP-3607), the
 /// system address's nonce and code for a system-address transaction, and the charges the state

@@ -3,8 +3,8 @@
 //!
 //! The data-size, KV-update and state-growth limits and their frame budgets hold what users do. The
 //! protocol's own work — the maintenance a system transaction performs, the calls the protocol
-//! makes before a block's transactions — must not fail on them, as it pays no history gas for the
-//! same reason. What it uses is counted all the same, and reported.
+//! makes before a block's transactions — must not fail on them. Only system calls are exempt
+//! from history gas. What it uses is counted all the same, and reported.
 //!
 //! A user's deposit is not the protocol's work: it is held to every limit, and so is a user's
 //! transaction that calls a system contract.

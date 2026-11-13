@@ -269,8 +269,9 @@ fn test_the_reads_of_a_deposit_that_failed_are_in_the_witness() {
     assert_eq!(tx.gas.gas_used, gas_limit, "a failed deposit uses its whole gas limit");
     assert_eq!(
         (tx.gas.regular, tx.gas.state, tx.gas.history, tx.gas.history_bytes),
-        (gas_limit, 0, 0, 0),
+        (gas_limit, 0, 0, mega_evm::TX_BODY_SIZE),
         "all of it regular gas: the account it created carries no state gas"
     );
     assert_eq!((run.gas.state, run.gas.history), (0, 0), "nor does the block count any");
+    assert_eq!(run.gas.history_bytes, mega_evm::TX_BODY_SIZE, "the block keeps the body's bytes");
 }

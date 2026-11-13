@@ -241,14 +241,14 @@ fn registry_call_from(sender: Address, input: Vec<u8>) -> Recovered<MegaTxEnvelo
 }
 
 /// Asserts `sender` is the block's system address: its Oracle call runs as the protocol's own
-/// transaction, with no fee and no history gas, from an account holding nothing. Answers the
+/// transaction, with no fee but with history gas, from an account holding nothing. Answers the
 /// outcome, not committed.
 fn assert_is_the_system_address(executor: &mut Executor<'_>, sender: Address) -> Outcome {
     let outcome = executor
         .run_transaction(&oracle_call_from(sender, 0))
         .expect("a system-address transaction is accepted without a balance");
     assert!(outcome.result.is_success(), "{:?}", outcome.result);
-    assert_eq!(outcome.gas.history, 0, "the protocol's own transaction pays no history");
+    assert_eq!(outcome.gas.history, common::body_history(36), "the Oracle read pays body history");
     assert!(executor.evm().ctx().is_system_originated(), "it is the protocol's own transaction");
     outcome
 }

@@ -121,9 +121,9 @@ fn test_property_inspector_transparency() {
     );
 }
 
-/// Whether the transaction is exempt from history gas and the per-transaction limits: a deposit,
-/// a transaction the protocol sent, or one the engine promotes to a deposit.
-fn is_exempt(tx: &MegaTransaction) -> bool {
+/// Whether the transaction is fee-free: a deposit or the protocol's own transaction.
+/// Failed deposits can also keep a body larger than the transaction's resource limit.
+fn is_fee_exempt(tx: &MegaTransaction) -> bool {
     tx.0.deposit.source_hash != alloy_primitives::B256::ZERO ||
         is_system_originated(tx, SYSTEM_ADDRESS)
 }
@@ -190,8 +190,8 @@ fn destroyed_in_the_transaction(account: &revm::state::Account) -> bool {
 ///   history ledgers, or all of it when they exceed it. Two rules bill it otherwise and are left
 ///   out: the EIP-7623 floor, when it is the receipt's figure, and op-revm's failed deposit, which
 ///   bills the whole gas limit;
-/// - an exempt transaction pays no history and reports no history bytes; any other reports at least
-///   its body and pays at most what its bytes cost, the allowances paying the rest;
+/// - every transaction reports at least its body as history bytes and pays at most their price, the
+///   allowances paying some logs and a failed deposit reporting no history gas;
 /// - value is conserved: the balances change by what a deposit minted, less what a self-destruction
 ///   burned;
 /// - the sender's nonce moves by one, or by more when its own code creates.
@@ -251,20 +251,18 @@ fn test_property_gas_ledgers() {
                 );
             }
 
-            if is_exempt(&tx) {
+            prop_check!(
+                gas.history_bytes >= transaction_body_bytes(&tx),
+                "the body is in the history bytes"
+            );
+            let worth = mega_evm::history_gas(gas.history_bytes).expect("the bytes have a price");
+            prop_check!(gas.history <= worth, "the history gas is at most what the bytes cost");
+            if failed_deposit {
                 prop_eq!(
-                    (gas.history, gas.history_bytes),
-                    (0, 0),
-                    "an exempt transaction pays no history"
+                    gas.history_bytes,
+                    transaction_body_bytes(&tx),
+                    "a failed deposit retains only its body as history"
                 );
-            } else {
-                prop_check!(
-                    gas.history_bytes >= transaction_body_bytes(&tx),
-                    "the body is in the history bytes"
-                );
-                let worth =
-                    mega_evm::history_gas(gas.history_bytes).expect("the bytes have a price");
-                prop_check!(gas.history <= worth, "the history gas is at most what the bytes cost");
             }
 
             let mut pre = case.database();
@@ -364,7 +362,7 @@ fn test_property_kv_weighs_no_more_than_data_size() {
                 usage.data_size >= transaction_body_bytes(&tx) + hints,
                 "the body and the {hints} bytes of hints forwarded are counted: {usage:?}"
             );
-            if !is_exempt(&tx) {
+            if !is_fee_exempt(&tx) {
                 let limits = case.world.limits.runtime();
                 let limit = limits.tx_data_size_limit;
                 prop_check!(
@@ -477,7 +475,7 @@ fn fee_credits(
     let basefee = u128::from(block.basefee);
     let used = u128::from(outcome.gas.gas_used);
     let tip = tx.effective_gas_price(basefee).saturating_sub(basefee);
-    let pays_fees = !is_exempt(tx);
+    let pays_fees = !is_fee_exempt(tx);
     move |address: Address| {
         let mut credit = 0;
         if pays_fees && address == block.beneficiary {
@@ -856,7 +854,7 @@ pub(crate) fn check_survivors(
             "the data size kept is the body, the records and the hints forwarded\n{rendered}"
         );
     }
-    if !is_exempt(tx) {
+    if !is_fee_exempt(tx) {
         prop_eq!(
             outcome.gas.history_bytes,
             priced,
