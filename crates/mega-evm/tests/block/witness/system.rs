@@ -67,7 +67,11 @@ fn test_a_rotation_and_a_system_transaction_replay() {
     let run = &replay.recorded;
     assert!(applies_pending_changes(&run.pre_block), "the change was applied");
     assert!(run.tx(0).result.is_success(), "{:?}", run.tx(0).result);
-    assert_eq!(run.tx(0).gas.history, 0, "the protocol's own transaction pays no history");
+    assert_eq!(
+        run.tx(0).gas.history,
+        common::body_history(36),
+        "the Oracle read pays body history"
+    );
     assert!(run.refusal(1).contains("lack of funds"), "{}", run.refusal(1));
     assert_eq!(run.receipts.len(), 1);
     assert!(run.bucket_ids.is_empty(), "a system transaction prices at the minimum bucket");

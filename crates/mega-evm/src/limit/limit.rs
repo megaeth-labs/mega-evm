@@ -131,10 +131,12 @@ pub struct AdditionalLimit {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum TxClass {
     /// The protocol's own work, a system-originated transaction or a system call: held to no
-    /// per-transaction limit, not detained, priced at the minimum bucket and paying no history.
-    ProtocolOwn,
-    /// A user's deposit: held to every limit like any transaction, and paying no history, its
-    /// bytes paid for on L1.
+    /// per-transaction limit, not detained and priced at the minimum bucket.
+    ProtocolOwn {
+        /// Transactions pay history; system calls and the neutral configuration do not.
+        prices_history: bool,
+    },
+    /// A user's deposit: held to every limit and paying history like any transaction.
     Deposit,
     /// Any other transaction under the neutral configuration, which prices no history: held as
     /// an ordinary transaction is, paying no history. Switching the context to the neutral
@@ -789,7 +791,7 @@ impl AdditionalLimit {
     /// Whether the running transaction is exempt from every per-transaction limit: the protocol's
     /// own work is.
     pub const fn is_exempt(&self) -> bool {
-        matches!(self.class, TxClass::ProtocolOwn)
+        matches!(self.class, TxClass::ProtocolOwn { .. })
     }
 
     /// What the running (or last) execution is, decided when it was begun.
@@ -802,9 +804,10 @@ impl AdditionalLimit {
     /// decides again.
     #[cfg(any(test, feature = "test-utils"))]
     pub(crate) const fn price_no_history(&mut self) {
-        if matches!(self.class, TxClass::Ordinary) {
-            self.class = TxClass::Neutral;
-        }
+        self.class = match self.class {
+            TxClass::ProtocolOwn { .. } => TxClass::ProtocolOwn { prices_history: false },
+            _ => TxClass::Neutral,
+        };
     }
 
     /* The start ledger */
@@ -861,6 +864,13 @@ impl AdditionalLimit {
     /// their price.
     pub const fn history_bytes(&self) -> u64 {
         self.history_bytes
+    }
+
+    /// Settles a failed deposit's history: its gas limit is reported entirely as regular gas,
+    /// but its body and calldata remain in the block even if validation never admitted them.
+    pub(crate) const fn settle_failed_deposit_history(&mut self, priced: bool) {
+        self.history_gas_spent = 0;
+        self.history_bytes = if priced { self.body } else { 0 };
     }
 
     /// Settles the history figures once the transaction's own frame returned: `spent`, the history
@@ -929,7 +939,7 @@ mod tests {
     #[test]
     fn test_the_exemption_answers_every_crossing_and_lasts_one_transaction() {
         let mut limit = AdditionalLimit::default();
-        limit.begin_transaction(TxClass::ProtocolOwn, 0);
+        limit.begin_transaction(TxClass::ProtocolOwn { prices_history: false }, 0);
         assert!(limit.is_exempt());
         for kind in [LimitKind::DataSize, LimitKind::ComputeGas] {
             for frame_local in [false, true] {
@@ -1072,9 +1082,10 @@ mod tests {
         // A frame's pool before the draw: empty, short of the count, ample; an exempt
         // transaction's frames start with unlimited pools.
         let mut cases = 0;
-        for (class, pools) in
-            [(TxClass::Ordinary, &[0_u64, 4, 100][..]), (TxClass::ProtocolOwn, &[u64::MAX - 2][..])]
-        {
+        for (class, pools) in [
+            (TxClass::Ordinary, &[0_u64, 4, 100][..]),
+            (TxClass::ProtocolOwn { prices_history: false }, &[u64::MAX - 2][..]),
+        ] {
             for tx_limit in [10_u64, u64::MAX] {
                 for kept in [0_u64, 3, 8] {
                     let limits = EvmTxRuntimeLimits::no_limits()
@@ -1176,7 +1187,7 @@ mod tests {
         assert_eq!(limit.take_first_frame_charge(), None, "taken by the frame's input");
 
         limit.keep_first_frame_charge(7);
-        limit.begin_transaction(TxClass::ProtocolOwn, 0);
+        limit.begin_transaction(TxClass::ProtocolOwn { prices_history: false }, 0);
         assert_eq!(limit.take_first_frame_charge(), None, "the next execution begins without it");
     }
 

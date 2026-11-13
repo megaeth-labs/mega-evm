@@ -317,7 +317,7 @@ fn test_the_l1_info_deposit_prices_the_transactions_after_it() {
         .execute_transaction(&common::deposit_tx_to(
             L1_BLOCK_CONTRACT,
             Bytes::from(word.to_be_bytes::<32>()),
-            200_000,
+            200_000 + common::body_history(32) + mega_evm::write_record_history_gas(1).unwrap(),
         ))
         .expect("the deposit executes");
     assert_eq!(state_scalars(&mut executor), word, "the deposit wrote the block's scalars");

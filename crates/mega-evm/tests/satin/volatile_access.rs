@@ -340,7 +340,7 @@ fn test_the_system_address_is_not_detained() {
 /// push of the counter, one round that expands memory to 1,024 words, then rounds of 3,108 until
 /// the next round's 3,072-gas copy no longer fits.
 ///
-/// A deposit pays no history gas, and a user's deposit is not system-originated.
+/// A deposit pays its body's history gas, and a user's deposit is not system-originated.
 /// The same body, run as a Mega System Transaction, reads the same thing and is not stopped.
 #[test]
 fn test_a_users_deposit_is_detained() {
@@ -499,10 +499,18 @@ fn assert_deposit_stopped(
         "{name}"
     );
     assert_eq!(run.outcome.gas.regular, intrinsic + used, "{name}: billed what ran");
-    assert_eq!(run.outcome.gas.gas_used, intrinsic + used, "{name}: the receipt bills the same");
+    assert_eq!(
+        run.outcome.gas.gas_used,
+        intrinsic + used + crate::common::body_history(0),
+        "{name}: the receipt includes history"
+    );
     assert_eq!(run.outcome.gas.state, 0, "{name}");
-    assert_eq!(run.outcome.gas.history, 0, "{name}: a deposit pays no history");
-    assert_eq!(run.outcome.gas.history_bytes, 0, "{name}");
+    assert_eq!(
+        run.outcome.gas.history,
+        crate::common::body_history(0),
+        "{name}: the body pays history"
+    );
+    assert_eq!(run.outcome.gas.history_bytes, mega_evm::TX_BODY_SIZE, "{name}");
     assert!(run.outcome.result.logs().is_empty(), "{name}");
 }
 
@@ -523,7 +531,7 @@ fn assert_system_transaction_is_not_stopped(name: &str, code: Bytes, cap: u64) {
     assert_eq!(run.accessed, VolatileDataAccess::empty(), "{name} system");
     assert_eq!(run.limit, None, "{name} system");
     assert!(run.outcome.gas.regular > cap, "{name} system: it ran past the cap");
-    assert_eq!(run.outcome.gas.history, 0, "{name} system");
+    assert_eq!(run.outcome.gas.history, crate::common::body_history(0), "{name} system");
 }
 
 /* ---------- the beneficiary's own frame ---------- */

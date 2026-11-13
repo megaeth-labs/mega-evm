@@ -11,6 +11,8 @@
 //!   `SSTORE`'s completed-write hook, its commit and its refund.
 //! - `logs`: 200 two-topic logs in one frame: the `LOG`'s completed-write hook, and the one
 //!   `record_history_cost` each log's bytes cost — no allocation, no second pass over the table.
+//! - `deposit_logs`: the same logs in a deposit with 32 bytes of calldata, paying history for both
+//!   its body and its logs.
 //! - `calldata`: a call carrying 4 KiB of calldata, which is 4 KiB of the transaction body's
 //!   history, priced once before the first frame runs.
 //! - `intercepted_calls`: 200 `STATICCALL`s to `MegaAccessControl`'s
@@ -427,7 +429,10 @@ fn bench_transact(c: &mut Criterion) {
 
     let mut depth = [0u8; 32];
     depth[31] = DEPTH;
+    let mut deposit_logs = call_tx(LOGGER, Bytes::from(vec![0xab; 32]), 30_000_000);
+    deposit_logs.deposit.source_hash = alloy_primitives::B256::repeat_byte(0x11);
     let workloads = [
+        ("deposit_logs", deposit_logs),
         ("empty_transaction", tx(U256::ZERO)),
         ("ether_transfer", tx(U256::from(1))),
         ("deep_calls", call_tx(RECURSIVE, Bytes::from(depth.to_vec()), 30_000_000)),
@@ -481,10 +486,9 @@ fn bench_transact(c: &mut Criterion) {
                     satin.state[&RECURSIVE].storage.values().filter(|s| s.is_changed()).count();
                 assert_eq!(written, DEPTH as usize, "every frame of the recursion ran");
             }
-            "logs" => assert_eq!(
+            "logs" | "deposit_logs" => assert_eq!(
                 satin.gas.history,
-                (TX_BODY_SIZE + REPEAT * (LOG_BASE_SIZE + 2 * LOG_TOPIC_SIZE + 32)) *
-                    COST_PER_HISTORY_BYTE,
+                (body + REPEAT * (LOG_BASE_SIZE + 2 * LOG_TOPIC_SIZE + 32)) * COST_PER_HISTORY_BYTE,
                 "the logs must draw history gas, which is what this arm measures",
             ),
             "calldata" => assert_eq!(
