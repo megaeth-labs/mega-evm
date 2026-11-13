@@ -167,8 +167,8 @@ impl Pools {
 
     /// A child's return, handing back `child`: its regular gas comes back, what its regular gas
     /// paid for state and history joins this frame's count, and the reservoir it hands back joins
-    /// what this frame kept, unwinding nothing. A child that halted hands back no regular gas and
-    /// no count.
+    /// what this frame kept, unwinding nothing. A child that halted hands back no regular gas, the
+    /// share it was given and its count, which its halt consumed and no give-back takes back.
     fn absorb(&mut self, child: Self) {
         self.regular += child.regular;
         self.spill += child.spill;
@@ -626,7 +626,11 @@ fn model_callee(callee: Callee, start: Pools, budget: Budget) -> CalleeModel {
             },
             LimitUsage::ZERO,
         ),
-        CalleeEnd::Halted => (Pools::new(0, start.reservoir), LimitUsage::ZERO),
+        // The halt consumes the regular gas and what it paid, and hands back the share it was
+        // given and the count of what its regular gas paid.
+        CalleeEnd::Halted => {
+            (Pools { regular: 0, reservoir: start.reservoir, spill: pools.spill }, LimitUsage::ZERO)
+        }
     };
     let (state, history) = if end == CalleeEnd::Returned { (state, history) } else { (0, 0) };
     CalleeModel { end, charges, at_end: pools, handed_back, state, history, kept }

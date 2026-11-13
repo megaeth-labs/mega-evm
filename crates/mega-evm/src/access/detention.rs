@@ -151,9 +151,10 @@ impl FrameFigures {
 /// then refuses the call or its creation runs.
 ///
 /// The one part of the regular ledger that is not compute is what a halt burns (`burned`): a
-/// frame that halts consumes the gas it had left, and what its regular gas paid of state and
-/// history gas, without running anything with
-/// it. A frame answered without running that halts burns its whole gas limit: a precompile that
+/// frame that halts consumes the gas it had left without running anything with it. What its
+/// regular gas paid of state and history gas, which the halt consumes too, stays out of compute by
+/// its caller's count under Satin's give-backs, and is burned with the rest under EIP-8037's own. A
+/// frame answered without running that halts burns its whole gas limit: a precompile that
 /// runs out of gas counts nothing of its forward, nor of a value call's stipend, as compute. An
 /// out-of-gas zeroes what the frame had before the frame returns; the revm fork records it first,
 /// before every deduction that fails — an opcode's static gas, which the interpreter's step loop
@@ -470,12 +471,14 @@ impl Detention {
                 return Some(ComputeStop { limit, used: self.compute(gas.tracker()) });
             }
         }
-        // The halt burns what the frame had left and what its regular gas paid of state and
-        // history gas: the settlement consumes both, under EIP-8037's own give-backs by rolling
-        // the spill back into regular gas and burning it all, under Satin's by taking it out of the
-        // reservoir the rollback credited.
+        // The halt burns what the frame had left. Under EIP-8037's own give-backs it burns the
+        // spill too: the settlement rolls it back into regular gas and burns it all, and the
+        // caller's count does not take it. Under Satin's the caller's count takes what the
+        // frame's regular gas paid of state and history gas, which keeps it out of the caller's
+        // regular gas spent, so it is not burned a second time here.
         let left = gas.failed_charge_remaining().unwrap_or_else(|| gas.remaining());
-        self.burned = self.burned.saturating_add(left).saturating_add(gas.state_gas_spilled());
+        let spill = if gas.reservoir_only_give_backs() { 0 } else { gas.state_gas_spilled() };
+        self.burned = self.burned.saturating_add(left).saturating_add(spill);
         None
     }
 

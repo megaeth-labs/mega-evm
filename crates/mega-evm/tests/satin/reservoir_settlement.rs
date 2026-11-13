@@ -133,7 +133,7 @@ impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for Settlements {
                 let child = &mut self.children[index];
                 // A revert puts every charge the child made back into its reservoir, whichever
                 // pool paid it, and keeps the count of what regular gas paid; a halt gives back
-                // the share and consumes what regular gas paid.
+                // the share and consumes what regular gas paid, which stays counted.
                 let charged = gas.state_gas_spent() + gas.history_gas_spent();
                 child.handed_back = Some(if result.is_ok() {
                     funding(gas)
@@ -143,7 +143,7 @@ impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for Settlements {
                         spilled: gas.state_gas_spilled(),
                     }
                 } else {
-                    Funding { reservoir: child.share, spilled: 0 }
+                    Funding { reservoir: child.share, spilled: gas.state_gas_spilled() }
                 });
                 self.settling = Some(index);
             }
@@ -229,10 +229,11 @@ const fn after_settlement(kept: Funding, handed_back: Funding) -> Funding {
 /// Each child of the transaction's frame settles into what the frame kept of its reservoir: one
 /// that succeeded after a write hands back what it left of its share, one that reverted after a
 /// write its share and the write's charges, its legacy share included, one that halted after a
-/// write its share, and one that spent past its share hands back nothing and the count of what its
-/// regular gas paid; the next child's share then joins what the frame kept, and the count stands.
-/// The frame kept two per cent of its reservoir at every start, and the transaction's gas, which
-/// holds none of it, ends with what the frame hands back.
+/// write its share, and every one the count of what its regular gas paid, which no give-back and no
+/// halt takes back — one that spent past its share hands back nothing but that count; the next
+/// child's share then joins what the frame kept, and the count stands. The frame kept two per cent
+/// of its reservoir at every start, and the transaction's gas, which holds none of it, ends with
+/// what the frame hands back.
 #[test]
 fn test_a_callers_reservoir_after_a_child_is_what_it_kept_with_what_the_child_hands_back() {
     if state_is_free() {
@@ -263,7 +264,11 @@ fn test_a_callers_reservoir_after_a_child_is_what_it_kept_with_what_the_child_ha
         Some(Funding { reservoir: reverter.share + slot_share(), spilled: slot_share() }),
         "the reverter hands back its share and what its regular gas paid"
     );
-    assert_eq!(halter.handed_back, Some(Funding { reservoir: halter.share, spilled: 0 }));
+    assert_eq!(
+        halter.handed_back,
+        Some(Funding { reservoir: halter.share, spilled: slot_share() }),
+        "the halter hands back its share, and its legacy share stays counted as regular-paid"
+    );
     assert!(spender.handed_back.expect("ended").spilled > 0, "the spender spills");
     let idle_kept = idle.kept.expect("the CALL ended");
     assert!(idle_kept.spilled > 0 && idle.share > 0, "the idle child's share and the spill");
