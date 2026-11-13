@@ -52,7 +52,7 @@ use mega_evm::{
         SharedWitnessRecord,
     },
     BlockLimits, EmptyExternalEnv, ExternalEnvFactory, ExternalEnvTypes, MegaBlockExecutionCtx,
-    MegaBlockExecutor, MegaEvm, MegaHardforkConfig, MegaHardforks, ProtocolLimits,
+    MegaBlockExecutor, MegaEvm, MegaHardforkConfig, ProtocolLimits,
 };
 
 use super::fixture::DecodedBlock;
@@ -434,17 +434,13 @@ impl Chain {
         E: ExternalEnvTypes,
     {
         let header = &block.header;
-        let only_deposits = self.spec.admits_only_deposits(self.head_timestamp, header.timestamp);
-        let activates_satin =
-            self.spec.is_satin_activation_block(self.head_timestamp, header.timestamp);
         let ctx = MegaBlockExecutionCtx::new(
             header.parent_hash,
             header.parent_beacon_block_root,
             header.extra_data.clone(),
             BlockLimits::no_limits(),
-        )
-        .with_no_user_tx_activation_block(only_deposits)
-        .with_satin_activation_block(activates_satin);
+            Some(self.head_timestamp),
+        );
         let mut executor =
             MegaBlockExecutor::new(evm, ctx, self.spec.clone(), OpAlloyReceiptBuilder::default())
                 .with_protocol_limits(limits());
@@ -477,6 +473,8 @@ fn refusal(error: BlockExecutionError) -> Refusal {
 
 #[cfg(test)]
 mod tests {
+    use mega_evm::MegaHardforks;
+
     use super::*;
 
     /// The removal list names every predeploy the pre-state holds and the three fee vaults, each

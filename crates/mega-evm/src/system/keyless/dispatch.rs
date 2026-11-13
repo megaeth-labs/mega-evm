@@ -54,27 +54,38 @@ pub(crate) struct Started {
     pub(super) empty_deposit_refused: bool,
 }
 
-/// Whether `frame_init` starts a `keylessDeploy` call the dispatch takes: a `CALL` at depth 0 to
-/// [`KEYLESS_DEPLOY_ADDRESS`] carrying the `keylessDeploy` selector.
+/// The `keylessDeploy` call `frame_init` starts when the dispatch takes it: a `CALL` at depth 0 to
+/// [`KEYLESS_DEPLOY_ADDRESS`] carrying the `keylessDeploy` selector and arguments that decode as
+/// `(bytes, uint256)`; `None` for any other call.
 ///
 /// Only a transaction deploys, so the deployment's answer is never something an inner caller can
-/// read off its own return data. A call a contract makes, and a selector the contract does not
-/// declare, run the deployed bytecode: a `keylessDeploy` call reaches the method body and its
-/// `NotIntercepted()`, and an undeclared selector finds no function and no fallback, so it reverts
-/// with empty data.
+/// read off its own return data. A call a contract makes, a selector the contract does not
+/// declare, and arguments that do not decode run the deployed bytecode and are charged nothing: a
+/// `keylessDeploy` call a contract makes reaches the method body and its `NotIntercepted()`, an
+/// undeclared selector finds no function and no fallback, so it reverts with empty data, and
+/// arguments that do not decode revert with empty data in the method's own decoder.
+///
+/// The arguments are accepted exactly when the contract's own calldata decoder for `(bytes,
+/// uint256)` accepts them: a head of at least 64 bytes, an offset and a length below 2^64, and the
+/// offset plus 32 plus the length within the input; no padding and no canonical offset is required,
+/// and trailing bytes are allowed.
 ///
 /// The depth is tested first: every frame below the transaction's own leaves after one
-/// comparison.
+/// comparison. The decoded call is handed on, so the rules do not decode the arguments again.
 #[inline]
 pub(crate) fn is_dispatched<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &MegaContext<DB, ExtEnvs>,
     frame_init: &FrameInit,
-) -> bool {
-    let FrameInput::Call(inputs) = &frame_init.frame_input else { return false };
-    frame_init.depth == 0 &&
-        inputs.target_address == KEYLESS_DEPLOY_ADDRESS &&
-        inputs.scheme == CallScheme::Call &&
-        peek_selector(&inputs.input, ctx) == Some(IKeylessDeploy::keylessDeployCall::SELECTOR)
+) -> Option<IKeylessDeploy::keylessDeployCall> {
+    let FrameInput::Call(inputs) = &frame_init.frame_input else { return None };
+    if frame_init.depth != 0 ||
+        inputs.target_address != KEYLESS_DEPLOY_ADDRESS ||
+        inputs.scheme != CallScheme::Call ||
+        peek_selector(&inputs.input, ctx) != Some(IKeylessDeploy::keylessDeployCall::SELECTOR)
+    {
+        return None;
+    }
+    IKeylessDeploy::keylessDeployCall::abi_decode(&inputs.input.bytes(ctx)).ok()
 }
 
 /// Readies the frame of a call [`is_dispatched`] took for revm to build, or answers it.
@@ -85,14 +96,15 @@ pub(crate) fn is_dispatched<DB: Database, ExtEnvs: ExternalEnvTypes>(
 /// would be.
 ///
 /// Any other call is built as a call to the contract, whose code it never runs: its actions are
-/// made by hand, its first by [`start`]. The dispatch is by address and selector, whatever the
-/// address holds, so where the state holds no contract code the frame is built on the contract's
-/// own. A chain Satin runs on holds it, as Rex2 deployed it, and Satin's activation block checks
-/// it.
+/// made by hand, its first by [`start`]. The dispatch is by address, selector and decoded
+/// arguments, whatever the address holds, so where the state holds no contract code the frame is
+/// built on the contract's own. A chain Satin runs on holds it, as Rex2 deployed it, and Satin's
+/// activation block checks it.
 #[inline(never)]
 pub(crate) fn ready<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
     frame_init: &mut FrameInit,
+    call: &IKeylessDeploy::keylessDeployCall,
 ) -> Result<Option<FrameResult>, ContextError<DB::Error>> {
     let FrameInput::Call(inputs) = &mut frame_init.frame_input else { return Ok(None) };
     if inputs.call_value().is_zero() {
@@ -104,7 +116,7 @@ pub(crate) fn ready<DB: Database, ExtEnvs: ExternalEnvTypes>(
     }
     let mut gas = untouched_call_gas(inputs);
     ctx.detention.hold(gas.tracker_mut());
-    let Err(refusal) = prepare(ctx, inputs, &mut gas)? else {
+    let Err(refusal) = prepare(ctx, inputs, call, &mut gas)? else {
         unreachable!("a call carrying value is refused at rule 2")
     };
     Ok(Some(refusal.answer(inputs, gas)))
@@ -125,9 +137,10 @@ pub(crate) fn ready<DB: Database, ExtEnvs: ExternalEnvTypes>(
 ///    transaction and recovering its signer. A call that cannot pay it runs out of gas.
 /// 2. The call carries no value (`NoEtherTransfer()`). A call carrying value is refused before revm
 ///    builds its frame ([`ready`]).
-/// 3. Its arguments decode, and so does the transaction they carry: a signed legacy creation, no
-///    chain id, no trailing bytes (`MalformedEncoding()`, `NotContractCreation()`,
-///    `NotPreEIP155()`), signed at nonce 0 (`NonZeroTxNonce`).
+/// 3. The transaction the arguments carry decodes (the arguments themselves decoded when the call
+///    was recognized): a signed legacy creation, no chain id, no trailing bytes
+///    (`MalformedEncoding()`, `NotContractCreation()`, `NotPreEIP155()`), signed at nonce 0
+///    (`NonZeroTxNonce`).
 /// 4. The init code is within the configured initcode size limit (`InitCodeTooLarge`).
 /// 5. `gasLimitOverride` covers the signed gas limit (`GasLimitTooLow`).
 /// 6. The signer can be recovered (`InvalidSignature()`).
@@ -173,12 +186,13 @@ pub(crate) fn ready<DB: Database, ExtEnvs: ExternalEnvTypes>(
 pub(crate) fn start<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
     frame: &mut EthFrame<EthInterpreter>,
+    call: &IKeylessDeploy::keylessDeployCall,
 ) -> Result<InterpreterAction, ContextError<DB::Error>> {
     let FrameInput::Call(inputs) = &frame.input else {
         unreachable!("a keylessDeploy call's frame is a call")
     };
     let gas = &mut frame.interpreter.gas;
-    let deployment = match prepare(ctx, inputs, gas)? {
+    let deployment = match prepare(ctx, inputs, call, gas)? {
         Ok(deployment) => deployment,
         Err(refusal) => {
             let (result, output) = refusal.result(gas);
@@ -265,6 +279,7 @@ impl Refusal {
 fn prepare<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
     inputs: &CallInputs,
+    call: &IKeylessDeploy::keylessDeployCall,
     gas: &mut Gas,
 ) -> Result<Result<Deployment, Refusal>, ContextError<DB::Error>> {
     macro_rules! refuse {
@@ -278,10 +293,6 @@ fn prepare<DB: Database, ExtEnvs: ExternalEnvTypes>(
     if !inputs.call_value().is_zero() {
         refuse!(KeylessDeployError::NoEtherTransfer);
     }
-    let input = inputs.input.bytes(ctx);
-    let Ok(call) = IKeylessDeploy::keylessDeployCall::abi_decode(&input) else {
-        refuse!(KeylessDeployError::MalformedEncoding);
-    };
     let signed = match decode_keyless_tx(&call.keylessDeploymentTransaction) {
         Ok(signed) => signed,
         Err(error) => refuse!(error),
@@ -436,4 +447,98 @@ pub(super) fn state_gas<DB: Database, ExtEnvs: ExternalEnvTypes>(
     Err(core::mem::replace(ctx.error(), Ok(()))
         .err()
         .unwrap_or_else(|| ContextError::Custom("state gas price lookup failed".into())))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{test_utils::MemoryDatabase, MegaSpecId};
+    use alloy_primitives::address;
+    use revm::interpreter::{CallInput, CallValue, SharedMemory};
+
+    const CALLER: Address = address!("00000000000000000000000000000000000e0001");
+    const OTHER: Address = address!("00000000000000000000000000000000000e0002");
+
+    /// Arguments that decode as `(bytes, uint256)`.
+    fn decodable() -> Bytes {
+        IKeylessDeploy::keylessDeployCall {
+            keylessDeploymentTransaction: Bytes::from_static(&[1, 2, 3]),
+            gasLimitOverride: U256::from(7),
+        }
+        .abi_encode()
+        .into()
+    }
+
+    /// The `keylessDeploy` selector with a head too short to decode.
+    fn undecodable() -> Bytes {
+        Bytes::copy_from_slice(&IKeylessDeploy::keylessDeployCall::SELECTOR)
+    }
+
+    /// A call of `scheme` at `depth` to `target` carrying `input`.
+    fn frame(depth: usize, target: Address, scheme: CallScheme, input: Bytes) -> FrameInit {
+        FrameInit {
+            depth,
+            memory: SharedMemory::new(),
+            frame_input: FrameInput::Call(Box::new(CallInputs {
+                input: CallInput::Bytes(input),
+                return_memory_offset: 0..0,
+                gas_limit: 1_000_000,
+                reservoir: 0,
+                bytecode_address: target,
+                known_bytecode: Default::default(),
+                target_address: target,
+                caller: CALLER,
+                value: CallValue::Apparent(U256::ZERO),
+                scheme,
+                is_static: scheme == CallScheme::StaticCall,
+                charged_new_account_state_gas: false,
+            })),
+        }
+    }
+
+    /// Only a `CALL` at depth 0 to the contract, carrying the `keylessDeploy` selector and
+    /// arguments that decode, is dispatched. Each other row of the table changes exactly one
+    /// condition, so each guard is pinned alone.
+    #[test]
+    fn test_the_dispatch_table_takes_only_the_all_true_row() {
+        let ctx = MegaContext::new(MemoryDatabase::default(), MegaSpecId::SATIN);
+        let other_selector = Bytes::from_static(&[0xde, 0xad, 0xbe, 0xef, 0, 0, 0, 0]);
+        let at = KEYLESS_DEPLOY_ADDRESS;
+        let call = CallScheme::Call;
+
+        let dispatched = is_dispatched(&ctx, &frame(0, at, call, decodable()))
+            .expect("the all-true row is dispatched");
+        assert_eq!(dispatched.keylessDeploymentTransaction, Bytes::from_static(&[1, 2, 3]));
+        assert_eq!(dispatched.gasLimitOverride, U256::from(7));
+
+        let rows: [(&str, FrameInit); 8] = [
+            ("depth 1", frame(1, at, call, decodable())),
+            ("another target", frame(0, OTHER, call, decodable())),
+            ("STATICCALL", frame(0, at, CallScheme::StaticCall, decodable())),
+            ("DELEGATECALL", frame(0, at, CallScheme::DelegateCall, decodable())),
+            // The scheme alone refuses these: every other condition holds.
+            ("CALLCODE", frame(0, at, CallScheme::CallCode, decodable())),
+            ("another selector", frame(0, at, call, other_selector)),
+            ("undecodable arguments", frame(0, at, call, undecodable())),
+            ("no selector", frame(0, at, call, Bytes::from_static(&[0xde, 0xad]))),
+        ];
+        for (name, init) in rows {
+            assert!(is_dispatched(&ctx, &init).is_none(), "{name} is not dispatched");
+        }
+
+        // A non-call frame is never dispatched.
+        let create = FrameInit {
+            depth: 0,
+            memory: SharedMemory::new(),
+            frame_input: FrameInput::Create(Box::new(CreateInputs::new(
+                CALLER,
+                CreateScheme::Create,
+                U256::ZERO,
+                decodable(),
+                1_000_000,
+                0,
+            ))),
+        };
+        assert!(is_dispatched(&ctx, &create).is_none());
+    }
 }

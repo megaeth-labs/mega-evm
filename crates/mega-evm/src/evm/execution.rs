@@ -632,8 +632,8 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
             }
         }
         let keyless = keyless::is_dispatched(&self.inner.ctx, &frame_init);
-        let answer = if keyless {
-            keyless::ready(&mut self.inner.ctx, &mut frame_init)?.map(Answer::new)
+        let answer = if let Some(call) = &keyless {
+            keyless::ready(&mut self.inner.ctx, &mut frame_init, call)?.map(Answer::new)
         } else {
             self.intercept(&frame_init)
         };
@@ -671,8 +671,8 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
             ctx.detention.on_frame_run(&mut frame.interpreter.gas, depth);
             let first = if verdict.exceeded_limit() {
                 Some(stop_action(ctx, frame, &verdict))
-            } else if keyless {
-                Some(keyless::start(ctx, frame)?)
+            } else if let Some(call) = &keyless {
+                Some(keyless::start(ctx, frame, call)?)
             } else {
                 None
             };
@@ -687,7 +687,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
             }
             return Ok(ItemOrResult::Item(self.inner.frame_stack.get()));
         };
-        debug_assert!(!keyless, "revm builds a keylessDeploy call's frame");
+        debug_assert!(keyless.is_none(), "revm builds a keylessDeploy call's frame");
         if let PrecompileHold::Clamped(withheld) = hold {
             Detention::restore_forward(result.interpreter_result_mut(), withheld);
         }
@@ -1414,8 +1414,14 @@ fn stop_before_the_first_frame<DB: Database, ExtEnvs: ExternalEnvTypes>(
 /// every other authority loaded once, with its code, and skipped when that code is not a
 /// delegation; a nonce compared with the authority's effective one, which the simulation bumps
 /// for each entry it accepts — and the totals it would keep are held to the transaction's KV and
-/// state-growth limits. The stop when they cross one, KV updates first; `None` when they fit, or
-/// when the list is too short to cross either.
+/// state-growth limits. The stop when they cross one, KV updates first; `None` when they fit.
+/// Every list is simulated, whatever its length, so the authorities the witness holds do not
+/// depend on whether the list could cross a limit or on where its application would run out of
+/// gas — every list of a transaction held to a KV-update or a state-growth limit, which Satin's
+/// own limits always set. Limits that set neither hold the list to nothing, so it is not
+/// simulated and loads only what its application loads, as Ethereum's does: the neutral
+/// configuration's runner turns every limit off
+/// ([`AdditionalLimit::holds_authorization_list`](crate::AdditionalLimit)).
 ///
 /// The simulation writes nothing and warms nothing: the loads are taken back to a journal mark,
 /// which leaves the accounts in the transaction's state, cold, so a stateless witness holds every
@@ -1423,11 +1429,9 @@ fn stop_before_the_first_frame<DB: Database, ExtEnvs: ExternalEnvTypes>(
 fn hold_authorization_list<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
 ) -> Result<Option<LimitCheck>, DB::Error> {
-    if ctx.tx().tx_type() != TransactionType::Eip7702 {
-        return Ok(None);
-    }
-    let entries = ctx.tx().authorization_list_len() as u64;
-    if !ctx.additional_limit.authorization_list_may_cross(entries) {
+    if ctx.tx().tx_type() != TransactionType::Eip7702 ||
+        !ctx.additional_limit.holds_authorization_list()
+    {
         return Ok(None);
     }
     let (records, created) = simulate_authorization_list(ctx)?;

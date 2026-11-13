@@ -279,8 +279,8 @@ mega-evme replay 0x1234...txhash --override.input-file calldata.hex
 # Check 200 blocks against the chain and record them
 mega-evme replay --block 26400000..26400199 --rpc https://mainnet.megaeth.com/rpc --block-cache ./blocks --verify
 
-# The same blocks on Satin, as NDJSON (the first Satin run reads the L1 fee overhead slot over RPC;
-# later runs of the same blocks can drop --rpc)
+# The same blocks on Satin, as NDJSON (--rpc serves what a Satin run reads beyond the cache, such
+# as a path a transaction takes on Satin that it did not take on the chain)
 mega-evme replay --block 26400000..26400199 --rpc https://mainnet.megaeth.com/rpc --block-cache ./blocks --override.spec Satin --json > satin.ndjson
 ```
 

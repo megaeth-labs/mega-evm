@@ -20,7 +20,10 @@ use std::{
 
 use alloy_consensus::{transaction::Recovered, Signed, TxEip7702};
 use alloy_eips::eip7702::{Authorization, SignedAuthorization};
-use alloy_evm::{block::BlockExecutor, EvmEnv, EvmFactory};
+use alloy_evm::{
+    block::{BlockExecutionError, BlockExecutor, GasOutput},
+    EvmEnv, EvmFactory,
+};
 use alloy_op_evm::block::receipt_builder::{OpAlloyReceiptBuilder, OpReceiptBuilder};
 use alloy_primitives::{Address, Bytes, Signature, TxKind, B256, U256};
 use mega_evm::{
@@ -29,11 +32,11 @@ use mega_evm::{
         SharedWitnessRecord, StrictDatabase, StrictEnvFactory, WitnessKeys, WitnessRecord,
     },
     BlockGasCounters, BucketId, ExternalEnvFactory, LimitCheck, LimitUsage, MegaBlockExecutionCtx,
-    MegaBlockExecutor, MegaEvmFactory, MegaGasUsage, MegaHaltReason, MegaHardforkConfig,
-    MegaSpecId, MegaTxEnvelope, OracleRead, ProtocolLimits, SaltEnv, TestExternalEnvs,
-    MIN_BUCKET_SIZE,
+    MegaBlockExecutor, MegaBlockTxResult, MegaEvmFactory, MegaGasUsage, MegaHaltReason,
+    MegaHardforkConfig, MegaSpecId, MegaTxEnvelope, OracleRead, ProtocolLimits, SaltEnv,
+    TestExternalEnvs, MIN_BUCKET_SIZE,
 };
-use op_alloy_consensus::TxDeposit;
+use op_alloy_consensus::{OpTxType, TxDeposit};
 use revm::{
     context::result::ExecutionResult,
     database::{states::bundle_state::BundleRetention, BundleState, CacheState, State},
@@ -76,6 +79,12 @@ pub(crate) struct Case {
     pub txs: Vec<Tx>,
     /// The candidates the builder executes and then does not commit.
     pub dropped: BTreeSet<usize>,
+    /// The candidates whose outcome the builder holds while it executes the next candidate, and
+    /// commits once that one executed, before it.
+    pub held: BTreeSet<usize>,
+    /// The candidates the builder executes on another executor of the same block and commits on
+    /// this one, each with the transactions that other executor executed and committed first.
+    pub elsewhere: BTreeMap<usize, Vec<Tx>>,
     /// The answers the oracle service moves on to while the block is built: `(index, slot,
     /// value)` has it answer `value` for `slot` once the candidate at `index` was executed.
     pub service_updates: Vec<(usize, U256, U256)>,
@@ -86,6 +95,22 @@ const DROPPED: &str = "executed and dropped by the builder";
 
 /// Why a replay did not run a candidate.
 const NOT_INCLUDED: &str = "not in the recorded block";
+
+/// What a held candidate is until the builder commits it.
+const HELD: &str = "held by the builder";
+
+/// What the builder took from another executor of the block for one candidate: the candidate's
+/// outcome there, and what that executor's run asked of the channels — the oracle reads of every
+/// transaction it executed, in order, and its exports.
+struct Elsewhere {
+    outcome: Result<Outcome, String>,
+    oracle_reads: Vec<OracleRead>,
+    block_hashes: BTreeMap<u64, B256>,
+    bucket_ids: Vec<BucketId>,
+}
+
+/// What executing one candidate produced, before it is committed.
+type Outcome = MegaBlockTxResult<OpTxType>;
 
 impl Case {
     /// A block over `db` on the tests' chain, with no building policy and no transactions.
@@ -100,6 +125,8 @@ impl Case {
             env: common::evm_env(),
             txs: Vec::new(),
             dropped: BTreeSet::new(),
+            held: BTreeSet::new(),
+            elsewhere: BTreeMap::new(),
             service_updates: Vec::new(),
         }
     }
@@ -114,6 +141,22 @@ impl Case {
     /// committed, and it is not in the block.
     pub(crate) fn dropped(mut self, index: usize) -> Self {
         self.dropped.insert(index);
+        self
+    }
+
+    /// Has the builder hold the outcome of the candidate at `index` while it executes the next
+    /// candidate, and commit it once that one executed, before it: two candidates executed before
+    /// either is committed.
+    pub(crate) fn held(mut self, index: usize) -> Self {
+        self.held.insert(index);
+        self
+    }
+
+    /// Has the builder execute the candidate at `index` on another executor of the same block,
+    /// over the same pre-state and environments, after that executor executed and committed
+    /// `prior`, which are not in this block, and commit the outcome on this one.
+    pub(crate) fn executed_elsewhere(mut self, index: usize, prior: Vec<Tx>) -> Self {
+        self.elsewhere.insert(index, prior);
         self
     }
 
@@ -178,6 +221,12 @@ impl Case {
                     }
                 }
             },
+            &self.held,
+            |index| {
+                self.elsewhere
+                    .get(&index)
+                    .map(|prior| self.execute_elsewhere(index, prior, &record))
+            },
         );
         self.envs.clear_oracle_storage();
         for (slot, value) in answers {
@@ -203,7 +252,8 @@ impl Case {
             Oracle::Absent => StrictEnvFactory::<Envs>::without_oracle(witness),
         };
         let factory = RecordingEnvFactory::new(strict.clone(), reads.clone());
-        let mut run = self.drive(state, factory, |index| included[index], |_| {});
+        let mut run =
+            self.drive(state, factory, |index| included[index], |_| {}, &BTreeSet::new(), |_| None);
         run.record = reads.take();
         run.oracle_replayed_exactly = strict.oracle().replayed_exactly();
         run
@@ -296,12 +346,19 @@ impl Case {
     /// Runs the block on `state` with the environments `factory` makes, executing the candidates
     /// `include` admits and committing those the builder does not drop; `executed` is told each
     /// candidate's index once its execution returned, whatever it returned.
+    ///
+    /// A candidate in `held` is committed once the next candidate executed, before that one; a
+    /// candidate `elsewhere` answers for is executed on another executor of the block and its
+    /// outcome committed here. Every other candidate is committed as soon as it executed, and is
+    /// committed exactly as its outcome returned it.
     fn drive<DB, F>(
         &self,
         mut state: State<DB>,
         factory: F,
         include: impl Fn(usize) -> bool,
         executed: impl Fn(usize),
+        held: &BTreeSet<usize>,
+        elsewhere: impl Fn(usize) -> Option<Elsewhere>,
     ) -> Run
     where
         DB: Database<Error: core::error::Error + Send + Sync + 'static> + Debug,
@@ -324,47 +381,70 @@ impl Case {
         let pre_block = committed.states();
         let mut txs = Vec::new();
         let mut executed_oracle_reads = Vec::new();
+        let mut other_block_hashes = BTreeMap::new();
+        let mut other_bucket_ids = BTreeSet::new();
+        let mut from_elsewhere = false;
+        let mut holding: Option<(usize, Outcome)> = None;
         for (index, tx) in self.txs.iter().enumerate() {
             if !include(index) {
                 txs.push(Err(NOT_INCLUDED.into()));
                 continue;
             }
-            let outcome = executor.run_transaction(tx);
+            let (outcome, here) = match elsewhere(index) {
+                Some(other) => {
+                    from_elsewhere = true;
+                    executed_oracle_reads.extend(other.oracle_reads);
+                    other_block_hashes.extend(other.block_hashes);
+                    other_bucket_ids.extend(other.bucket_ids);
+                    (other.outcome, false)
+                }
+                None => {
+                    let outcome = executor.run_transaction(tx).map_err(|error| error.to_string());
+                    if let Ok(outcome) = &outcome {
+                        executed_oracle_reads.extend(outcome.inner.oracle_reads.iter().copied());
+                    }
+                    (outcome, true)
+                }
+            };
             executed(index);
+            // A held outcome is committed once the candidate after it executed, before it, so the
+            // candidate after it is not committed as soon as it executed.
+            let after_another = holding.is_some();
+            if let Some((index, outcome)) = holding.take() {
+                let snapshot = TxSnapshot::of(&outcome);
+                let commit = executor.commit_transaction_outcome(outcome);
+                txs[index] = self.committed(index, snapshot, commit, &committed, false);
+            }
             let outcome = match outcome {
                 Ok(outcome) => outcome,
                 Err(error) => {
-                    txs.push(Err(error.to_string()));
+                    txs.push(Err(error));
                     continue;
                 }
             };
-            executed_oracle_reads.extend(outcome.inner.oracle_reads.iter().copied());
             if self.dropped.contains(&index) {
                 txs.push(Err(DROPPED.into()));
                 continue;
             }
-            let snapshot = TxSnapshot {
-                tx_hash: outcome.tx_hash,
-                gas_limit: outcome.gas_limit,
-                tx_size: outcome.tx_size,
-                da_size: outcome.da_size,
-                da_footprint: outcome.da_footprint,
-                is_deposit: outcome.is_deposit,
-                depositor_nonce: outcome.depositor_nonce,
-                result: outcome.inner.result.clone(),
-                state: outcome.inner.state.clone(),
-                gas: outcome.inner.gas,
-                usage: outcome.inner.usage,
-                limit_exceeded: outcome.inner.limit_exceeded,
-                oracle_reads: outcome.inner.oracle_reads.clone(),
-            };
-            match executor.commit_transaction_outcome(outcome) {
-                Ok(_) => txs.push(Ok(snapshot)),
-                Err(error) => txs.push(Err(error.to_string())),
+            if held.contains(&index) {
+                txs.push(Err(HELD.into()));
+                holding = Some((index, outcome));
+                continue;
             }
+            let snapshot = TxSnapshot::of(&outcome);
+            let commit = executor.commit_transaction_outcome(outcome);
+            let immediately = here && !after_another;
+            txs.push(self.committed(index, snapshot, commit, &committed, immediately));
         }
-        let block_hashes = executor.get_accessed_block_hashes();
-        let bucket_ids = executor.get_accessed_bucket_ids();
+        if let Some((index, outcome)) = holding.take() {
+            let snapshot = TxSnapshot::of(&outcome);
+            let commit = executor.commit_transaction_outcome(outcome);
+            txs[index] = self.committed(index, snapshot, commit, &committed, false);
+        }
+        let mut block_hashes = executor.get_accessed_block_hashes();
+        block_hashes.extend(other_block_hashes);
+        other_bucket_ids.extend(executor.get_accessed_bucket_ids());
+        let bucket_ids = other_bucket_ids.into_iter().collect();
         let (evm, result) = executor.finish_with_counters().expect("the block finishes");
         drop(evm);
         state.merge_transitions(BundleRetention::Reverts);
@@ -386,10 +466,84 @@ impl Case {
             cache: state.cache,
             block_hashes,
             bucket_ids,
+            from_elsewhere,
             keys,
             executed_oracle_reads,
             record: WitnessRecord::default(),
             oracle_replayed_exactly: true,
+        }
+    }
+
+    /// What the block holds of the candidate at `index` once the builder committed it: its
+    /// `snapshot`, taken before the commit, with the state the block committed for it in place of
+    /// the one its outcome returned, or why `commit` refused it.
+    ///
+    /// An outcome executed here and committed as soon as it executed is committed exactly as it
+    /// returned: `immediately` asserts so.
+    fn committed(
+        &self,
+        index: usize,
+        mut snapshot: TxSnapshot,
+        commit: Result<GasOutput, BlockExecutionError>,
+        committed: &CommittedStates,
+        immediately: bool,
+    ) -> Result<TxSnapshot, String> {
+        commit.map_err(|error| error.to_string())?;
+        let state = committed.states().pop().expect("the commit committed a state");
+        if immediately {
+            assert_eq!(
+                state, snapshot.state,
+                "{}: transaction {index}, committed as soon as it executed, is committed as it \
+                 returned",
+                self.name
+            );
+        }
+        snapshot.state = state;
+        Ok(snapshot)
+    }
+
+    /// Executes the candidate at `index` as the builder does on another executor of the same
+    /// block: over the case's pre-state and environments, recording into `record` what it reads
+    /// and asks, once that executor executed and committed `prior`.
+    fn execute_elsewhere(
+        &self,
+        index: usize,
+        prior: &[Tx],
+        record: &SharedWitnessRecord,
+    ) -> Elsewhere {
+        let mut state = State::builder()
+            .with_database(RecordingDatabase::new(self.db.clone(), record.clone()))
+            .with_bundle_update()
+            .build();
+        let factory = RecordingEnvFactory::new(self.envs.clone(), record.clone());
+        let evm = MegaEvmFactory::new()
+            .with_external_env_factory(factory)
+            .create_evm(&mut state, self.env.clone());
+        let mut executor = MegaBlockExecutor::new(
+            evm,
+            self.ctx.clone(),
+            self.spec.clone(),
+            OpAlloyReceiptBuilder::default(),
+        );
+        if let Some(limits) = self.limits {
+            executor = executor.with_protocol_limits(limits);
+        }
+        executor.apply_pre_execution_changes().expect("the other executor's block starts");
+        let mut oracle_reads = Vec::new();
+        for tx in prior {
+            let outcome = executor.run_transaction(tx).expect("the other executor executes it");
+            oracle_reads.extend(outcome.inner.oracle_reads.iter().copied());
+            executor.commit_transaction_outcome(outcome).expect("and commits it");
+        }
+        let outcome = executor.run_transaction(&self.txs[index]).map_err(|error| error.to_string());
+        if let Ok(outcome) = &outcome {
+            oracle_reads.extend(outcome.inner.oracle_reads.iter().copied());
+        }
+        Elsewhere {
+            outcome,
+            oracle_reads,
+            block_hashes: executor.get_accessed_block_hashes(),
+            bucket_ids: executor.get_accessed_bucket_ids(),
         }
     }
 }
@@ -405,12 +559,34 @@ pub(crate) struct TxSnapshot {
     pub is_deposit: bool,
     pub depositor_nonce: Option<u64>,
     pub result: ExecutionResult<MegaHaltReason>,
+    /// The state the block committed for it.
     pub state: EvmState,
     pub gas: MegaGasUsage,
     pub usage: LimitUsage,
     pub limit_exceeded: Option<LimitCheck>,
     /// The reads of the Oracle's storage the transaction recorded, with the service's answers.
     pub oracle_reads: Vec<OracleRead>,
+}
+
+impl TxSnapshot {
+    /// What `outcome` produced, its returned state included.
+    fn of(outcome: &Outcome) -> Self {
+        Self {
+            tx_hash: outcome.tx_hash,
+            gas_limit: outcome.gas_limit,
+            tx_size: outcome.tx_size,
+            da_size: outcome.da_size,
+            da_footprint: outcome.da_footprint,
+            is_deposit: outcome.is_deposit,
+            depositor_nonce: outcome.depositor_nonce,
+            result: outcome.inner.result.clone(),
+            state: outcome.inner.state.clone(),
+            gas: outcome.inner.gas,
+            usage: outcome.inner.usage,
+            limit_exceeded: outcome.inner.limit_exceeded,
+            oracle_reads: outcome.inner.oracle_reads.clone(),
+        }
+    }
 }
 
 /// What one run of a block produced, and what it read.
@@ -432,9 +608,13 @@ pub(crate) struct Run {
     pub bundle: BundleState,
     /// The state cache after the block: everything loaded and committed.
     pub cache: CacheState,
-    /// What the executor exported.
+    /// What the executor exported, with what the other executors a candidate was taken from
+    /// exported: the union a node takes.
     pub block_hashes: BTreeMap<u64, B256>,
     pub bucket_ids: Vec<BucketId>,
+    /// Whether a candidate's outcome was taken from another executor, so this run's state cache
+    /// holds nothing of what that candidate's execution loaded.
+    pub from_elsewhere: bool,
     /// The keys the committed states name: a node's channel witness, before its values are
     /// resolved.
     pub keys: WitnessKeys,
@@ -496,9 +676,10 @@ pub(crate) struct Replay {
 /// A candidate the block did not include was not run by the replay, so the two agree on which
 /// those are and nothing more is compared for them. The recording's state cache and exports hold
 /// what every execution loaded and asked about, dropped candidates' included, so they are equal
-/// only when the block included every candidate; otherwise the replay's exports must be among
-/// the recording's. The oracle reads a transaction recorded are the same reads on both runs, and
-/// their answers are the service's, which a replay without a service does not have.
+/// only when the block included every candidate and executed each on its own executor; otherwise
+/// the replay's exports must be among the recording's. The oracle reads a transaction recorded are
+/// the same reads on both runs, and their answers are the service's, which a replay without a
+/// service does not have.
 pub(crate) fn assert_same_run(name: &str, a: &Run, b: &Run) {
     assert_eq!(a.pre_block, b.pre_block, "{name}: the pre-block states");
     assert_eq!(a.txs.len(), b.txs.len(), "{name}: the candidate count");
@@ -531,7 +712,7 @@ pub(crate) fn assert_same_run(name: &str, a: &Run, b: &Run) {
     assert_eq!(a.gas, b.gas, "{name}: the block's ledgers");
     assert_eq!(a.usage, b.usage, "{name}: the block's usage");
     assert_eq!(a.bundle, b.bundle, "{name}: the state changes");
-    if a.included().iter().all(|included| *included) {
+    if a.included().iter().all(|included| *included) && !a.from_elsewhere {
         assert_eq!(a.cache, b.cache, "{name}: the state cache");
         assert_eq!(a.block_hashes, b.block_hashes, "{name}: the exported block hashes");
         assert_eq!(a.bucket_ids, b.bucket_ids, "{name}: the exported buckets");
@@ -547,9 +728,9 @@ pub(crate) fn assert_same_run(name: &str, a: &Run, b: &Run) {
     }
 }
 
-/// Asserts what the run `a` committed, in order, is the block: its pre-block states, then each
-/// included transaction's returned state, then the end of the block, whose balance increments
-/// name no account on this chain.
+/// Asserts what the run `a` committed, in order, is the block: its pre-block states, then one
+/// state for each included transaction, the one the run took for it, then the end of the block,
+/// whose balance increments name no account on this chain.
 fn assert_commits_the_block(name: &str, a: &Run) {
     let mut expected = a.pre_block.clone();
     expected.extend(a.included_outcomes().into_iter().map(|tx| tx.state.clone()));

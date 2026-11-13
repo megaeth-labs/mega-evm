@@ -21,7 +21,7 @@ Defer to the baseline for everything not listed here; the rules below take prece
 ### Consensus-critical execution
 
 - All execution logic must be **deterministic and architecture-independent** — no `mem::transmute`, no native-endian byte conversions, no platform-dependent operations in consensus paths.
-- Pre-block helpers (the activation block's predeploy check, pre-block system calls, the registry's due-change read, the L1 block info read) return their state (an `EvmState`, or a `ResultAndState` for a system call) for the block executor to commit on its own, in order; they never call `db.commit(...)`.
+- Pre-block helpers (the activation block's predeploy check, pre-block system calls, the registry's due-change read) return their state (an `EvmState`, or a `ResultAndState` for a system call) for the block executor to commit on its own, in order; they never call `db.commit(...)`.
   An idempotent "no change" path returns an `EvmState` that carries the observed account as a read-only entry; returning nothing drops the account from the stateless witness read set and produces an incomplete proof.
   The same applies inside execution: read through the journal with revm's own loads (`load_account`, `sload`), never `journal.database.basic(...)`, or the account driving the result is missing from the returned state.
 - **A write is counted once its opcode completed.**
@@ -145,13 +145,24 @@ These checks guard every change to the Satin engine.
 ### Byte-price grid
 
 - `.github/workflows/price-grid.yml` runs the `mega-evm` suite at byte prices other than the constants, through `scripts/price_grid.sh`: a cost per state byte and a cost per history byte per point, each run with `--no-fail-fast`.
-- On a pull request it runs five points: both bytes free (0 / 0), both at one gas (1 / 1), the cheapest and the dearest pair under consideration (312.5 / 20 and 5000 / 300), and a point past every candidate (10000 / 1000).
-  Between them they have failed every test the whole grid failed; 1 / 1 is where a premise that a charge cannot be paid, true only while a byte is dear, breaks.
-- Nightly and on dispatch it runs the whole grid: CPSB 0, 1, 312.5, 700, 1530, 2000, 5000 and 10000 by CPHB 0, 1, 20, 50, 88, 100, 200, 300 and 1000, and 0.001 on both.
+  The full grid runs as four parallel shards (`--full --shard I/4`) of one point list kept in the script, and a pull request that changes documentation alone skips it under the same allowlist; the `byte-price grid` job always runs and reports.
+- On a pull request and on dispatch it runs the whole grid: CPSB 0, 1, 312.5, 700, 1530, 2000, 5000 and 10000 by CPHB 0, 1, 20, 50, 88, 100, 200, 300 and 1000, and 0.001 on both.
+  It has no schedule, because a scheduled run would fire only from the default branch.
 - It is not a required check.
   A failure is a test that assumes a price, a scenario that does not scale with it, or an engine defect; the first two are fixed in the test, the third is not hidden behind a guard.
 - Each point reports how many tests a price guard held back (`guarded`, from `note_price_guard`; the tests are listed in the point's `.guards` file beside its log): every point passes the same number of tests, and this column tells a point at which tests returned early from one at which they ran.
-- Locally, `scripts/price_grid.sh --pr`, `--full`, or the points named (`scripts/price_grid.sh 312.5/20 5000/300`); each point's log is under `target/price-grid/`.
+- Locally, `scripts/price_grid.sh --full`, `--pr` (five points: 0 / 0, 1 / 1, 312.5 / 20, 5000 / 300 and 10000 / 1000, a quick local check), or the points named (`scripts/price_grid.sh 312.5/20 5000/300`); each point's log is under `target/price-grid/`.
+
+### Randomized tests, long mode
+
+- The bounded fuzz run is part of the `test` and `test-release` checks.
+- `.github/workflows/fuzz.yml` runs the long mode on every pull request and on dispatch: every property at fifty times its bounded count, in debug and in release, and the byte-price record at two prices compared by `scripts/fuzz_price_monotonic.py`, all from one seed the run draws and prints in the step summary.
+  It has no schedule and no path filter, because a scheduled or dispatch-only workflow would never run on this line (GitHub needs the workflow on the default branch for either).
+  A pull request that changes documentation alone is skipped, by an allowlist: every changed file must be under `docs/` or be a Markdown file outside `crates/` and `bin/` (`scripts/pull_request_needs_ci.sh`); any other change runs it.
+  The `long mode` job always runs and reports, so a skipped run does not leave a required check pending.
+- It is not a required check.
+  A failure prints the seed and the case count that reproduce it and the minimal case; it is a defect in the engine or a property to correct, never a seed to avoid.
+- Locally, `MEGA_FUZZ_LONG=1 MEGA_FUZZ_SEED=<seed> cargo test [--release] -p mega-evm --test fuzz -- --nocapture`.
 
 ### Instruction counts (CodSpeed)
 
@@ -185,12 +196,12 @@ These checks guard every change to the Satin engine.
 
 ### Scheduled workflows
 
-- GitHub fires a `schedule` trigger only from the default branch's copy of a workflow, so the schedules in `satin`'s copies (nightly mutation, doc-audit, the weekly execution-spec run, the nightly byte-price grid) stay inert until `satin` is the default branch.
-- Run them on `satin` by hand: `gh workflow run <workflow>.yml --ref satin` runs `satin`'s copy of the workflow on `satin`'s head, so none of them needs a `ref` input.
+- GitHub fires a `schedule` trigger only from the default branch's copy of a workflow, so the schedules in `satin`'s copies (nightly mutation, doc-audit, the weekly execution-spec run) stay inert until `satin` is the default branch.
+- `price-grid.yml` and `fuzz.yml` are not in that list: they have no schedule, and a dispatch needs the workflow on the default branch, so neither can be dispatched on `satin` and both run on every pull request instead.
+- Run the others on `satin` by hand: `gh workflow run <workflow>.yml --ref satin` runs `satin`'s copy of the workflow on `satin`'s head, so none of them needs a `ref` input.
   - `mutation.yml`: the whole-crate cargo-mutants run and suppression hygiene.
   - `exec-spec.yml`: the execution-spec fixtures at the pinned fork tag.
   - `doc-audit.yml`: the documentation audit of `satin`'s docs.
-  - `price-grid.yml`: the whole byte-price grid.
 
 ## Dev tools and test infrastructure
 

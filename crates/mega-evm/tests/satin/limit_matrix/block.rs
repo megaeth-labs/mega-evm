@@ -115,7 +115,7 @@ pub(super) fn drive_with(
 ) -> (Vec<Result<(), String>>, State<MemoryDatabase>) {
     let mut state = State::builder().with_database(db).build();
     let evm = MegaEvmFactory::new().create_evm(&mut state, env());
-    let ctx = MegaBlockExecutionCtx::new(B256::ZERO, Some(B256::ZERO), Bytes::new(), policy);
+    let ctx = MegaBlockExecutionCtx::new(B256::ZERO, Some(B256::ZERO), Bytes::new(), policy, None);
     let mut executor = MegaBlockExecutor::new(
         evm,
         ctx,
@@ -268,11 +268,10 @@ fn test_a_pre_block_call_of_1001_slots_is_not_stopped_and_does_not_move_the_bloc
     assert!(results[1].is_err(), "the block is now at 1,000: {:?}", results[1]);
 }
 
-/// The block is already at 1,000 state growth: the ordinary transaction that comes later is
-/// skipped. A Mega System Transaction at that point is not skipped, and not stopped by the
-/// per-transaction limit: its 1,001 slots are kept. It counts.
+/// The block is already at 1,000 state growth: both a Mega System Transaction and an ordinary
+/// transaction are skipped before execution, leaving the system sender and Oracle unchanged.
 #[test]
-fn test_a_system_transaction_after_1000_slots_is_not_skipped() {
+fn test_a_system_transaction_after_1000_slots_is_skipped() {
     let Some(gas) = slots_gas(TX_STATE_GROWTH_LIMIT + 1) else { return };
     let mut db = database(store_n_slots(TX_STATE_GROWTH_LIMIT as u16));
     db.set_account_code(ORACLE_CONTRACT_ADDRESS, store_n_slots((TX_STATE_GROWTH_LIMIT + 1) as u16));
@@ -285,20 +284,20 @@ fn test_a_system_transaction_after_1000_slots_is_not_skipped() {
         ],
     );
     assert!(results[0].is_ok(), "{:?}", results[0]);
-    assert!(results[1].is_ok(), "a system transaction is not skipped: {:?}", results[1]);
-    assert_eq!(
-        slot(&mut state, ORACLE_CONTRACT_ADDRESS, TX_STATE_GROWTH_LIMIT + 1),
-        U256::from(1),
-        "it is not stopped"
-    );
+    let refusal = results[1].as_ref().expect_err("a system transaction is skipped");
+    assert!(refusal.contains("Block state growth limit reached"), "{refusal}");
+    assert_eq!(slot(&mut state, ORACLE_CONTRACT_ADDRESS, 1), U256::ZERO);
+    assert_eq!(slot(&mut state, ORACLE_CONTRACT_ADDRESS, TX_STATE_GROWTH_LIMIT + 1), U256::ZERO);
+    assert_eq!(state.basic(MEGA_SYSTEM_ADDRESS).unwrap().unwrap().nonce, 0);
     assert!(results[2].is_err(), "the block is at its limit: {:?}", results[2]);
 }
 
 /// A builder's policy holds the block's KV packing budget at 10 and its state-growth packing
 /// budget at 2. The ordinary transaction that fills two slots reaches the state-growth budget,
-/// so the next ordinary one is not packed; a deposit and a Mega System Transaction are not
-/// refused and still count. A validator applies no policy and includes the next one too, and the
-/// transactions both packed compute the same. The protocol values stay 500,000 and 1,000.
+/// so the next ordinary and system transactions are not packed; a deposit is included and
+/// still counts. A validator applies no policy and includes all of them. The writes both
+/// executions keep agree, and only the validator keeps the system write. The protocol values
+/// stay 500,000 and 1,000.
 #[test]
 fn test_a_builders_kv_and_state_growth_policy_does_not_bind_a_validator() {
     let protocol = ProtocolLimits::for_spec(MegaSpecId::SATIN);
@@ -321,14 +320,12 @@ fn test_a_builders_kv_and_state_growth_policy_does_not_bind_a_validator() {
     let policy =
         BlockLimits::no_limits().with_block_kv_update_limit(10).with_block_state_growth_limit(2);
     let (built, mut built_state) = drive_with(db(), txs(), policy, None);
-    assert!(built[0].is_ok() && built[1].is_ok() && built[2].is_ok(), "{built:?}");
+    assert!(built[0].is_ok() && built[1].is_ok(), "{built:?}");
+    assert!(built[2].is_err(), "the policy holds a system transaction too: {:?}", built[2]);
     assert!(built[3].is_err(), "the builder does not pack it: {:?}", built[3]);
     let (validated, mut validated_state) = drive(db(), txs());
     assert!(validated.iter().all(Result::is_ok), "a validator applies no policy: {validated:?}");
-    for (address, index) in [(CONTRACT, 2), (ORACLE_CONTRACT_ADDRESS, 2)] {
-        assert_eq!(
-            slot(&mut built_state, address, index),
-            slot(&mut validated_state, address, index)
-        );
-    }
+    assert_eq!(slot(&mut built_state, CONTRACT, 2), slot(&mut validated_state, CONTRACT, 2));
+    assert_eq!(slot(&mut built_state, ORACLE_CONTRACT_ADDRESS, 2), U256::ZERO);
+    assert_eq!(slot(&mut validated_state, ORACLE_CONTRACT_ADDRESS, 2), U256::from(1));
 }

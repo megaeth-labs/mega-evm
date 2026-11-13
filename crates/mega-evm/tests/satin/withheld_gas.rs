@@ -1539,21 +1539,68 @@ fn test_a_priced_and_an_unpriced_precompile_part_as_a_failed_call_and_a_crossing
 /// default cap the allowance pays the price, and the call fails on its input as without the read.
 #[test]
 fn test_a_precompile_whose_input_fails_past_its_gas_check_stops_past_the_allowance() {
-    let input = vec![0_u8; 3 * 192 + 1];
+    assert_invalid_precompile_is_held_from_its_price(EC_PAIRING, &[0_u8; 3 * 192 + 1], 100_000);
+}
+
+#[test]
+fn test_modexp_over_bound_input_crosses_at_its_formula_price() {
+    let input: Vec<u8> = [U256::from(1_025), U256::from(1), U256::from(1)]
+        .into_iter()
+        .flat_map(|len| len.to_be_bytes::<32>())
+        .collect();
+    // Its 33,282-gas formula price exceeds this cap; the old 500-gas quote did not.
+    assert_invalid_precompile_is_held_from_its_price(MODEXP, &input, 16_641);
+}
+
+#[test]
+fn test_modexp_over_bound_input_returns_its_forward_at_the_default_compute_cap() {
+    let input: Vec<u8> = [U256::from(1_025), U256::from(80), U256::from(1)]
+        .into_iter()
+        .flat_map(|len| len.to_be_bytes::<32>())
+        .collect();
+    // EIP-7883: 2 * 129^2 * (16 * (80 - 32)) = 25,560,576, above the default cap.
+    let forward = 30_000_000;
+    for gas_limit in TIERS {
+        let run = |first| {
+            let db = MemoryDatabase::default()
+                .account_code(CONTRACT, calls_precompile(first, MODEXP, Some(forward)));
+            let mut evm = MegaEvm::new(context(db)).with_inspector(Calls::default());
+            let run = run_on(&mut evm, tx_with(&input, gas_limit));
+            let call = evm.inspector().calls.iter().find(|call| call.target == MODEXP).unwrap();
+            (run, call.spent, call.precompile_ran)
+        };
+        let ((detained, spent, ran), (plain, plain_spent, plain_ran)) =
+            (run(TIMESTAMP), run(PUSH0));
+        let allowance = CAP - charges_to_the_precompile(input.len(), Some(forward)).total();
+        assert_caught(
+            &detained,
+            intrinsic_with(&input, gas_limit),
+            allowance,
+            &failed_status_store(),
+        );
+        assert_eq!(spent, 0, "the crossing returns the whole forward");
+        assert!(!ran && plain_ran);
+        assert_eq!(plain_spent, u64::from(forward), "the size failure burns the forward");
+        assert!(detained.outcome.gas.regular < plain.outcome.gas.regular);
+    }
+}
+
+/// An input rejected after its gas check crosses when its price lies between allowance and forward.
+fn assert_invalid_precompile_is_held_from_its_price(to: Address, input: &[u8], cap: u64) {
     for gas_limit in TIERS {
         let run = |first, cap| {
             let limits = EvmTxRuntimeLimits::default().with_block_env_access_compute_gas_limit(cap);
-            let code = calls_precompile(first, EC_PAIRING, None);
+            let code = calls_precompile(first, to, None);
             let db = MemoryDatabase::default().account_code(CONTRACT, code);
             let mut evm = MegaEvm::new(context(db).with_tx_runtime_limits(limits))
                 .with_inspector(Calls::default());
-            let run = run_on(&mut evm, tx_with(&input, gas_limit));
-            let call = evm.inspector().calls.iter().find(|call| call.target == EC_PAIRING).unwrap();
+            let run = run_on(&mut evm, tx_with(input, gas_limit));
+            let call = evm.inspector().calls.iter().find(|call| call.target == to).unwrap();
             (run, call.precompile_ran)
         };
-        let ((detained, ran), (plain, plain_ran)) = (run(TIMESTAMP, 100_000), run(PUSH0, 100_000));
-        let allowance = 100_000 - charges_to_the_precompile(input.len(), None).total();
-        let intrinsic = intrinsic_with(&input, gas_limit);
+        let ((detained, ran), (plain, plain_ran)) = (run(TIMESTAMP, cap), run(PUSH0, cap));
+        let allowance = cap - charges_to_the_precompile(input.len(), None).total();
+        let intrinsic = intrinsic_with(input, gas_limit);
         assert_caught(&detained, intrinsic, allowance, &failed_status_store());
         assert!(!ran && plain_ran, "answered without running");
         assert!(plain.outcome.result.is_success());

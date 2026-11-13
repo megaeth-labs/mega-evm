@@ -32,7 +32,6 @@ use alloy_evm::{precompiles::PrecompilesMap, Database};
 use revm::{
     context::CfgEnv,
     context_interface::cfg::GasParams,
-    handler::EvmTr,
     interpreter::instructions::{gas_table_spec, GasTable},
     precompile::{PrecompileSpecId, Precompiles},
     primitives::eip7954,
@@ -117,8 +116,7 @@ pub fn neutralize_evm<DB: Database, INSP, ExtEnvs: ExternalEnvTypes>(
 ) -> Option<()> {
     let (precompiles, gas_table) = (neutral_precompiles(fork)?, neutral_gas_table(fork)?);
     evm.replace_precompile_set(precompiles);
-    let (_, instructions, _, _) = evm.all_mut();
-    *instructions.gas_table_mut() = gas_table;
+    evm.replace_static_gas_table(gas_table);
     Some(())
 }
 
@@ -151,6 +149,7 @@ mod tests {
     use revm::{
         context::{Cfg, ContextTr},
         database::EmptyDB,
+        handler::EvmTr,
         precompile::kzg_point_evaluation,
         primitives::{eip170, eip3860, eip7825},
     };
@@ -266,8 +265,8 @@ mod tests {
     #[test]
     fn test_neutral_gas_tables() {
         use revm::bytecode::opcode::{EXTCODECOPY, EXTCODESIZE};
-        let mut evm = MegaEvm::new(context(EthSpecId::AMSTERDAM));
-        let satin = *evm.all_mut().1.gas_table();
+        let evm = MegaEvm::new(context(EthSpecId::AMSTERDAM));
+        let satin = evm.static_gas_table();
         assert_eq!(neutral_gas_table(EthSpecId::AMSTERDAM), Some(satin));
 
         let osaka = neutral_gas_table(EthSpecId::OSAKA).expect("a neutral fork");
@@ -280,16 +279,23 @@ mod tests {
     }
 
     /// `neutralize_evm` installs the fork's static prices, and changes nothing for a fork
-    /// without a neutral configuration. That it installs the precompile set is shown by a call
-    /// (`tests/satin/neutral.rs`).
+    /// without a neutral configuration. The opcodes that can read volatile data take theirs in
+    /// their read wrappers, so the instruction table charges none of theirs, before and after.
+    /// That it installs the precompile set is shown by a call (`tests/satin/neutral.rs`).
     #[test]
     fn test_neutralize_evm_installs_the_fork_s_static_prices() {
-        use revm::bytecode::opcode::EXTCODESIZE;
+        use revm::bytecode::opcode::{EXTCODECOPY, EXTCODESIZE};
         let mut evm = MegaEvm::new(context(EthSpecId::OSAKA));
         assert!(neutralize_evm(&mut evm, EthSpecId::PRAGUE).is_none());
-        assert_eq!(evm.all_mut().1.gas_table()[EXTCODESIZE as usize], 200);
+        assert_eq!(evm.static_gas_table()[EXTCODESIZE as usize], 200);
 
         assert!(neutralize_evm(&mut evm, EthSpecId::OSAKA).is_some());
-        assert_eq!(evm.all_mut().1.gas_table()[EXTCODESIZE as usize], 100);
+        let osaka = neutral_gas_table(EthSpecId::OSAKA).expect("a neutral fork");
+        assert_eq!(evm.static_gas_table(), osaka);
+        assert_eq!(evm.static_gas_table()[EXTCODESIZE as usize], 100);
+        for opcode in [EXTCODESIZE, EXTCODECOPY] {
+            assert_eq!(evm.all_mut().1.gas_table()[opcode as usize], 0, "the wrapper's");
+            assert_eq!(evm.ctx().read_static_gas(opcode), 100);
+        }
     }
 }

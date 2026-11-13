@@ -200,7 +200,7 @@ A block's inputs are the block with its transactions, the chain's receipts, and 
 A read the trace does not cover (what only a pre-block system call reads, or a path a counterfactual takes that the chain did not) is read from the parent block over RPC.
 
 On Satin a block in which a fork activates admits only deposits, as the [Satin upgrade](../../spec/upgrades/satin.md#1-base-layer-optimism-karst-ethereum-osaka) states: Satin itself, or an Optimism fork at or after Jovian.
-The replay works this out as a node does, from the schedule the block runs under and the parent block's timestamp, and tells block execution; every transaction of such a block but its deposits is reported `refused`.
+The replay works this out as a node does, from the schedule the block runs under and the parent block's timestamp, and gives block execution the parent's timestamp, from which it decides; every transaction of such a block but its deposits is reported `refused`.
 A transaction replay works it out the same way, from the parent block it forks, and refuses a non-deposit transaction of such a block with an error.
 The parent's timestamp decides the answer only for a Satin block at which a fork its schedule activates after genesis is active; for such a block alone the replay fetches the parent's header over `--rpc` and keeps its timestamp in the cache.
 Every other block, a legacy one or one whose schedule activates every fork it runs at genesis as the Satin counterfactual's does, replays from what the cache holds and never asks for the parent.
@@ -255,7 +255,7 @@ The exit code is 0, 1 when a block could not be replayed, or 2 when `--verify` i
 `--override.spec Satin` runs every block as it would run on Satin: every transaction as signed, on the state its parent block left, under Satin's protocol limits, or those `--override.limits` gives, with no building policy of a block builder applied.
 A transaction the Satin engine refuses (it cannot pay for its gas, or a block budget is full) is reported `refused` and left out, and the block goes on.
 A transaction signed with a gas limit sized for legacy costs can run out of gas on Satin: that is the counterfactual's answer, not a tool fault.
-`--override.spec Satin` runs no block as Satin's activation block, so it checks no predeploy; what it reads beyond the legacy replay is the L1 fee overhead slot, which every Satin block reads with the rest of the L1 block info.
+`--override.spec Satin` runs no block as Satin's activation block, so it checks no predeploy, and it reads the L1 block contract as the legacy replay does, when a transaction is priced against it or held to its footprint; what it reads beyond the legacy replay is only what a transaction's Satin run reads on a path the chain's run did not take.
 
 ## Transaction Overrides
 

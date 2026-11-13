@@ -215,13 +215,14 @@ fn test_the_oracle_reading_its_own_storage_is_held_to_the_cap() {
                 .account_code(ORACLE_CONTRACT_ADDRESS, oracle_reads_then_spins())
         };
 
-        // Whoever calls it, the Oracle's `POP` and loop come after its read.
-        let left = Charges::default().then(&[2]).spin(0).left(CAP);
+        // Whoever calls it, the `SLOAD`'s cold access, which the read is made before, and the
+        // Oracle's `POP` and loop come after its read.
+        let left = Charges::default().then(&[2_100, 2]).spin(0).left(CAP);
         let run = execute(db(), tx(CALLER, ORACLE_CONTRACT_ADDRESS, gas_limit));
         assert_eq!(
             assert_stopped(&run, intrinsic, left),
-            CAP + 2 + 2_100,
-            "the direct call: PUSH0 and a cold SLOAD"
+            CAP + 2,
+            "the direct call: the PUSH0 before the read"
         );
         assert_eq!(run.accessed, VolatileDataAccess::ORACLE);
 
@@ -315,8 +316,9 @@ fn test_the_system_address_is_not_detained() {
 ///
 /// independent: the cap, the compute at the read and the bill are the spec's own numbers.
 /// The cap is 20,000,000.
-/// `TIMESTAMP` costs 2, `PUSH0` costs 2 and a cold `SLOAD` costs 2,100, so the compute at the
-/// read is that opcode's gas.
+/// `TIMESTAMP` costs 2, so the compute at its read is that opcode's gas. An Oracle read is made
+/// before its `SLOAD` charges anything, so the compute at it is the `PUSH0`'s 2, and the `SLOAD`'s
+/// cold access, 2,100, is the first charge the allowance pays after it.
 /// The EIP-2780 intrinsic of a call to an existing account, with no value and no calldata, is
 /// `TX_BASE_COST` (12,000) plus the recipient access (3,000).
 /// What the loop leaves is the same hand count `Charges` makes: the `POP` after the read, the
@@ -351,10 +353,16 @@ fn test_a_users_deposit_is_detained() {
     assert_ne!(CALLER, MEGA_SYSTEM_ADDRESS);
     assert_ne!(CALLER, mega_evm::SYSTEM_ADDRESS);
 
-    // What a 20,000,000 allowance has left when the copy that crosses it is not made.
+    // What a 20,000,000 allowance has left when the copy that crosses it is not made: after the
+    // block environment's read, and after the Oracle's, whose `SLOAD` pays its cold access first.
     let left = allowance_after_the_read(BLOCK_ENV_CAP);
     assert_eq!(left, 1_100);
     assert_eq!(Charges::default().then(&[2]).work(PAST_THE_CAP, 0).left(BLOCK_ENV_CAP), left);
+    let oracle_left = allowance_after_the_read(ORACLE_CAP - COLD_SLOAD);
+    assert_eq!(
+        Charges::default().then(&[COLD_SLOAD, 2]).work(PAST_THE_CAP, 0).left(ORACLE_CAP),
+        oracle_left
+    );
 
     let timestamp = work(op(BytecodeBuilder::default(), TIMESTAMP), PAST_THE_CAP).stop().build();
     let oracle = work(BytecodeBuilder::default().append_many([PUSH0, SLOAD, POP]), PAST_THE_CAP)
@@ -373,11 +381,11 @@ fn test_a_users_deposit_is_detained() {
     assert_deposit_stopped(
         "Oracle",
         oracle.clone(),
-        PUSH_GAS + COLD_SLOAD,
+        PUSH_GAS,
         ORACLE_CAP,
         VolatileDataAccess::ORACLE,
         intrinsic,
-        left,
+        oracle_left,
         source,
     );
     assert_system_transaction_is_not_stopped("TIMESTAMP", timestamp, BLOCK_ENV_CAP);
@@ -577,7 +585,7 @@ fn refused(access: VolatileDataAccess) -> (InstructionResult, Bytes) {
 /// The refusal follows what the Host loads, whichever way the call reaches it: the beneficiary
 /// behind an EIP-7702 delegation, the beneficiary with a delegation of its own, and the
 /// beneficiary's own frame destroying itself are refused; a call that loads no volatile data
-/// proceeds.
+/// proceeds, and so does an `EXTCODECOPY` of another account with every operand on the stack.
 #[test]
 fn test_a_refusal_follows_what_the_host_loads() {
     let beneficiary = refused(VolatileDataAccess::BENEFICIARY_BALANCE);
@@ -597,6 +605,19 @@ fn test_a_refusal_follows_what_the_host_loads() {
         .account_code(OTHER, BytecodeBuilder::default().stop().build())
         .account_code(CHILD, call(BytecodeBuilder::default(), CALL, OTHER).stop().build());
     assert_eq!(refused_child(db), (InstructionResult::Stop, Bytes::new()), "no volatile load");
+
+    // A copy of another account's code, its four operands on the stack.
+    let copy = BytecodeBuilder::default()
+        .push_number(1_u8)
+        .append_many([PUSH0, PUSH0])
+        .push_address(OTHER)
+        .append(EXTCODECOPY)
+        .stop()
+        .build();
+    let db = MemoryDatabase::default()
+        .account_code(OTHER, BytecodeBuilder::default().stop().build())
+        .account_code(CHILD, copy);
+    assert_eq!(refused_child(db), (InstructionResult::Stop, Bytes::new()), "EXTCODECOPY");
 }
 
 /// The beneficiary's own frame destroying itself reads and clears the beneficiary's balance:
@@ -622,8 +643,8 @@ fn test_the_beneficiary_destroying_itself_is_refused() {
 }
 
 /// An opcode that fails before it loads anything keeps its own failure: a `SELFDESTRUCT` in the
-/// beneficiary's own frame or a `CALL` to the beneficiary short of operands halts with a stack
-/// underflow, not a refusal.
+/// beneficiary's own frame, a `CALL` to the beneficiary or an `EXTCODECOPY` of it short of
+/// operands halts with a stack underflow, not a refusal.
 #[test]
 fn test_a_stack_underflow_is_not_a_refusal() {
     let db = MemoryDatabase::default()
@@ -643,6 +664,11 @@ fn test_a_stack_underflow_is_not_a_refusal() {
         .build();
     let db = MemoryDatabase::default().account_code(CHILD, partial_call);
     assert_eq!(refused_child(db).0, InstructionResult::StackUnderflow, "CALL");
+
+    let partial_copy =
+        BytecodeBuilder::default().push_address(BENEFICIARY).append(EXTCODECOPY).build();
+    let db = MemoryDatabase::default().account_code(CHILD, partial_copy);
+    assert_eq!(refused_child(db).0, InstructionResult::StackUnderflow, "EXTCODECOPY");
 }
 
 /// A database failure on an account an opcode loads surfaces as an error of the transaction, with
@@ -693,6 +719,100 @@ fn test_a_database_failure_surfaces_and_a_stack_underflow_comes_first() {
         let child = evm.inspector().calls.iter().find(|call| call.target == CHILD).unwrap();
         assert_eq!(child.result, InstructionResult::StackUnderflow, "code {fails_on_code}");
     }
+}
+
+/// The operands of a `CALLCODE` of `to` carrying no value, with an input of 1 MiB, an output of
+/// nothing and 1,000 gas: the frame cannot pay the input's memory.
+fn callcode_of_a_mebibyte(to: Address) -> BytecodeBuilder {
+    BytecodeBuilder::default()
+        .append_many([PUSH0, PUSH0])
+        .push_number(0x10_0000_u32)
+        .append_many([PUSH0, PUSH0])
+        .push_address(to)
+        .push_number(1_000_u16)
+        .append(CALLCODE)
+}
+
+/// What the pushes of [`callcode_of_a_mebibyte`] cost.
+const CALLCODE_PUSHES: u64 = 2 + 2 + 3 + 2 + 2 + 3 + 3;
+
+/// With access off, a call opcode reads its target's account and code to find the EIP-7702
+/// delegate it would follow, before it charges or checks anything, and the read is required: a
+/// `CALLCODE` of a delegator of the beneficiary, with an input of 1 MiB its 1,000 gas cannot pay,
+/// is refused for free where the delegator can be read, and gives the transaction no outcome
+/// where its account or its code cannot, rather than halting on the memory.
+#[test]
+fn test_a_call_target_unreadable_for_its_delegate_has_no_outcome() {
+    let code_hash = Bytecode::new_eip7702(BENEFICIARY).hash_slow();
+    let child = callcode_of_a_mebibyte(DELEGATOR).build();
+    let parent = BytecodeBuilder::default()
+        .append_many([PUSH0; 5])
+        .push_address(CHILD)
+        .push_number(CALLCODE_PUSHES + 1_000)
+        .append_many([CALL, POP])
+        .stop()
+        .build();
+    let db = || {
+        MemoryDatabase::default()
+            .account_code(CONTRACT, parent.clone())
+            .account_code(CHILD, child.clone())
+    };
+
+    let readable = with_delegation(db(), DELEGATOR, BENEFICIARY);
+    let mut evm = MegaEvm::new(context(readable).with_volatile_access_disabled_from(1))
+        .with_inspector(Calls::default());
+    let run = run_on(&mut evm, tx(CALLER, CONTRACT, BELOW));
+    assert!(run.outcome.result.is_success(), "{:?}", run.outcome.result);
+    let record = evm.inspector().calls.iter().find(|call| call.target == CHILD).unwrap();
+    assert_eq!(
+        (record.result, record.output.clone()),
+        refused(VolatileDataAccess::BENEFICIARY_BALANCE),
+        "a readable delegator"
+    );
+    assert_eq!(record.spent, CALLCODE_PUSHES, "the refusal costs nothing");
+
+    for fails_on_code in [false, true] {
+        let mut db = ErrorInjectingDatabase::new(db().account_lazy_code(DELEGATOR, code_hash));
+        if fails_on_code {
+            db.fail_on_code_by_hash = Some(code_hash);
+        } else {
+            db.fail_on_account = Some(DELEGATOR);
+        }
+        let result = MegaEvm::new(context(db).with_volatile_access_disabled_from(1))
+            .execute_transaction(tx(CALLER, CONTRACT, BELOW));
+        assert!(result.is_err(), "code {fails_on_code}: {result:?}");
+    }
+}
+
+/// The read of a call target's account and code that finds its delegate warms neither: a call the
+/// read does not refuse — of a delegator of another account than the beneficiary — pays the cold
+/// access to its target with access off as with access on, and spends the same.
+#[test]
+fn test_the_delegate_read_warms_nothing() {
+    let child = call(BytecodeBuilder::default(), CALL, DELEGATOR).stop().build();
+    let spent = |disabled: bool| {
+        let db = with_delegation(MemoryDatabase::default(), DELEGATOR, OTHER)
+            .account_code(CONTRACT, call(BytecodeBuilder::default(), CALL, CHILD).stop().build())
+            .account_code(CHILD, child.clone())
+            .account_code(OTHER, BytecodeBuilder::default().stop().build());
+        let mut ctx = context(db);
+        if disabled {
+            ctx = ctx.with_volatile_access_disabled_from(1);
+        }
+        let mut evm = MegaEvm::new(ctx).with_inspector(Calls::default());
+        let run = run_on(&mut evm, tx(CALLER, CONTRACT, BELOW));
+        assert!(run.outcome.result.is_success(), "disabled {disabled}");
+        let child = evm.inspector().calls.iter().find(|call| call.target == CHILD).unwrap();
+        assert_eq!(child.result, InstructionResult::Stop, "disabled {disabled}");
+        child.spent
+    };
+    let on = spent(false);
+    // The five pushes and the address's, the `GAS`, the call's cold target and its delegate's
+    // cold account, and the `POP`: the callee stops at once and hands back what it was forwarded.
+    let cold =
+        entry(GasId::warm_storage_read_cost()) + entry(GasId::cold_account_additional_cost());
+    assert_eq!(on, 2 * 5 + 3 + 2 + 2 * cold + 2, "access on");
+    assert_eq!(spent(true), on, "access off reads the target first and warms nothing");
 }
 
 /// Calling `MegaAccessControl` costs the caller its call's overhead alone: the answer carries the

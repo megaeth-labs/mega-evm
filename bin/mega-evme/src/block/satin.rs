@@ -68,20 +68,17 @@ pub(super) fn execute(
         envs = envs.with_bucket_capacity(bucket, capacity);
     }
     let evm_factory = MegaEvmFactory::new().with_external_env_factory(envs);
-    let only_deposits =
-        admits_only_deposits(&hardforks, header.number, parent_timestamp, header.timestamp)?;
-    // Without the parent's timestamp the block admits every transaction only where no fork the
-    // schedule activates after genesis is active at it, so Satin does not activate in it either.
-    let activates_satin = parent_timestamp
-        .is_some_and(|parent| hardforks.is_satin_activation_block(parent, header.timestamp));
+    // The executor works out which rules the block's activations bring from the schedule and the
+    // parent's timestamp. Without the timestamp it applies none, which is right only where no
+    // fork activates in the block, so any other block is refused here.
+    admits_only_deposits(&hardforks, header.number, parent_timestamp, header.timestamp)?;
     let block_ctx = MegaBlockExecutionCtx::new(
         header.parent_hash,
         header.parent_beacon_block_root,
         header.extra_data.clone(),
         BlockLimits::default(),
-    )
-    .with_no_user_tx_activation_block(only_deposits)
-    .with_satin_activation_block(activates_satin);
+        parent_timestamp,
+    );
 
     let result = {
         let mut db = State::builder().with_database(SatinDb(state)).with_bundle_update().build();
@@ -152,7 +149,7 @@ pub(super) fn execute(
 /// its parent came ([`admits_only_deposits`]).
 pub(super) fn needs_parent_timestamp(chain_id: u64, timestamp: u64) -> Result<bool> {
     let hardforks = satin_schedule(chain_id, timestamp)?;
-    Ok(hardforks.admits_only_deposits(0, timestamp))
+    Ok(hardforks.activation_depends_on_parent(timestamp))
 }
 
 /// Whether block `number`, at `timestamp`, admits only deposits under `hardforks`, as a node works
@@ -172,7 +169,7 @@ fn admits_only_deposits(
 ) -> Result<bool> {
     match parent_timestamp {
         Some(parent_timestamp) => Ok(hardforks.admits_only_deposits(parent_timestamp, timestamp)),
-        None if !hardforks.admits_only_deposits(0, timestamp) => Ok(false),
+        None if !hardforks.activation_depends_on_parent(timestamp) => Ok(false),
         None => Err(EvmeError::Other(format!(
             "block {number}: a fork its schedule activates is active at its timestamp, and \
              whether the fork activates in this block depends on its parent's timestamp, which \

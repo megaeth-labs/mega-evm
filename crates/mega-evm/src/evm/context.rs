@@ -65,12 +65,19 @@ pub struct MegaContext<DB: Database, ExtEnvs: ExternalEnvTypes = EmptyExternalEn
     /// Whether the running execution is a system call rather than a transaction. See
     /// [`MegaContext::is_system_call`].
     system_call: bool,
+    /// Whether the running execution asks the oracle service for the Oracle's storage. See
+    /// [`MegaContext::asks_oracle_service`].
+    oracle_service: bool,
     /// The creation the running transaction's `keylessDeploy` call started, while it runs. See
     /// the [`keyless`](crate::system::keyless) module.
     pub(crate) keyless_creation: Option<keyless::Started>,
     /// Whether the context runs the neutral configuration. See [`MegaContext::with_neutral_cfg`].
     #[cfg(any(test, feature = "test-utils"))]
     neutral: bool,
+    /// The static opcode prices the read wrappers charge in place of Satin's, once the test
+    /// tooling installed a fixture fork's on the EVM. See [`MegaContext::read_static_gas`].
+    #[cfg(any(test, feature = "test-utils"))]
+    read_static_gas: Option<revm::interpreter::instructions::GasTable>,
 }
 
 impl<DB: Database> MegaContext<DB, EmptyExternalEnv> {
@@ -106,9 +113,12 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
             bucket_record: BucketRecord::default(),
             oracle_reads: OracleReadRecord::default(),
             system_call: false,
+            oracle_service: true,
             keyless_creation: None,
             #[cfg(any(test, feature = "test-utils"))]
             neutral: false,
+            #[cfg(any(test, feature = "test-utils"))]
+            read_static_gas: None,
         }
     }
 
@@ -193,6 +203,29 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     #[cfg(any(test, feature = "test-utils"))]
     pub const fn is_neutral(&self) -> bool {
         self.neutral
+    }
+
+    /// The static gas of `opcode`, one of the opcodes that can read volatile data, which its read
+    /// wrapper charges itself once it decided the read is not refused, in place of the
+    /// interpreter: Satin's, or, once the test tooling installed a fixture fork's static prices on
+    /// the EVM, the fork's.
+    #[inline(always)]
+    pub(crate) fn read_static_gas(&self, opcode: u8) -> u64 {
+        #[cfg(any(test, feature = "test-utils"))]
+        if let Some(table) = &self.read_static_gas {
+            return u64::from(table[opcode as usize]);
+        }
+        u64::from(super::instructions::SATIN_GAS_TABLE[opcode as usize])
+    }
+
+    /// Has the read wrappers charge `table`'s static prices: test tooling, with which an EVM takes
+    /// a fixture fork's static prices.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) const fn set_read_static_gas(
+        &mut self,
+        table: revm::interpreter::instructions::GasTable,
+    ) {
+        self.read_static_gas = Some(table);
     }
 
     /// Whether the context runs the neutral configuration: never outside the test tooling, which
@@ -464,6 +497,10 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     pub(crate) fn on_new_tx(&mut self, system_transaction: bool) {
         self.prepare(system::originates_from_the_protocol(&self.inner.tx, system_transaction));
         self.system_call = false;
+        // Decided before a system-address transaction is promoted to a deposit, so it is told
+        // apart by `system_transaction`, and any other deposit by its type.
+        self.oracle_service =
+            !system_transaction && self.inner.tx.tx_type() != DEPOSIT_TRANSACTION_TYPE;
     }
 
     /// Prepares the context for a system call. Every system-call entry point of
@@ -475,18 +512,38 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     pub(crate) fn on_new_system_call(&mut self) {
         self.prepare(true);
         self.system_call = true;
+        self.oracle_service = false;
     }
 
     /// Whether the running execution is a system call: the protocol's own call, such as a
-    /// pre-block call, rather than a transaction of the block.
-    ///
-    /// A system call is a function of the chain's state alone, so it never asks the oracle
-    /// service: the service's answers reach a stateless validator through the included
-    /// transactions' records, and a system call has none. Set when the call is prepared and
+    /// pre-block call, rather than a transaction of the block. Set when the call is prepared and
     /// cleared when the next transaction is, so it cannot outlive the call.
     #[inline]
     pub(crate) const fn is_system_call(&self) -> bool {
         self.system_call
+    }
+
+    /// Whether the running execution asks the oracle service for the Oracle's storage: a
+    /// transaction that is neither a deposit nor a Mega System Transaction does. A system call, a
+    /// deposit and a Mega System Transaction do not: an Oracle read they make pushes the slot's
+    /// value on the chain, and records no answer.
+    ///
+    /// A node that replays a block runs no oracle service, so a value the service gives a read
+    /// must be on the chain before the transaction that read it, written by a Mega System
+    /// Transaction the block orders first; none of the three can have one before it. A system
+    /// call precedes the block's transactions and is a function of the state a stateless
+    /// validator is given. Every deposit of a block precedes its other transactions, and a deposit
+    /// cannot be left out of the block instead. A Mega System Transaction is the sequencer's write
+    /// of the values the service gave, so a value served to its own read would need another one
+    /// before it. The block in which Satin activates admits only deposits, so none of its reads
+    /// asks the service.
+    ///
+    /// Decided when the execution is prepared, from what the transaction is then: a system-address
+    /// transaction before the engine promotes it to a deposit, and any other deposit by its type.
+    /// It cannot outlive the execution: the next one decides again.
+    #[inline]
+    pub(crate) const fn asks_oracle_service(&self) -> bool {
+        self.oracle_service
     }
 
     /// Whether the running execution's gas is split as EIP-8037 splits a system call's: at most
@@ -496,7 +553,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// a system contract, are part of executing the chain. No transaction's is, and under the
     /// neutral configuration no system call's either, as revm's own runner has it.
     pub(crate) const fn splits_system_call_gas(&self) -> bool {
-        !self.runs_neutral() && self.system_call
+        !self.runs_neutral() && self.is_system_call()
     }
 
     /// The part of its pools and of its EIP-8037 reservoir, in per cent, a caller keeps when it
@@ -776,7 +833,7 @@ mod tests {
     use super::*;
     use crate::{limit::emits_transfer_logs, EthSpecId, SaltEnv, TestExternalEnvs};
     use alloy_eips::eip4788::SYSTEM_ADDRESS;
-    use alloy_primitives::U256;
+    use alloy_primitives::{B256, U256};
     use core::convert::Infallible;
     use revm::{context_interface::cfg::GasParams, database::EmptyDB};
 
@@ -1052,6 +1109,34 @@ mod tests {
         ctx.on_new_system_call();
         ctx.on_new_tx(true);
         assert!(!ctx.is_system_call(), "nor is a system transaction, which the protocol sends");
+    }
+
+    /// Only a transaction that is neither a deposit nor a system-address transaction asks the
+    /// oracle service; a deposit, a system-address transaction, which the engine promotes to a
+    /// deposit after this decision, and a system call do not. The decision is each execution's
+    /// own: the next one decides again.
+    #[test]
+    fn test_only_a_transaction_that_is_no_deposit_asks_the_oracle_service() {
+        let mut ctx = MegaContext::new(EmptyDB::default(), MegaSpecId::SATIN);
+        ctx.on_new_tx(false);
+        assert!(ctx.asks_oracle_service(), "an ordinary transaction asks");
+
+        ctx.on_new_tx(true);
+        assert!(!ctx.asks_oracle_service(), "a system-address transaction does not");
+
+        ctx.inner.tx.deposit.source_hash = B256::repeat_byte(0x22);
+        ctx.on_new_tx(false);
+        assert!(!ctx.asks_oracle_service(), "nor does a deposit");
+
+        ctx.inner.tx.deposit.source_hash = B256::ZERO;
+        ctx.on_new_tx(false);
+        assert!(ctx.asks_oracle_service(), "the deposit's decision does not outlive it");
+
+        ctx.on_new_system_call();
+        assert!(!ctx.asks_oracle_service(), "nor does a system call");
+
+        ctx.on_new_tx(false);
+        assert!(ctx.asks_oracle_service(), "and the call's does not outlive it");
     }
 
     /// A system call's gas is split as EIP-8037 has it; a transaction's is not, a system-address

@@ -1,20 +1,22 @@
 //! The activation-block rule as a node applies it.
 //!
-//! Block execution does not work out whether a block admits only deposits: it is told, through
-//! [`MegaBlockExecutionCtx::no_user_tx_activation_block`]. A node works it out from its schedule
-//! and the parent block's timestamp ([`MegaHardforks::admits_only_deposits`]) for every block it
-//! builds or validates. The tests here build each block's context that way, from a schedule, and
-//! run the block: a user transaction is refused exactly in the blocks the rule names, and a
-//! deposit runs in every block.
+//! Block execution works out for itself whether a block admits only deposits and whether it is
+//! Satin's activation block, from its chain schedule, the block's own timestamp and the parent
+//! block's timestamp ([`MegaBlockExecutionCtx::new`]), which is all a node
+//! supplies. The tests here build each block's context from the parent's timestamp alone and run
+//! the block: a user transaction is refused exactly in the blocks the rule names, and a deposit
+//! runs in every block.
 
 use alloy_evm::block::{BlockExecutionError, BlockExecutor, BlockValidationError};
 use alloy_hardforks::{EthereumHardfork, ForkCondition};
 use alloy_op_hardforks::OpHardfork;
-use alloy_primitives::{Bytes, U256};
+use alloy_primitives::{Bytes, B256, U256};
 use mega_evm::{
-    system::SYSTEM_CONTRACT_COUNT, test_utils::CommittedStates, BlockLimits, MegaBlockExecutionCtx,
-    MegaBlockExecutionError, MegaHardfork, MegaHardforkConfig, MegaHardforks,
+    system::SYSTEM_CONTRACT_COUNT,
+    test_utils::{CommittedStates, MemoryDatabase},
+    BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutionError, MegaHardfork, MegaHardforkConfig,
 };
+use revm::{context::ContextSetters, context_interface::ContextTr, database::State};
 
 use crate::common::{
     self, block_ctx, deposit_tx, empty_call_gas, executor_with_env_and_spec, user_tx,
@@ -32,16 +34,17 @@ fn schedule(satin: u64) -> MegaHardforkConfig {
     MegaHardforkConfig::default().with(MegaHardfork::Satin, ForkCondition::Timestamp(satin))
 }
 
-/// The context of the block at `timestamp`, whose parent is at `parent_timestamp`, as a node
-/// builds it: both switches come from the schedule and the parent's timestamp.
-fn node_ctx(
-    spec: &MegaHardforkConfig,
-    parent_timestamp: u64,
-    timestamp: u64,
-) -> MegaBlockExecutionCtx {
-    block_ctx(BlockLimits::no_limits())
-        .with_no_user_tx_activation_block(spec.admits_only_deposits(parent_timestamp, timestamp))
-        .with_satin_activation_block(spec.is_satin_activation_block(parent_timestamp, timestamp))
+/// The context of a block whose parent is at `parent_timestamp`. Nothing else is said: the
+/// executor works out from its schedule and the block's own timestamp whether a fork activates
+/// in the block.
+fn node_ctx(parent_timestamp: u64) -> MegaBlockExecutionCtx {
+    MegaBlockExecutionCtx::new(
+        B256::ZERO,
+        Some(B256::ZERO),
+        Bytes::new(),
+        BlockLimits::no_limits(),
+        Some(parent_timestamp),
+    )
 }
 
 /// Whether `error` is the activation-block refusal.
@@ -66,7 +69,7 @@ fn refuses_a_user_transaction(
 ) -> bool {
     let mut env = common::evm_env();
     env.block_env.timestamp = U256::from(timestamp);
-    let ctx = node_ctx(&spec, parent_timestamp, timestamp);
+    let ctx = node_ctx(parent_timestamp);
     let mut state = common::state();
     let mut executor = executor_with_env_and_spec(&mut state, ctx, env, spec);
     executor.apply_pre_execution_changes().unwrap_or_else(|e| panic!("{name}: starts: {e}"));
@@ -191,7 +194,7 @@ fn test_the_activation_rule_follows_the_optimism_fork_order() {
 fn predeploys_checked(spec: MegaHardforkConfig, parent_timestamp: u64, timestamp: u64) -> usize {
     let mut env = common::evm_env();
     env.block_env.timestamp = U256::from(timestamp);
-    let ctx = node_ctx(&spec, parent_timestamp, timestamp);
+    let ctx = node_ctx(parent_timestamp);
     let mut state = common::state();
     let committed = CommittedStates::install(&mut state);
     let mut executor = executor_with_env_and_spec(&mut state, ctx, env, spec);
@@ -226,4 +229,113 @@ fn test_a_node_context_checks_the_predeploys_where_satin_activates() {
     for (name, spec, parent, timestamp, expected) in cases {
         assert_eq!(predeploys_checked(spec, parent, timestamp), expected, "{name}");
     }
+}
+
+/// The `MegaBlockExecutionError` an internal error carries.
+fn internal(error: &BlockExecutionError) -> Option<&MegaBlockExecutionError> {
+    error.as_internal().and_then(|error| error.downcast_other::<MegaBlockExecutionError>())
+}
+
+/// An executor for the block at `timestamp` on the chain `spec` describes, whose context names
+/// `parent_timestamp`.
+fn executor_at<'a>(
+    state: &'a mut State<MemoryDatabase>,
+    spec: MegaHardforkConfig,
+    parent_timestamp: Option<u64>,
+    timestamp: u64,
+) -> common::TestExecutor<'a> {
+    let mut env = common::evm_env();
+    env.block_env.timestamp = U256::from(timestamp);
+    let mut ctx = block_ctx(BlockLimits::no_limits());
+    ctx.parent_timestamp = parent_timestamp;
+    executor_with_env_and_spec(state, ctx, env, spec)
+}
+
+/// A context that names no parent timestamp, for a block in which a fork the schedule activates
+/// after genesis is active, cannot be told from a block that has a parent: whether the fork
+/// activates in it depends on the parent. Executing such a block is refused with a typed error,
+/// by the block's start, by every transaction and by both rules, instead of running the block as
+/// an ordinary one. The same block with the parent named is the activation block.
+///
+/// Expected values: independent (the schedule's own timestamps and the documented refusal).
+#[test]
+fn test_an_absent_parent_timestamp_is_refused_where_it_could_change_the_answer() {
+    let at = ACTIVATION;
+    let missing = MegaBlockExecutionError::MissingParentTimestamp { block_timestamp: at };
+
+    let mut state = common::state();
+    let mut executor = executor_at(&mut state, schedule(at), None, at);
+    assert_eq!(executor.admits_only_deposits(), Err(missing.clone()));
+    assert_eq!(executor.is_satin_activation_block(), Err(missing.clone()));
+    let error = executor.apply_pre_execution_changes().expect_err("the block does not start");
+    assert_eq!(internal(&error), Some(&missing), "an internal error: the caller's omission");
+    assert_eq!(
+        internal(&error).unwrap().to_string(),
+        format!(
+            "the parent block's timestamp is missing: a fork the schedule activates after \
+             genesis is active at the block's timestamp {at}, and whether it activates in this \
+             block depends on the parent's timestamp"
+        ),
+        "the diagnostic identifies the missing context and the affected block"
+    );
+    let error = executor
+        .execute_transaction(&deposit_tx(Bytes::new(), empty_call_gas()))
+        .expect_err("not even a deposit runs");
+    assert_eq!(internal(&error), Some(&missing));
+
+    let mut state = common::state();
+    let executor = executor_at(&mut state, schedule(at), Some(at - 1), at);
+    assert_eq!(
+        (executor.admits_only_deposits(), executor.is_satin_activation_block()),
+        (Ok(true), Ok(true)),
+        "the same block with its parent named is the activation block"
+    );
+}
+
+/// A context that names no parent timestamp is accepted where no parent could change the answer,
+/// and then neither rule applies: a schedule whose forks are all active from genesis, a schedule
+/// with no `MegaETH` fork, and a block before the fork's activation. The block runs a user
+/// transaction.
+///
+/// Expected values: independent (the schedule's own timestamps and the rule's clauses).
+#[test]
+fn test_an_absent_parent_timestamp_is_accepted_where_no_parent_could_change_the_answer() {
+    let at = ACTIVATION;
+    let cases = [
+        ("Satin from genesis", schedule(0), at),
+        ("no MegaETH fork", MegaHardforkConfig::default(), at),
+        ("a block before the activation", schedule(at), at - 1),
+    ];
+    for (name, spec, timestamp) in cases {
+        let mut state = common::state();
+        let mut executor = executor_at(&mut state, spec, None, timestamp);
+        assert_eq!(executor.admits_only_deposits(), Ok(false), "{name}");
+        assert_eq!(executor.is_satin_activation_block(), Ok(false), "{name}");
+        executor.apply_pre_execution_changes().unwrap_or_else(|e| panic!("{name}: starts: {e}"));
+        executor
+            .execute_transaction(&user_tx(0, empty_call_gas()))
+            .unwrap_or_else(|e| panic!("{name}: a user transaction runs: {e}"));
+    }
+}
+
+/// Both rules are decided when the block starts and not again for each transaction: moving the
+/// block environment's timestamp after the executor was built changes neither answer, and the
+/// transactions after it are held to the rule the block began with.
+///
+/// Expected values: independent (the schedule's own timestamps).
+#[test]
+fn test_the_activation_rules_are_decided_once_for_the_block() {
+    let at = ACTIVATION;
+    let mut state = common::state();
+    let mut executor = executor_at(&mut state, schedule(at), Some(at - 1), at);
+    let mut block = executor.evm().ctx().block().clone();
+    block.timestamp = U256::from(at + 1_000);
+    executor.evm_mut().ctx_mut().set_block(block);
+    assert_eq!(executor.admits_only_deposits(), Ok(true), "decided for the timestamp it began at");
+    assert_eq!(executor.is_satin_activation_block(), Ok(true));
+    executor.apply_pre_execution_changes().expect("the block starts");
+    let error = executor
+        .execute_transaction(&user_tx(0, empty_call_gas()))
+        .expect_err("a user transaction is still refused");
+    assert!(is_activation_refusal(&error), "{error}");
 }

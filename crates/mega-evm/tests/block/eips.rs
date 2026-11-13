@@ -81,12 +81,13 @@ fn ctx() -> MegaBlockExecutionCtx {
         Some(PARENT_BEACON_ROOT),
         Bytes::new(),
         BlockLimits::no_limits(),
+        None,
     )
 }
 
 /// The context of a block that carries no parent beacon block root.
 fn ctx_without_beacon_root() -> MegaBlockExecutionCtx {
-    MegaBlockExecutionCtx::new(PARENT_HASH, None, Bytes::new(), BlockLimits::no_limits())
+    MegaBlockExecutionCtx::new(PARENT_HASH, None, Bytes::new(), BlockLimits::no_limits(), None)
 }
 
 /// The environment of a block at `number`.
@@ -237,8 +238,13 @@ fn test_the_pre_block_calls_are_held_to_no_limit() {
 #[test]
 fn test_the_pre_block_calls_count_towards_no_counter_or_budget() {
     let policy = BlockLimits::no_limits().with_block_txs_data_limit(1);
-    let ctx =
-        MegaBlockExecutionCtx::new(PARENT_HASH, Some(PARENT_BEACON_ROOT), Bytes::new(), policy);
+    let ctx = MegaBlockExecutionCtx::new(
+        PARENT_HASH,
+        Some(PARENT_BEACON_ROOT),
+        Bytes::new(),
+        policy,
+        None,
+    );
     let mut db = common::database();
     db.set_account_code(HISTORY_STORAGE_ADDRESS, HISTORY_STORAGE_CODE.clone());
     db.set_account_code(BEACON_ROOTS_ADDRESS, BEACON_ROOTS_CODE.clone());
@@ -314,6 +320,7 @@ fn test_the_genesis_block_makes_no_pre_block_call() {
         Some(B256::ZERO),
         Bytes::new(),
         BlockLimits::no_limits(),
+        None,
     );
 
     assert_eq!(

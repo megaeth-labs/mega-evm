@@ -177,6 +177,7 @@ fn test_the_pre_block_calls_and_a_system_transaction_add_no_bucket() {
         Some(B256::ZERO),
         Bytes::new(),
         BlockLimits::no_limits(),
+        None,
     );
     let mut executor =
         MegaBlockExecutor::new(evm, ctx, common::chain_spec(), OpAlloyReceiptBuilder::default());

@@ -124,6 +124,19 @@ pub trait MegaHardforks: OpHardforks {
         }) || self.is_no_user_tx_activation_block(parent_timestamp, block_timestamp)
     }
 
+    /// Whether the answers of [`admits_only_deposits`](Self::admits_only_deposits) and
+    /// [`is_satin_activation_block`](Self::is_satin_activation_block) for a block at
+    /// `block_timestamp` can depend on its parent's timestamp.
+    ///
+    /// They cannot when every fork the schedule activates and the block has is active from
+    /// timestamp 0, or when none is active at the block: a fork activates in a block only if it
+    /// is active at the block and not at its parent, and activation is monotone in the timestamp,
+    /// so the answers are `false` for every parent. Otherwise a caller that does not know the
+    /// parent's timestamp cannot tell whether a fork activates in the block.
+    fn activation_depends_on_parent(&self, block_timestamp: u64) -> bool {
+        self.admits_only_deposits(0, block_timestamp)
+    }
+
     /// Checks that this schedule is one a chain can run, so a configuration mistake is caught
     /// when the chain configuration is loaded rather than at the fork's first block.
     ///
@@ -495,6 +508,37 @@ mod tests {
         assert!(config.admits_only_deposits(99, 101), "and the first block after a gap");
         assert!(!config.admits_only_deposits(98, 99), "not before the activation");
         assert!(!config.admits_only_deposits(100, 101), "and not once the parent had it too");
+    }
+
+    /// The answers depend on the parent's timestamp exactly when a fork the schedule activates
+    /// after genesis is active at the block; for any parent the answers are then both possible.
+    /// Otherwise both are `false` whatever the parent.
+    #[test]
+    fn test_the_activation_answers_depend_on_the_parent_only_after_a_late_fork() {
+        let satin_at = |timestamp| {
+            MegaHardforkConfig::default()
+                .with(MegaHardfork::Satin, ForkCondition::Timestamp(timestamp))
+        };
+        let late = satin_at(100);
+        assert!(late.activation_depends_on_parent(100), "active at the block, not at genesis");
+        assert!(late.activation_depends_on_parent(500), "and after a gap");
+        assert!(!late.activation_depends_on_parent(99), "not active at the block yet");
+        assert!(!satin_at(0).activation_depends_on_parent(500), "Satin from genesis");
+        assert!(!MegaHardforkConfig::default().activation_depends_on_parent(500), "no Satin");
+        let jovian_late = satin_at(0).with(OpHardfork::Jovian, ForkCondition::Timestamp(100));
+        assert!(jovian_late.activation_depends_on_parent(100), "an Optimism fork counts too");
+
+        // Whatever the parent, a schedule that does not depend on it answers `false`.
+        for config in [late, satin_at(0), MegaHardforkConfig::default()] {
+            for block in [1, 99, 100, 500] {
+                if !config.activation_depends_on_parent(block) {
+                    for parent in 0..=block {
+                        assert!(!config.admits_only_deposits(parent, block));
+                        assert!(!config.is_satin_activation_block(parent, block));
+                    }
+                }
+            }
+        }
     }
 
     /// Satin's activation block is the block at which Satin is active and at whose parent it is

@@ -17,18 +17,14 @@ use mega_evm::{
     test_utils::{rex6_predeploys, CommittedStates, ErrorInjectingDatabase, MemoryDatabase},
     MegaBlockExecutionCtx, MegaBlockExecutionError,
 };
-use op_revm::constants::L1_BLOCK_CONTRACT;
 use revm::{
     context::result::ExecutionResult, database::State, primitives::KECCAK_EMPTY, state::EvmState,
 };
 
-use crate::common::{self, executor, named_accounts, recovered, tx, unlimited_ctx};
-
-/// The context of the block in which Satin activates, as a node sets it from the schedule and
-/// the parent's timestamp: deposit-only, and the check of the predeploys.
-fn activation_ctx() -> MegaBlockExecutionCtx {
-    unlimited_ctx().with_no_user_tx_activation_block(true).with_satin_activation_block(true)
-}
+use crate::common::{
+    self, activation_ctx, activation_spec, after_activation_ctx, executor_with_spec,
+    named_accounts, recovered, tx, unlimited_ctx,
+};
 
 /// The states the pre-block steps of a block over `state` held to `ctx` committed, in order, as a
 /// commit hook on `state` receives them.
@@ -37,7 +33,7 @@ fn start(
     ctx: MegaBlockExecutionCtx,
 ) -> Result<Vec<EvmState>, BlockExecutionError> {
     let committed = CommittedStates::install(state);
-    let mut executor = executor(state, ctx);
+    let mut executor = executor_with_spec(state, ctx, activation_spec());
     executor.apply_pre_execution_changes()?;
     assert_eq!(executor.gas().execution, 0);
     assert_eq!(executor.gas().state, 0);
@@ -46,14 +42,15 @@ fn start(
 }
 
 /// The account each pre-block state of a block names, in commit order: the two EIP calls' targets,
-/// in the activation block the seven predeploys in order, the registry, whose pending changes are
-/// read and found none due on these blocks, and the L1 block contract, whose info is read.
+/// in the activation block the seven predeploys in order, and the registry, whose pending changes
+/// are read and found none due on these blocks. Nothing reads the L1 block contract before the
+/// block's transactions.
 fn expected_accounts(activation: bool) -> Vec<Address> {
     let mut expected = vec![HISTORY_STORAGE_ADDRESS, BEACON_ROOTS_ADDRESS];
     if activation {
         expected.extend(system_contract_specs().map(|spec| spec.address));
     }
-    expected.extend([SEQUENCER_REGISTRY_ADDRESS, L1_BLOCK_CONTRACT]);
+    expected.push(SEQUENCER_REGISTRY_ADDRESS);
     expected
 }
 
@@ -61,9 +58,8 @@ fn expected_accounts(activation: bool) -> Vec<Address> {
 /// Satin's code. Each pre-block step commits a state of its own, and a commit hook receives them in
 /// order, read-only entries included: the two EIP calls, which touch their contracts; the seven
 /// accounts, each a read-only entry as the chain holds it — no write, no created mark, the six at
-/// nonce 0 and the factory at its own; the registry's two pending slots, read only; and the L1
-/// block contract, read only. The block after it, on the committed state, reads none of the
-/// predeploys, and neither block changes one.
+/// nonce 0 and the factory at its own; and the registry's two pending slots, read only. The block
+/// after it, on the committed state, reads none of the predeploys, and neither block changes one.
 ///
 /// Expected values: independent (the Rex6-shaped accounts the test puts in the state).
 #[test]
@@ -89,10 +85,8 @@ fn test_the_activation_block_reads_the_seven_predeploys_once() {
         "the read of its pending changes"
     );
     assert!(registry.storage.values().all(|slot| !slot.is_changed()));
-    let l1_block = &activation[3 + held.len()][&L1_BLOCK_CONTRACT];
-    assert!(!l1_block.is_touched() && !l1_block.is_created(), "the L1 block info is read only");
 
-    let next = start(&mut state, unlimited_ctx()).expect("the next block starts");
+    let next = start(&mut state, after_activation_ctx()).expect("the next block starts");
     assert_eq!(named_accounts(&next), expected_accounts(false), "no other block reads them");
     for (address, info, _) in held {
         let now = revm::Database::basic(&mut state, address).unwrap().expect("still there");
@@ -122,12 +116,12 @@ fn test_no_other_block_reads_a_predeploy() {
         mega_evm::MegaBlockExecutor::new(
             evm,
             ctx,
-            common::chain_spec(),
+            common::activation_spec(),
             alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder::default(),
         )
         .apply_pre_execution_changes()
     };
-    start_on(unlimited_ctx()).expect("an ordinary block reads no predeploy");
+    start_on(after_activation_ctx()).expect("an ordinary block reads no predeploy");
     let error = start_on(activation_ctx()).expect_err("the activation block reads the Oracle");
     assert!(matches!(error, BlockExecutionError::Internal(_)), "{error:?}");
     assert!(error.to_string().contains("injected basic() error"), "{error}");
@@ -138,7 +132,7 @@ fn test_no_other_block_reads_a_predeploy() {
 fn refused(db: MemoryDatabase, at: Address) -> MegaBlockExecutionError {
     let mut state = State::builder().with_database(db).build();
     let committed = CommittedStates::install(&mut state);
-    let mut executor = executor(&mut state, activation_ctx());
+    let mut executor = executor_with_spec(&mut state, activation_ctx(), activation_spec());
     let error = executor.apply_pre_execution_changes().expect_err("the block is refused");
     let delivered = named_accounts(&committed.states());
     let position = system_contract_specs().iter().position(|spec| spec.address == at).unwrap();
@@ -237,7 +231,7 @@ fn test_an_activation_block_without_the_expected_code_is_refused() {
 #[test]
 fn test_a_create2_round_trip_through_the_factory() {
     let mut state = common::state();
-    let mut executor = executor(&mut state, unlimited_ctx());
+    let mut executor = common::executor(&mut state, unlimited_ctx());
     executor.apply_pre_execution_changes().expect("the block starts");
 
     let salt = B256::repeat_byte(0x11);

@@ -29,7 +29,7 @@ use mega_evm::{
     MegaEvm, MegaEvmFactory, MegaHardforkConfig, MegaTxEnvelope, TestExternalEnvs, MIN_BUCKET_SIZE,
 };
 use op_alloy_consensus::TxDeposit;
-use op_revm::OpHaltReason;
+use op_revm::{constants::L1_BLOCK_CONTRACT, OpHaltReason};
 use revm::{
     context::result::ExecutionResult, database::State, inspector::NoOpInspector, state::EvmState,
     Database,
@@ -115,6 +115,7 @@ fn executor_on(
         Some(B256::ZERO),
         Bytes::new(),
         BlockLimits::no_limits(),
+        None,
     );
     MegaBlockExecutor::new(evm, ctx, spec, OpAlloyReceiptBuilder::default())
 }
@@ -365,8 +366,13 @@ fn test_an_evm_outside_block_execution_promotes_the_rotated_address() {
 
     let mut executor = executor(&mut state, envs.clone(), common::BLOCK_GAS_LIMIT);
     executor.apply_pre_execution_changes().expect("the block starts");
-    let in_block = assert_is_the_system_address(&mut executor, NEXT_SYSTEM_ADDRESS).inner;
+    let mut in_block = assert_is_the_system_address(&mut executor, NEXT_SYSTEM_ADDRESS).inner;
     drop(executor);
+    // Block execution reads the footprint gas scalar before the transaction, outside its journal,
+    // and reports the read in its state as a read-only entry, the block's first; an EVM outside
+    // block execution makes no such read.
+    let report = in_block.state.remove(&L1_BLOCK_CONTRACT).expect("the footprint read");
+    assert!(!report.is_touched() && !report.is_created(), "a read-only entry");
 
     // The state now holds the rotation the block applied, as the one a node's EVM runs on does.
     let assert_as_in_block = |evm: &mut OutsideEvm<'_>| {
@@ -632,6 +638,7 @@ fn started_block_at(state: &mut State<MemoryDatabase>, number: u64) -> Executor<
         Some(B256::ZERO),
         Bytes::new(),
         BlockLimits::no_limits(),
+        None,
     );
     let mut executor =
         MegaBlockExecutor::new(evm, ctx, common::chain_spec(), OpAlloyReceiptBuilder::default());

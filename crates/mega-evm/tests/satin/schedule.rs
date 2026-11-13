@@ -246,10 +246,10 @@ fn test_clz_runs_on_the_base_spec() {
     assert!(result.is_success(), "{result:?}");
 }
 
-/// `SLOTNUM` pushes the block's slot number, `BlockEnv::slot_num`, which the node supplies, and
-/// zero for a block that does not set it.
+/// `SLOTNUM` pushes zero, whatever slot number the block environment carries: the value is the
+/// engine's own and depends on no field the node supplies.
 #[test]
-fn test_slotnum_pushes_the_blocks_slot_number() {
+fn test_slotnum_pushes_zero_whatever_the_block_carries() {
     let code = BytecodeBuilder::default().append(SLOTNUM).return_top().build();
     for (slot_num, name) in [(0x0123_4567_89ab_u64, "a slot the node set"), (0, "no slot set")] {
         let block = revm::context::BlockEnv { slot_num, ..crate::common::block() };
@@ -261,9 +261,8 @@ fn test_slotnum_pushes_the_blocks_slot_number() {
         assert!(result.is_success(), "{name}: {result:?}");
         assert_eq!(
             result.output().map(|output| U256::from_be_slice(output)),
-            Some(U256::from(slot_num)),
+            Some(U256::ZERO),
             "{name}",
         );
     }
-    assert_eq!(crate::common::block().slot_num, 0, "the tests' block leaves it unset");
 }

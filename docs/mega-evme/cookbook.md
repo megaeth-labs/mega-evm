@@ -69,7 +69,7 @@ mega-evme replay --block 26400000..26400099 \
 ```
 
 Replay the same blocks on Satin and keep the per-transaction records.
-The first Satin run reads over RPC what Satin reads beyond the legacy replay (the L1 fee overhead slot of the L1 block contract, which its pre-block changes read with the rest of the L1 block info) and adds it to the cache; later runs of the same blocks can drop `--rpc`:
+A Satin run reads the L1 block contract as the legacy replay does and checks no predeploy, so it needs `--rpc` only for a path a transaction takes on Satin that it did not take on the chain; such a read is made over RPC and added to the cache:
 
 ```bash
 mega-evme replay --block 26400000..26400099 --block-cache ./blocks \

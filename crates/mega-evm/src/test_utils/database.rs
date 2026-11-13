@@ -234,10 +234,28 @@ impl revm::Database for MemoryDatabase {
 }
 
 impl revm::DatabaseCommit for MemoryDatabase {
-    delegate! {
-        to self.db {
-            fn commit(&mut self, changes: EvmState);
-        }
+    /// Commits a transaction's state with EIP-161 state clearing, as a node's database does.
+    ///
+    /// revm leaves the removal of a touched empty account to the database at commit, and
+    /// `CacheDB` keeps such an account as an existing empty one. A node's state removes it, so
+    /// a later transaction finds it absent and charges it as a new account. An account created in
+    /// the transaction stays, as under revm's own `State`, and a self-destructed account is
+    /// handled by `CacheDB` as before.
+    fn commit(&mut self, mut changes: EvmState) {
+        changes.retain(|address, account| {
+            let cleared = account.is_touched() &&
+                account.is_empty() &&
+                !account.is_selfdestructed() &&
+                !account.is_created();
+            if cleared {
+                let cached = self.db.cache.accounts.entry(*address).or_default();
+                cached.storage.clear();
+                cached.account_state = AccountState::NotExisting;
+                cached.info = AccountInfo::default();
+            }
+            !cleared
+        });
+        self.db.commit(changes);
     }
 }
 
@@ -354,5 +372,57 @@ mod tests {
         let err = db.block_hash(7).unwrap_err();
         assert!(err.to_string().contains("injected block_hash() error for 7"), "{err}");
         assert_eq!(db.block_hash(1).unwrap(), served);
+    }
+
+    fn touched(info: AccountInfo) -> revm::state::Account {
+        let mut account = revm::state::Account::from(info);
+        account.mark_touch();
+        account
+    }
+
+    #[test]
+    fn test_commit_removes_a_touched_empty_account_and_keeps_the_rest() {
+        use revm::DatabaseCommit;
+        let empty = address!("00000000000000000000000000000000000000e1");
+        let funded = address!("00000000000000000000000000000000000000e2");
+        let destroyed = address!("00000000000000000000000000000000000000e3");
+        let mut db = MemoryDatabase::default()
+            .account_balance(funded, U256::from(5))
+            .account_balance(destroyed, U256::from(7));
+        // An empty account the database holds, and one it holds none for, both touched.
+        db.insert_account_info(empty, AccountInfo::default());
+        db.insert_account_storage(empty, U256::from(1), U256::from(2)).unwrap();
+        let absent = address!("00000000000000000000000000000000000000e4");
+
+        let mut selfdestructed = touched(AccountInfo::from_balance(U256::from(7)));
+        selfdestructed.mark_selfdestruct();
+        let changes: EvmState = [
+            (empty, touched(AccountInfo::default())),
+            (absent, touched(AccountInfo::default())),
+            (funded, touched(AccountInfo::from_balance(U256::from(5)))),
+            (destroyed, selfdestructed),
+        ]
+        .into_iter()
+        .collect();
+        db.commit(changes);
+
+        assert_eq!(db.basic(empty).unwrap(), None, "a touched empty account is removed");
+        assert_eq!(db.storage(empty, U256::from(1)).unwrap(), U256::ZERO, "its storage with it");
+        assert_eq!(db.basic(absent).unwrap(), None, "and one the database held none for");
+        assert_eq!(db.basic(funded).unwrap().expect("kept").balance, U256::from(5));
+        assert_eq!(db.basic(destroyed).unwrap(), None, "a self-destructed account is removed");
+    }
+
+    #[test]
+    fn test_commit_keeps_an_empty_account_created_in_the_transaction() {
+        use revm::DatabaseCommit;
+        let created = address!("00000000000000000000000000000000000000e5");
+        let mut account = touched(AccountInfo::default());
+        account.mark_created();
+        let mut db = MemoryDatabase::default();
+        let mut changes = EvmState::default();
+        changes.insert(created, account);
+        db.commit(changes);
+        assert!(db.basic(created).unwrap().is_some(), "a created account is not cleared");
     }
 }

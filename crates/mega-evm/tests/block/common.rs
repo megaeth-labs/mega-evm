@@ -18,8 +18,8 @@ use mega_evm::{
     },
     test_utils::{BytecodeBuilder, MemoryDatabase, SequencerRegistryRoles},
     BlockLimits, EmptyExternalEnv, EvmTxRuntimeLimits, MegaBlockExecutionCtx, MegaBlockExecutor,
-    MegaBlockExecutorFactory, MegaEvm, MegaEvmFactory, MegaHardforkConfig, MegaSpecId,
-    MegaTxEnvelope, ProtocolLimits,
+    MegaBlockExecutorFactory, MegaEvm, MegaEvmFactory, MegaHardfork, MegaHardforkConfig,
+    MegaSpecId, MegaTxEnvelope, ProtocolLimits,
 };
 use op_alloy_consensus::TxDeposit;
 use revm::{
@@ -117,6 +117,40 @@ pub(crate) fn chain_spec() -> MegaHardforkConfig {
     MegaHardforkConfig::default().with_all_activated()
 }
 
+/// A schedule in which Satin activates at [`BLOCK_TIMESTAMP`], the timestamp of the block
+/// [`evm_env`] describes, so that block is Satin's activation block when its context names a
+/// parent before it ([`activation_ctx`]).
+pub(crate) fn activation_spec() -> MegaHardforkConfig {
+    MegaHardforkConfig::default()
+        .with(MegaHardfork::Satin, alloy_hardforks::ForkCondition::Timestamp(BLOCK_TIMESTAMP))
+}
+
+/// The context of the block [`evm_env`] describes as Satin's activation block under
+/// [`activation_spec`]: its parent came one second before the activation, so the block admits
+/// only deposits and checks the predeploys.
+pub(crate) fn activation_ctx() -> MegaBlockExecutionCtx {
+    MegaBlockExecutionCtx::new(
+        B256::ZERO,
+        Some(B256::ZERO),
+        Bytes::new(),
+        BlockLimits::no_limits(),
+        Some(BLOCK_TIMESTAMP - 1),
+    )
+}
+
+/// The context of a block that follows the activation block under [`activation_spec`]: its parent
+/// is at [`BLOCK_TIMESTAMP`], where Satin is already active, so the block is an ordinary one that
+/// admits user transactions and checks no predeploy.
+pub(crate) fn after_activation_ctx() -> MegaBlockExecutionCtx {
+    MegaBlockExecutionCtx::new(
+        B256::ZERO,
+        Some(B256::ZERO),
+        Bytes::new(),
+        BlockLimits::no_limits(),
+        Some(BLOCK_TIMESTAMP),
+    )
+}
+
 /// The loosest limits a block could be held to while a read of volatile data still detains:
 /// every limit unlimited, and gas detention's caps one below the most compute a transaction can
 /// spend, which no transaction of a block this size reaches. For a test that holds a block to
@@ -138,7 +172,7 @@ pub(crate) const fn loosest_tx() -> EvmTxRuntimeLimits {
 /// Cancun is active, so the block carries a parent beacon block root; without one the EIP-4788
 /// pre-block call refuses the block.
 pub(crate) fn block_ctx(policy: BlockLimits) -> MegaBlockExecutionCtx {
-    MegaBlockExecutionCtx::new(B256::ZERO, Some(B256::ZERO), Bytes::new(), policy)
+    MegaBlockExecutionCtx::new(B256::ZERO, Some(B256::ZERO), Bytes::new(), policy, None)
 }
 
 /// The context of a block packed under no building policy, as a validator executes one.
@@ -433,4 +467,56 @@ pub(crate) fn incompressible(len: usize) -> Bytes {
             })
             .collect::<Vec<u8>>(),
     )
+}
+
+/// A database error that is not fatal, as a read an EIP-7928 block access list does not cover
+/// raises: a failed read of a transaction's execution that carries it is a verdict on the block,
+/// an invalid block, rather than an internal error.
+#[derive(Debug)]
+pub(crate) struct NotFatalError(String);
+
+impl core::fmt::Display for NotFatalError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl core::error::Error for NotFatalError {}
+
+impl revm::context::DBErrorMarker for NotFatalError {
+    fn is_fatal(&self) -> bool {
+        false
+    }
+}
+
+/// An [`ErrorInjectingDatabase`](mega_evm::test_utils::ErrorInjectingDatabase) whose refusals are
+/// not fatal. A block runs on it directly: revm's `State` declares every error of the database
+/// below it fatal, so a not-fatal error reaches block execution only from a database it runs on.
+#[derive(Debug)]
+pub(crate) struct NotFatal(pub(crate) mega_evm::test_utils::ErrorInjectingDatabase);
+
+impl revm::Database for NotFatal {
+    type Error = NotFatalError;
+
+    fn basic(&mut self, address: Address) -> Result<Option<revm::state::AccountInfo>, Self::Error> {
+        self.0.basic(address).map_err(|error| NotFatalError(error.to_string()))
+    }
+
+    fn code_by_hash(&mut self, code_hash: B256) -> Result<revm::state::Bytecode, Self::Error> {
+        self.0.code_by_hash(code_hash).map_err(|error| NotFatalError(error.to_string()))
+    }
+
+    fn storage(&mut self, address: Address, index: U256) -> Result<U256, Self::Error> {
+        self.0.storage(address, index).map_err(|error| NotFatalError(error.to_string()))
+    }
+
+    fn block_hash(&mut self, number: u64) -> Result<B256, Self::Error> {
+        self.0.block_hash(number).map_err(|error| NotFatalError(error.to_string()))
+    }
+}
+
+impl revm::DatabaseCommit for NotFatal {
+    fn commit(&mut self, changes: EvmState) {
+        self.0.commit(changes);
+    }
 }
