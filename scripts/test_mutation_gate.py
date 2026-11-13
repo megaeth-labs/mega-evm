@@ -126,6 +126,72 @@ class GateTest(unittest.TestCase):
         self.assertEqual(out.returncode, 2)
         self.assertIn("MUTANTS-STATUS", out.stderr)
 
+    # ---- merge (sharded full runs) ----
+
+    def write_shard(self, name: str, status: str, **lists: list[str]) -> Path:
+        shard = self.tmp / name
+        (shard / "mutants.out").mkdir(parents=True)
+        for kind in ("caught", "missed", "timeout", "unviable"):
+            lines = lists.get(kind, [])
+            (shard / "mutants.out" / f"{kind}.txt").write_text("".join(f"{m}\n" for m in lines))
+        (shard / "status").write_text(f"MUTANTS-STATUS {status}\n")
+        return shard
+
+    def merge(self, *shards: Path) -> subprocess.CompletedProcess:
+        inventory = self.tmp / "inventory.txt"
+        # `cargo mutants --list` output, with the colour codes CI can leave in it.
+        inventory.write_text(f"\x1b[33m{CAUGHT}\x1b[0m\n{MISSED}\n{UNVIABLE}\n")
+        return gate("merge", "--inventory", str(inventory), "--out", str(self.tmp / "merged"),
+                    *map(str, shards))
+
+    def merged_report(self) -> subprocess.CompletedProcess:
+        merged = self.tmp / "merged"
+        return gate("report", "--results", str(merged / "mutants.out"),
+                    "--status", str(merged / "status"))
+
+    def test_merge_of_all_shards_is_complete(self) -> None:
+        a = self.write_shard("a", "status=complete expected=2 outcomes=2",
+                             caught=[CAUGHT], unviable=[UNVIABLE])
+        b = self.write_shard("b", "status=complete expected=1 outcomes=1", caught=[MISSED])
+        out = self.merge(a, b)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        merged = self.tmp / "merged"
+        self.assertEqual((merged / "status").read_text().strip(),
+                         "MUTANTS-STATUS status=complete expected=3 outcomes=3")
+        self.assertEqual((merged / "mutants.out" / "caught.txt").read_text().splitlines(),
+                         [CAUGHT, MISSED])
+        self.assertEqual(self.merged_report().returncode, 0)
+
+    def test_missing_shard_shows_as_missing(self) -> None:
+        a = self.write_shard("a", "status=complete expected=2 outcomes=2",
+                             caught=[CAUGHT], unviable=[UNVIABLE])
+        self.merge(a)
+        status = (self.tmp / "merged" / "status").read_text().strip()
+        self.assertEqual(status, "MUTANTS-STATUS status=partial expected=3 outcomes=2")
+        out = self.merged_report()
+        self.assertEqual(out.returncode, 1, out.stdout)
+        self.assertIn("2 of 3", out.stdout)
+
+    def test_merge_of_no_shards_is_not_started(self) -> None:
+        self.merge()
+        self.assertIn("status=not-started expected=3 outcomes=0",
+                      (self.tmp / "merged" / "status").read_text())
+        self.assertEqual(self.merged_report().returncode, 1)
+
+    def test_merge_ignores_duplicates_and_unplanned_mutants(self) -> None:
+        a = self.write_shard("a", "status=complete expected=1 outcomes=1", caught=[CAUGHT])
+        b = self.write_shard("b", "status=complete expected=2 outcomes=2",
+                             caught=[CAUGHT, "crates/mega-evm/src/z.rs:9:9: not planned"])
+        self.merge(a, b)
+        self.assertIn("status=partial expected=3 outcomes=1",
+                      (self.tmp / "merged" / "status").read_text())
+
+    def test_merge_refuses_an_empty_inventory(self) -> None:
+        (self.tmp / "inventory.txt").write_text("")
+        out = gate("merge", "--inventory", str(self.tmp / "inventory.txt"),
+                   "--out", str(self.tmp / "merged"))
+        self.assertEqual(out.returncode, 2)
+
     # ---- exclude-re ----
 
     def test_exclude_re_emits_one_pair_per_function_suppression(self) -> None:

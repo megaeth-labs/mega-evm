@@ -15,7 +15,7 @@ Target: **`crates/mega-evm`**.
 | `scripts/mutation_test.sh` | Driver: `diff <base>`, `full`, `file <glob>`. |
 | `scripts/mutation_gate.py` | Scores a run, applies suppressions, gates the PR. |
 | `scripts/test_mutation_gate.py` | Tests for the scorer (`python3 scripts/test_mutation_gate.py`). |
-| `.github/workflows/mutation.yml` | Diff-scoped PR gate + result comment. |
+| `.github/workflows/mutation.yml` | Diff-scoped PR gate + result comment; sharded nightly full run. |
 
 ## Local use
 
@@ -47,6 +47,10 @@ MUTANTS-STATUS status=<complete|partial|not-started|baseline-failed|error> expec
 `expected` is the number of mutants cargo-mutants planned (`unknown` if the run stopped before it planned them) and `outcomes` the number that got an outcome.
 `baseline-failed` (the unmutated tree does not build or pass its tests) and `error` (the run itself failed) exit non-zero.
 `mutation_gate.py report --status target/mutants/status` fails the gate unless the status is `complete`, while still reporting what was tested.
+
+The nightly full-crate run does not fit in one job, so CI splits it into four fresh shards (`scripts/mutation_test.sh full --shard k/4`, consecutive slices of the mutant list).
+The `cargo-mutants-full` job lists the full inventory (`cargo mutants --list` with the same excludes), combines the shards with `mutation_gate.py merge`, and scores the result.
+A shard that failed, was cancelled, or stopped on its budget leaves its remaining mutants without an outcome, so the combined status is `partial` and the gate fails.
 
 ## The gate
 

@@ -29,13 +29,22 @@ permissions:
 
 jobs:
   # ── cargo-mutants: diff-scoped gate on PRs, full-crate run nightly ──────────
+  # A PR runs one diff-scoped job. The full-crate run (nightly, dispatch) does not
+  # fit in one job, so it runs as four fresh shards (`cargo mutants --shard k/4`:
+  # consecutive slices of the mutant list) and `cargo-mutants-full` scores them
+  # together against the full inventory, so a missing or stopped shard shows as
+  # untested mutants rather than vanishing from the report.
   cargo-mutants:
-    name: cargo-mutants gate
+    name: ${{ matrix.shard == 'diff' && 'cargo-mutants gate' || format('cargo-mutants shard {0}', matrix.shard) }}
     runs-on: ubuntu-24.04
-    # Diff-scoped PR runs finish in minutes; the nightly full-crate run needs
-    # much longer headroom. MUTANTS_BUDGET (below) stops the run itself before
-    # this limit, so a run that cannot finish still scores and uploads its results.
+    # Diff-scoped PR runs finish in minutes; a full-crate shard needs much longer
+    # headroom. MUTANTS_BUDGET (below) stops the run itself before this limit, so
+    # a run that cannot finish still scores and uploads its results.
     timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(github.event_name == 'pull_request' && '["diff"]' || '["0/4", "1/4", "2/4", "3/4"]') }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -63,8 +72,8 @@ jobs:
 
       - name: Run mutation testing
         # On a PR: mutate only the changed lines (fast gate). On manual dispatch
-        # there is no PR base, so run the whole crate as an on-demand baseline
-        # instead of feeding an empty base into `diff` mode (which would fail).
+        # there is no PR base, so run the whole crate (sharded) as an on-demand
+        # baseline instead of feeding an empty base into `diff` mode (which would fail).
         #
         # The driver first builds the tests into ./target, so (a) Swatinem/rust-cache
         # (bundled in setup-rust-toolchain) caches the compiled dependencies, and
@@ -84,10 +93,12 @@ jobs:
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             scripts/mutation_test.sh diff "${{ github.event.pull_request.base.sha }}"
           else
-            scripts/mutation_test.sh full
+            scripts/mutation_test.sh full --shard "${{ matrix.shard }}"
           fi
 
       - name: Score and gate
+        # Shards are scored together by cargo-mutants-full.
+        if: github.event_name == 'pull_request'
         run: |
           python3 scripts/mutation_gate.py report \
             --results target/mutants/mutants.out \
@@ -131,7 +142,7 @@ jobs:
             }
 
       - name: Upload mutation artifacts
-        if: always()
+        if: always() && github.event_name == 'pull_request'
         uses: actions/upload-artifact@v4
         with:
           name: mutation-results
@@ -139,6 +150,76 @@ jobs:
             target/mutants/mutants.out
             target/mutants/status
             target/mutants.diff
+            mutation-report.md
+          if-no-files-found: ignore
+
+      - name: Upload shard results
+        # The artifact holds this shard's mutants.out/ and status at its root.
+        if: always() && github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutation-results-shard-${{ strategy.job-index }}
+          path: target/mutants
+          if-no-files-found: ignore
+
+  cargo-mutants-full:
+    name: cargo-mutants full run
+    needs: cargo-mutants
+    # Also after a failed or cancelled shard: its mutants then count as untested.
+    if: always() && github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+
+      - name: Install cargo-mutants
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants@27.1.0
+
+      - name: Download shard results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: mutation-results-shard-*
+          path: shards
+
+      - name: List the full inventory
+        # The driver's `full` mutant set: --package mega-evm, minus the
+        # function-scoped suppressions. --colors never: CI forces colour output.
+        run: |
+          exclude="$(python3 scripts/mutation_gate.py exclude-re --suppressions mutants/suppressions.toml)"
+          exclude_args=()
+          if [ -n "$exclude" ]; then mapfile -t exclude_args <<< "$exclude"; fi
+          cargo mutants --list --package mega-evm --colors never "${exclude_args[@]}" > inventory.txt
+          echo "inventory: $(wc -l < inventory.txt) mutants"
+
+      - name: Merge, score and gate
+        run: |
+          shopt -s nullglob
+          shards=(shards/*)
+          python3 scripts/mutation_gate.py merge --inventory inventory.txt \
+            --out target/mutants "${shards[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
+          python3 scripts/mutation_gate.py report \
+            --results target/mutants/mutants.out \
+            --status target/mutants/status \
+            --suppressions mutants/suppressions.toml \
+            --comment mutation-report.md \
+            --summary "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload mutation artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutation-results
+          path: |
+            target/mutants/mutants.out
+            target/mutants/status
+            inventory.txt
             mutation-report.md
           if-no-files-found: ignore
 

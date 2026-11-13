@@ -13,6 +13,13 @@ Subcommands:
         planned (unknown before cargo-mutants wrote its plan) and how many have
         an outcome. Used by scripts/mutation_test.sh for its status line.
 
+  merge       --inventory <file> --out <dir> <shard dir>...
+        Combine the results of a run split into shards (cargo mutants --shard)
+        into <dir>/mutants.out and <dir>/status, counted against <inventory>
+        (`cargo mutants --list` of the whole run). Each <shard dir> holds one
+        shard's mutants.out/ and status. A shard that is missing or stopped
+        early leaves inventory mutants without an outcome: status partial.
+
   report      --results <mutants.out dir> [--suppressions <toml>]
               [--status <file>] [--comment <path>] [--summary <path>]
         Read the run outcomes, apply line-scoped suppressions, compute the
@@ -115,6 +122,41 @@ def incomplete_note(status: dict[str, str]) -> str:
                 f"({expected} planned). Nothing below is a result, and an incomplete run never passes.")
     return (f"**Run did not complete** (status `{state}`, {outcomes} of {expected} mutants tested); "
             f"see the run log.")
+
+
+def cmd_merge(args: argparse.Namespace) -> int:
+    ansi = re.compile(r"\x1b\[[0-9;]*m")
+    inventory = [ansi.sub("", m) for m in read_lines(Path(args.inventory))]
+    if not inventory:
+        print(f"ERROR: empty mutant inventory at {args.inventory}", file=sys.stderr)
+        return 2
+    planned = set(inventory)
+    merged: dict[str, list[str]] = {name: [] for name in OUTCOME_FILES}
+    seen: set[str] = set()
+    print("| shard | status |")
+    print("|---|---|")
+    for shard in args.shards:
+        shard = Path(shard)
+        status = read_status(shard / "status")
+        line = " ".join(f"{k}={v}" for k, v in status.items()) if status else "no status"
+        print(f"| `{shard}` | {line} |")
+        for name in OUTCOME_FILES:
+            for m in read_lines(shard / "mutants.out" / name):
+                if m in planned and m not in seen:
+                    seen.add(m)
+                    merged[name].append(m)
+    out = Path(args.out)
+    results = out / "mutants.out"
+    results.mkdir(parents=True, exist_ok=True)
+    (results / "mutants.json").write_text(json.dumps([{"name": m} for m in inventory]))
+    for name, items in merged.items():
+        (results / name).write_text("".join(f"{m}\n" for m in items))
+    expected, outcomes = len(inventory), len(seen)
+    state = "complete" if outcomes == expected else "partial" if outcomes else "not-started"
+    line = f"MUTANTS-STATUS status={state} expected={expected} outcomes={outcomes}"
+    (out / "status").write_text(line + "\n")
+    print(f"\n{len(args.shards)} shard result(s) found.\n\n{line}")
+    return 0
 
 
 def emit(report: str, args: argparse.Namespace) -> None:
@@ -324,6 +366,13 @@ def main() -> int:
     pp = sub.add_parser("progress", help="count planned and tested mutants")
     pp.add_argument("--results", required=True)
     pp.set_defaults(func=cmd_progress)
+
+    pm = sub.add_parser("merge", help="combine sharded results against the full inventory")
+    pm.add_argument("--inventory", required=True,
+                    help="file of all mutant lines of the run (cargo mutants --list)")
+    pm.add_argument("--out", required=True)
+    pm.add_argument("shards", nargs="*", help="one directory per shard: mutants.out/ + status")
+    pm.set_defaults(func=cmd_merge)
 
     pr = sub.add_parser("report")
     pr.add_argument("--results", required=True)
