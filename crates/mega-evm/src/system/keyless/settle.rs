@@ -57,19 +57,25 @@ pub(crate) fn returning<DB: Database, ExtEnvs: ExternalEnvTypes>(
     stack: &mut FrameStack<EthFrame<EthInterpreter>>,
     result: &FrameResult,
 ) -> Option<Creation> {
-    ctx.keyless_creation.as_ref()?;
+    let started = ctx.keyless_creation.as_ref()?;
     if !returns_into_the_call(stack) {
         return None;
     }
     let result_code = result.instruction_result();
     // The creation's gas as revm's settlement leaves it before the merge: a creation that failed
-    // rolls its state and history gas back, and one that halted spends its regular gas.
+    // rolls its state and history gas back into its reservoir, and one that halted spends its
+    // regular gas and returns the reservoir it was given.
     let mut gas = *result.gas();
     handle_reservoir_remaining_gas(result_code, &mut GasTracker::default(), gas.tracker_mut());
+    // What the destruction table gave back for the deploy address's leaf is a charge the creation
+    // did not make, so it does not lower what the creation spent, while the destruction stands
+    // when the creation ends.
+    let destroyed = result_code.is_ok() && ctx.accounts().is_destroyed(started.deploy_address);
+    let given_back = if destroyed { started.leaf_given_back } else { 0 };
     Some(Creation {
         result: result_code,
         output: result.interpreter_result().output.clone(),
-        gas_used: creation_gas_used(&gas),
+        gas_used: creation_gas_used(gas.tracker(), started.reservoir_share, given_back),
         created: match result {
             FrameResult::Create(outcome) => outcome.address,
             FrameResult::Call(_) => None,
@@ -182,9 +188,11 @@ pub(crate) fn settle<DB: Database, ExtEnvs: ExternalEnvTypes>(
 /// keeps what the creation's start wrote: a signer at nonce 0 whose deployment failed has spent its
 /// nonce all the same.
 ///
-/// `gasUsed` is what the creation spent: its regular gas and the state and history gas it kept,
-/// from whichever pool paid it. It is the same whether the transaction has a state-gas reservoir
-/// or not, and it counts nothing the call paid for the creation's start.
+/// `gasUsed` is what the creation spent from both pools taken together ([`creation_gas_used`]):
+/// its regular charges and the state and history gas it kept, net of every give-back of a charge it
+/// made. It is the same whether the transaction has a state-gas reservoir or not, and it counts
+/// nothing the call paid for the creation's start: a give-back of the call's charges the creation
+/// received is added back.
 ///
 /// A creation revm reports as a success at another address than the pinned one, or at none, is a
 /// broken engine rather than a failed deployment: the call reverts with `AddressMismatch()` or
@@ -312,18 +320,26 @@ fn halt_reason(result: InstructionResult) -> MegaHaltReason {
     }
 }
 
-/// What a creation whose gas settled into `gas` spent, from either pool: its regular gas, and the
-/// state and history gas it kept that the reservoir paid.
+/// What a creation spent from both pools taken together, its gas `gas` as its own settlement left
+/// it: the regular gas it was given less the regular gas it returns, plus the reservoir it was
+/// given, `reservoir_share`, less the reservoir it returns, plus `given_back`, the give-backs it
+/// received for charges it did not make.
 ///
-/// Regular gas spent includes the state and history charges that spilled onto it once the
-/// reservoir was empty, and nothing the reservoir paid. Adding back what the reservoir paid makes
-/// the figure the same whether the transaction was funded above the execution cap or not. A
-/// creation that failed kept no state or history gas: its settlement rolled both back, and a
-/// halt spent its regular gas.
-fn creation_gas_used(gas: &Gas) -> u64 {
-    let kept = gas.state_gas_spent().saturating_add(gas.history_gas_spent());
-    let from_reservoir = kept.saturating_sub_unsigned(gas.state_gas_spilled());
-    gas.total_gas_spent().saturating_add(u64::try_from(from_reservoir).unwrap_or_default())
+/// The two pools are netted together, not each clipped at zero: a creation that pays a state
+/// charge from regular gas and then reverts returns that charge in its reservoir, which offsets
+/// the regular gas it paid, so what is left is its regular charges and the state and history gas
+/// it kept, net of every give-back of a charge it made. The figure is the same whether the
+/// transaction carries a reservoir or not. A creation that halted returns no regular gas and the
+/// reservoir it was given, so it spent its whole forward.
+///
+/// The one give-back of a charge the creation did not make is the destruction table's for the
+/// account being created — the state gas of its leaf and the history of its write record, which
+/// the `keylessDeploy` call or the transfer that funded the address paid — and it is added back,
+/// so the figure is never below the creation's regular charges.
+fn creation_gas_used(gas: &GasTracker, reservoir_share: u64, given_back: u64) -> u64 {
+    let regular = i128::from(gas.limit()) - i128::from(gas.remaining());
+    let reservoir = i128::from(reservoir_share) - i128::from(gas.reservoir());
+    u64::try_from(regular + reservoir + i128::from(given_back)).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -348,54 +364,91 @@ mod tests {
         );
     }
 
+    /// A creation's gas with give-backs to the reservoir alone, as a Satin frame's is: `limit` of
+    /// regular gas and `reservoir`.
+    fn creation_gas(limit: u64, reservoir: u64) -> Gas {
+        let mut gas = Gas::new_with_regular_gas_and_reservoir(limit, reservoir);
+        gas.set_reservoir_only_give_backs(true);
+        gas
+    }
+
+    /// Settles `gas` as revm settles a creation that ended with `result`.
+    fn settled(result: InstructionResult, mut gas: Gas) -> GasTracker {
+        handle_reservoir_remaining_gas(result, &mut GasTracker::default(), gas.tracker_mut());
+        *gas.tracker()
+    }
+
     /// The creation's spend is the same figure whichever pool paid its state and history gas.
     #[test]
     fn test_the_creation_gas_used_does_not_depend_on_the_pool() {
-        // No reservoir: every state and history charge spills onto regular gas.
-        let mut narrow = Gas::new_with_regular_gas_and_reservoir(1_000_000, 0);
-        assert!(narrow.record_regular_cost(30_000));
-        assert!(narrow.record_state_cost(200_000));
-        assert!(narrow.record_history_cost(4_000));
-
-        // A reservoir that pays for all of it.
-        let mut wide = Gas::new_with_regular_gas_and_reservoir(1_000_000, 10_000_000);
-        assert!(wide.record_regular_cost(30_000));
-        assert!(wide.record_state_cost(200_000));
-        assert!(wide.record_history_cost(4_000));
-
-        // Half and half: the reservoir runs dry in the middle of the state charge.
-        let mut split = Gas::new_with_regular_gas_and_reservoir(1_000_000, 100_000);
-        assert!(split.record_regular_cost(30_000));
-        assert!(split.record_state_cost(200_000));
-        assert!(split.record_history_cost(4_000));
-
-        for gas in [narrow, wide, split] {
-            assert_eq!(creation_gas_used(&gas), 234_000, "{gas:?}");
+        for reservoir in [0, 100_000, 10_000_000] {
+            let mut gas = creation_gas(1_000_000, reservoir);
+            assert!(gas.record_regular_cost(30_000));
+            assert!(gas.record_state_cost_with_legacy_share(200_000, 10_000));
+            assert!(gas.record_history_cost(4_000));
+            let gas = settled(InstructionResult::Stop, gas);
+            assert_eq!(creation_gas_used(&gas, reservoir, 0), 234_000, "reservoir {reservoir}");
         }
     }
 
-    /// A creation that failed kept nothing but the regular gas it spent: a revert gives back the
-    /// spill with the rollback, a halt spends the whole forward.
+    /// A creation that reverts returns its state and history charges in its reservoir, whichever
+    /// pool paid them, so it spent its regular charges alone; one that halts spent its whole
+    /// forward and returns the reservoir it was given.
     #[test]
-    fn test_a_failed_creation_spent_its_regular_gas_alone() {
+    fn test_a_failed_creation_spent_its_regular_charges_or_its_forward() {
         for reservoir in [0, 10_000_000] {
-            let mut gas = Gas::new_with_regular_gas_and_reservoir(1_000_000, reservoir);
-            assert!(gas.record_regular_cost(30_000));
-            assert!(gas.record_state_cost(200_000));
-            gas.rollback_state_gas();
-            assert_eq!(creation_gas_used(&gas), 30_000, "a revert, reservoir {reservoir}");
-            gas.spend_all();
-            assert_eq!(creation_gas_used(&gas), 1_000_000, "a halt, reservoir {reservoir}");
+            let charged = || {
+                let mut gas = creation_gas(1_000_000, reservoir);
+                assert!(gas.record_regular_cost(30_000));
+                assert!(gas.record_state_cost_with_legacy_share(200_000, 10_000));
+                gas
+            };
+            let reverted = settled(InstructionResult::Revert, charged());
+            assert_eq!(creation_gas_used(&reverted, reservoir, 0), 30_000, "{reservoir}");
+            let halted = settled(InstructionResult::OutOfGas, charged());
+            assert_eq!(halted.reservoir(), reservoir);
+            assert_eq!(creation_gas_used(&halted, reservoir, 0), 1_000_000, "{reservoir}");
         }
+    }
+
+    /// A constructor that writes a fresh slot from regular gas alone and reverts reports its
+    /// regular charges, not the slot it gave back: 500,000 of forward and no reservoir, 113,549 of
+    /// regular gas spent of which 101,440 paid the slot's state gas and its record's history, both
+    /// returned as reservoir.
+    #[test]
+    fn test_a_reverted_fresh_slot_lowers_the_spend_by_what_regular_gas_paid_for_it() {
+        let mut gas = creation_gas(500_000, 0);
+        assert!(gas.record_regular_cost(3 + 2 + 2_100 + 10_000 + 2 + 2));
+        assert!(gas.record_state_cost_with_legacy_share(97_920, 10_000));
+        assert!(gas.record_history_cost(3_520));
+        let gas = settled(InstructionResult::Revert, gas);
+        assert_eq!((gas.remaining(), gas.reservoir()), (386_451, 101_440));
+        assert_eq!(creation_gas_used(&gas, 0, 0), 12_109);
+    }
+
+    /// A give-back of a charge the creation did not make is added back: a constructor that
+    /// destroys the account it creates is given back the leaf the call paid for and its record,
+    /// and reports what it spent of regular gas, not that spend less the give-back.
+    #[test]
+    fn test_a_give_back_of_the_calls_charges_does_not_lower_the_spend() {
+        let mut gas = creation_gas(500_000, 0);
+        assert!(gas.record_regular_cost(2 + 5_000));
+        gas.refill_reservoir(183_600);
+        gas.refill_history(3_520);
+        let gas = settled(InstructionResult::SelfDestruct, gas);
+        assert_eq!((gas.remaining(), gas.reservoir()), (494_998, 187_120));
+        assert_eq!(creation_gas_used(&gas, 0, 187_120), 5_002);
     }
 
     /// A creation that refilled more than it charged — a slot written back that its caller had
-    /// filled — does not report less than the regular gas it spent.
+    /// filled — reports what it spent of regular gas less the give-back, which it took off a
+    /// charge another frame of the creation made.
     #[test]
-    fn test_a_net_refill_does_not_lower_the_regular_spend() {
-        let mut gas = Gas::new_with_regular_gas_and_reservoir(1_000_000, 0);
+    fn test_a_net_refill_nets_against_the_regular_spend() {
+        let mut gas = creation_gas(1_000_000, 0);
         assert!(gas.record_regular_cost(30_000));
-        gas.refill_reservoir(50_000);
-        assert_eq!(creation_gas_used(&gas), 30_000);
+        gas.refill_reservoir(20_000);
+        let gas = settled(InstructionResult::Stop, gas);
+        assert_eq!(creation_gas_used(&gas, 0, 0), 10_000);
     }
 }

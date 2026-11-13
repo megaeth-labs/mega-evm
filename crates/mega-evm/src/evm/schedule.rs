@@ -2,7 +2,7 @@
 //!
 //! Satin takes the Amsterdam schedule — the one that carries EIP-8037 state gas, EIP-8038's
 //! state-access prices, the EIP-2780 intrinsic decomposition, the EIP-7976 calldata floor and
-//! EIP-7981 access-list data — and changes exactly three things:
+//! EIP-7981 access-list data — and changes exactly four things:
 //!
 //! 1. the EIP-8037 state-gas entries are rebuilt from `MegaETH`'s own cost per state byte
 //!    ([`STATE_GAS_REPRICED`]), which is what makes the state dimension `MegaETH`'s rather than
@@ -12,7 +12,15 @@
 //!    byte per byte, which is what makes a deployment pay for the bytes every node has to carry;
 //! 3. the regular gas a call or creation forwards: at most `remaining − remaining × 2 / 100` of
 //!    what its caller has left, Rex6's rule, in place of EIP-150's 63/64
-//!    ([`FORWARD_REDUCTION_QUOTIENT`], the fork's `GasId::call_stipend_reduction`).
+//!    ([`FORWARD_REDUCTION_QUOTIENT`], the fork's `GasId::call_stipend_reduction`);
+//! 4. the legacy share of the state charges an opcode makes for a fresh slot, a new account and a
+//!    created account ([`legacy_shares`]): the part regular gas pays before the reservoir pays any
+//!    of it, `min(charge, PRE_FORK_COST − execution_charge)`, so state an opcode creates costs at
+//!    least its pre-Satin price in regular gas whether or not the transaction carries a reservoir.
+//!    The fork's legacy-share entries hold `PRE_FORK_COST − execution_charge`, fixed numbers that
+//!    neither the bucket multiplier nor the byte prices move: 10,000 for a slot, 25,000 for a value
+//!    call's new account, 16,000 for a `SELFDESTRUCT`'s new beneficiary and 20,000 for a created
+//!    account. Every other state charge has none, and no history charge has one.
 //!
 //! What else a frame start takes from its caller is the engine's, not the schedule's, and is in no
 //! entry of it: the share of its caller's pools — data size, KV updates, state growth — and of its
@@ -145,7 +153,47 @@ pub fn satin_gas_params_at(prices: SatinPrices) -> GasParams {
         HISTORY_GAS_PRICED.iter().map(|&(id, bytes)| (id(), prices.cphb.fixed_size_gas(bytes))),
     );
     params.override_gas([(GasId::call_stipend_reduction(), FORWARD_REDUCTION_QUOTIENT)]);
+    params.override_gas(legacy_shares(&params));
     params
+}
+
+/// The legacy shares of the state charges an opcode makes, as the fork's schedule entries hold
+/// them: `PRE_FORK_COST − execution_charge` for each, the regular cost `params` gives the part of
+/// the opcode that creates the state taken off its fixed pre-Satin price.
+///
+/// - A fresh slot: [`PRE_FORK_SSTORE_SET_COST`] less the slot's write,
+///   `sstore_set_without_load_cost`.
+/// - A value call's new account: [`PRE_FORK_NEW_ACCOUNT_COST`], the call charging no regular gas
+///   for the account it creates. A keyless deployment's signer takes the same share.
+/// - A `SELFDESTRUCT`'s new beneficiary: [`PRE_FORK_NEW_ACCOUNT_COST`] less the schedule's new
+///   account of `SELFDESTRUCT`, `new_account_cost_for_selfdestruct`.
+/// - A created account: [`PRE_FORK_CREATE_COST`] less the creation's access, `create`. A keyless
+///   deployment's creation takes the same share.
+///
+/// [`PRE_FORK_SSTORE_SET_COST`]: crate::constants::PRE_FORK_SSTORE_SET_COST
+/// [`PRE_FORK_NEW_ACCOUNT_COST`]: crate::constants::PRE_FORK_NEW_ACCOUNT_COST
+/// [`PRE_FORK_CREATE_COST`]: crate::constants::PRE_FORK_CREATE_COST
+pub(crate) fn legacy_shares(params: &GasParams) -> [(GasId, u64); 4] {
+    use crate::constants::{
+        PRE_FORK_CREATE_COST, PRE_FORK_NEW_ACCOUNT_COST, PRE_FORK_SSTORE_SET_COST,
+    };
+    [
+        (
+            GasId::sstore_set_state_gas_legacy_share(),
+            PRE_FORK_SSTORE_SET_COST
+                .saturating_sub(params.get(GasId::sstore_set_without_load_cost())),
+        ),
+        (GasId::new_account_state_gas_legacy_share(), PRE_FORK_NEW_ACCOUNT_COST),
+        (
+            GasId::selfdestruct_new_account_state_gas_legacy_share(),
+            PRE_FORK_NEW_ACCOUNT_COST
+                .saturating_sub(params.get(GasId::new_account_cost_for_selfdestruct())),
+        ),
+        (
+            GasId::create_state_gas_legacy_share(),
+            PRE_FORK_CREATE_COST.saturating_sub(params.get(GasId::create())),
+        ),
+    ]
 }
 
 #[cfg(test)]
@@ -178,7 +226,8 @@ mod tests {
             let id = GasId::new(slot);
             let rebuilt = STATE_GAS_REPRICED.iter().any(|&(entry, _)| entry() == id) ||
                 HISTORY_GAS_PRICED.iter().any(|&(entry, _)| entry() == id) ||
-                id == GasId::call_stipend_reduction();
+                id == GasId::call_stipend_reduction() ||
+                legacy_shares(&satin).iter().any(|&(entry, _)| entry == id);
             if rebuilt {
                 continue;
             }
@@ -320,6 +369,27 @@ mod tests {
         assert_eq!(satin.get(id), 88);
         assert_eq!(osaka().get(id), 0);
         assert_eq!(amsterdam().get(id), 0);
+    }
+
+    /// The legacy shares are the pre-Satin prices less what the schedule already charges in
+    /// regular gas for the part of the opcode that creates the state: 20,000 − 10,000 for a fresh
+    /// slot, 25,000 for a value call's new account, 25,000 − 9,000 for a `SELFDESTRUCT`'s new
+    /// beneficiary and 32,000 − 12,000 for a created account, at any byte price
+    /// ([`test_other_prices_move_only_the_byte_priced_entries`]). Amsterdam carries none, so its
+    /// state charges are EIP-8037's.
+    #[test]
+    fn test_the_legacy_shares_are_the_pre_satin_prices_less_the_execution_charges() {
+        let satin = satin_gas_params();
+        for (id, share) in [
+            (GasId::sstore_set_state_gas_legacy_share(), 10_000),
+            (GasId::new_account_state_gas_legacy_share(), 25_000),
+            (GasId::selfdestruct_new_account_state_gas_legacy_share(), 16_000),
+            (GasId::create_state_gas_legacy_share(), 20_000),
+        ] {
+            assert_eq!(satin.get(id), share, "{}", id.name());
+            assert_eq!(satin_gas_params_history_exempt().get(id), share, "{}", id.name());
+            assert_eq!(amsterdam().get(id), 0, "{}", id.name());
+        }
     }
 
     /// The state entries are EIP-8037's byte counts at `MegaETH`'s price. Dividing an entry by

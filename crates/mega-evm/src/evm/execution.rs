@@ -192,8 +192,9 @@ where
             runtime_oog_unwind(evm.ctx(), checkpoint)?;
             return Ok(None);
         };
+        let (first_frame, from_regular) = first_frame;
         let layer = &mut evm.ctx_mut().additional_limit;
-        layer.keep_first_frame_charge(first_frame);
+        layer.keep_first_frame_charge(first_frame, from_regular);
         layer.count_authorities(applied, created);
         Ok(Some(PreExecutionOutput { eip7702_refund, checkpoint }))
     }
@@ -1628,19 +1629,27 @@ fn applied_authorities<DB: Database, ExtEnvs: ExternalEnvTypes>(
 /// caller that turned the nonce check off can run, and which revm answers with a success and no
 /// address.
 ///
+/// The two are one charge, which the reservoir pays first and the regular budget the rest, and of
+/// it the reservoir pays the authorities' records first, the list being applied first: the part of
+/// the first frame's record the reservoir paid is what the authorities' records leave of it.
+///
 /// Answers the history gas the first frame's record was charged, which pre-execution keeps for
-/// the frame's input to carry, and nothing for a transaction that pays no history; `None` when the
-/// transaction cannot pay, which is an out-of-gas before it runs.
+/// the frame's input to carry, with the part of it regular gas paid, which a halt of that frame
+/// consumes; nothing for a transaction that pays no history; `None` when the transaction cannot
+/// pay, which is an out-of-gas before it runs.
 fn charge_records_made_outside_a_frame<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &MegaContext<DB, ExtEnvs>,
     gas: &mut GasTracker,
     applied_authorities: u64,
-) -> Option<u64> {
+) -> Option<(u64, u64)> {
     if !ctx.prices_history() {
-        return Some(0);
+        return Some((0, 0));
     }
-    charge_write_records_history(gas, first_frame_records(ctx), applied_authorities)
-        .map(|(first_frame, _)| first_frame)
+    let reservoir = gas.reservoir();
+    let (first_frame, authorities) =
+        charge_write_records_history(gas, first_frame_records(ctx), applied_authorities)?;
+    let from_reservoir = reservoir.saturating_sub(authorities).min(first_frame);
+    Some((first_frame, first_frame - from_reservoir))
 }
 
 /// The write records the transaction's own frame makes, as the journal's state stands before the

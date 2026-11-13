@@ -23,6 +23,9 @@
 //! | [`ORACLE_ACCESS_COMPUTE_GAS`] | 20,000,000 | compute a transaction may still spend once it read the Oracle's storage (as Rex6) | Satin's protocol limits |
 //! | [`MAX_TX_COMPUTE_GAS`] | 199,987,900 | the most compute one transaction can spend: the execution cap less EIP-2780's base cost and one warm account access | tests of the protocol limits, whose detention caps are below it |
 //! | [`PRE_BLOCK_CALL_GAS_LIMIT`] | 31,566,720 | gas limit of every pre-block system call: 30,000,000 of regular gas and a reservoir of sixteen fresh slots | the block's pre-block calls |
+//! | [`PRE_FORK_SSTORE_SET_COST`] | 20,000 | regular gas of a fresh slot's `SSTORE` before Satin | the legacy share of a slot's state gas, in the Satin gas schedule |
+//! | [`PRE_FORK_NEW_ACCOUNT_COST`] | 25,000 | regular gas of a new account before Satin | the legacy share of a new account's state gas |
+//! | [`PRE_FORK_CREATE_COST`] | 32,000 | regular gas of a `CREATE` before Satin | the legacy share of a created account's state gas |
 //!
 //! The Satin gas schedule builds its state-gas entries from the EIP-8037 byte counts at
 //! [`COST_PER_STATE_BYTE`], read through [`SatinPrices`](crate::SatinPrices) so a measurement
@@ -132,6 +135,23 @@ pub const MAX_TX_COMPUTE_GAS: u64 =
 pub const PRE_BLOCK_CALL_GAS_LIMIT: u64 =
     crate::SYSTEM_CALL_REGULAR_GAS_LIMIT + 16 * SLOT_STATE_GAS;
 
+/// The regular gas a fresh slot's `SSTORE` cost before Satin, above its load: what a state charge
+/// for a fresh slot takes from regular gas before the reservoir, less what the write already
+/// charges in regular gas. A fixed pre-Satin price: the bucket multiplier does not scale it, and a
+/// change of the byte prices does not move it.
+pub const PRE_FORK_SSTORE_SET_COST: u64 = 20_000;
+
+/// The regular gas a new account cost before Satin: what a state charge for the account a value
+/// call or a keyless deployment's signer creates takes from regular gas before the reservoir, and,
+/// less the regular gas the schedule charges a `SELFDESTRUCT`'s new beneficiary, what that
+/// beneficiary's takes. A fixed pre-Satin price.
+pub const PRE_FORK_NEW_ACCOUNT_COST: u64 = 25_000;
+
+/// The regular gas a `CREATE` cost before Satin: less the creation's access, what a state charge
+/// for the account a `CREATE`, a `CREATE2` or a keyless deployment creates takes from regular gas
+/// before the reservoir. A fixed pre-Satin price.
+pub const PRE_FORK_CREATE_COST: u64 = 32_000;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -150,5 +170,8 @@ mod tests {
         // that read them, in `ProtocolLimits::for_spec`'s own test.
         assert_eq!(MAX_TX_COMPUTE_GAS, 199_987_900);
         assert_eq!(PRE_BLOCK_CALL_GAS_LIMIT, 31_566_720);
+        assert_eq!(PRE_FORK_SSTORE_SET_COST, 20_000);
+        assert_eq!(PRE_FORK_NEW_ACCOUNT_COST, 25_000);
+        assert_eq!(PRE_FORK_CREATE_COST, 32_000);
     }
 }

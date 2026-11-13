@@ -480,22 +480,24 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
     /// none. It is given back as history, as it was charged, once revm's own settlement of the
     /// frame is made, its upfront state-gas refund included.
     ///
-    /// revm's settlement put the reservoir the frame handed back in place of the caller's, once it
-    /// unwound the caller's outstanding spill; a child's caller gets back here the reservoir it
-    /// held while the child ran (`held_reservoir`), the part it kept at the start, on top. The
+    /// revm's settlement put the reservoir the frame handed back in place of the caller's, as it
+    /// is, give-backs going to the reservoir alone; a child's caller gets back here the reservoir
+    /// it held while the child ran (`held_reservoir`), the part it kept at the start, on top. The
     /// caller then holds what it kept and what the child handed back, whatever the order of this
-    /// and the refunds, which read the spill and their own amount, never the reservoir. The
-    /// transaction's gas holds a copy of the reservoir its frame was given, which revm's
-    /// settlement replaced, so nothing is added back to it.
+    /// and the refunds, which add their own amount to the reservoir. The transaction's gas holds a
+    /// copy of the reservoir its frame was given, which revm's settlement replaced, so nothing is
+    /// added back to it.
     ///
     /// The transaction's start ends the transaction: when its frame halted, giving the charge back
     /// burns every regular gas the transaction's gas holds, what the refill credited and what
     /// revm's settlement left alike, as revm's settlement burns a halted transaction's after each
     /// of its own refunds; with no charge to give back nothing is burned, as revm's settlement
-    /// burned nothing then. revm's settlement leaves regular gas there only where an inspector
-    /// makes the frame hand back more reservoir than it inherited — on its input, or in its
-    /// result's figures — which unwinds part of the spill the charges made before the frame. A
-    /// child's caller runs on, and keeps its regular gas.
+    /// burned nothing then. With give-backs to the reservoir alone the refill credited the record
+    /// to the reservoir, of which only the part the reservoir paid comes back: what regular gas
+    /// paid of it is consumed with the frame's regular gas. revm's settlement leaves regular gas
+    /// there only where an inspector makes the frame hand back more reservoir than it inherited
+    /// — on its input, or in its result's figures — which unwinds part of the spill the charges
+    /// made before the frame. A child's caller runs on, and keeps its regular gas.
     #[inline]
     fn frame_settle(&mut self, settle: &FrameSettle, gas: &mut GasTracker) {
         self.inner.frame_settle(settle, gas);
@@ -507,6 +509,13 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
             gas.refill_history(refund);
             if settle.depth == 0 && settle.status == SettleStatus::Halt {
                 gas.spend_all();
+                // A give-back to the reservoir alone credited the whole record there; the part
+                // regular gas paid is consumed with the regular gas the halt spends.
+                if gas.reservoir_only_give_backs() {
+                    let from_regular =
+                        self.additional_limit.first_frame_charge_from_regular().min(refund);
+                    gas.set_reservoir(gas.reservoir().saturating_sub(from_regular));
+                }
             }
         }
     }
@@ -615,9 +624,22 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         let slots = parts.slots.iter().map(|&key| {
             StateGasCharge::one(GasId::sstore_set_state_gas(), StateGasSite::slot(address, key))
         });
+        let mut leaf_given_back = 0;
         for charge in leaf.into_iter().chain(code).chain(slots) {
             let Some(price) = self.priced_state_gas(charge.id, charge.site) else { return false };
+            if charge.id == GasId::new_account_state_gas() {
+                leaf_given_back = charge.total(price);
+            }
             gas.refill_reservoir(charge.total(price));
+        }
+        // A keyless deployment's creation that destroys the account it creates is given back the
+        // leaf the call paid for, or the transfer that funded the address, and its write record:
+        // charges the creation did not make, which its answer adds back to what it spent.
+        if parts.leaf {
+            let record = self.records_history_charge(1);
+            if let Some(started) = self.keyless_creation.as_mut() {
+                started.note_leaf_given_back(address, leaf_given_back.saturating_add(record));
+            }
         }
         true
     }

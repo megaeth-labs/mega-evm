@@ -104,6 +104,11 @@ pub struct AdditionalLimit {
     /// makes, kept from that charge until the frame's input is built, which carries it as its
     /// start charge ([`take_first_frame_charge`](Self::take_first_frame_charge)).
     first_frame_charge: Option<u64>,
+    /// The part of that charge the transaction's regular gas paid, the reservoir having paid the
+    /// authorities' records first: what a halt of the transaction's own frame consumes with its
+    /// regular gas rather than gives back
+    /// ([`first_frame_charge_from_regular`](Self::first_frame_charge_from_regular)).
+    first_frame_charge_from_regular: u64,
     /// What the transaction's frames keep, every running frame counted as if it succeeds.
     kept: Kept,
     /// One per start revm decided whose result has not returned, the latest last.
@@ -311,6 +316,7 @@ impl AdditionalLimit {
         self.created_caller = false;
         self.pre_frame_stop = None;
         self.first_frame_charge = None;
+        self.first_frame_charge_from_regular = 0;
         self.kept = Kept::default();
         self.decided.clear();
         self.intrinsic_history_bytes = 0;
@@ -477,9 +483,18 @@ impl AdditionalLimit {
 
     /// Keeps `history`, the history gas pre-execution just charged for the write record the
     /// transaction's own frame makes, for the frame's input to carry
-    /// ([`take_first_frame_charge`](Self::take_first_frame_charge)).
-    pub(crate) const fn keep_first_frame_charge(&mut self, history: u64) {
+    /// ([`take_first_frame_charge`](Self::take_first_frame_charge)), and `from_regular`, the part
+    /// of it the transaction's regular gas paid.
+    pub(crate) const fn keep_first_frame_charge(&mut self, history: u64, from_regular: u64) {
         self.first_frame_charge = Some(history);
+        self.first_frame_charge_from_regular = from_regular;
+    }
+
+    /// The part of the history gas pre-execution charged for the write record the transaction's
+    /// own frame makes that the transaction's regular gas paid: zero until pre-execution charges
+    /// it, and for a transaction that pays no history.
+    pub(crate) const fn first_frame_charge_from_regular(&self) -> u64 {
+        self.first_frame_charge_from_regular
     }
 
     /// The history gas pre-execution charged for the write record the transaction's own frame
@@ -1171,13 +1186,15 @@ mod tests {
         let mut limit = AdditionalLimit::default();
         limit.begin_transaction(TxClass::Ordinary, 0);
         assert_eq!(limit.take_first_frame_charge(), None, "nothing charged yet");
-        limit.keep_first_frame_charge(7);
+        limit.keep_first_frame_charge(7, 3);
         assert_eq!(limit.take_first_frame_charge(), Some(7));
         assert_eq!(limit.take_first_frame_charge(), None, "taken by the frame's input");
+        assert_eq!(limit.first_frame_charge_from_regular(), 3, "read where the frame settles");
 
-        limit.keep_first_frame_charge(7);
+        limit.keep_first_frame_charge(7, 3);
         limit.begin_transaction(TxClass::ProtocolOwn, 0);
         assert_eq!(limit.take_first_frame_charge(), None, "the next execution begins without it");
+        assert_eq!(limit.first_frame_charge_from_regular(), 0);
     }
 
     /// Validation admits no body whose authority records cross the data-size limit, so a debug
