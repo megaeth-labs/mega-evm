@@ -204,7 +204,7 @@ The replay works this out as a node does, from the schedule the block runs under
 A transaction replay works it out the same way, from the parent block it forks, and refuses a non-deposit transaction of such a block with an error.
 The parent's timestamp decides the answer only for a Satin block at which a fork its schedule activates after genesis is active; for such a block alone the replay fetches the parent's header over `--rpc` and keeps its timestamp in the cache.
 Every other block, a legacy one or one whose schedule activates every fork it runs at genesis as the Satin counterfactual's does, replays from what the cache holds and never asks for the parent.
-Satin's activation block also checks the predeploys (the six system contracts and the EIP-7997 factory), which the legacy engine never read in full, so a block cached from a legacy replay may need them over `--rpc` once.
+Every Satin block reads the six system contracts, which it deploys, and Satin's activation block also checks the EIP-7997 factory; the legacy engine never read the factory, so a block cached from a legacy replay may need it over `--rpc` once.
 Offline, a block that needs the parent's timestamp and whose cache entry lacks it (an entry written before the cache kept it, or by a replay that did not need it) fails rather than guess, and the error says so.
 To recover, replay it once with `--rpc`: the replay fetches the timestamp and writes it to the cache, and the block then replays offline.
 
