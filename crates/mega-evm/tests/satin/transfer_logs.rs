@@ -186,9 +186,12 @@ impl Site {
     /// with no share.
     fn shares(self, variant: Variant) -> u64 {
         match (self, variant) {
-            (Self::TxEndowment, _) | (Self::TxValue, Variant::Plain | Variant::TakenBack) => 0,
+            (Self::TxEndowment, _) |
+            (
+                Self::TxValue | Self::Call | Self::SelfDestruct,
+                Variant::Plain | Variant::TakenBack,
+            ) => 0,
             (Self::TxValue, Variant::Twin) => slot_share(),
-            (Self::Call | Self::SelfDestruct, Variant::Plain | Variant::TakenBack) => 0,
             (
                 Self::Call | Self::CallWithoutCode | Self::CallToPrecompile | Self::SelfDestruct,
                 Variant::Twin,
