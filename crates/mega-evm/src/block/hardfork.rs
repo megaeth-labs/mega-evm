@@ -16,7 +16,7 @@ use alloy_op_hardforks::{OpHardfork, OpHardforks};
 use alloy_primitives::{BlockTimestamp, U256};
 use auto_impl::auto_impl;
 
-use crate::MegaSpecId;
+use crate::{system::SequencerRegistryBootstrap, MegaSpecId};
 
 /// The Ethereum forks Satin runs on that a schedule activates by timestamp: every one from the
 /// first after the Merge up to Osaka.
@@ -74,6 +74,18 @@ pub trait MegaHardforks: OpHardforks {
     /// The activation condition of `fork`, or [`ForkCondition::Never`] if the schedule does not
     /// carry it.
     fn mega_fork_activation(&self, fork: MegaHardfork) -> ForkCondition;
+
+    /// The `SequencerRegistry`'s bootstrap values the chain configuration carries, or `None` if it
+    /// carries none.
+    ///
+    /// A Satin block reads them only to deploy the registry: to seed a registry its state does not
+    /// hold, and to give one at version 1.0.0 its minimum rotation delay when it migrates it. A
+    /// chain configuration that schedules Satin must carry them, each non-zero, and its parser
+    /// refuses one that does not
+    /// ([`SatinChainConfig::from_genesis_config`](crate::SatinChainConfig::from_genesis_config));
+    /// a block that needs them and finds none, or a zero one, cannot be executed, which is the
+    /// node's fault and no verdict on the block.
+    fn sequencer_registry_bootstrap(&self) -> Option<SequencerRegistryBootstrap>;
 
     /// The latest `MegaETH` fork active at `timestamp`, or `None` before the first one.
     ///
@@ -260,6 +272,8 @@ impl Clone for ForkEntry {
 #[derive(Debug, Clone)]
 pub struct MegaHardforkConfig {
     entries: Vec<ForkEntry>,
+    /// The `SequencerRegistry`'s bootstrap values, which the schedule carries beside the forks.
+    sequencer_registry_bootstrap: Option<SequencerRegistryBootstrap>,
 }
 
 impl Default for MegaHardforkConfig {
@@ -281,6 +295,7 @@ where
                     condition,
                 })
                 .collect(),
+            sequencer_registry_bootstrap: None,
         }
     }
 }
@@ -334,7 +349,18 @@ impl MegaHardforkConfig {
                 .into_iter()
                 .map(|(fork, condition)| ForkEntry { fork, condition })
                 .collect(),
+            sequencer_registry_bootstrap: None,
         }
+    }
+
+    /// Carries `bootstrap`, the `SequencerRegistry`'s bootstrap values, beside the schedule
+    /// ([`MegaHardforks::sequencer_registry_bootstrap`]).
+    pub const fn with_sequencer_registry_bootstrap(
+        mut self,
+        bootstrap: SequencerRegistryBootstrap,
+    ) -> Self {
+        self.sequencer_registry_bootstrap = Some(bootstrap);
+        self
     }
 
     /// Activates every `MegaETH` fork at timestamp 0.
@@ -391,6 +417,10 @@ impl OpHardforks for MegaHardforkConfig {
 impl MegaHardforks for MegaHardforkConfig {
     fn mega_fork_activation(&self, fork: MegaHardfork) -> ForkCondition {
         self.get(fork).copied().unwrap_or(ForkCondition::Never)
+    }
+
+    fn sequencer_registry_bootstrap(&self) -> Option<SequencerRegistryBootstrap> {
+        self.sequencer_registry_bootstrap
     }
 }
 

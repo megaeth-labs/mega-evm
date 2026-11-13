@@ -12,7 +12,6 @@ use alloy_hardforks::{EthereumHardfork, ForkCondition};
 use alloy_op_hardforks::OpHardfork;
 use alloy_primitives::{Bytes, B256, U256};
 use mega_evm::{
-    system::SYSTEM_CONTRACT_COUNT,
     test_utils::{CommittedStates, MemoryDatabase},
     BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutionError, MegaHardfork, MegaHardforkConfig,
 };
@@ -189,9 +188,9 @@ fn test_the_activation_rule_follows_the_optimism_fork_order() {
     }
 }
 
-/// The predeploys a node's context has the block check, from its schedule and the parent's
-/// timestamp: how many of the states the pre-block steps committed are reads of a predeploy.
-fn predeploys_checked(spec: MegaHardforkConfig, parent_timestamp: u64, timestamp: u64) -> usize {
+/// Whether a node's context has the block check the EIP-7997 factory, from its schedule and the
+/// parent's timestamp: whether one of the states the pre-block steps committed is the check.
+fn factory_checked(spec: MegaHardforkConfig, parent_timestamp: u64, timestamp: u64) -> bool {
     let mut env = common::evm_env();
     env.block_env.timestamp = U256::from(timestamp);
     let ctx = node_ctx(parent_timestamp);
@@ -199,23 +198,23 @@ fn predeploys_checked(spec: MegaHardforkConfig, parent_timestamp: u64, timestamp
     let committed = CommittedStates::install(&mut state);
     let mut executor = executor_with_env_and_spec(&mut state, ctx, env, spec);
     executor.apply_pre_execution_changes().expect("the block starts");
-    committed.states().iter().filter(|state| common::is_predeploy_check(state)).count()
+    committed.states().iter().any(common::is_factory_check)
 }
 
-/// [S18] A node's context has the predeploys checked in Satin's activation block and in no other:
-/// the first block at the activation and the first after a gap over it read all seven; the block
+/// [S18] A node's context has the EIP-7997 factory checked in Satin's activation block and in no
+/// other: the first block at the activation and the first after a gap over it read it; the block
 /// after the activation block, every block of a chain with Satin from genesis, and Jovian's
-/// activation block on such a chain, which admits only deposits, read none.
+/// activation block on such a chain, which admits only deposits, do not.
 ///
 /// Expected values: independent (the schedule's own timestamps and the rule).
 #[test]
-fn test_a_node_context_checks_the_predeploys_where_satin_activates() {
+fn test_a_node_context_checks_the_factory_where_satin_activates() {
     let at = ACTIVATION;
     let cases = [
-        ("Satin's activation block", schedule(at), at - 1, at, SYSTEM_CONTRACT_COUNT),
-        ("the first block after a gap", schedule(at), at - 10, at + 5, SYSTEM_CONTRACT_COUNT),
-        ("the block after Satin's activation block", schedule(at), at, at + 1, 0),
-        ("a block of a chain with Satin from genesis", schedule(0), at - 1, at, 0),
+        ("Satin's activation block", schedule(at), at - 1, at, true),
+        ("the first block after a gap", schedule(at), at - 10, at + 5, true),
+        ("the block after Satin's activation block", schedule(at), at, at + 1, false),
+        ("a block of a chain with Satin from genesis", schedule(0), at - 1, at, false),
         (
             "Jovian's activation block",
             schedule(0)
@@ -223,11 +222,11 @@ fn test_a_node_context_checks_the_predeploys_where_satin_activates() {
                 .with(OpHardfork::Karst, ForkCondition::Timestamp(LATER)),
             at - 1,
             at,
-            0,
+            false,
         ),
     ];
     for (name, spec, parent, timestamp, expected) in cases {
-        assert_eq!(predeploys_checked(spec, parent, timestamp), expected, "{name}");
+        assert_eq!(factory_checked(spec, parent, timestamp), expected, "{name}");
     }
 }
 

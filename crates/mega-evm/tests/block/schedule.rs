@@ -167,7 +167,10 @@ fn test_engine_built_schedules_keep_their_base_forks_at_genesis() {
             .with(MegaHardfork::Satin, ForkCondition::Timestamp(satin_time));
         assert_eq!(schedule.validate_schedule(), Ok(()), "Satin at {satin_time}");
 
-        let activation = ChainActivation { chain_id: MAINNET_CHAIN_ID, satin: Some(satin_time) };
+        let activation = ChainActivation {
+            satin: Some(satin_time),
+            ..mega_evm::chain_activation(MAINNET_CHAIN_ID).expect("a known chain")
+        };
         let schedule = activation.hardforks();
         assert_eq!(schedule.validate_schedule(), Ok(()), "the table's Satin at {satin_time}");
     }

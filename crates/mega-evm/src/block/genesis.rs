@@ -1,11 +1,13 @@
-//! The Satin key of a chain configuration: when Satin activates.
+//! The Satin keys of a chain configuration: when Satin activates, and the `SequencerRegistry`'s
+//! bootstrap values a chain that schedules it carries.
 //!
-//! [`SatinChainConfig`] reads it and states the format, which is provisional.
+//! [`SatinChainConfig`] reads them and states the format, which is provisional.
 
 #[cfg(not(feature = "std"))]
 use alloc as std;
-use core::fmt;
+use core::{fmt, str::FromStr};
 use std::{
+    borrow::ToOwned,
     collections::BTreeMap,
     string::{String, ToString},
 };
@@ -17,13 +19,38 @@ use serde::{
     Deserialize, Deserializer, Serialize, Serializer,
 };
 
-use crate::{MegaHardfork, MegaHardforkConfig, MegaHardforks, ScheduleError};
+use alloy_primitives::Address;
+
+use crate::{
+    system::SequencerRegistryBootstrap, MegaHardfork, MegaHardforkConfig, MegaHardforks,
+    ScheduleError,
+};
 
 /// The key of Satin's activation timestamp.
 pub const SATIN_TIME_KEY: &str = "satinTime";
 
 /// Every Satin key of a chain configuration, in the order [`SatinChainConfig`] writes them.
 pub const SATIN_CHAIN_CONFIG_KEYS: [&str; 1] = [SATIN_TIME_KEY];
+
+/// The key of the sequencer a new `SequencerRegistry` is seeded with.
+pub const REX5_INITIAL_SEQUENCER_KEY: &str = "rex5InitialSequencer";
+
+/// The key of the admin a new `SequencerRegistry` is seeded with.
+pub const REX5_INITIAL_ADMIN_KEY: &str = "rex5InitialAdmin";
+
+/// The key of the minimum rotation delay a `SequencerRegistry` is seeded or migrated with.
+pub const REX6_MIN_ROTATION_DELAY_KEY: &str = "rex6MinRotationDelay";
+
+/// The `SequencerRegistry`'s bootstrap keys, which a configuration that schedules Satin carries,
+/// in the order [`SatinChainConfig`] writes them after [`SATIN_TIME_KEY`].
+pub const SEQUENCER_REGISTRY_BOOTSTRAP_KEYS: [&str; 3] =
+    [REX5_INITIAL_SEQUENCER_KEY, REX5_INITIAL_ADMIN_KEY, REX6_MIN_ROTATION_DELAY_KEY];
+
+/// What a bootstrap address must be.
+const ADDRESS_EXPECTED: &str = "a 20-byte hexadecimal address";
+
+/// What an integer must be.
+const INTEGER_EXPECTED: &str = "an integer from 0 to 2^64 - 1";
 
 /// The prefix every Satin key starts with, compared without regard to case.
 const PREFIX: &str = "satin";
@@ -32,7 +59,7 @@ const PREFIX: &str = "satin";
 const ARBITRARY_PRECISION_NUMBER: &str = "$serde_json::private::Number";
 
 /// A chain's Satin configuration, as its genesis file's `config` object carries it: when Satin
-/// activates.
+/// activates, and the `SequencerRegistry`'s bootstrap values.
 ///
 /// **The key format is provisional.** It is fixed when a network first publishes a genesis file
 /// that carries it; until then a change to it is a change to this parser and to every genesis
@@ -43,32 +70,40 @@ const ARBITRARY_PRECISION_NUMBER: &str = "$serde_json::private::Number";
 /// key names and the rules cannot drift apart between them: a reader that took another value for
 /// the key would execute another chain.
 ///
-/// Satin carries no parameter: a chain that activates it has run the legacy forks, which deployed
-/// the `SequencerRegistry` and upgraded it to v2.0.0, and the registry's roles are what it holds.
-/// The legacy forks' own keys (`rex5InitialSequencer`, `rex6MinRotationDelay`, ...) are theirs
-/// and are not read here.
+/// Satin carries no parameter of its own: no key names a limit, a detention cap or a price. Every
+/// Satin block deploys the `SequencerRegistry`, seeding it when the state does not hold it and
+/// migrating it from version 1.0.0, from the bootstrap values under the keys the Rex era
+/// introduced, which a configuration that schedules Satin must carry; once the registry holds its
+/// roles, its storage decides them, not these values.
 ///
-/// The key sits at the top level of the genesis file's `config` object, beside the other forks'
+/// The keys sit at the top level of the genesis file's `config` object, beside the other forks'
 /// keys, camelCase:
 ///
-/// | Key         | Value   | Field                                                  |
-/// | ----------- | ------- | ------------------------------------------------------ |
-/// | `satinTime` | integer | the activation timestamp ([`Self::activation_time`])   |
+/// | Key                    | Value   | Field                                                     |
+/// | ---------------------- | ------- | --------------------------------------------------------- |
+/// | `satinTime`            | integer | the activation timestamp ([`Self::activation_time`])      |
+/// | `rex5InitialSequencer` | address | a new registry's sequencer, non-zero                      |
+/// | `rex5InitialAdmin`     | address | a new registry's admin, non-zero                          |
+/// | `rex6MinRotationDelay` | integer | the registry's minimum rotation delay in blocks, non-zero |
 ///
-/// An integer is a JSON number that fits in 64 unsigned bits, `u64::MAX` included, which a writer
-/// must emit exactly.
+/// The last three are [`Self::sequencer_registry_bootstrap`]. An integer is a JSON number that
+/// fits in 64 unsigned bits, `u64::MAX` included, which a writer must emit exactly; an address is
+/// a JSON string of 40 hexadecimal digits, `0x` before them.
 ///
 /// The rules:
 ///
-/// - A configuration with no key starting with `satin` does not activate Satin.
+/// - A configuration with no key starting with `satin` does not activate Satin, and its other keys,
+///   the bootstrap keys included, are not read.
+/// - A configuration that activates Satin must carry each bootstrap key, each non-zero: one that
+///   lacks one or gives one as zero is refused, naming the key.
 /// - A key starting with `satin`, in any case, that is not `satinTime` is refused, so a misspelled
 ///   key cannot stand in for the one it meant, and a file written against an earlier version of the
 ///   format — one that named the registry's roles (`satinInitialSequencer`, ...) or the limits —
 ///   does not load. Every other key is another fork's and is not read.
-/// - A key given twice is read as its last copy, as `serde_json` reads an object into a
-///   `serde_json::Value`: a reader handed the object's text, which still shows both copies, and a
-///   reader that parses the file into a `Value` first — `mega-evme --genesis` does, and so does a
-///   node that serializes its chain-config type — read the same value.
+/// - A key given twice, a bootstrap key included, is read as its last copy, as `serde_json` reads
+///   an object into a `serde_json::Value`: a reader handed the object's text, which still shows
+///   both copies, and a reader that parses the file into a `Value` first — `mega-evme --genesis`
+///   does, and so does a node that serializes its chain-config type — read the same value.
 /// - A value of the wrong type is refused, naming its key, and so is a schedule
 ///   [`validate_schedule`](MegaHardforks::validate_schedule) refuses. One object is read as an
 ///   integer: `{"$serde_json::private::Number": "<digits>"}`, the form `serde_json` hands a number
@@ -76,24 +111,26 @@ const ARBITRARY_PRECISION_NUMBER: &str = "$serde_json::private::Number";
 ///   same object written into the file alike, so both are read as the number; every reader parses
 ///   here, so every reader reads it the same.
 ///
-/// The parser reads no other fork's key. Satin runs on the OP Karst fork and the Ethereum forks
-/// Karst includes, Osaka among them, and [`hardforks`](Self::hardforks) schedules those as active
-/// from the first block, which no Satin block can tell apart from the file's times when they are
-/// active by `satinTime`.
+/// The parser reads no other fork's key but the bootstrap keys. Satin runs on the OP Karst fork and
+/// the Ethereum forks Karst includes, Osaka among them, and [`hardforks`](Self::hardforks)
+/// schedules those as active from the first block, which no Satin block can tell apart from the
+/// file's times when they are active by `satinTime`.
 /// A node's own schedule times those forks from the file, and holds them to both halves of the
 /// timing rule [`validate_schedule`](MegaHardforks::validate_schedule) states.
 ///
 /// A flat key is one entry of the object, so a checker that freezes a configuration key by key
-/// freezes `satinTime` on its own and names it when it changes. It does not stop a key being added
+/// freezes each key on its own and names it when it changes. It does not stop a key being added
 /// later; a rule that refuses a new key starting with `satin` once the configuration was first
 /// loaded does.
 ///
-/// It serializes to the key it is read from, so a generator that writes a genesis file with it
+/// It serializes to the keys it is read from, so a generator that writes a genesis file with it
 /// writes what every reader parses.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SatinChainConfig {
     /// The timestamp Satin activates at.
     pub activation_time: u64,
+    /// The `SequencerRegistry`'s bootstrap values.
+    pub sequencer_registry_bootstrap: SequencerRegistryBootstrap,
 }
 
 impl SatinChainConfig {
@@ -115,28 +152,41 @@ impl SatinChainConfig {
         let mut entries = config
             .deserialize_map(EntriesVisitor)
             .map_err(|error| SatinChainConfigError::Malformed(error.to_string()))?;
-        if let Some(unknown) =
-            entries.keys().find(|key| !SATIN_CHAIN_CONFIG_KEYS.contains(&key.as_str()))
+        if let Some(unknown) = entries
+            .keys()
+            .find(|key| is_satin_key(key) && !SATIN_CHAIN_CONFIG_KEYS.contains(&key.as_str()))
         {
             return Err(SatinChainConfigError::UnknownKey(unknown.clone()));
         }
         let activation_time = match entries.remove(SATIN_TIME_KEY) {
             None => return Ok(None),
-            Some(Entry::Unsigned(value)) => value,
-            Some(Entry::Other) => {
-                return Err(SatinChainConfigError::InvalidValue {
-                    key: SATIN_TIME_KEY,
-                    expected: "an integer from 0 to 2^64 - 1",
-                })
-            }
+            Some(entry) => entry.integer(SATIN_TIME_KEY)?,
         };
-        let config = Self { activation_time };
+        let mut bootstrap = |key| entries.remove(key).ok_or(SatinChainConfigError::MissingKey(key));
+        let initial_sequencer =
+            bootstrap(REX5_INITIAL_SEQUENCER_KEY)?.non_zero_address(REX5_INITIAL_SEQUENCER_KEY)?;
+        let initial_admin =
+            bootstrap(REX5_INITIAL_ADMIN_KEY)?.non_zero_address(REX5_INITIAL_ADMIN_KEY)?;
+        let min_rotation_delay =
+            match bootstrap(REX6_MIN_ROTATION_DELAY_KEY)?.integer(REX6_MIN_ROTATION_DELAY_KEY)? {
+                0 => return Err(SatinChainConfigError::ZeroValue(REX6_MIN_ROTATION_DELAY_KEY)),
+                delay => delay,
+            };
+        let config = Self {
+            activation_time,
+            sequencer_registry_bootstrap: SequencerRegistryBootstrap::new(
+                initial_sequencer,
+                initial_admin,
+                min_rotation_delay,
+            ),
+        };
         config.hardforks()?;
         Ok(Some(config))
     }
 
     /// The hardfork schedule this configuration makes: [`MegaHardforkConfig::new`]'s base forks
-    /// and Satin at [`activation_time`](Self::activation_time).
+    /// and Satin at [`activation_time`](Self::activation_time), carrying the bootstrap values
+    /// ([`MegaHardforks::sequencer_registry_bootstrap`]).
     ///
     /// The base forks, every OP and Ethereum fork up to Karst, are active from the first block here
     /// whatever the genesis file times them at, so the schedule passes the base-fork check of
@@ -149,17 +199,23 @@ impl SatinChainConfig {
     /// A schedule [`validate_schedule`](MegaHardforks::validate_schedule) refuses.
     pub fn hardforks(&self) -> Result<MegaHardforkConfig, ScheduleError> {
         let schedule = MegaHardforkConfig::new()
-            .with(MegaHardfork::Satin, ForkCondition::Timestamp(self.activation_time));
+            .with(MegaHardfork::Satin, ForkCondition::Timestamp(self.activation_time))
+            .with_sequencer_registry_bootstrap(self.sequencer_registry_bootstrap);
         schedule.validate_schedule()?;
         Ok(schedule)
     }
 }
 
 impl Serialize for SatinChainConfig {
-    /// Writes the key, [`SATIN_TIME_KEY`].
+    /// Writes the keys, [`SATIN_TIME_KEY`] then [`SEQUENCER_REGISTRY_BOOTSTRAP_KEYS`].
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let mut map = serializer.serialize_map(Some(SATIN_CHAIN_CONFIG_KEYS.len()))?;
+        let bootstrap = &self.sequencer_registry_bootstrap;
+        let len = SATIN_CHAIN_CONFIG_KEYS.len() + SEQUENCER_REGISTRY_BOOTSTRAP_KEYS.len();
+        let mut map = serializer.serialize_map(Some(len))?;
         map.serialize_entry(SATIN_TIME_KEY, &self.activation_time)?;
+        map.serialize_entry(REX5_INITIAL_SEQUENCER_KEY, &bootstrap.initial_sequencer)?;
+        map.serialize_entry(REX5_INITIAL_ADMIN_KEY, &bootstrap.initial_admin)?;
+        map.serialize_entry(REX6_MIN_ROTATION_DELAY_KEY, &bootstrap.min_rotation_delay)?;
         map.end()
     }
 }
@@ -178,6 +234,10 @@ pub enum SatinChainConfigError {
         /// What its value must be.
         expected: &'static str,
     },
+    /// A bootstrap key a configuration that schedules Satin lacks.
+    MissingKey(&'static str),
+    /// A bootstrap key whose value is zero.
+    ZeroValue(&'static str),
     /// A schedule [`validate_schedule`](MegaHardforks::validate_schedule) refuses.
     Schedule(ScheduleError),
 }
@@ -190,6 +250,10 @@ impl fmt::Display for SatinChainConfigError {
             }
             Self::UnknownKey(key) => write!(f, "`{key}` is not a Satin chain-configuration key"),
             Self::InvalidValue { key, expected } => write!(f, "`{key}` must be {expected}"),
+            Self::MissingKey(key) => {
+                write!(f, "a chain configuration that schedules Satin must carry `{key}`")
+            }
+            Self::ZeroValue(key) => write!(f, "`{key}` must not be zero"),
             Self::Schedule(error) => write!(f, "{error}"),
         }
     }
@@ -203,16 +267,44 @@ impl From<ScheduleError> for SatinChainConfigError {
     }
 }
 
-/// The value of a key, as far as reading the Satin key needs it: an unsigned integer, or anything
-/// else.
+/// The value of a key, as far as reading the Satin keys needs it: an unsigned integer, a string,
+/// or anything else.
 #[derive(Debug)]
 enum Entry {
     Unsigned(u64),
+    Text(String),
     Other,
 }
 
-/// Collects a configuration object's entries whose key starts with [`PREFIX`], the last copy of a
-/// key given twice, and skips the others' values without keeping them.
+impl Entry {
+    /// The integer the value of `key` is.
+    fn integer(self, key: &'static str) -> Result<u64, SatinChainConfigError> {
+        match self {
+            Self::Unsigned(value) => Ok(value),
+            Self::Text(_) | Self::Other => {
+                Err(SatinChainConfigError::InvalidValue { key, expected: INTEGER_EXPECTED })
+            }
+        }
+    }
+
+    /// The non-zero address the value of `key` is: 40 hexadecimal digits after `0x`.
+    fn non_zero_address(self, key: &'static str) -> Result<Address, SatinChainConfigError> {
+        let invalid = || SatinChainConfigError::InvalidValue { key, expected: ADDRESS_EXPECTED };
+        let Self::Text(text) = self else { return Err(invalid()) };
+        let digits = text.strip_prefix("0x").ok_or_else(invalid)?;
+        if digits.len() != 40 || !digits.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(invalid());
+        }
+        let address = Address::from_str(digits).map_err(|_| invalid())?;
+        if address.is_zero() {
+            return Err(SatinChainConfigError::ZeroValue(key));
+        }
+        Ok(address)
+    }
+}
+
+/// Collects a configuration object's entries whose key starts with [`PREFIX`] and the bootstrap
+/// keys', the last copy of a key given twice, and skips the others' values without keeping them.
 struct EntriesVisitor;
 
 impl<'de> Visitor<'de> for EntriesVisitor {
@@ -225,7 +317,7 @@ impl<'de> Visitor<'de> for EntriesVisitor {
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
         let mut entries = BTreeMap::new();
         while let Some(key) = map.next_key::<String>()? {
-            if is_satin_key(&key) {
+            if is_satin_key(&key) || SEQUENCER_REGISTRY_BOOTSTRAP_KEYS.contains(&key.as_str()) {
                 entries.insert(key, map.next_value::<Entry>()?);
             } else {
                 map.next_value::<IgnoredAny>()?;
@@ -279,8 +371,8 @@ impl<'de> Visitor<'de> for EntryVisitor {
         Ok(Entry::Other)
     }
 
-    fn visit_str<E: de::Error>(self, _: &str) -> Result<Entry, E> {
-        Ok(Entry::Other)
+    fn visit_str<E: de::Error>(self, value: &str) -> Result<Entry, E> {
+        Ok(Entry::Text(value.to_owned()))
     }
 
     fn visit_unit<E: de::Error>(self) -> Result<Entry, E> {
@@ -334,8 +426,15 @@ mod tests {
 
     const ACTIVATION: u64 = 1_800_000_000;
 
+    /// The bootstrap values [`genesis_config`] carries.
+    const BOOTSTRAP: SequencerRegistryBootstrap = SequencerRegistryBootstrap::new(
+        alloy_primitives::address!("0x4444444444444444444444444444444444444444"),
+        alloy_primitives::address!("0x5555555555555555555555555555555555555555"),
+        100,
+    );
+
     fn config() -> SatinChainConfig {
-        SatinChainConfig { activation_time: ACTIVATION }
+        SatinChainConfig { activation_time: ACTIVATION, sequencer_registry_bootstrap: BOOTSTRAP }
     }
 
     /// The keys of the configuration format's earlier versions: the `SequencerRegistry`'s roles and
@@ -353,8 +452,8 @@ mod tests {
         "satinBlockTxsDataLimit",
     ];
 
-    /// A mainnet-shaped genesis `config` object carrying [`config`] among other forks' keys, the
-    /// legacy forks' registry keys included.
+    /// A mainnet-shaped genesis `config` object carrying [`config`] among other forks' keys: the
+    /// legacy forks' registry keys, which are its bootstrap values, and others.
     fn genesis_config() -> Value {
         let mut object = json!({
             "chainId": 4326,
@@ -362,9 +461,6 @@ mod tests {
             "shanghaiTime": 0,
             "rex5Time": 1_760_000_000,
             "rex6Time": 1_770_000_000,
-            "rex5InitialSequencer": "0x4444444444444444444444444444444444444444",
-            "rex5InitialAdmin": "0x5555555555555555555555555555555555555555",
-            "rex6MinRotationDelay": 100,
             "optimism": { "eip1559Elasticity": 6, "eip1559Denominator": 50 },
             "blobSchedule": { "cancun": { "target": 3, "max": 6 } },
             "terminalTotalDifficultyPassed": true,
@@ -379,13 +475,20 @@ mod tests {
         SatinChainConfig::from_genesis_config(config)
     }
 
-    /// The configuration writes `satinTime` alone, and reading it back gives the same
-    /// configuration, from a `serde_json::Value` and from the object's text alike, with the legacy
-    /// forks' keys beside it read by nobody here.
+    /// The configuration writes `satinTime` and the three bootstrap keys, and reading it back
+    /// gives the same configuration, from a `serde_json::Value` and from the object's text alike,
+    /// with the other forks' keys beside it read by nobody here.
     #[test]
     fn test_the_key_round_trips() {
-        assert_eq!(serde_json::to_string(&config()).unwrap(), r#"{"satinTime":1800000000}"#);
+        assert_eq!(
+            serde_json::to_string(&config()).unwrap(),
+            r#"{"satinTime":1800000000,"rex5InitialSequencer":"0x4444444444444444444444444444444444444444","rex5InitialAdmin":"0x5555555555555555555555555555555555555555","rex6MinRotationDelay":100}"#
+        );
         assert_eq!(SATIN_CHAIN_CONFIG_KEYS, [SATIN_TIME_KEY]);
+        assert_eq!(
+            SEQUENCER_REGISTRY_BOOTSTRAP_KEYS,
+            ["rex5InitialSequencer", "rex5InitialAdmin", "rex6MinRotationDelay"]
+        );
 
         assert_eq!(parse(&genesis_config()), Ok(Some(config())));
         let text = genesis_config().to_string();
@@ -395,14 +498,102 @@ mod tests {
         );
     }
 
-    /// The schedule the configuration makes runs Satin from its activation and passes the
-    /// schedule's own check.
+    /// The schedule the configuration makes runs Satin from its activation, carries the bootstrap
+    /// values, and passes the schedule's own check.
     #[test]
     fn test_the_schedule_activates_satin() {
         let schedule = config().hardforks().unwrap();
         assert_eq!(schedule.spec_id(ACTIVATION - 1), None);
         assert_eq!(schedule.spec_id(ACTIVATION), Some(MegaSpecId::SATIN));
+        assert_eq!(schedule.sequencer_registry_bootstrap(), Some(BOOTSTRAP));
         assert_eq!(schedule.validate_schedule(), Ok(()));
+    }
+
+    /// A configuration that schedules Satin must carry each of the three bootstrap keys: one that
+    /// lacks one is refused, naming it. One that does not schedule Satin needs none of them.
+    #[test]
+    fn test_a_missing_bootstrap_key_is_refused() {
+        for key in SEQUENCER_REGISTRY_BOOTSTRAP_KEYS {
+            let mut config = genesis_config();
+            config.as_object_mut().unwrap().remove(key);
+            assert_eq!(parse(&config), Err(SatinChainConfigError::MissingKey(key)), "{key}");
+            assert_eq!(
+                SatinChainConfigError::MissingKey(key).to_string(),
+                format!("a chain configuration that schedules Satin must carry `{key}`")
+            );
+            config.as_object_mut().unwrap().remove(SATIN_TIME_KEY);
+            assert_eq!(parse(&config), Ok(None), "{key}: no Satin, no bootstrap needed");
+        }
+    }
+
+    /// A bootstrap value of zero is refused, naming its key: the zero address as either role,
+    /// written in any case, and a minimum rotation delay of zero.
+    #[test]
+    fn test_a_zero_bootstrap_value_is_refused() {
+        let zero_address = json!("0x0000000000000000000000000000000000000000");
+        for (key, zero) in [
+            (REX5_INITIAL_SEQUENCER_KEY, zero_address.clone()),
+            (REX5_INITIAL_ADMIN_KEY, zero_address),
+            (REX6_MIN_ROTATION_DELAY_KEY, json!(0)),
+        ] {
+            let mut config = genesis_config();
+            config.as_object_mut().unwrap().insert(key.into(), zero);
+            assert_eq!(parse(&config), Err(SatinChainConfigError::ZeroValue(key)), "{key}");
+        }
+        assert_eq!(
+            SatinChainConfigError::ZeroValue(REX5_INITIAL_ADMIN_KEY).to_string(),
+            "`rex5InitialAdmin` must not be zero"
+        );
+    }
+
+    /// A bootstrap address must be a string of 40 hexadecimal digits after `0x`, in either case,
+    /// and the rotation delay an integer; anything else is refused, naming the key. The last copy
+    /// of a bootstrap key given twice is read.
+    #[test]
+    fn test_a_bootstrap_value_of_the_wrong_type_is_refused() {
+        let with = |key: &str, value: Value| {
+            let mut config = genesis_config();
+            config.as_object_mut().unwrap().insert(key.into(), value);
+            parse(&config)
+        };
+        let mixed_case =
+            with(REX5_INITIAL_ADMIN_KEY, json!("0xAbCdEf0000000000000000000000000000000001"));
+        assert_eq!(
+            mixed_case.unwrap().unwrap().sequencer_registry_bootstrap.initial_admin,
+            alloy_primitives::address!("0xabcdef0000000000000000000000000000000001")
+        );
+        for key in [REX5_INITIAL_SEQUENCER_KEY, REX5_INITIAL_ADMIN_KEY] {
+            let refused =
+                Err(SatinChainConfigError::InvalidValue { key, expected: ADDRESS_EXPECTED });
+            for value in [
+                json!("4444444444444444444444444444444444444444"),
+                json!("0x44"),
+                json!("0x44444444444444444444444444444444444444444"),
+                json!("0x444444444444444444444444444444444444444g"),
+                json!(1),
+                json!(null),
+                json!(["0x4444444444444444444444444444444444444444"]),
+            ] {
+                assert_eq!(with(key, value.clone()), refused, "{key}: {value}");
+            }
+        }
+        let refused = Err(SatinChainConfigError::InvalidValue {
+            key: REX6_MIN_ROTATION_DELAY_KEY,
+            expected: INTEGER_EXPECTED,
+        });
+        for value in [json!("100"), json!(-1), json!(1.5), json!(null)] {
+            assert_eq!(with(REX6_MIN_ROTATION_DELAY_KEY, value.clone()), refused, "{value}");
+        }
+        let text = genesis_config().to_string();
+        let twice = text.replacen(
+            "\"rex6MinRotationDelay\":100",
+            "\"rex6MinRotationDelay\":0,\"rex6MinRotationDelay\":7",
+            1,
+        );
+        assert_ne!(twice, text);
+        let streamed =
+            SatinChainConfig::from_genesis_config(&mut serde_json::Deserializer::from_str(&twice));
+        assert_eq!(streamed.unwrap().unwrap().sequencer_registry_bootstrap.min_rotation_delay, 7);
     }
 
     /// A configuration without a Satin key does not activate Satin. One whose only Satin key is
@@ -533,7 +724,7 @@ mod tests {
             key: SATIN_TIME_KEY,
             expected: "an integer from 0 to 2^64 - 1",
         });
-        let at = |time| Ok(Some(SatinChainConfig { activation_time: time }));
+        let at = |time| Ok(Some(SatinChainConfig { activation_time: time, ..config() }));
         for (first, last, expected) in [
             ("1", "1800000000", at(ACTIVATION)),
             ("1800000000", "7", at(7)),

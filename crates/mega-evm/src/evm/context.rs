@@ -46,6 +46,15 @@ pub(crate) type MegaInnerContext<DB> =
 /// detention's ([`Detention`]), the SALT bucket multipliers that transaction has priced state
 /// gas with ([`BucketMultipliers`]) and the reads of the Oracle's storage it made through the
 /// oracle service ([`OracleReadRecord`]).
+///
+/// It holds the live system address it classifies transactions against: a transaction of the
+/// system shape from it is a Mega System Transaction, and one of another shape from it is invalid.
+/// A context built without one reads it once, when it is built, directly off its database
+/// ([`live_system_address`](crate::system::live_system_address)): outside every transaction, so
+/// no transaction loads the registry, finds it warm or pays for the read, and a transaction run
+/// on the context costs what it costs in a block. Block execution resolves the address after
+/// every block's pre-block steps and hands it in
+/// ([`set_system_address`](Self::set_system_address)).
 #[derive(Debug)]
 pub struct MegaContext<DB: Database, ExtEnvs: ExternalEnvTypes = EmptyExternalEnv> {
     pub(crate) inner: MegaInnerContext<DB>,
@@ -71,6 +80,8 @@ pub struct MegaContext<DB: Database, ExtEnvs: ExternalEnvTypes = EmptyExternalEn
     /// The creation the running transaction's `keylessDeploy` call started, while it runs. See
     /// the [`keyless`](crate::system::keyless) module.
     pub(crate) keyless_creation: Option<keyless::Started>,
+    /// The live system address the context classifies transactions against.
+    system_address: LiveSystemAddress,
     /// Whether the context runs the neutral configuration. See [`MegaContext::with_neutral_cfg`].
     #[cfg(any(test, feature = "test-utils"))]
     neutral: bool,
@@ -78,6 +89,16 @@ pub struct MegaContext<DB: Database, ExtEnvs: ExternalEnvTypes = EmptyExternalEn
     /// tooling installed a fixture fork's on the EVM. See [`MegaContext::read_static_gas`].
     #[cfg(any(test, feature = "test-utils"))]
     read_static_gas: Option<revm::interpreter::instructions::GasTable>,
+}
+
+/// The live system address a context classifies transactions against, as far as it knows it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LiveSystemAddress {
+    /// Read off the database or handed in: the address, or `None` when the registry names none.
+    Known(Option<Address>),
+    /// The read when the context was built failed: the next transaction reads it again, and fails
+    /// with the database's error if the read fails again.
+    Unread,
 }
 
 impl<DB: Database> MegaContext<DB, EmptyExternalEnv> {
@@ -93,11 +114,19 @@ impl<DB: Database> MegaContext<DB, EmptyExternalEnv> {
 impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// Creates a context over `db` that executes `spec` with the given external environments,
     /// under `spec`'s limits ([`ProtocolLimits::for_spec`]).
+    ///
+    /// It reads the live system address off `db` here, directly and outside every transaction
+    /// ([`live_system_address`](crate::system::live_system_address)), and classifies every
+    /// transaction against it until one is handed in
+    /// ([`with_system_address`](Self::with_system_address)). A read the database cannot serve is
+    /// made again by the next transaction, which fails with the database's error if it fails again.
     pub fn new_with_external_envs(
-        db: DB,
+        mut db: DB,
         spec: MegaSpecId,
         external_envs: ExternalEnvs<ExtEnvs>,
     ) -> Self {
+        let system_address = system::live_system_address(&mut db)
+            .map_or(LiveSystemAddress::Unread, LiveSystemAddress::Known);
         let cfg = spec_cfg(CfgEnv::new_with_spec(spec));
         let limits = ProtocolLimits::for_spec(spec).tx_runtime_limits;
         let inner: MegaInnerContext<DB> =
@@ -115,6 +144,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
             system_call: false,
             oracle_service: true,
             keyless_creation: None,
+            system_address,
             #[cfg(any(test, feature = "test-utils"))]
             neutral: false,
             #[cfg(any(test, feature = "test-utils"))]
@@ -260,6 +290,46 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// Modifies the L1 block info in place.
     pub fn modify_chain(&mut self, f: impl FnOnce(&mut L1BlockInfo)) {
         f(&mut self.inner.chain);
+    }
+
+    /// Classifies every transaction from the next one on against `system_address`, the live
+    /// system address, in place of the one the context read when it was built: `None` makes no
+    /// transaction a Mega System Transaction.
+    pub fn with_system_address(mut self, system_address: Option<Address>) -> Self {
+        self.set_system_address(system_address);
+        self
+    }
+
+    /// Classifies every transaction from the next one on against `system_address`. Block execution
+    /// hands in the address it resolved after the block's pre-block steps.
+    pub const fn set_system_address(&mut self, system_address: Option<Address>) {
+        self.system_address = LiveSystemAddress::Known(system_address);
+    }
+
+    /// The live system address the context classifies transactions against: `None` when the
+    /// registry names none, and while a read the database could not serve when the context was
+    /// built is still to be made again.
+    pub const fn system_address(&self) -> Option<Address> {
+        match self.system_address {
+            LiveSystemAddress::Known(address) => address,
+            LiveSystemAddress::Unread => None,
+        }
+    }
+
+    /// The live system address the next transaction is classified against, read off the database
+    /// now, directly and outside the transaction's journal, if the read when the context was built
+    /// failed.
+    ///
+    /// # Errors
+    ///
+    /// The database's, when that read fails again.
+    pub(crate) fn live_system_address(&mut self) -> Result<Option<Address>, DB::Error> {
+        if let LiveSystemAddress::Known(address) = self.system_address {
+            return Ok(address);
+        }
+        let address = system::live_system_address(self.inner.db_mut())?;
+        self.system_address = LiveSystemAddress::Known(address);
+        Ok(address)
     }
 
     /// The spec this context executes.

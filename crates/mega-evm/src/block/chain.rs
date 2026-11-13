@@ -7,9 +7,9 @@
 //! chain that ran the legacy forks, and whoever runs another names its schedule.
 
 use alloy_hardforks::ForkCondition;
-use alloy_primitives::BlockTimestamp;
+use alloy_primitives::{address, BlockTimestamp};
 
-use crate::{MegaHardfork, MegaHardforkConfig};
+use crate::{system::SequencerRegistryBootstrap, MegaHardfork, MegaHardforkConfig};
 
 /// `MegaETH` mainnet chain ID.
 pub const MAINNET_CHAIN_ID: u64 = 4326;
@@ -24,6 +24,10 @@ pub struct ChainActivation {
     pub chain_id: u64,
     /// When [`MegaHardfork::Satin`] activates; `None` while it is not scheduled.
     pub satin: Option<BlockTimestamp>,
+    /// The `SequencerRegistry`'s bootstrap values the chain's configuration carries: on a live
+    /// network, the roles Rex5 seeded its registry with and the minimum rotation delay Rex6 gave
+    /// it; `None` for a configuration that carries none.
+    pub sequencer_registry_bootstrap: Option<SequencerRegistryBootstrap>,
 }
 
 impl ChainActivation {
@@ -38,9 +42,12 @@ impl ChainActivation {
         }
     }
 
-    /// The hardfork schedule of this chain.
+    /// The hardfork schedule of this chain, carrying its bootstrap values.
     pub fn hardforks(&self) -> MegaHardforkConfig {
         let mut config = MegaHardforkConfig::new();
+        if let Some(bootstrap) = self.sequencer_registry_bootstrap {
+            config = config.with_sequencer_registry_bootstrap(bootstrap);
+        }
         for fork in MegaHardfork::VARIANTS {
             config.insert(*fork, self.condition(*fork));
         }
@@ -48,10 +55,30 @@ impl ChainActivation {
     }
 }
 
+/// The minimum rotation delay, in blocks, both live networks' configurations carry and Rex6 seeded
+/// their registries with.
+const MIN_ROTATION_DELAY: u64 = 21_600;
+
 /// Activation table of the known `MegaETH` chains.
 pub const CHAIN_ACTIVATIONS: [ChainActivation; 2] = [
-    ChainActivation { chain_id: MAINNET_CHAIN_ID, satin: None },
-    ChainActivation { chain_id: TESTNET_CHAIN_ID, satin: None },
+    ChainActivation {
+        chain_id: MAINNET_CHAIN_ID,
+        satin: None,
+        sequencer_registry_bootstrap: Some(SequencerRegistryBootstrap::new(
+            address!("0x7a49197dd1ebb8d38c67e4eb7626af6ade432445"),
+            address!("0x92e0e0b15e3e99b32c9ed9ad284f939553c7b7d6"),
+            MIN_ROTATION_DELAY,
+        )),
+    },
+    ChainActivation {
+        chain_id: TESTNET_CHAIN_ID,
+        satin: None,
+        sequencer_registry_bootstrap: Some(SequencerRegistryBootstrap::new(
+            address!("0xB8DB54eBA7Ae650d14F362de461516a4FF1551FC"),
+            address!("0x1d9BD232C44B39341e670B735c7F423c40426b34"),
+            MIN_ROTATION_DELAY,
+        )),
+    },
 ];
 
 /// The activation table of a known chain, or `None` for any other chain.
@@ -112,8 +139,8 @@ mod tests {
     /// A scheduled chain resolves the spec its table gives, at the timestamp the table gives.
     #[test]
     fn test_a_scheduled_activation_resolves_at_its_timestamp() {
-        let hf =
-            ChainActivation { chain_id: MAINNET_CHAIN_ID, satin: Some(1_800_000_000) }.hardforks();
+        let mainnet = chain_activation(MAINNET_CHAIN_ID).expect("a known chain");
+        let hf = ChainActivation { satin: Some(1_800_000_000), ..mainnet }.hardforks();
 
         assert_eq!(hf.spec_id(1_799_999_999), None);
         assert_eq!(hf.spec_id(1_800_000_000), Some(MegaSpecId::SATIN));
@@ -129,6 +156,13 @@ mod tests {
             for fork in MegaHardfork::VARIANTS {
                 assert_eq!(schedule.get(*fork), Some(&activation.condition(*fork)));
             }
+            let bootstrap = activation.sequencer_registry_bootstrap.expect("a live network's");
+            assert_eq!(
+                schedule.sequencer_registry_bootstrap(),
+                Some(bootstrap),
+                "the schedule carries the chain's bootstrap values"
+            );
+            assert!(bootstrap.is_usable());
         }
         for chain_id in [0, 1, 6342, 999_999] {
             assert!(hardfork_schedule(chain_id).is_none(), "chain {chain_id} is unknown");

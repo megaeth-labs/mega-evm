@@ -148,9 +148,11 @@ use crate::{
     },
     estimated_da_size,
     system::{
-        check_system_contract, classify_system_transaction, is_apply_pending_changes_due,
-        live_system_address, system_contract_specs, transact_apply_pending_changes,
-        write_unexpected_code, SystemContractCheckError,
+        check_system_contract, classify_system_transaction, create2_factory_spec,
+        deploy_sequencer_registry, deploy_system_contract, flat_system_contract_specs,
+        is_apply_pending_changes_due, resolve_system_address, transact_apply_pending_changes,
+        write_unexpected_code, SequencerRegistryError, SequencerRegistryRefusal,
+        SystemContractCheckError,
     },
     BlockGasCounters, BlockLimiter, BlockLimits, BucketId, ExternalEnvTypes,
     MegaBlockExecutionResult, MegaBlockTxResult, MegaContext, MegaEvm, MegaHardforks,
@@ -174,14 +176,16 @@ pub struct MegaBlockExecutionCtx {
     ///
     /// With the chain's schedule and the block's own timestamp it decides whether a fork
     /// activates in this block, which makes the block admit only deposits, and whether Satin
-    /// does, which makes the pre-block step check the system contracts and the EIP-7997 factory.
-    /// The executor works both out itself.
+    /// does, which makes the pre-block step check the EIP-7997 factory. The executor works both
+    /// out itself.
     ///
-    /// `None` is a block with no parent to compare against, such as a genesis block, and neither
-    /// rule applies to it. It is accepted only where no parent could change that: when every fork
-    /// the schedule activates is active from genesis. Where one could, executing the block fails
-    /// with [`MegaBlockExecutionError::MissingParentTimestamp`], since the block would otherwise
-    /// run as an ordinary one. A caller that executes a block with a parent must supply it.
+    /// `None` is a block with no parent to compare against. The genesis block, number zero, has
+    /// none, and neither rule applies to it, whenever Satin activates at or before its timestamp.
+    /// Any other block is accepted without it only where no parent could change the rules: when
+    /// every fork the schedule activates is active from timestamp zero. Where one could, executing
+    /// the block fails with [`MegaBlockExecutionError::MissingParentTimestamp`], since the block
+    /// would otherwise run as an ordinary one. A caller that executes a block with a parent must
+    /// supply it.
     pub parent_timestamp: Option<u64>,
     /// The builder's packing policy: the limits only a builder applies, and a cap on the block's
     /// data-size budget below the protocol's ([`BlockLimits`]).
@@ -214,10 +218,11 @@ impl MegaBlockExecutionCtx {
 pub enum MegaBlockExecutionError {
     /// A block that activates a fork carries a transaction that is not a deposit.
     UnexpectedNonDepositTxInActivationBlock,
-    /// The context names no parent timestamp for a block whose activation rules depend on it: a
-    /// fork the schedule activates after genesis is active at the block, and whether it activates
-    /// in this block, which makes the block deposit-only and, for Satin, makes the pre-block step
-    /// check the predeploys, is decided by the parent's timestamp.
+    /// The context names no parent timestamp for a block other than the genesis block whose
+    /// activation rules depend on it: a fork the schedule activates after timestamp zero is active
+    /// at the block, and whether it activates in this block, which makes the block deposit-only
+    /// and, for Satin, makes the pre-block step check the EIP-7997 factory, is decided by the
+    /// parent's timestamp.
     ///
     /// The caller's omission, not a verdict on the block: an internal error. Executing the block
     /// without the timestamp would run it as an ordinary block.
@@ -232,12 +237,11 @@ pub enum MegaBlockExecutionError {
         /// The footprint the block has left.
         available_block_da_footprint: u64,
     },
-    /// In the block in which Satin activates, a predeploy's address does not hold the code Satin
-    /// expects: it holds other code, an older version of the contract, no code, or no account.
+    /// In the block in which Satin activates, the EIP-7997 factory's address does not hold the
+    /// factory's code: it holds other code, no code, or no account.
     ///
-    /// Satin deploys and upgrades nothing: the legacy forks install the six system contracts, the
-    /// `SequencerRegistry` and the Oracle at v2.0.0, and OP's genesis tooling the EIP-7997
-    /// factory, so a chain without them is not one Satin runs on.
+    /// Satin does not deploy the factory, which OP's genesis tooling preinstalls, so a chain
+    /// without it is not one Satin runs on.
     UnexpectedSystemContractCode {
         /// The predeploy's address.
         address: Address,
@@ -252,6 +256,16 @@ pub enum MegaBlockExecutionError {
         /// What the call ended with: its result, or the error that stopped it.
         message: String,
     },
+    /// The `SequencerRegistry` makes the block invalid: its deployment found code it cannot
+    /// migrate, or the resolution of the block's live system address found it absent, holding
+    /// other code, or naming no system address.
+    SequencerRegistry(SequencerRegistryRefusal),
+    /// The block must seed the `SequencerRegistry` or migrate it from version 1.0.0, and the chain
+    /// configuration carries no usable bootstrap values for it: none, or one of them zero.
+    ///
+    /// The node's configuration, which its parser refuses, not a verdict on the block: an internal
+    /// error.
+    UnusableRegistryBootstrap,
     /// An outcome handed to a delayed commit executed against another nonce or balance of its
     /// sender than the block holds now: a commit since its execution moved them.
     ///
@@ -291,6 +305,11 @@ impl fmt::Display for MegaBlockExecutionError {
             Self::ApplyPendingChangesFailed { message } => {
                 write!(f, "the SequencerRegistry's pending changes could not be applied: {message}")
             }
+            Self::SequencerRegistry(refusal) => write!(f, "{refusal}"),
+            Self::UnusableRegistryBootstrap => f.write_str(
+                "the SequencerRegistry must be seeded or migrated, and the chain configuration \
+                 carries no usable bootstrap values for it",
+            ),
             Self::StaleOutcome { tx_hash, sender } => write!(
                 f,
                 "stale outcome of transaction {tx_hash}: it executed against another nonce or \
@@ -304,17 +323,19 @@ impl core::error::Error for MegaBlockExecutionError {}
 
 impl From<MegaBlockExecutionError> for BlockExecutionError {
     /// A block refused for what the node itself does is an internal error: an outcome the builder
-    /// let go stale and a parent timestamp the caller left out say nothing about the block, and a
-    /// node must not mark a block invalid because of its own choices. Every other refusal is a
-    /// verdict on the block, a validation error.
+    /// let go stale, a parent timestamp the caller left out and bootstrap values its configuration
+    /// lacks say nothing about the block, and a node must not mark a block invalid because of its
+    /// own choices. Every other refusal is a verdict on the block, a validation error.
     fn from(error: MegaBlockExecutionError) -> Self {
         match error {
             MegaBlockExecutionError::StaleOutcome { .. } |
-            MegaBlockExecutionError::MissingParentTimestamp { .. } => Self::other(error),
+            MegaBlockExecutionError::MissingParentTimestamp { .. } |
+            MegaBlockExecutionError::UnusableRegistryBootstrap => Self::other(error),
             MegaBlockExecutionError::UnexpectedNonDepositTxInActivationBlock |
             MegaBlockExecutionError::TransactionDaFootprintAboveGasLimit { .. } |
             MegaBlockExecutionError::UnexpectedSystemContractCode { .. } |
-            MegaBlockExecutionError::ApplyPendingChangesFailed { .. } => {
+            MegaBlockExecutionError::ApplyPendingChangesFailed { .. } |
+            MegaBlockExecutionError::SequencerRegistry(_) => {
                 Self::Validation(alloy_evm::block::BlockValidationError::Other(Box::new(error)))
             }
         }
@@ -357,7 +378,7 @@ pub struct MegaBlockExecutor<E, R: OpReceiptBuilder, Spec> {
 struct ActivationRules {
     /// A fork activates in the block, so it admits only deposits.
     admits_only_deposits: bool,
-    /// Satin activates in the block, so the pre-block step checks the predeploys.
+    /// Satin activates in the block, so the pre-block step checks the EIP-7997 factory.
     satin_activation_block: bool,
 }
 
@@ -415,10 +436,12 @@ where
     ) -> Self {
         let block_gas_limit = evm.ctx().block().gas_limit();
         let block_timestamp = evm.ctx().block().timestamp().saturating_to();
+        let genesis = evm.ctx().block().number().is_zero();
         let protocol_limits = ProtocolLimits::for_spec(evm.ctx().spec());
         evm.set_tx_runtime_limits(protocol_limits.tx_runtime_limits);
         let limiter = BlockLimiter::new(ctx.block_limits.within(&protocol_limits), block_gas_limit);
-        let activation = Self::activation_rules(&spec, ctx.parent_timestamp, block_timestamp);
+        let activation =
+            Self::activation_rules(&spec, genesis, ctx.parent_timestamp, block_timestamp);
         Self {
             spec,
             receipt_builder,
@@ -436,18 +459,24 @@ where
     /// The activation rules of the block at `block_timestamp` whose parent is at
     /// `parent_timestamp`, decided once for the block.
     ///
-    /// Without the parent's timestamp the rules are known only where no parent could change
-    /// them: no fork the schedule activates after genesis is active at the block
-    /// ([`MegaHardforks::activation_depends_on_parent`]), so neither rule applies. That is a block
-    /// with no parent, such as a genesis block, or a chain whose forks are all active from the
-    /// start. Any other block is refused with [`MegaBlockExecutionError::MissingParentTimestamp`],
-    /// since running it as an ordinary block would silently skip both rules.
+    /// The `genesis` block has no parent, and a fork active at its timestamp is active from it:
+    /// no fork activates in it, so neither rule applies, as on a chain on which Satin is active
+    /// from genesis no block is Satin's activation block. Without the parent's timestamp the rules
+    /// of any other block are known only where no parent could change them: no fork the schedule
+    /// activates after timestamp zero is active at the block
+    /// ([`MegaHardforks::activation_depends_on_parent`]), so neither rule applies. Any other block
+    /// is refused with [`MegaBlockExecutionError::MissingParentTimestamp`], since running it as an
+    /// ordinary block would silently skip both rules.
     fn activation_rules(
         spec: &Spec,
+        genesis: bool,
         parent_timestamp: Option<u64>,
         block_timestamp: u64,
     ) -> Result<ActivationRules, MegaBlockExecutionError> {
         match parent_timestamp {
+            _ if genesis => {
+                Ok(ActivationRules { admits_only_deposits: false, satin_activation_block: false })
+            }
             Some(parent) => Ok(ActivationRules {
                 admits_only_deposits: spec.admits_only_deposits(parent, block_timestamp),
                 satin_activation_block: spec.is_satin_activation_block(parent, block_timestamp),
@@ -474,8 +503,8 @@ where
         self.activation.clone().map(|rules| rules.admits_only_deposits)
     }
 
-    /// Whether Satin activates in this block, which makes the pre-block step check the system
-    /// contracts and the EIP-7997 factory.
+    /// Whether Satin activates in this block, which makes the pre-block step check the EIP-7997
+    /// factory.
     ///
     /// The two answers differ: an Optimism fork at or after Jovian also makes a block
     /// deposit-only. Decided as [`admits_only_deposits`](Self::admits_only_deposits) is.
@@ -655,13 +684,34 @@ where
             .unwrap_or_default())
     }
 
-    /// Whether `tx` is a Mega System Transaction: sent from the live system address with the
-    /// system shape. A transaction from that address of another shape is not (the engine refuses
-    /// it when it validates it). A read the database cannot serve is an internal error.
+    /// Whether `tx` is a Mega System Transaction: sent from the live system address the EVM
+    /// classifies transactions against, which the pre-block steps resolved, with the system shape.
+    /// A transaction from that address of another shape is not (the engine refuses it when it
+    /// validates it). A read the database cannot serve, which only an EVM whose read when it was
+    /// built failed makes before the pre-block steps resolved the address, is an internal error.
     fn is_system_transaction(&mut self, tx: &MegaTransaction) -> Result<bool, BlockExecutionError> {
-        let system_address = live_system_address(&mut *self.evm.ctx_mut().db_mut())
-            .map_err(BlockExecutionError::other)?;
+        let system_address =
+            self.evm.ctx_mut().live_system_address().map_err(BlockExecutionError::other)?;
         Ok(classify_system_transaction(tx, system_address).unwrap_or(false))
+    }
+
+    /// The bootstrap values the `SequencerRegistry`'s deployment needs from the chain
+    /// configuration, and the refusals its deployment and the resolution of the live system
+    /// address make, as the block's errors: a failed read and missing bootstrap values are the
+    /// node's internal errors, a refusal a verdict on the block.
+    fn registry_error<E>(error: SequencerRegistryError<E>) -> BlockExecutionError
+    where
+        E: core::error::Error + Send + Sync + 'static,
+    {
+        match error {
+            SequencerRegistryError::Database(error) => BlockExecutionError::other(error),
+            SequencerRegistryError::UnusableBootstrap => {
+                MegaBlockExecutionError::UnusableRegistryBootstrap.into()
+            }
+            SequencerRegistryError::Refused(refusal) => {
+                MegaBlockExecutionError::SequencerRegistry(refusal).into()
+            }
+        }
     }
 }
 
@@ -744,38 +794,41 @@ where
     /// Runs what a block does before its transactions.
     ///
     /// In order: the reset of the block-hash and bucket records and of what the block reported of
-    /// the L1 block contract, the EIP-2935 and EIP-4788 pre-block calls, in the block in which
-    /// Satin activates the check of the predeploys, and the `SequencerRegistry`'s due role
-    /// changes. Each step's state is committed here, on its own and read-only entries included,
-    /// rather than inside its helper, so a commit hook on the database sees every step's read and
-    /// write set. The sequence of committed states is the witness a stateless client needs.
+    /// the L1 block contract, then the pre-block sequence:
+    ///
+    /// 1. the EIP-2935 call, and 2. the EIP-4788 call, neither made in the genesis block, whose
+    ///    parent beacon block root must be zero;
+    /// 3. in the block in which Satin activates, and in no other, the check of the EIP-7997
+    ///    factory;
+    /// 4. the deployment of the Oracle, the high-precision timestamp, `KeylessDeploy`,
+    ///    `MegaAccessControl` and `MegaLimitControl`, each a step of its own;
+    /// 5. the read of whether the `SequencerRegistry` has a role change due, and when it has, the
+    ///    `applyPendingChanges()` call;
+    /// 6. the deployment of the `SequencerRegistry`, from the chain configuration's bootstrap
+    ///    values when it must be seeded or migrated;
+    /// 7. the resolution of the block's live system address, which the EVM classifies every
+    ///    transaction of the block against.
+    ///
+    /// Each step's state is committed here, on its own, before the next step runs, read-only
+    /// entries included, rather than inside its helper, so every step sees the ones before it and
+    /// a commit hook on the database sees every step's read and write set. The sequence of
+    /// committed states is the witness a stateless client needs. Nothing is charged, and nothing
+    /// counts toward the block's counters.
     ///
     /// Nothing reads the L1 block contract here. op-revm's handler fetches the L1 block info when
     /// it deducts the caller of the first non-deposit transaction, which is after the block's own
     /// L1 info deposit has committed, and the first transaction that reads it reports what it read
     /// in its own returned state.
     ///
-    /// The EIP-2935 and EIP-4788 calls run before the check. They write the parent hash and the
-    /// parent beacon root into their own contracts (`0x0…2935` and `0x0…4788`), which are not
-    /// `MegaETH` system contracts and do not read them, so their outcome does not depend on the
-    /// check that follows. Each runs on the pre-block budget
+    /// Each pre-block call runs on the pre-block budget
     /// ([`PRE_BLOCK_CALL_GAS_LIMIT`](crate::constants::PRE_BLOCK_CALL_GAS_LIMIT)), and one that
-    /// does not succeed refuses the block before its state is committed.
-    ///
-    /// The check is made once, in the block in which Satin activates
-    /// (see [`MegaBlockExecutor::is_satin_activation_block`]): each of the seven predeploys must
-    /// hold the code Satin expects, and its account is committed as a read-only entry; any
-    /// other block reads none of them. Satin deploys and upgrades nothing: a chain reaches it
-    /// through the legacy forks, which leave the six system contracts at the versions Satin
-    /// runs, and the EIP-7997 factory is OP's predeploy.
-    ///
-    /// The registry's role changes come after. Its pending slots are read and committed as a
-    /// read-only state whatever they say, and when a change is due in this block the
-    /// `applyPendingChanges()` call applies it on the same pre-block budget, refusing the block
-    /// if it does not succeed. So a rotation due in this block governs this block's
-    /// system-address transactions: each reads the live system address out of the registry when
-    /// it is validated, after these steps are committed, and nothing inside the block can
-    /// change it again.
+    /// does not succeed refuses the block before its state is committed. A deployment installs a
+    /// missing system contract and replaces one whose code differs, keeping its storage, and
+    /// records one that holds the expected code as a read-only entry; the registry is seeded when
+    /// its address holds no code, migrated in place from version 1.0.0, and refuses the block when
+    /// it holds other code. The resolution comes last, on the state every other step left, so a
+    /// rotation due in this block governs this block's Mega System Transactions; nothing inside the
+    /// block can change the address again, and it refuses the block when the registry names none.
     fn apply_pre_execution_changes(&mut self) -> Result<(), BlockExecutionError> {
         // A block whose activation rules cannot be decided is refused before anything runs.
         self.admits_only_deposits()?;
@@ -805,40 +858,50 @@ where
             self.commit(state);
         }
 
-        // The EIP-2935 / EIP-4788 calls above do not depend on these predeploys: they target
-        // their own contracts, not the MegaETH system addresses or the factory.
+        // The EIP calls above do not depend on what follows: they target their own contracts,
+        // not the MegaETH system addresses or the factory.
         if self.is_satin_activation_block()? {
-            for spec in system_contract_specs() {
-                let state =
-                    check_system_contract(self.evm.db_mut(), &spec).map_err(
-                        |error| match error {
-                            SystemContractCheckError::Database(error) => {
-                                BlockExecutionError::other(error)
-                            }
-                            SystemContractCheckError::UnexpectedCode {
-                                address,
-                                expected,
-                                found,
-                            } => MegaBlockExecutionError::UnexpectedSystemContractCode {
-                                address,
-                                expected,
-                                found,
-                            }
-                            .into(),
-                        },
-                    )?;
-                self.commit(state);
-            }
+            let state = check_system_contract(self.evm.db_mut(), &create2_factory_spec()).map_err(
+                |error| match error {
+                    SystemContractCheckError::Database(error) => BlockExecutionError::other(error),
+                    SystemContractCheckError::UnexpectedCode { address, expected, found } => {
+                        MegaBlockExecutionError::UnexpectedSystemContractCode {
+                            address,
+                            expected,
+                            found,
+                        }
+                        .into()
+                    }
+                },
+            )?;
+            self.commit(state);
         }
 
-        let block_number = self.evm.block().number().saturating_to();
-        let (due, reads) = is_apply_pending_changes_due(self.evm.db_mut(), block_number)
-            .map_err(BlockExecutionError::other)?;
+        for spec in flat_system_contract_specs() {
+            let state = deploy_system_contract(self.evm.db_mut(), &spec)
+                .map_err(BlockExecutionError::other)?;
+            self.commit(state);
+        }
+
+        let block_number = self.evm.block().number();
+        let (due, reads) =
+            is_apply_pending_changes_due(self.evm.db_mut(), block_number.saturating_to())
+                .map_err(BlockExecutionError::other)?;
         self.commit(reads);
         if due {
             let ResultAndState { state, .. } = transact_apply_pending_changes(&mut self.evm)?;
             self.commit(state);
         }
+
+        let bootstrap = self.spec.sequencer_registry_bootstrap();
+        let state = deploy_sequencer_registry(self.evm.db_mut(), block_number, bootstrap)
+            .map_err(Self::registry_error)?;
+        self.commit(state);
+
+        let (system_address, state) =
+            resolve_system_address(self.evm.db_mut()).map_err(Self::registry_error)?;
+        self.commit(state);
+        self.evm.ctx_mut().set_system_address(Some(system_address));
 
         Ok(())
     }

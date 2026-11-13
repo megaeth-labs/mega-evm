@@ -18,8 +18,8 @@ use alloy_op_evm::OpTx;
 use alloy_primitives::{address, Address, Bytes, TxKind, U256};
 use mega_evm::{
     test_utils::{
-        neutral_cfg, neutralize_evm, op_transaction, take_system_address_read,
-        zero_fee_l1_block_info, BytecodeBuilder, MemoryDatabase,
+        neutral_cfg, neutralize_evm, op_transaction, zero_fee_l1_block_info, BytecodeBuilder,
+        MemoryDatabase,
     },
     EthSpecId, EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
     VolatileDataAccess,
@@ -89,9 +89,8 @@ fn run_both(fork: EthSpecId, db: MemoryDatabase, tx: TxEnv) -> (Outcome, Outcome
     let mut mega = MegaEvm::new(ctx);
     neutralize_evm(&mut mega, fork).expect("a neutral fork");
     let outcome = mega.execute_transaction(OpTx(op_transaction(tx.clone()))).unwrap();
-    let mut state = outcome.result_and_state.state;
-    take_system_address_read(&mut state);
-    let mega = ExecResultAndState::new(outcome.result_and_state.result, state);
+    let mega =
+        ExecResultAndState::new(outcome.result_and_state.result, outcome.result_and_state.state);
 
     let op = OpEvm::new(op_ctx, NoOpInspector).transact(op_transaction(tx)).unwrap();
     (mega, op, outcome.gas.history)
@@ -280,7 +279,6 @@ fn run_against_ethereum(fork: EthSpecId, db: MemoryDatabase, tx: TxEnv) -> (Outc
     neutralize_evm(&mut mega, fork).expect("a neutral fork");
     let outcome = mega.execute_transaction(OpTx(op_transaction(tx.clone()))).unwrap();
     let mut state = outcome.result_and_state.state;
-    take_system_address_read(&mut state);
     for vault in [BASE_FEE_RECIPIENT, L1_FEE_RECIPIENT, OPERATOR_FEE_RECIPIENT] {
         if state.get(&vault).is_some_and(|account| account.is_empty()) {
             state.remove(&vault);

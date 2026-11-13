@@ -268,12 +268,14 @@ fn test_another_shape_from_the_live_system_address_is_invalid() {
     }
 }
 
-/// Every transaction reads the registry when it is validated, whatever its shape and whoever
-/// sends it: its returned state holds the registry's account, untouched, and the system-address
-/// slot, unchanged, and a database that cannot serve the registry's account or that slot fails it
-/// with the database's error, a deposit included.
+/// No transaction reads the registry for its classification, whatever its shape and whoever sends
+/// it: the EVM read the live system address when it was built, so the transaction's returned state
+/// holds no entry of the registry, and an EVM handed the address runs every shape on a database
+/// that cannot serve the registry's account or its system-address slot. Only an EVM whose own read
+/// failed when it was built makes the read again, for its next transaction, and fails it with the
+/// database's error, a deposit included.
 #[test]
-fn test_every_transaction_reads_the_registry() {
+fn test_no_transaction_reads_the_registry() {
     let funded = || {
         chain_db()
             .account_code(OFF_WHITELIST, Bytes::from_static(&[STOP]))
@@ -289,40 +291,39 @@ fn test_every_transaction_reads_the_registry() {
             .execute_transaction(tx.clone())
             .expect("an ordinary transaction");
         assert!(outcome.result.is_success(), "{shape}: {:?}", outcome.result);
-        let registry = &outcome.state[&SEQUENCER_REGISTRY_ADDRESS];
-        assert!(!registry.is_touched(), "{shape}: a read-only entry");
-        let slot = &registry.storage[&CURRENT_SYSTEM_ADDRESS];
-        assert!(!slot.is_changed(), "{shape}");
-        assert_eq!(slot.present_value(), U256::from_be_slice(MEGA_SYSTEM_ADDRESS.as_slice()));
+        assert!(
+            !outcome.state.contains_key(&SEQUENCER_REGISTRY_ADDRESS),
+            "{shape}: the transaction read nothing of the registry"
+        );
 
         let mut account = ErrorInjectingDatabase::new(funded());
         account.fail_on_account = Some(SEQUENCER_REGISTRY_ADDRESS);
         let mut slot = ErrorInjectingDatabase::new(funded());
         slot.fail_on_storage = Some((SEQUENCER_REGISTRY_ADDRESS, CURRENT_SYSTEM_ADDRESS));
         for db in [account, slot] {
+            let handed = chain_context(db.clone()).with_system_address(Some(MEGA_SYSTEM_ADDRESS));
+            let outcome = MegaEvm::new(handed)
+                .execute_transaction(tx.clone())
+                .expect("an EVM handed the address reads no registry");
+            assert!(outcome.result.is_success(), "{shape}: {:?}", outcome.result);
             let error = MegaEvm::new(chain_context(db))
                 .execute_transaction(tx.clone())
-                .expect_err("the registry is read");
+                .expect_err("the read the EVM could not make when it was built is made again");
             assert!(matches!(error, EVMError::Database(_)), "{shape}: {error:?}");
         }
     }
 }
 
-/// Every transaction starts with the registry's account and its system-address slot warm, as
-/// EIP-3651 starts the block beneficiary warm: validation reads the live system address for every
-/// transaction, whatever its shape. A user's call to the Oracle's `setSlots` makes the Oracle ask
-/// the registry for the system address itself, and that `SLOAD` pays the warm price, as a legacy
-/// call, as an EIP-2930 call, and as one whose access list names the slot alike: the shape of the
-/// envelope changes nothing the transaction pays, and the access list adds only its own
-/// intrinsic cost.
+/// No transaction starts with the registry's account or its system-address slot warm: a user's
+/// call to the Oracle's `setSlots` makes the Oracle ask the registry for the system address, and
+/// that `SLOAD` pays the cold price, as a legacy call and as an EIP-2930 call alike, which spend
+/// the same gas on every ledger, while an access list naming the slot makes it warm, as it makes
+/// any slot. A Mega System Transaction's own call to the Oracle pays the same cold reads.
 #[test]
-fn test_every_transaction_warms_the_registry_and_its_slot() {
-    let run = |tx: MegaTransaction| {
-        let mut evm =
-            MegaEvm::new(chain_context(chain_db().account_balance(CALLER, U256::from(FUNDS))))
-                .with_inspector(GasInspector::new());
-        let outcome = evm.execute_transaction(tx).expect("an ordinary transaction");
-        assert!(!outcome.result.is_success(), "the Oracle refuses a write from a user");
+fn test_a_transaction_that_reads_the_registry_pays_cold() {
+    let run = |db: MemoryDatabase, tx: MegaTransaction| {
+        let mut evm = MegaEvm::new(chain_context(db)).with_inspector(GasInspector::new());
+        let outcome = evm.execute_transaction(tx).expect("a valid transaction");
         let sloads: Vec<u64> = evm
             .inspector()
             .records()
@@ -334,41 +335,48 @@ fn test_every_transaction_warms_the_registry_and_its_slot() {
         assert_eq!(sloads.len(), 1, "the registry reads its one slot: {sloads:?}");
         (outcome, sloads[0])
     };
-    let write = || {
+    let user = || chain_db().account_balance(CALLER, U256::from(FUNDS));
+    let write = |caller| {
         legacy_tx(
-            CALLER,
+            caller,
             TxKind::Call(ORACLE_CONTRACT_ADDRESS),
             set_slot(ORACLE_SLOT, B256::with_last_byte(1)),
             0,
         )
     };
 
-    let warm = mega_evm::satin_gas_params().warm_storage_read_cost();
+    let params = mega_evm::satin_gas_params();
+    let cold = params.warm_storage_read_cost() + params.cold_storage_additional_cost();
+    let warm = params.warm_storage_read_cost();
 
-    let (shaped, legacy) = run(write());
-    let (unshaped, typed_call) = run(typed(write(), 1));
+    let (shaped, legacy) = run(user(), write(CALLER));
+    let (unshaped, typed_call) = run(user(), typed(write(CALLER), 1));
     for (shape, outcome) in [("legacy", &shaped), ("EIP-2930", &unshaped)] {
+        assert!(!outcome.result.is_success(), "{shape}: the Oracle refuses a write from a user");
         let registry = &outcome.state[&SEQUENCER_REGISTRY_ADDRESS];
-        assert!(!registry.is_touched(), "{shape}: the read writes nothing");
+        assert!(!registry.is_touched(), "{shape}: the Oracle's read writes nothing");
         assert!(registry.storage.contains_key(&CURRENT_SYSTEM_ADDRESS), "{shape}: the slot");
     }
-    assert_eq!(legacy, warm, "the legacy call's SLOAD is warm");
-    assert_eq!(typed_call, warm, "and so is the EIP-2930 call's");
+    assert_eq!(legacy, cold, "the legacy call's SLOAD is cold");
+    assert_eq!(typed_call, cold, "and so is the EIP-2930 call's");
     assert_eq!(shaped.gas, unshaped.gas, "the two spend the same gas on every ledger");
 
-    let mut listed = typed(write(), 1);
+    let mut listed = typed(write(CALLER), 1);
     listed.0.base.access_list = AccessList(vec![AccessListItem {
         address: SEQUENCER_REGISTRY_ADDRESS,
         storage_keys: vec![B256::from(CURRENT_SYSTEM_ADDRESS)],
     }]);
-    let (_, listed) = run(listed);
-    assert_eq!(listed, warm, "an access list naming the slot makes it no warmer");
+    let (_, listed) = run(user(), listed);
+    assert_eq!(listed, warm, "an access list naming the slot makes it warm");
+
+    let (system, read) = run(chain_db(), write(MEGA_SYSTEM_ADDRESS));
+    assert!(system.result.is_success(), "the system address writes the Oracle");
+    assert_eq!(read, cold, "a Mega System Transaction's read of the registry is cold too");
 }
 
-/// The registry's account and slot every transaction reads are an untouched entry of its state,
-/// and a commit skips an account nothing touched: committing a transaction writes nothing of the
-/// registry, whether the state holds a registry or not, so the state root moves as it would
-/// without the read.
+/// A transaction leaves no entry of the registry in its state, and committing it writes nothing of
+/// the registry, whether the state holds a registry or not, so the state root moves as it would
+/// without the registry.
 #[test]
 fn test_committing_a_transaction_writes_nothing_of_the_registry() {
     for (holds, db) in [("a registry", chain_db()), ("no registry", MemoryDatabase::default())] {
@@ -380,7 +388,7 @@ fn test_committing_a_transaction_writes_nothing_of_the_registry() {
         let tx = legacy_tx(CALLER, TxKind::Call(OFF_WHITELIST), Bytes::new(), 0);
         let outcome = evm.execute_transaction(tx).expect("an ordinary transaction");
         assert!(outcome.result.is_success(), "{holds}: {:?}", outcome.result);
-        assert!(outcome.state.contains_key(&SEQUENCER_REGISTRY_ADDRESS), "{holds}: it was read");
+        assert!(!outcome.state.contains_key(&SEQUENCER_REGISTRY_ADDRESS), "{holds}: not read");
         drop(evm);
         state.commit(outcome.state.clone());
 

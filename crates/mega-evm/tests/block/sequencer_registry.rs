@@ -1,13 +1,13 @@
 //! The `SequencerRegistry`'s role changes, applied before a block's transactions, and the live
-//! system address read out of it.
+//! system address resolved out of it once per block.
 //!
-//! The registry the legacy forks left is checked once, by Satin's activation block, which refuses
-//! a chain without it. Before every block's transactions the executor reads whether a role change
-//! is due in the block and, when one is, makes the `applyPendingChanges()` system call. Each step
-//! commits a state of its own, which a commit hook on the block's state receives, the read as a
-//! read-only entry. The executor's pre-block steps do not read the system address: every
-//! transaction reads it out of the registry when it is validated, so every EVM — the block's, or
-//! one a node builds outside block execution — promotes the address the state names.
+//! Before every block's transactions the executor reads whether a role change is due in the block
+//! and, when one is, makes the `applyPendingChanges()` system call, then deploys the registry, then
+//! resolves the block's live system address from it. Each step commits a state of its own, which a
+//! commit hook on the block's state receives, the reads as read-only entries, the resolution last.
+//! No transaction reads the registry for its classification: the block's EVM classifies against
+//! the address the block resolved, and one a node builds outside block execution against the one
+//! it read off the state when it was built.
 
 use alloy_consensus::{transaction::Recovered, Sealed, Signed, TxEip1559};
 use alloy_evm::{block::BlockExecutor, EvmEnv, EvmFactory, ToTxEnv};
@@ -121,9 +121,8 @@ fn executor_on(
 }
 
 /// Starts a block at [`BLOCK_NUMBER`] over `state` and answers the registry's own steps, the
-/// committed states that name it, in order: the read of its pending changes and the call that
-/// applies them. The blocks here are not Satin's activation block, so no step checks the
-/// registry's code.
+/// committed states that name it, in order: the read of its pending changes, the call that applies
+/// them when one is due, its deployment and the resolution of the live system address.
 fn start_block(state: &mut State<MemoryDatabase>, envs: Envs, gas_limit: u64) -> Vec<EvmState> {
     let committed = CommittedStates::install(state);
     let mut executor = executor(state, envs, gas_limit);
@@ -151,9 +150,11 @@ fn test_a_due_change_is_applied_under_a_crowded_bucket() {
         State::builder().with_database(registry_with(&system_address_change(BLOCK_NUMBER))).build();
     let steps = start_block(&mut state, envs.clone(), LARGE_BLOCK_GAS_LIMIT);
 
-    assert_eq!(steps.len(), 2, "the read and the call");
+    assert_eq!(steps.len(), 4, "the read, the call, the deployment and the resolution");
     assert!(!applies_pending_changes(&steps[..1]), "the read leaves the registry untouched");
-    assert!(applies_pending_changes(&steps[1..]), "the call touches it");
+    assert!(applies_pending_changes(&steps[1..2]), "the call touches it");
+    assert!(!applies_pending_changes(&steps[2..]), "the deployment and the resolution read it");
+    assert_resolution(&steps[3], NEXT_SYSTEM_ADDRESS);
     assert_eq!(envs.total_bucket_queries(), 0, "no pre-block step read a capacity");
     assert_eq!(slot(&mut state, CURRENT_SYSTEM_ADDRESS), common::word(NEXT_SYSTEM_ADDRESS));
     assert_eq!(slot(&mut state, PENDING_SYSTEM_ADDRESS), U256::ZERO, "the pending slot is cleared");
@@ -161,17 +162,35 @@ fn test_a_due_change_is_applied_under_a_crowded_bucket() {
 }
 
 /// A block with nothing due makes no call: the block commits the read that found nothing due,
-/// both pending slots and nothing else, read-only.
+/// both pending slots and nothing else, read-only, then the deployment's read-only entry of the
+/// registry, which holds version 2.0.0, then the resolution.
 #[test]
 fn test_a_block_with_nothing_due_makes_no_call() {
     let mut state = State::builder().with_database(registry_with(&[])).build();
     let steps = start_block(&mut state, envs_at(1), common::BLOCK_GAS_LIMIT);
-    assert_eq!(steps.len(), 1, "the read alone");
+    assert_eq!(steps.len(), 3, "the read, the deployment and the resolution");
     let registry = &steps[0][&SEQUENCER_REGISTRY_ADDRESS];
     assert!(!registry.is_touched(), "a read-only entry");
     assert_eq!(registry.storage.len(), 2);
     assert!(registry.storage.contains_key(&PENDING_SYSTEM_ADDRESS));
     assert!(registry.storage.contains_key(&PENDING_SEQUENCER));
+    let deployed = &steps[1][&SEQUENCER_REGISTRY_ADDRESS];
+    assert!(!deployed.is_touched() && !deployed.is_created(), "version 2.0.0 is left as it is");
+    assert!(deployed.storage.is_empty(), "the deployment reads no slot of it");
+    assert_resolution(&steps[2], MEGA_SYSTEM_ADDRESS);
+}
+
+/// Asserts `state` is the resolution of the live system address: the registry's account alone,
+/// untouched, holding version 2.0.0, with the one slot naming `system_address`, unchanged.
+fn assert_resolution(state: &EvmState, system_address: Address) {
+    assert_eq!(state.len(), 1, "the registry alone");
+    let registry = &state[&SEQUENCER_REGISTRY_ADDRESS];
+    assert!(!registry.is_touched() && !registry.is_created(), "a read-only entry");
+    assert_eq!(registry.info.code_hash, SEQUENCER_REGISTRY_CODE_HASH);
+    assert_eq!(registry.storage.len(), 1, "exactly the one slot read");
+    let slot = &registry.storage[&CURRENT_SYSTEM_ADDRESS];
+    assert!(!slot.is_changed());
+    assert_eq!(slot.present_value(), common::word(system_address));
 }
 
 /// A change scheduled for a later block is left pending: nothing is due, and no call is made.
@@ -220,8 +239,8 @@ fn gas_limit(input_len: usize) -> u64 {
 /// A legacy call from `sender` to the Oracle's `getSlot(0)`: a system-address transaction when
 /// `sender` is the system address the registry names, an ordinary one otherwise. It carries a
 /// gas price, so an ordinary one needs a balance its sender does not have here. `getSlot` does not
-/// read the registry itself, so what the transaction's state holds of the registry is what its
-/// validation read.
+/// read the registry itself, so the transaction's state holds nothing of the registry unless its
+/// classification read it.
 fn oracle_call_from(sender: Address, nonce: u64) -> Recovered<MegaTxEnvelope> {
     let input = IOracle::getSlotCall { slot: U256::ZERO }.abi_encode();
     let gas_limit = gas_limit(input.len());
@@ -262,39 +281,35 @@ fn assert_is_not_the_system_address(executor: &mut Executor<'_>, sender: Address
     assert!(err.to_string().contains("lack of funds"), "{err}");
 }
 
-/// Asserts `state` holds what a system-address transaction's validation read: the registry's
-/// account, untouched, with the one slot naming `system_address`, unchanged.
-fn assert_carries_the_system_address_read(state: &EvmState, system_address: Address) {
-    let registry = &state[&SEQUENCER_REGISTRY_ADDRESS];
-    assert!(!registry.is_touched(), "a read-only entry");
-    assert_eq!(registry.info.code_hash, SEQUENCER_REGISTRY_CODE_HASH);
-    assert_eq!(registry.storage.len(), 1, "exactly the one slot read");
-    let slot = &registry.storage[&CURRENT_SYSTEM_ADDRESS];
-    assert!(!slot.is_changed());
-    assert_eq!(slot.present_value(), common::word(system_address));
+/// Asserts a transaction read nothing of the registry for its classification: its `state` holds
+/// no entry of it.
+fn assert_reads_no_registry(state: &EvmState) {
+    assert!(!state.contains_key(&SEQUENCER_REGISTRY_ADDRESS), "the transaction read the registry");
 }
 
-/// No pre-block step carries the system address's slot: the read of the pending changes reads the
-/// pending slots alone, and the activation block's check, which reads the registry's account
-/// without storage, is not made here. The slot is in the system-address transaction's own state
-/// instead, read-only and warm, as its validation read it.
+/// The live system address is resolved once, as the block's last pre-block state: the registry's
+/// account and its system-address slot, read-only, which no earlier step carries. The
+/// system-address transaction after it reads nothing of the registry for its classification, and
+/// a transaction that reads the registry's slot itself finds it cold.
 #[test]
-fn test_the_slot_is_in_the_system_transactions_state_not_the_pre_block_witness() {
+fn test_the_resolution_is_the_last_pre_block_state_and_no_transaction_reads_the_registry() {
     let mut state = State::builder().with_database(registry_with(&[])).build();
     let committed = CommittedStates::install(&mut state);
     let mut executor = executor(&mut state, envs_at(1), common::BLOCK_GAS_LIMIT);
     executor.apply_pre_execution_changes().expect("the block starts");
-    for (step, state) in committed.states().iter().enumerate() {
+    let states = committed.states();
+    let (last, earlier) = states.split_last().expect("the pre-block states");
+    assert_resolution(last, MEGA_SYSTEM_ADDRESS);
+    for (step, state) in earlier.iter().enumerate() {
         let slot = state
             .get(&SEQUENCER_REGISTRY_ADDRESS)
             .and_then(|registry| registry.storage.get(&CURRENT_SYSTEM_ADDRESS));
         assert!(slot.is_none(), "pre-block step {step} carries the system address's slot");
     }
+    assert_eq!(executor.evm().ctx().system_address(), Some(MEGA_SYSTEM_ADDRESS));
 
     let outcome = assert_is_the_system_address(&mut executor, MEGA_SYSTEM_ADDRESS);
-    assert_carries_the_system_address_read(&outcome.inner.state, MEGA_SYSTEM_ADDRESS);
-    let registry = &outcome.inner.state[&SEQUENCER_REGISTRY_ADDRESS];
-    assert!(!registry.storage[&CURRENT_SYSTEM_ADDRESS].is_cold, "the read warmed the slot");
+    assert_reads_no_registry(&outcome.inner.state);
 }
 
 /// A system-address transaction is recognised by the address read out of the registry: from it,
@@ -309,7 +324,7 @@ fn test_system_tx_uses_resolved_system_address() {
     let mut executor = executor(&mut state, envs_at(1), common::BLOCK_GAS_LIMIT);
     executor.apply_pre_execution_changes().expect("the block starts");
     let outcome = assert_is_the_system_address(&mut executor, CHAIN_SYSTEM_ADDRESS);
-    assert_carries_the_system_address_read(&outcome.inner.state, CHAIN_SYSTEM_ADDRESS);
+    assert_reads_no_registry(&outcome.inner.state);
     assert_is_not_the_system_address(&mut executor, MEGA_SYSTEM_ADDRESS);
 }
 
@@ -330,7 +345,7 @@ fn test_a_rotation_governs_the_blocks_from_its_activation_block() {
     for number in [activation, activation + 1] {
         let mut block = started_block_at(&mut state, number);
         let outcome = assert_is_the_system_address(&mut block, NEXT_SYSTEM_ADDRESS);
-        assert_carries_the_system_address_read(&outcome.inner.state, NEXT_SYSTEM_ADDRESS);
+        assert_reads_no_registry(&outcome.inner.state);
         assert_is_not_the_system_address(&mut block, MEGA_SYSTEM_ADDRESS);
     }
     assert_eq!(slot(&mut state, PENDING_SYSTEM_ADDRESS), U256::ZERO, "applied once");

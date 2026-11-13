@@ -96,6 +96,9 @@ pub fn chain_activation(chain_id: u64) -> Option<ChainActivation> {
         Some(genesis) if genesis.chain_id == chain_id => Some(ChainActivation {
             chain_id,
             satin: genesis.satin.map(|satin| satin.activation_time),
+            sequencer_registry_bootstrap: genesis
+                .satin
+                .map(|satin| satin.sequencer_registry_bootstrap),
         }),
         _ => mega_evm::chain_activation(chain_id),
     }
@@ -233,7 +236,8 @@ mod tests {
     const ACTIVATION: u64 = 1_800_000_000;
 
     fn scheduled() -> MegaHardforkConfig {
-        ChainActivation { chain_id: MAINNET_CHAIN_ID, satin: Some(ACTIVATION) }.hardforks()
+        let mainnet = mega_evm::chain_activation(MAINNET_CHAIN_ID).expect("a known chain");
+        ChainActivation { satin: Some(ACTIVATION), ..mainnet }.hardforks()
     }
 
     /// A counterfactual runs on the chain's own schedule with Satin from genesis, whatever the
@@ -324,10 +328,21 @@ mod tests {
         );
     }
 
-    /// A genesis file whose `config` carries `chainId` and the Satin key: Satin at
-    /// [`ACTIVATION`].
+    /// The bootstrap values the tests' genesis files carry.
+    const BOOTSTRAP: mega_evm::system::SequencerRegistryBootstrap =
+        mega_evm::system::SequencerRegistryBootstrap::new(
+            alloy_primitives::address!("0x0000000000000000000000000000000000000033"),
+            alloy_primitives::address!("0x0000000000000000000000000000000000000044"),
+            1,
+        );
+
+    /// A genesis file whose `config` carries `chainId` and the Satin keys: Satin at
+    /// [`ACTIVATION`], and [`BOOTSTRAP`].
     fn genesis_file(dir: &tempfile::TempDir, chain_id: u64) -> (String, SatinChainConfig) {
-        let satin = SatinChainConfig { activation_time: ACTIVATION };
+        let satin = SatinChainConfig {
+            activation_time: ACTIVATION,
+            sequencer_registry_bootstrap: BOOTSTRAP,
+        };
         let mut config = serde_json::to_value(satin).unwrap();
         config["chainId"] = serde_json::json!(chain_id);
         config["optimism"] = serde_json::json!({ "eip1559Elasticity": 6 });
@@ -412,10 +427,24 @@ mod tests {
         assert_eq!(parse_genesis(&bare), Ok(GenesisChain { chain_id: 7, satin: None }));
         let no_chain_id = write("no-id.json", serde_json::json!({ "config": {} }));
         assert!(parse_genesis(&no_chain_id).unwrap_err().contains("chainId"));
-        let satin = write("satin.json", serde_json::json!({ "chainId": 7, "satinTime": 0 }));
-        let expected =
-            GenesisChain { chain_id: 7, satin: Some(SatinChainConfig { activation_time: 0 }) };
+        let satin = write(
+            "satin.json",
+            serde_json::json!({
+                "chainId": 7,
+                "satinTime": 0,
+                "rex5InitialSequencer": "0x0000000000000000000000000000000000000033",
+                "rex5InitialAdmin": "0x0000000000000000000000000000000000000044",
+                "rex6MinRotationDelay": 1,
+            }),
+        );
+        let config =
+            SatinChainConfig { activation_time: 0, sequencer_registry_bootstrap: BOOTSTRAP };
+        let expected = GenesisChain { chain_id: 7, satin: Some(config) };
         assert_eq!(parse_genesis(&satin), Ok(expected));
+        let without_bootstrap =
+            write("no-bootstrap.json", serde_json::json!({ "chainId": 7, "satinTime": 0 }));
+        let error = parse_genesis(&without_bootstrap).unwrap_err();
+        assert!(error.contains("must carry `rex5InitialSequencer`"), "{error}");
         let old = write(
             "old.json",
             serde_json::json!({ "chainId": 7, "satinTime": 0, "satinInitialAdmin": "0x33" }),

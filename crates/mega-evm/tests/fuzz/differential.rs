@@ -36,8 +36,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use alloy_op_evm::OpTx;
 use mega_evm::{
     test_utils::{
-        neutral_cfg, neutral_gas_table, neutralize_evm, take_system_address_read,
-        zero_fee_l1_block_info, MemoryDatabase,
+        neutral_cfg, neutral_gas_table, neutralize_evm, zero_fee_l1_block_info, MemoryDatabase,
     },
     EthSpecId, EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
 };
@@ -110,9 +109,7 @@ fn run_mega(
     let outcome = mega
         .execute_transaction(OpTx(tx))
         .map(|outcome| {
-            let mut state = outcome.result_and_state.state;
-            take_system_address_read(&mut state);
-            ExecResultAndState::new(outcome.result_and_state.result, state)
+            ExecResultAndState::new(outcome.result_and_state.result, outcome.result_and_state.state)
         })
         .map_err(|error| format!("{error}"));
     (outcome, cfg)
