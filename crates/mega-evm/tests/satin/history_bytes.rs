@@ -31,7 +31,7 @@ use revm::{
     },
     context::{
         transaction::{AccessList, AccessListItem, TransactionType},
-        TxEnv,
+        ContextTr, TxEnv,
     },
     context_interface::{
         either::Either,
@@ -256,14 +256,14 @@ struct AnswersCreations;
 impl Inspector<MegaContext<MemoryDatabase>, EthInterpreter> for AnswersCreations {
     fn create(
         &mut self,
-        _context: &mut MegaContext<MemoryDatabase>,
+        context: &mut MegaContext<MemoryDatabase>,
         inputs: &mut CreateInputs,
     ) -> Option<CreateOutcome> {
         Some(CreateOutcome::new(
             InterpreterResult::new(
                 InstructionResult::Return,
                 Bytes::from(vec![0xfe; 32]),
-                untouched_create_gas(inputs),
+                untouched_create_gas(context.cfg(), inputs),
             ),
             Some(CHILD),
         ))

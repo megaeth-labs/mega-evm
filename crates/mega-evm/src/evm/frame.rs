@@ -18,12 +18,17 @@
 //! The contract for a synthetic result is that it settles exactly like revm's own: its gas carries
 //! the reservoir the frame inherited ([`untouched_call_gas`], [`untouched_create_gas`]), never
 //! `Gas::new(limit)`, which would carry no reservoir, billing the sender for the whole reservoir;
-//! and it carries the calling opcode's upfront-charge flags, so step 1 refunds them. The budgets
-//! and the start charge are the start ledger's, which the engine's own answers settle on by
-//! status, so nothing of them is carried. [`synthetic_frame_result`] builds one.
+//! its gas gives back where the execution's configuration says, as the gas of every frame revm
+//! builds does: into the reservoir alone under Satin's give-backs, as EIP-8037 has it under the
+//! neutral configuration's (`Cfg::reservoir_only_give_backs`), so an inspector that charges and
+//! gives back on the result's gas sees the same rule whoever built the result; and it carries the
+//! calling opcode's upfront-charge flags, so step 1 refunds them. The budgets and the start charge
+//! are the start ledger's, which the engine's own answers settle on by status, so nothing of them
+//! is carried. [`synthetic_frame_result`] builds one.
 
 use alloy_primitives::Bytes;
 use revm::{
+    context::Cfg,
     handler::FrameResult,
     interpreter::{
         CallInputs, CallOutcome, CreateInputs, CreateOutcome, FrameInput, Gas, InstructionResult,
@@ -31,32 +36,44 @@ use revm::{
     },
 };
 
-/// The gas of a call result built without running the callee: the call's whole gas limit
-/// unspent, and the reservoir the call inherited.
+/// The gas of a frame built under `cfg` with `limit` of regular gas unspent and `reservoir`: its
+/// give-backs go where the configuration says (`Cfg::reservoir_only_give_backs`), as they do for
+/// the gas revm builds for every frame.
 #[inline]
-pub const fn untouched_call_gas(inputs: &CallInputs) -> Gas {
-    Gas::new_with_regular_gas_and_reservoir(inputs.gas_limit, inputs.reservoir)
+pub(crate) fn frame_gas(cfg: &impl Cfg, limit: u64, reservoir: u64) -> Gas {
+    let mut gas = Gas::new_with_regular_gas_and_reservoir(limit, reservoir);
+    gas.set_reservoir_only_give_backs(cfg.reservoir_only_give_backs());
+    gas
 }
 
-/// The gas of a creation result built without running the init code: its whole gas limit
-/// unspent, and the reservoir the creation inherited.
+/// The gas of a call result built under `cfg` without running the callee: the call's whole gas
+/// limit unspent, the reservoir the call inherited, and the configuration's give-back mode.
 #[inline]
-pub const fn untouched_create_gas(inputs: &CreateInputs) -> Gas {
-    Gas::new_with_regular_gas_and_reservoir(inputs.gas_limit(), inputs.reservoir())
+pub fn untouched_call_gas(cfg: &impl Cfg, inputs: &CallInputs) -> Gas {
+    frame_gas(cfg, inputs.gas_limit, inputs.reservoir)
 }
 
-/// A result for the frame `input` would start, built without running it: `result` with
-/// `output`, the frame's gas untouched, the inherited reservoir carried, and the calling opcode's
-/// upfront state-gas flags, as revm builds the results of the frames it answers itself.
+/// The gas of a creation result built under `cfg` without running the init code: its whole gas
+/// limit unspent, the reservoir the creation inherited, and the configuration's give-back mode.
+#[inline]
+pub fn untouched_create_gas(cfg: &impl Cfg, inputs: &CreateInputs) -> Gas {
+    frame_gas(cfg, inputs.gas_limit(), inputs.reservoir())
+}
+
+/// A result for the frame `input` would start, built under `cfg` without running it: `result`
+/// with `output`, the frame's gas untouched, the inherited reservoir carried, the configuration's
+/// give-back mode, and the calling opcode's upfront state-gas flags, as revm builds the results
+/// of the frames it answers itself.
 pub fn synthetic_frame_result(
+    cfg: &impl Cfg,
     input: &FrameInput,
     result: InstructionResult,
     output: Bytes,
 ) -> FrameResult {
     match input {
-        FrameInput::Call(inputs) => synthetic_call_result(inputs, result, output),
+        FrameInput::Call(inputs) => synthetic_call_result(cfg, inputs, result, output),
         FrameInput::Create(inputs) => FrameResult::Create(CreateOutcome {
-            result: InterpreterResult::new(result, output, untouched_create_gas(inputs)),
+            result: InterpreterResult::new(result, output, untouched_create_gas(cfg, inputs)),
             address: None,
             charged_create_state_gas: inputs.charged_create_state_gas(),
             charged_state_gas_address: inputs.charged_state_gas_address(),
@@ -66,16 +83,17 @@ pub fn synthetic_frame_result(
     }
 }
 
-/// A result for the call `inputs` would start, built without running it, as
+/// A result for the call `inputs` would start, built under `cfg` without running it, as
 /// [`synthetic_frame_result`] builds one: for a mechanism that already holds the call's inputs
 /// (a system contract interceptor).
 pub fn synthetic_call_result(
+    cfg: &impl Cfg,
     inputs: &CallInputs,
     result: InstructionResult,
     output: Bytes,
 ) -> FrameResult {
     FrameResult::Call(CallOutcome {
-        result: InterpreterResult::new(result, output, untouched_call_gas(inputs)),
+        result: InterpreterResult::new(result, output, untouched_call_gas(cfg, inputs)),
         memory_offset: inputs.return_memory_offset.clone(),
         was_precompile_called: false,
         precompile_call_logs: Default::default(),
@@ -89,7 +107,10 @@ pub fn synthetic_call_result(
 mod tests {
     use super::*;
     use alloy_primitives::{address, Address, U256};
-    use revm::interpreter::{CallInput, CallScheme, CallValue};
+    use revm::{
+        context::CfgEnv,
+        interpreter::{CallInput, CallScheme, CallValue},
+    };
 
     const TARGET: Address = address!("0000000000000000000000000000000000001234");
 
@@ -110,15 +131,62 @@ mod tests {
         }
     }
 
+    /// A configuration whose give-backs credit the reservoir alone when `reservoir_only` is set,
+    /// as Satin's do, and as EIP-8037 has them otherwise.
+    fn cfg(reservoir_only: bool) -> CfgEnv {
+        let mut cfg = CfgEnv::default();
+        cfg.reservoir_only_give_backs = reservoir_only;
+        cfg
+    }
+
     /// The untouched gas is the gas limit unspent and the inherited reservoir, not a fresh
     /// `Gas::new(limit)`.
     #[test]
     fn test_untouched_call_gas_carries_the_reservoir() {
-        let gas = untouched_call_gas(&call_inputs(50_000, 7_000, false));
+        let gas = untouched_call_gas(&cfg(false), &call_inputs(50_000, 7_000, false));
         assert_eq!(gas.limit(), 50_000);
         assert_eq!(gas.remaining(), 50_000);
         assert_eq!(gas.reservoir(), 7_000);
         assert_ne!(gas, Gas::new(50_000));
+    }
+
+    /// The gas of every synthetic result, a call's and a creation's, gives back as the
+    /// configuration it is built under says: a history charge regular gas paid comes back into
+    /// the reservoir alone under give-backs to the reservoir alone, and into regular gas under
+    /// EIP-8037's own.
+    #[test]
+    fn test_untouched_gas_gives_back_as_the_configuration_says() {
+        let create = CreateInputs::new(
+            Address::ZERO,
+            revm::interpreter::CreateScheme::Create,
+            U256::ZERO,
+            Bytes::new(),
+            50_000,
+            0,
+        );
+        for reservoir_only in [true, false] {
+            let cfg = cfg(reservoir_only);
+            let call = FrameInput::Call(Box::new(call_inputs(50_000, 0, false)));
+            let results = [
+                untouched_call_gas(&cfg, &call_inputs(50_000, 0, false)),
+                untouched_create_gas(&cfg, &create),
+                *synthetic_frame_result(&cfg, &call, InstructionResult::Stop, Bytes::new()).gas(),
+                *synthetic_frame_result(
+                    &cfg,
+                    &FrameInput::Create(Box::new(create.clone())),
+                    InstructionResult::Stop,
+                    Bytes::new(),
+                )
+                .gas(),
+            ];
+            for mut gas in results {
+                assert_eq!(gas.reservoir_only_give_backs(), reservoir_only);
+                assert!(gas.record_history_cost(1_000), "regular gas pays it: no reservoir");
+                gas.refill_history(1_000);
+                let expected = if reservoir_only { (49_000, 1_000) } else { (50_000, 0) };
+                assert_eq!((gas.remaining(), gas.reservoir()), expected, "{reservoir_only}");
+            }
+        }
     }
 
     /// A synthetic call result carries the return range, the untouched gas and the upfront
@@ -127,6 +195,7 @@ mod tests {
     fn test_synthetic_call_result_carries_the_inputs() {
         let input = FrameInput::Call(Box::new(call_inputs(9_000, 11, true)));
         let FrameResult::Call(outcome) = synthetic_frame_result(
+            &cfg(false),
             &input,
             InstructionResult::CallTooDeep,
             Bytes::from_static(b"x"),

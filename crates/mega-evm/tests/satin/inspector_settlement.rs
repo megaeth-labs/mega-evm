@@ -95,19 +95,20 @@ impl Answers {
     }
 }
 
-impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for Answers {
-    fn call(&mut self, _: &mut CTX, inputs: &mut CallInputs) -> Option<CallOutcome> {
+impl<CTX: ContextTr, INTR: InterpreterTypes> Inspector<CTX, INTR> for Answers {
+    fn call(&mut self, context: &mut CTX, inputs: &mut CallInputs) -> Option<CallOutcome> {
         (inputs.target_address == self.target).then(|| {
+            let gas = untouched_call_gas(context.cfg(), inputs);
             CallOutcome::new(
-                InterpreterResult::new(self.result, Bytes::new(), untouched_call_gas(inputs)),
+                InterpreterResult::new(self.result, Bytes::new(), gas),
                 inputs.return_memory_offset.clone(),
             )
         })
     }
 
-    fn create(&mut self, _: &mut CTX, inputs: &mut CreateInputs) -> Option<CreateOutcome> {
+    fn create(&mut self, context: &mut CTX, inputs: &mut CreateInputs) -> Option<CreateOutcome> {
         (self.target == Address::ZERO).then(|| {
-            let gas = untouched_create_gas(inputs);
+            let gas = untouched_create_gas(context.cfg(), inputs);
             CreateOutcome::new(InterpreterResult::new(self.result, Bytes::new(), gas), self.address)
         })
     }
@@ -566,7 +567,11 @@ impl<CTX: ContextTr, INTR: InterpreterTypes> Inspector<CTX, INTR> for Retargets 
         inputs.known_bytecode = (self.code.hash_slow(), self.code.clone());
         self.answer.map(|result| {
             CallOutcome::new(
-                InterpreterResult::new(result, Bytes::new(), untouched_call_gas(inputs)),
+                InterpreterResult::new(
+                    result,
+                    Bytes::new(),
+                    untouched_call_gas(context.cfg(), inputs),
+                ),
                 inputs.return_memory_offset.clone(),
             )
         })

@@ -29,7 +29,7 @@ use mega_evm::{
 };
 use revm::{
     bytecode::opcode::{CALL, PUSH0, RETURN, REVERT},
-    context::result::EVMError,
+    context::{result::EVMError, ContextTr},
     context_interface::{
         cfg::{gas::GasTracker, GasId, StateGasCharge, StateGasSite},
         Host,
@@ -410,7 +410,8 @@ fn settle_a_synthetic_failure(
     // The calling opcode hands the frame a copy of the reservoir its charge left, which the
     // frame's return replaces with what the frame gives back.
     let share = caller.reservoir();
-    let result = synthetic_frame_result(&input(share), InstructionResult::Revert, Bytes::new());
+    let result =
+        synthetic_frame_result(ctx.cfg(), &input(share), InstructionResult::Revert, Bytes::new());
     let mut frame = EthFrame::<EthInterpreter>::default();
     *frame.interpreter.gas.tracker_mut() = caller;
     frame

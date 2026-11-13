@@ -8,7 +8,10 @@
 use alloy_evm::Database;
 use alloy_primitives::{address, Address, Bytes};
 use alloy_sol_types::{SolCall, SolError};
-use revm::interpreter::{CallInputs, InstructionResult};
+use revm::{
+    context::ContextTr,
+    interpreter::{CallInputs, InstructionResult},
+};
 
 use crate::{
     synthetic_call_result,
@@ -96,14 +99,15 @@ pub(crate) fn intercept<DB: Database, ExtEnvs: ExternalEnvTypes>(
     } else {
         return None;
     };
-    if let Some(rejected) = reject_non_zero_transfer(inputs) {
+    if let Some(rejected) = reject_non_zero_transfer(ctx.cfg(), inputs) {
         return Some(Answer::new(rejected));
     }
     let caller = depth.checked_sub(1);
     let detention = &mut ctx.detention;
     let (result, output) = match method {
         Method::Disable => {
-            let result = synthetic_call_result(inputs, InstructionResult::Return, Bytes::new());
+            let result =
+                synthetic_call_result(ctx.cfg(), inputs, InstructionResult::Return, Bytes::new());
             return Some(Answer { result, disables_access_from: caller });
         }
         Method::Enable => {
@@ -120,7 +124,7 @@ pub(crate) fn intercept<DB: Database, ExtEnvs: ExternalEnvTypes>(
             (InstructionResult::Return, Bytes::from(output))
         }
     };
-    Some(Answer::new(synthetic_call_result(inputs, result, output)))
+    Some(Answer::new(synthetic_call_result(ctx.cfg(), inputs, result, output)))
 }
 
 /// The three methods `MegaAccessControl` intercepts.
