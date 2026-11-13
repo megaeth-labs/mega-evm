@@ -4,7 +4,8 @@
 # Subcommands:
 #   diff  <base-ref>   Mutate only lines changed vs <base-ref> (PR gate mode).
 #   full  [args...]    Mutate the whole mega-evm crate (nightly mode; slow).
-#                      Extra arguments go to cargo-mutants (e.g. `-f <file>`).
+#                      Extra arguments go to cargo-mutants (e.g. `-f <file>`,
+#                      `--shard k/n`).
 #   file  <glob>       Mutate files matching <glob> (local iteration).
 #
 # Every run first builds the unmutated tests into ./target, which cargo-mutants'

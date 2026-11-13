@@ -1,7 +1,8 @@
 name: Mutation Testing
 
 # All mutation-testing CI lives here. Three concerns, one file:
-#   * cargo-mutants gate   — generic operators (diff-scoped on PRs, full nightly)
+#   * cargo-mutants gate   — generic operators (diff-scoped on PRs, full nightly
+#                            in four shards)
 #   * spec-gate            — universalmutator + comby custom operators for
 #                            backward-compat spec gates (diff PR + nightly sweep)
 #   * suppression hygiene  — flag suppressions that no longer match a live mutant
@@ -165,8 +166,8 @@ jobs:
   cargo-mutants-full:
     name: cargo-mutants full run
     needs: cargo-mutants
-    # Also after a failed or cancelled shard: its mutants then count as untested.
-    if: always() && github.event_name != 'pull_request'
+    # Also after a failed or timed-out shard: its mutants then count as untested.
+    if: ${{ !cancelled() && github.event_name != 'pull_request' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
