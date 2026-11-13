@@ -186,14 +186,15 @@
 //! that delegate, since only the target's code shows it: the call runs its steps before that load
 //! as with access on — its static gas, its memory, its value transfer, the load of its target,
 //! which a frame short of the cold access skips as an out-of-gas — and the Host refuses the
-//! delegate's load. The call has read its target by then, which is no volatile read, and pays for
-//! it as an account opcode would: the frame reverts on the gas it held when it reached the call
-//! less the target's access — the warm access, and the cold surcharge when the target was cold
-//! before the call — as two regular charges, so a cold surcharge past what gas detention lets the
-//! frame spend stops it with the compute stop instead. Nothing else of the call is paid: not its
-//! memory, its value transfer or the delegate's access. So the call reads its target only once it
-//! holds the gas for it, and pays a cold target's cold access, as with access on, and a frame that
-//! cannot reach the delegate fails as it would with access on. Every other refusal costs nothing.
+//! delegate's load. The call has read its target by then, which is no volatile read, and grown
+//! the frame's memory, and pays for both as with access on: the frame reverts on the gas it held
+//! when it reached the call less the warm access, the memory the call grew and, when the target
+//! was cold before the call, the cold surcharge, as regular charges in that order, so a cold
+//! surcharge past what gas detention lets the frame spend stops it with the compute stop instead.
+//! Nothing else of the call is paid: not its value transfer or the delegate's access. So the call
+//! reads its target only once it holds the gas for it, and pays a cold target's cold access and
+//! the memory it grew, as with access on, and a frame that cannot reach the delegate fails as it
+//! would with access on. Every other refusal costs nothing.
 //!
 //! A refusal names the kind the opcode reads — `BLOCKHASH`'s names the hash, whatever its operand
 //! — and a `SLOTNUM` refusal names access type 12

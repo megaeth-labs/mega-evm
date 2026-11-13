@@ -33,8 +33,8 @@
 //! refuses it. A refused account or storage load fails as a skipped cold load, and a refused
 //! block-environment accessor answers zero. Nothing is loaded, and the opcode's wrapper turns the
 //! refusal into the frame's revert, on the gas the frame held when it reached the opcode, less, for
-//! a call refused at its target's delegate, the target's access: the Host notes whether the target
-//! was cold when it loads it.
+//! a call refused at its target's delegate, the target's access and the memory the call grew: the
+//! Host notes whether the target was cold when it loads it.
 //!
 //! # The Oracle's storage
 //!
