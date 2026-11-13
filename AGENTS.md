@@ -758,6 +758,7 @@ When the agent is requested to implement a new feature or bug fix, it should con
 - **Validate the schedule at load time.**
   `MegaHardforks::validate_schedule` refuses a schedule a chain cannot run when the chain configuration is loaded rather than at the fork's first block.
   It refuses a schedule in which a fork Satin runs on and the schedule activates by timestamp (Ethereum Shanghai to Osaka, Optimism Regolith to Karst) is not active at Satin's activation (`ScheduleError::InactiveBaseFork`); the engine's own schedules activate those forks from the first block, so they are active by `satinTime`, and pass.
+  It refuses a schedule that activates Satin without the `SequencerRegistry`'s bootstrap values (`ScheduleError::MissingRegistryBootstrap`) or with one of them zero (`ScheduleError::ZeroRegistryBootstrapValue`, naming the key), through the one check of the values, `SequencerRegistryBootstrap::validate`, which the genesis parser makes too; block execution does not validate its schedule, so an unvalidated schedule reaches `MegaBlockExecutionError::UnusableRegistryBootstrap` only at a block that must seed or migrate the registry.
   That Jovian, Karst and Osaka do not activate before Satin is the node's to check, not the engine's.
 - **Keep the workspace on its declared minimum toolchain (1.94).**
   CI's msrv job checks the workspace on 1.94.0, every feature on, with the lock as it is.

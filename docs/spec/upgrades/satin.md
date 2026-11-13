@@ -1268,7 +1268,7 @@ An out-of-gas step halts the call, consuming its regular gas.
   - any other code MUST make the block invalid: the registry's storage is never overwritten by code it was not migrated to.
 
   The configured values are the chain configuration's bootstrap keys, the ones the Rex era introduced (see the chain configuration under [Implementation Notes](#implementation-notes)); once the registry holds its roles, its storage, not the configuration, decides them.
-  The reference implementation reports a registry it cannot migrate, and one the resolution of the live system address refuses, as `MegaBlockExecutionError::SequencerRegistry`, a verdict on the block; a block that must seed or migrate the registry on a node whose configuration carries no usable bootstrap values fails with `MegaBlockExecutionError::UnusableRegistryBootstrap`, an internal error of the node.
+  The reference implementation reports a registry it cannot migrate, and one the resolution of the live system address refuses, as `MegaBlockExecutionError::SequencerRegistry`, a verdict on the block; its schedule validation (`MegaHardforks::validate_schedule`) refuses a schedule that activates Satin without the bootstrap values or with one of them zero when it is loaded, as the genesis parser refuses such a configuration, and a block that must seed or migrate the registry on a schedule that skipped that validation fails with `MegaBlockExecutionError::UnusableRegistryBootstrap`, an internal error of the node.
 
 - **The factory check.**
   Satin does not deploy the EIP-7997 factory: OP's genesis tooling gives the chain one.

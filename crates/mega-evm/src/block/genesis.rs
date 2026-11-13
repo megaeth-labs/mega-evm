@@ -164,22 +164,17 @@ impl SatinChainConfig {
         };
         let mut bootstrap = |key| entries.remove(key).ok_or(SatinChainConfigError::MissingKey(key));
         let initial_sequencer =
-            bootstrap(REX5_INITIAL_SEQUENCER_KEY)?.non_zero_address(REX5_INITIAL_SEQUENCER_KEY)?;
-        let initial_admin =
-            bootstrap(REX5_INITIAL_ADMIN_KEY)?.non_zero_address(REX5_INITIAL_ADMIN_KEY)?;
+            bootstrap(REX5_INITIAL_SEQUENCER_KEY)?.address(REX5_INITIAL_SEQUENCER_KEY)?;
+        let initial_admin = bootstrap(REX5_INITIAL_ADMIN_KEY)?.address(REX5_INITIAL_ADMIN_KEY)?;
         let min_rotation_delay =
-            match bootstrap(REX6_MIN_ROTATION_DELAY_KEY)?.integer(REX6_MIN_ROTATION_DELAY_KEY)? {
-                0 => return Err(SatinChainConfigError::ZeroValue(REX6_MIN_ROTATION_DELAY_KEY)),
-                delay => delay,
-            };
-        let config = Self {
-            activation_time,
-            sequencer_registry_bootstrap: SequencerRegistryBootstrap::new(
-                initial_sequencer,
-                initial_admin,
-                min_rotation_delay,
-            ),
-        };
+            bootstrap(REX6_MIN_ROTATION_DELAY_KEY)?.integer(REX6_MIN_ROTATION_DELAY_KEY)?;
+        let sequencer_registry_bootstrap =
+            SequencerRegistryBootstrap::new(initial_sequencer, initial_admin, min_rotation_delay);
+        // The one check of the values, which a schedule's validation makes as well.
+        sequencer_registry_bootstrap
+            .validate()
+            .map_err(|zero| SatinChainConfigError::ZeroValue(zero.key))?;
+        let config = Self { activation_time, sequencer_registry_bootstrap };
         config.hardforks()?;
         Ok(Some(config))
     }
@@ -287,19 +282,15 @@ impl Entry {
         }
     }
 
-    /// The non-zero address the value of `key` is: 40 hexadecimal digits after `0x`.
-    fn non_zero_address(self, key: &'static str) -> Result<Address, SatinChainConfigError> {
+    /// The address the value of `key` is: 40 hexadecimal digits after `0x`.
+    fn address(self, key: &'static str) -> Result<Address, SatinChainConfigError> {
         let invalid = || SatinChainConfigError::InvalidValue { key, expected: ADDRESS_EXPECTED };
         let Self::Text(text) = self else { return Err(invalid()) };
         let digits = text.strip_prefix("0x").ok_or_else(invalid)?;
         if digits.len() != 40 || !digits.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             return Err(invalid());
         }
-        let address = Address::from_str(digits).map_err(|_| invalid())?;
-        if address.is_zero() {
-            return Err(SatinChainConfigError::ZeroValue(key));
-        }
-        Ok(address)
+        Address::from_str(digits).map_err(|_| invalid())
     }
 }
 

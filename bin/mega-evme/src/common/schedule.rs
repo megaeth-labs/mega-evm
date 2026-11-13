@@ -3,8 +3,10 @@
 use std::sync::OnceLock;
 
 use mega_evm::{
-    alloy_hardforks::ForkCondition, ChainActivation, MegaHardfork, MegaHardforkConfig,
-    MegaHardforks, MegaSpecId, ProtocolLimits, SatinChainConfig,
+    alloy_hardforks::ForkCondition,
+    system::{SequencerRegistryBootstrap, MEGA_SYSTEM_ADDRESS},
+    ChainActivation, MegaHardfork, MegaHardforkConfig, MegaHardforks, MegaSpecId, ProtocolLimits,
+    SatinChainConfig,
 };
 use serde_json::{Map, Value};
 
@@ -36,11 +38,24 @@ pub fn satin_schedule(chain_id: u64, timestamp: u64) -> Result<MegaHardforkConfi
     schedule_for(chain, timestamp)
 }
 
+/// The `SequencerRegistry` bootstrap values a counterfactual gives a chain whose schedule carries
+/// none, as the legacy engine did for a chain without a published schedule: the system address in
+/// both roles and the shortest rotation delay. They matter only to a block that seeds a registry
+/// its state does not hold; on a chain whose registry is deployed its storage decides the roles.
+const PLACEHOLDER_BOOTSTRAP: SequencerRegistryBootstrap =
+    SequencerRegistryBootstrap::new(MEGA_SYSTEM_ADDRESS, MEGA_SYSTEM_ADDRESS, 1);
+
 /// The schedule of a Satin counterfactual on the chain whose schedule is `chain`: that schedule
 /// with Satin from genesis, or, for a chain neither the engine's table nor a genesis file names,
-/// the engine's base forks with Satin from genesis.
+/// the engine's base forks with Satin from genesis and [`PLACEHOLDER_BOOTSTRAP`], since a schedule
+/// that activates Satin carries the registry's bootstrap values.
 fn counterfactual(chain: Option<MegaHardforkConfig>) -> MegaHardforkConfig {
-    chain.unwrap_or_default().with(MegaHardfork::Satin, ForkCondition::Timestamp(0))
+    let schedule = chain.unwrap_or_default().with(MegaHardfork::Satin, ForkCondition::Timestamp(0));
+    if schedule.sequencer_registry_bootstrap().is_some() {
+        schedule
+    } else {
+        schedule.with_sequencer_registry_bootstrap(PLACEHOLDER_BOOTSTRAP)
+    }
 }
 
 /// The protocol limits a Satin run is held to: Satin's ([`ProtocolLimits::for_spec`]), the ones
@@ -242,7 +257,8 @@ mod tests {
 
     /// A counterfactual runs on the chain's own schedule with Satin from genesis, whatever the
     /// chain; a chain the engine does not know gets the engine's base forks with Satin from
-    /// genesis. No block of a counterfactual is Satin's activation block.
+    /// genesis and the placeholder bootstrap values, a known chain keeps its own, and each
+    /// schedule loads. No block of a counterfactual is Satin's activation block.
     #[test]
     fn test_a_counterfactual_runs_on_the_chains_schedule_with_satin_from_genesis() {
         for chain_id in [MAINNET_CHAIN_ID, TESTNET_CHAIN_ID, 6342, 1] {
@@ -250,6 +266,13 @@ mod tests {
             assert_eq!(schedule.spec_id(0), Some(MegaSpecId::SATIN), "chain {chain_id}");
             assert!(!schedule.is_satin_activation_block(0, 1_700_000_000), "chain {chain_id}");
             assert_eq!(schedule.validate_schedule(), Ok(()));
+            let own = mega_evm::chain_activation(chain_id)
+                .and_then(|activation| activation.sequencer_registry_bootstrap);
+            assert_eq!(
+                schedule.sequencer_registry_bootstrap(),
+                Some(own.unwrap_or(PLACEHOLDER_BOOTSTRAP)),
+                "chain {chain_id}"
+            );
         }
         let known = mega_evm::hardfork_schedule(MAINNET_CHAIN_ID).unwrap();
         let counterfactual = satin_schedule(MAINNET_CHAIN_ID, 1_700_000_000).unwrap();

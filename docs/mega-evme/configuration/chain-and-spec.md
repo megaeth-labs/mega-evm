@@ -124,6 +124,7 @@ A command on a legacy spec is refused with `--override.limits`: the legacy engin
 
 A chain the tool does not know, a devnet for one, is replayed as its nodes run it only with its own Satin configuration: which blocks run Satin.
 Without it a replay of such a chain is refused, unless `--override.spec` names the engine; `run` and `tx` with `--spec Satin` run a counterfactual on any chain, with Satin active from genesis.
+A counterfactual on a chain the tool does not know carries placeholder `SequencerRegistry` bootstrap values, the system address in both roles and a rotation delay of one block, which matter only to a block that seeds a registry its state does not hold.
 `--genesis <FILE>` takes it from the chain's genesis file, on every command, `replay` included.
 The file's `config` object (or a file that is the `config` object) is read for its `chainId`, its Satin key, `satinTime`, and the `SequencerRegistry`'s bootstrap keys a configuration that schedules Satin must carry (`rex5InitialSequencer`, `rex5InitialAdmin`, `rex6MinRotationDelay`), with the parser the node and the stateless validator read it with, so a key the node refuses is refused here too: a `satin`-prefixed key other than `satinTime`, the registry roles an earlier format named among them, and a missing or zero bootstrap value.
 For that chain the file replaces the tool's table: a block runs Satin from the file's `satinTime`.

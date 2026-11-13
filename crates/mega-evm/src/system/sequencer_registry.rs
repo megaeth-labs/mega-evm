@@ -89,12 +89,31 @@ impl SequencerRegistryBootstrap {
         Self { initial_sequencer, initial_admin, min_rotation_delay }
     }
 
-    /// Whether every value is usable: neither address zero, nor the delay, which would leave the
-    /// network no window to react to a scheduled rotation.
-    pub fn is_usable(&self) -> bool {
-        !self.initial_sequencer.is_zero() &&
-            !self.initial_admin.is_zero() &&
-            self.min_rotation_delay != 0
+    /// Checks that no value is zero: neither address, which would seed a role nobody holds, nor the
+    /// delay, which would leave the network no window to react to a scheduled rotation.
+    ///
+    /// The one check of the values, made by the chain configuration's parser
+    /// ([`SatinChainConfig::from_genesis_config`](crate::SatinChainConfig::from_genesis_config)),
+    /// by a schedule's validation
+    /// ([`validate_schedule`](crate::MegaHardforks::validate_schedule)) and before a block seeds or
+    /// migrates the registry.
+    ///
+    /// # Errors
+    ///
+    /// The first zero value, in the order of [`SEQUENCER_REGISTRY_BOOTSTRAP_KEYS`], named by its
+    /// chain-configuration key.
+    ///
+    /// [`SEQUENCER_REGISTRY_BOOTSTRAP_KEYS`]: crate::SEQUENCER_REGISTRY_BOOTSTRAP_KEYS
+    pub fn validate(&self) -> Result<(), ZeroBootstrapValue> {
+        let zero = [
+            (self.initial_sequencer.is_zero(), crate::REX5_INITIAL_SEQUENCER_KEY),
+            (self.initial_admin.is_zero(), crate::REX5_INITIAL_ADMIN_KEY),
+            (self.min_rotation_delay == 0, crate::REX6_MIN_ROTATION_DELAY_KEY),
+        ];
+        match zero.into_iter().find(|(is_zero, _)| *is_zero) {
+            Some((_, key)) => Err(ZeroBootstrapValue { key }),
+            None => Ok(()),
+        }
     }
 
     /// The storage a registry deployed new at `block_number` is seeded with, slot by slot: the
@@ -116,6 +135,22 @@ impl SequencerRegistryBootstrap {
     }
 }
 
+/// A `SequencerRegistry` bootstrap value that is zero, which no chain configuration may carry
+/// ([`SequencerRegistryBootstrap::validate`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ZeroBootstrapValue {
+    /// The chain-configuration key of the value.
+    pub key: &'static str,
+}
+
+impl fmt::Display for ZeroBootstrapValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "the SequencerRegistry's bootstrap value `{}` is zero", self.key)
+    }
+}
+
+impl core::error::Error for ZeroBootstrapValue {}
+
 /// An address as the word a Solidity `address` slot holds.
 fn address_word(address: Address) -> U256 {
     U256::from_be_bytes(address.into_word().0)
@@ -130,7 +165,9 @@ pub enum SequencerRegistryError<DbError> {
     Database(DbError),
     /// The registry has to be seeded or migrated, and the chain configuration carries no usable
     /// bootstrap values for it: none, or one of them zero. A fault of the node's configuration,
-    /// which a node refuses when it loads it, never a verdict on the block.
+    /// which its validation refuses when it is loaded
+    /// ([`validate_schedule`](crate::MegaHardforks::validate_schedule)), so only a schedule that
+    /// skipped it reaches this; never a verdict on the block.
     UnusableBootstrap,
     /// The registry makes the block invalid.
     Refused(SequencerRegistryRefusal),
@@ -333,7 +370,7 @@ pub fn deploy_sequencer_registry<DB: revm::Database>(
         }));
     }
     let bootstrap = bootstrap
-        .filter(SequencerRegistryBootstrap::is_usable)
+        .filter(|bootstrap| bootstrap.validate().is_ok())
         .ok_or(SequencerRegistryError::UnusableBootstrap)?;
 
     let mut info = existing.unwrap_or_default();
@@ -826,7 +863,7 @@ mod tests {
                 );
             }
         }
-        assert!(BOOTSTRAP.is_usable());
+        assert_eq!(BOOTSTRAP.validate(), Ok(()));
     }
 
     /// The resolution answers the address `_currentSystemAddress` holds, with the registry's

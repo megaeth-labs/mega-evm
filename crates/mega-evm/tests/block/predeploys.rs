@@ -29,6 +29,7 @@ use mega_evm::{
     },
     test_utils::{rex6_predeploys, CommittedStates, ErrorInjectingDatabase, MemoryDatabase},
     MegaBlockExecutionCtx, MegaBlockExecutionError, MegaHardfork, MegaHardforkConfig,
+    MegaHardforks,
 };
 use revm::{
     context::result::ExecutionResult, database::State, primitives::KECCAK_EMPTY, state::EvmState,
@@ -372,9 +373,10 @@ fn test_a_registry_naming_no_system_address_refuses_the_block() {
     assert_eq!(named_accounts(&states), expected_accounts(false)[..RESOLUTION]);
 }
 
-/// [S18] A block that must seed the registry, or migrate it from 1.0.0, on a configuration that
-/// carries no bootstrap values cannot be executed: an internal error of the node, not a verdict on
-/// the block. A block whose registry holds version 2.0.0 needs none, and starts.
+/// [S18] A block that must seed the registry, or migrate it from 1.0.0, on a schedule that
+/// carries no bootstrap values — one that skipped `validate_schedule`, which refuses it at load —
+/// cannot be executed: an internal error of the node, not a verdict on the block. A block whose
+/// registry holds version 2.0.0 needs none, and starts.
 ///
 /// Expected values: independent (the registry each state holds).
 #[test]
@@ -382,6 +384,7 @@ fn test_a_registry_to_seed_or_migrate_without_bootstrap_values_is_an_internal_er
     use mega_system_contracts::sequencer_registry::V1_0_0_CODE;
     let without_bootstrap = MegaHardforkConfig::default()
         .with(MegaHardfork::Satin, alloy_hardforks::ForkCondition::Timestamp(0));
+    assert!(without_bootstrap.validate_schedule().is_err(), "refused when it is loaded");
     let absent = {
         let mut db = common::database();
         db.cache.accounts.remove(&SEQUENCER_REGISTRY_ADDRESS);

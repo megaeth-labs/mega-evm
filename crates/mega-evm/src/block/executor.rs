@@ -264,8 +264,11 @@ pub enum MegaBlockExecutionError {
     /// The block must seed the `SequencerRegistry` or migrate it from version 1.0.0, and the chain
     /// configuration carries no usable bootstrap values for it: none, or one of them zero.
     ///
-    /// The node's configuration, which its parser refuses, not a verdict on the block: an internal
-    /// error.
+    /// The node's configuration, not a verdict on the block: an internal error. The genesis parser
+    /// and `MegaHardforks::validate_schedule` refuse such a schedule when it is loaded, and block
+    /// execution does not validate the schedule it is given, so only a schedule that skipped
+    /// validation reaches this; it stays the block's refusal of a schedule it cannot seed or
+    /// migrate the registry from, rather than seeding zero roles.
     UnusableRegistryBootstrap,
     /// An outcome handed to a delayed commit executed against another nonce or balance of its
     /// sender than the block holds now: a commit since its execution moved them.

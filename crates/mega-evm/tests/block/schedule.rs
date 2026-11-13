@@ -3,9 +3,12 @@
 use alloy_evm::block::BlockExecutor;
 use alloy_hardforks::{EthereumHardfork, ForkCondition, Hardfork};
 use alloy_op_hardforks::OpHardfork;
+use alloy_primitives::Address;
 use mega_evm::{
-    chain_activation, mainnet_hardforks, testnet_hardforks, ChainActivation, MegaHardfork,
-    MegaHardforkConfig, MegaHardforks, ScheduleError, MAINNET_CHAIN_ID, TESTNET_CHAIN_ID,
+    chain_activation, mainnet_hardforks, system::SequencerRegistryBootstrap, testnet_hardforks,
+    ChainActivation, MegaHardfork, MegaHardforkConfig, MegaHardforks, ScheduleError,
+    MAINNET_CHAIN_ID, REX5_INITIAL_ADMIN_KEY, REX5_INITIAL_SEQUENCER_KEY,
+    REX6_MIN_ROTATION_DELAY_KEY, TESTNET_CHAIN_ID,
 };
 
 use crate::common::{self, empty_call_gas, user_tx};
@@ -41,19 +44,79 @@ fn test_canonical_schedules_match_the_chain_activation_table() {
     assert_eq!(testnet_hardforks().spec_id(u64::MAX), None);
 }
 
-/// Satin carries no parameter: a schedule that activates it alone loads, and a block runs on it,
-/// over a state holding the registry the legacy forks left. The limits are the spec's, not a
-/// parameter either.
+/// A schedule that activates Satin and carries the `SequencerRegistry`'s bootstrap values, its one
+/// chain-configuration parameter, loads, and a block runs on it, over a state holding the registry
+/// the legacy forks left. The limits are the spec's, not a parameter.
 #[test]
-fn test_a_schedule_activating_satin_alone_loads_and_runs() {
-    let satin =
-        MegaHardforkConfig::default().with(MegaHardfork::Satin, ForkCondition::Timestamp(0));
+fn test_a_schedule_activating_satin_with_its_bootstrap_values_loads_and_runs() {
+    let satin = MegaHardforkConfig::default()
+        .with(MegaHardfork::Satin, ForkCondition::Timestamp(0))
+        .with_sequencer_registry_bootstrap(common::bootstrap());
     assert_eq!(satin.validate_schedule(), Ok(()));
 
     let mut state = common::state();
     let mut executor = common::executor_with_spec(&mut state, common::unlimited_ctx(), satin);
     executor.apply_pre_execution_changes().expect("the block starts");
     executor.execute_transaction(&user_tx(0, empty_call_gas())).expect("the transaction executes");
+}
+
+/// A schedule built in code that activates Satin without the `SequencerRegistry`'s bootstrap
+/// values is refused when it is loaded, naming the values, not at the first block that must seed
+/// or migrate the registry; so is one carrying any of them zero, naming the value's key, as the
+/// genesis parser names it. A schedule that does not activate Satin needs none, and the live
+/// networks' schedules, which carry Rex5's and Rex6's values, load whenever Satin is scheduled.
+#[test]
+fn test_a_schedule_activating_satin_without_its_bootstrap_values_is_refused_at_load() {
+    for satin_time in [0, SATIN_TIME] {
+        let satin = MegaHardforkConfig::new()
+            .with(MegaHardfork::Satin, ForkCondition::Timestamp(satin_time));
+        assert_eq!(
+            satin.validate_schedule(),
+            Err(ScheduleError::MissingRegistryBootstrap { fork: MegaHardfork::Satin }),
+            "Satin at {satin_time}"
+        );
+        let message = satin.validate_schedule().unwrap_err().to_string();
+        for key in [REX5_INITIAL_SEQUENCER_KEY, REX5_INITIAL_ADMIN_KEY, REX6_MIN_ROTATION_DELAY_KEY]
+        {
+            assert!(message.contains(key), "the refusal names {key}: {message}");
+        }
+
+        let values = common::bootstrap();
+        for (key, zero) in [
+            (
+                REX5_INITIAL_SEQUENCER_KEY,
+                SequencerRegistryBootstrap { initial_sequencer: Address::ZERO, ..values },
+            ),
+            (
+                REX5_INITIAL_ADMIN_KEY,
+                SequencerRegistryBootstrap { initial_admin: Address::ZERO, ..values },
+            ),
+            (
+                REX6_MIN_ROTATION_DELAY_KEY,
+                SequencerRegistryBootstrap { min_rotation_delay: 0, ..values },
+            ),
+        ] {
+            let schedule = satin.clone().with_sequencer_registry_bootstrap(zero);
+            assert_eq!(
+                schedule.validate_schedule(),
+                Err(ScheduleError::ZeroRegistryBootstrapValue { fork: MegaHardfork::Satin, key }),
+                "{key}"
+            );
+            assert!(schedule.validate_schedule().unwrap_err().to_string().contains(key), "{key}");
+        }
+        assert_eq!(satin.with_sequencer_registry_bootstrap(values).validate_schedule(), Ok(()));
+    }
+
+    let without_satin = MegaHardforkConfig::new();
+    assert_eq!(without_satin.sequencer_registry_bootstrap(), None);
+    assert_eq!(without_satin.validate_schedule(), Ok(()), "no Satin, no values needed");
+    for chain_id in [MAINNET_CHAIN_ID, TESTNET_CHAIN_ID] {
+        let scheduled = ChainActivation {
+            satin: Some(SATIN_TIME),
+            ..chain_activation(chain_id).expect("a known chain")
+        };
+        assert_eq!(scheduled.hardforks().validate_schedule(), Ok(()), "chain {chain_id}");
+    }
 }
 
 /// When Satin activates on the schedules of [`base_fork_case`].
@@ -79,11 +142,12 @@ const OP_BASE_FORKS: [OpHardfork; 9] = [
     OpHardfork::Karst,
 ];
 
-/// A schedule that activates Satin at [`SATIN_TIME`], every base fork at genesis but `base`, which
-/// activates on `condition`.
+/// A schedule that activates Satin at [`SATIN_TIME`], carrying its bootstrap values, every base
+/// fork at genesis but `base`, which activates on `condition`.
 fn base_fork_case(base: impl Hardfork, condition: ForkCondition) -> MegaHardforkConfig {
     MegaHardforkConfig::new()
         .with(MegaHardfork::Satin, ForkCondition::Timestamp(SATIN_TIME))
+        .with_sequencer_registry_bootstrap(common::bootstrap())
         .with(base, condition)
 }
 
@@ -164,7 +228,8 @@ fn test_a_base_fork_at_satin_time_is_accepted() {
 fn test_engine_built_schedules_keep_their_base_forks_at_genesis() {
     for satin_time in [0, 1, SATIN_TIME] {
         let schedule = MegaHardforkConfig::new()
-            .with(MegaHardfork::Satin, ForkCondition::Timestamp(satin_time));
+            .with(MegaHardfork::Satin, ForkCondition::Timestamp(satin_time))
+            .with_sequencer_registry_bootstrap(common::bootstrap());
         assert_eq!(schedule.validate_schedule(), Ok(()), "Satin at {satin_time}");
 
         let activation = ChainActivation {

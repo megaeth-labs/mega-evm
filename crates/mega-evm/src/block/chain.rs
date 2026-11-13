@@ -162,7 +162,7 @@ mod tests {
                 Some(bootstrap),
                 "the schedule carries the chain's bootstrap values"
             );
-            assert!(bootstrap.is_usable());
+            assert_eq!(bootstrap.validate(), Ok(()));
         }
         for chain_id in [0, 1, 6342, 999_999] {
             assert!(hardfork_schedule(chain_id).is_none(), "chain {chain_id} is unknown");
