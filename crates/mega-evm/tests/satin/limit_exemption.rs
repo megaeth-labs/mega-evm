@@ -123,7 +123,7 @@ fn test_a_system_transaction_is_held_to_no_limit() {
 /// and the layer reports what it used: its body, three slots' records and the log, in data size,
 /// and the three records in the KV count.
 ///
-/// Rule [S19.5]. Expected values `independent`: the spec's byte table by hand — a body of 310
+/// Expected values `independent`: the spec's byte table by hand — a body of 310
 /// bytes, 40 a record, and a log's 32 bytes of base and its 64 bytes of data.
 #[test]
 fn test_a_system_call_is_held_to_no_limit() {

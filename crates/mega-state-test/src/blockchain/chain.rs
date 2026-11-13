@@ -506,7 +506,7 @@ mod tests {
         );
     }
 
-    /// [S10] The schedule the chain runs on loads, and the blocks are held to no limit:
+    /// The schedule the chain runs on loads, and the blocks are held to no limit:
     /// equivalence mode takes out every one `MegaETH` sets.
     ///
     /// Expected values: constants (no limit at all).
@@ -519,7 +519,7 @@ mod tests {
         assert_eq!(limits().block_txs_data_limit, u64::MAX);
     }
 
-    /// [S1.8] [S21.12] [S1] A block's context says whether it admits only deposits, from the
+    /// A block's context says whether it admits only deposits, from the
     /// schedule and the head's timestamp, as a node works it out. Under a schedule that activates
     /// Satin at the block's timestamp, with the genesis a second earlier, the block is Satin's
     /// activation block: a user transaction in it is refused, and the block without it is

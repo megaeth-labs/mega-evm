@@ -360,10 +360,10 @@ const ANSWERING: u64 = 2 + 2 + 3 + 3 + 3 + 2;
 const INTRINSIC: u64 = 12_000 + 3_000;
 
 /// The body's history gas is taken from the reservoir first, and only its excess from the regular
-/// budget [S4.4]; a reservoir short of the body is spent to the last gas, one of exactly the body
-/// too, and one a gas larger keeps that gas [S4.7]. A body-only transaction shows it: the first
+/// budget; a reservoir short of the body is spent to the last gas, one of exactly the body
+/// too, and one a gas larger keeps that gas. A body-only transaction shows it: the first
 /// frame's `GAS` is the regular budget — the execution cap less the intrinsic gas, less the
-/// excess the reservoir did not cover, less the `GAS` itself — and not the reservoir [S4.8].
+/// excess the reservoir did not cover, less the `GAS` itself — and not the reservoir.
 ///
 /// Every figure is by hand (`constants`: the execution cap and the body's history at the price in
 /// effect, which is 310 × 88 at the spec's price): the regular ledger is the intrinsic gas and
@@ -417,7 +417,7 @@ fn test_the_body_draws_the_reservoir_first_and_only_its_excess_from_regular_gas(
 /// A transaction above the execution cap that runs out of gas in the runtime gas phase, before its
 /// first frame, keeps its body's history charged, and what the reservoir paid of it with it:
 /// revm rebuilds the transaction's gas from its intrinsic cost on that path, and the body is
-/// intrinsic [S5]. The rest of the regular budget is consumed, and what is left of the reservoir
+/// intrinsic. The rest of the regular budget is consumed, and what is left of the reservoir
 /// returns to the sender.
 ///
 /// The phase runs out here on EIP-2780's charge for the account a value call creates, in a bucket

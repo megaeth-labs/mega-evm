@@ -227,7 +227,7 @@ fn test_a_system_transaction_receipt_logs_no_transfer() {
     assert!(!logs_of(receipt).iter().any(is_transfer_log), "no value moved, nothing logged");
 }
 
-/// [S14.9] [S14] The balance of an account destroyed earlier in the transaction is burned at its
+/// The balance of an account destroyed earlier in the transaction is burned at its
 /// end without a log. A factory creates a child endowed with 17 wei whose constructor destructs to
 /// [`PAYEE`], moving the 17 on, then sends the destroyed child 5 wei. The receipt carries exactly
 /// the three transfers — the endowment, the destruction's move and the late value — and nothing

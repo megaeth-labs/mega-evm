@@ -749,7 +749,7 @@ fn deposit_one_short_of_its_caller(sender: Address) -> MegaTransaction {
 /// first frame, and a deposit that does is a failed deposit: the `FailedDeposit` halt, not an
 /// out-of-gas, billed its whole gas limit.
 ///
-/// Rules: [S5], [S21.5], [S21.7], [S5.12]. Independence: constants — the intrinsic gas is
+/// Independence: constants — the intrinsic gas is
 /// EIP-2780's, the caller account's state gas the schedule's entry at the price in effect.
 #[test]
 fn test_a_deposit_that_cannot_pay_for_its_caller_is_a_failed_deposit() {
@@ -776,7 +776,7 @@ fn test_a_deposit_that_cannot_pay_for_its_caller_is_a_failed_deposit() {
 /// the data-size limit does not waive the charge: a deposit that cannot pay for it is a failed
 /// deposit, which reports the failure and not the data-size stop, and keeps its body counted.
 ///
-/// Rules: [S11], [S10.15], [S21.7]. Independence: constants — the body is `TX_BODY_SIZE`, the gas
+/// Independence: constants — the body is `TX_BODY_SIZE`, the gas
 /// limit as [`deposit_one_short_of_its_caller`] works it out.
 #[test]
 fn test_a_deposit_over_the_data_size_limit_that_cannot_pay_for_its_caller_is_a_failed_deposit() {

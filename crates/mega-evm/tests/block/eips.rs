@@ -187,7 +187,7 @@ fn test_the_pre_block_calls_record_the_parent_hash_and_the_beacon_root() {
 /// states the block commits show the two writes. Each limit is set alone as well as both
 /// together.
 ///
-/// Rule [S19.3]. Expected values `independent`: the parent hash and the beacon root are the
+/// Expected values `independent`: the parent hash and the beacon root are the
 /// block's own inputs, and the crossings are counted here from the writes the calls made.
 #[test]
 fn test_the_pre_block_calls_are_held_to_no_limit() {
@@ -234,7 +234,7 @@ fn test_the_pre_block_calls_are_held_to_no_limit() {
 /// pre-block phase every counter of the block is still zero, and a block whose data-size budget is
 /// one byte — reached by anything counted — still admits its first transaction.
 ///
-/// Rule [S19.7]. Expected values `independent`: zeros, and the first transaction admitted.
+/// Expected values `independent`: zeros, and the first transaction admitted.
 #[test]
 fn test_the_pre_block_calls_count_towards_no_counter_or_budget() {
     let policy = BlockLimits::no_limits().with_block_txs_data_limit(1);

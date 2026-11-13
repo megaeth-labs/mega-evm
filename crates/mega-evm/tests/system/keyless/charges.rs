@@ -317,7 +317,7 @@ fn test_a_failed_deployment_gives_the_created_account_back_at_its_price() {
 /// `CREATE` opcode's regular gas, the created account and one record short of what it had after
 /// its overhead; sent by a relayer for a signer holding a wei, one record more.
 ///
-/// Rule [S15.22]. Expected values `constants`: the charges are the schedule's `create`, initcode
+/// Expected values `constants`: the charges are the schedule's `create`, initcode
 /// and created-account entries and one record's history at the cost per history byte; what the
 /// call has after its overhead is set by the test on a gas limit built by hand — the call's
 /// EIP-2780 intrinsic, its calldata's cost, its body's history and the keyless overhead — so an

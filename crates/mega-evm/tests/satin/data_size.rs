@@ -1095,8 +1095,6 @@ fn start_fits() -> u64 {
 /// under either. The log is charged nothing at all. Under the limit they cross, the frame is
 /// answered with the stop, which `A` catches; under the limit they fit, the frame starts and the
 /// records are kept.
-///
-/// Rules: [S7.28], [S10.10].
 #[test]
 fn test_a_frame_start_is_charged_before_its_records_are_counted() {
     let code = value_call_to_fresh();
@@ -1124,7 +1122,7 @@ fn test_a_frame_start_is_charged_before_its_records_are_counted() {
     );
 }
 
-/// The frame-start order, one gas short by hand [S7.28]: a caller that forwards all but 2 per cent
+/// The frame-start order, one gas short by hand: a caller that forwards all but 2 per cent
 /// keeps a fiftieth one gas short of the price of the two records its value call makes, under a
 /// limit those records would cross. The caller pays for the records before they are counted, so
 /// it runs out of gas first — a halt, no stop, nothing counted beyond the body — and the limit
@@ -1267,7 +1265,7 @@ fn selfdestruct_to_c() -> Bytes {
     BytecodeBuilder::default().push_address(C).append(SELFDESTRUCT).build()
 }
 
-/// The same rule at a child frame's write [S7.27]: the record's history is the child's to pay,
+/// The same rule at a child frame's write: the record's history is the child's to pay,
 /// out of the gas it was forwarded, so the forward where the write is counted and the forward
 /// where it is kept are exactly the record's history apart, with the caller's gas out of the
 /// picture. The fresh slot's forward is also the sum of its parts by hand: two pushes, the
@@ -1317,8 +1315,8 @@ fn test_whichever_of_gas_and_data_size_binds_first_is_reported_at_a_childs_write
     );
 }
 
-/// Above the cap, where a reservoir one gas short of a record's history makes the order visible
-/// [S7.27]: the record's history draws the reservoir share the child was given first and spills
+/// Above the cap, where a reservoir one gas short of a record's history makes the order visible,
+/// the record's history draws the reservoir share the child was given first and spills
 /// its last gas onto the child, which was forwarded exactly the gas of its write and has none
 /// left. Counted under a
 /// limit it crosses, the record is refused and nothing is charged — the transaction stops, and

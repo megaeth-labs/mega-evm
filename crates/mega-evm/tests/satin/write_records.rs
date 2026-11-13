@@ -944,7 +944,7 @@ enum FeeRowPath {
 /// A record weighs `WRITE_RECORD_SIZE` bytes of data size and history and is one KV update; the
 /// history is its bytes at the cost per history byte, on top of the body's `TX_BODY_SIZE`.
 ///
-/// Rules: [S10.17], [S10.19], [S10.22], [S10.28], [S10.29], [S7], [S10]. Independence: constants —
+/// Independence: constants —
 /// the record counts are written out per row, and the data size, KV count and history are hand
 /// arithmetic from `TX_BODY_SIZE`, `WRITE_RECORD_SIZE`, `TRANSFER_LOG_SIZE` and the cost per
 /// history byte in effect.

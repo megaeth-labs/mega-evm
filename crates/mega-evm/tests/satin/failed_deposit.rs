@@ -266,7 +266,7 @@ const ABSENT: Address = address!("0000000000000000000000000000000000f00002");
 /// - a user deposit from an absent sender whose gas limit covers its intrinsic gas and all but one
 ///   gas of its caller's account, and one whose gas limit covers that account too.
 ///
-/// Rules: [S10.15], [S11], [S5], [S4], [S21.5], [S21.7], [S5.12]. Independence: constants — the
+/// Independence: constants — the
 /// intrinsic gas and the body are hand arithmetic from EIP-2780 and `TX_BODY_SIZE`; the caller
 /// account's state gas is the schedule's entry at the price in effect.
 #[test]

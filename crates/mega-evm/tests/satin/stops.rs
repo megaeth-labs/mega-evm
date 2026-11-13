@@ -450,7 +450,7 @@ fn assert_cell(limit: Limit, crossing: usize, gas_limit: u64) {
 /// the transaction succeeds, keeping what they did and nothing of the frame that crossed; at the
 /// transaction's own frame the stop is the transaction's result.
 ///
-/// Rules: [S11.1], [S11.2], [S11.3], [S11.4], [S11.6], [S11.7], [S11.8]. Independence: constants
+/// Independence: constants
 /// for every limit and the stop it reports, and engine-derived for the bill, which a twin run sets.
 #[test]
 fn test_every_limit_stops_the_frame_that_crosses_it_at_every_depth_and_tier() {
@@ -487,7 +487,7 @@ impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for Halter {
 /// and revm committed its journal before the inspector rewrote its result, so the log it made is
 /// in the receipt, as revm leaves it.
 ///
-/// Rules: [S11.1], [S11.6]. Independence: constants — the body is `TX_BODY_SIZE`.
+/// Independence: constants — the body is `TX_BODY_SIZE`.
 #[test]
 fn test_an_inspector_that_rewrites_a_stop_into_a_halt_gets_the_halt() {
     let halts = [
@@ -1478,7 +1478,7 @@ fn test_detained_gas_is_restored() {
 /// | `B`'s `SSTORE` of the slot it warmed: static and the storage write | 10,100 |
 /// | `A`'s `POP` of the call's status | 2 |
 ///
-/// Rules: [S11.8], [S11.9]. Independence: independent — the parts are written out; the body's
+/// Independence: independent — the parts are written out; the body's
 /// history is priced by the production helper.
 #[test]
 fn test_data_limit_exceed_in_nested_call() {

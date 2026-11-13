@@ -225,7 +225,7 @@ fn internal_evm_error(error: &BlockExecutionError) -> B256 {
     }
 }
 
-/// [S21.17] [S21] [S6.7] A failed bucket read is a fault of the node and gives the transaction no
+/// A failed bucket read is a fault of the node and gives the transaction no
 /// outcome, for a deposit as for a user transaction: through the executor's own commit, each
 /// returns an internal error that names the transaction and the cause, and the block commits
 /// nothing for it — no receipt, nothing on the block's counters, no nonce bump, no mint, no write,

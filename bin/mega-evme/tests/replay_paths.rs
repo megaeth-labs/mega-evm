@@ -273,7 +273,7 @@ async fn test_a_transaction_replayed_alone_is_the_one_the_block_replay_runs() {
     assert_eq!(held, 1, "the limits leg checks the transaction the limit held");
 }
 
-/// [S1.8] [S21.12] [S1] A transaction replay is told whether its block admits only deposits as a
+/// A transaction replay is told whether its block admits only deposits as a
 /// node is, from the schedule and the parent block it forks. Under a genesis file that activates
 /// Satin at the block's timestamp, with the parent a second earlier, the block is Satin's
 /// activation block: a user transaction of it is refused for the rule, and its deposit replays.

@@ -1198,7 +1198,7 @@ fn run_with(scenario: Scenario, work: Option<u64>) -> Measured {
     };
     let p = &prediction;
 
-    // The reservoir is the gas limit above the execution cap, less the body [S4.4].
+    // The reservoir is the gas limit above the execution cap, less the body.
     assert_eq!(
         meter.at_call,
         Some(Pools::new(p.regular_at_call, p.reservoir_at_call)),

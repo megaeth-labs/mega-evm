@@ -123,7 +123,7 @@ fn internal(error: &BlockExecutionError) -> MegaBlockExecutionError {
         .clone()
 }
 
-/// [S18] Over a state shaped as Rex6 leaves it, Satin's activation block and the block after it
+/// Over a state shaped as Rex6 leaves it, Satin's activation block and the block after it
 /// deploy every system contract and find each holding Satin's code. Each pre-block step commits a
 /// state of its own, and a commit hook receives them in order, read-only entries included: the two
 /// EIP calls, which touch their contracts; in the activation block alone the factory, read only;
@@ -172,7 +172,7 @@ fn test_every_block_deploys_the_system_contracts_a_rex6_chain_holds_as_read_only
     }
 }
 
-/// [S18] A system contract the state does not hold is installed, in every block that finds it
+/// A system contract the state does not hold is installed, in every block that finds it
 /// missing: `KeylessDeploy`, `MegaAccessControl` and `MegaLimitControl`, which a chain that never
 /// ran their forks lacks, each get an account holding their code, at nonce 0, marked created; the
 /// next block reads them as the chain then holds them.
@@ -206,7 +206,7 @@ fn test_a_missing_system_contract_is_installed() {
     }
 }
 
-/// [S18] A system contract holding other code has its code replaced by Satin's and keeps its
+/// A system contract holding other code has its code replaced by Satin's and keeps its
 /// nonce, its balance and its storage: the Oracle at 1.0.0, which an earlier fork left with a slot
 /// written, becomes 2.0.0 with that slot, and `MegaLimitControl` holding foreign code gets its
 /// own. The account is touched and not created, which would clear the storage.
@@ -241,7 +241,7 @@ fn test_a_system_contract_holding_other_code_is_rewritten_keeping_its_storage() 
     );
 }
 
-/// [S18] Where the state holds no registry, or an account without code at its address, the block
+/// Where the state holds no registry, or an account without code at its address, the block
 /// deploys version 2.0.0 new, seeded from the configuration's bootstrap values: the system address
 /// both current and initial, the configured sequencer both current and initial, the configured
 /// admin, the block's number as its first block and the configured minimum rotation delay. An
@@ -292,7 +292,7 @@ fn test_a_registry_the_state_does_not_hold_is_seeded_from_the_bootstrap_values()
     }
 }
 
-/// [S18] A registry at version 1.0.0 is migrated in place: its code becomes 2.0.0 and its slot 13
+/// A registry at version 1.0.0 is migrated in place: its code becomes 2.0.0 and its slot 13
 /// the configured minimum rotation delay, the one slot written; its roles and every other slot are
 /// what they were, so the resolution names the system address it already held.
 ///
@@ -326,7 +326,7 @@ fn test_a_registry_at_1_0_0_is_migrated_writing_slot_13_alone() {
     assert_eq!(slot(&mut state, MIN_ROTATION_DELAY), U256::from(BOOTSTRAP_MIN_ROTATION_DELAY));
 }
 
-/// [S18] A registry holding any other code than version 2.0.0, version 1.0.0 or none makes the
+/// A registry holding any other code than version 2.0.0, version 1.0.0 or none makes the
 /// block invalid, with an error naming the code hash: its storage is never overwritten. The
 /// refusal comes at the registry's deployment, after its due-change read was committed.
 ///
@@ -354,7 +354,7 @@ fn test_a_registry_holding_other_code_refuses_the_block() {
     );
 }
 
-/// [S17] A registry that names no system address — version 2.0.0 whose `_currentSystemAddress` is
+/// A registry that names no system address — version 2.0.0 whose `_currentSystemAddress` is
 /// zero — makes the block invalid at the resolution, the last pre-block step, after the
 /// registry's deployment read it.
 ///
@@ -373,7 +373,7 @@ fn test_a_registry_naming_no_system_address_refuses_the_block() {
     assert_eq!(named_accounts(&states), expected_accounts(false)[..RESOLUTION]);
 }
 
-/// [S18] A block that must seed the registry, or migrate it from 1.0.0, on a schedule that
+/// A block that must seed the registry, or migrate it from 1.0.0, on a schedule that
 /// carries no bootstrap values — one that skipped `validate_schedule`, which refuses it at load —
 /// cannot be executed: an internal error of the node, not a verdict on the block. A block whose
 /// registry holds version 2.0.0 needs none, and starts.
@@ -401,7 +401,7 @@ fn test_a_registry_to_seed_or_migrate_without_bootstrap_values_is_an_internal_er
     started.expect("version 2.0.0 needs no bootstrap values");
 }
 
-/// [S18] The activation block is invalid when the EIP-7997 factory's address does not hold the
+/// The activation block is invalid when the EIP-7997 factory's address does not hold the
 /// factory's code, with one error naming the address, the expected hash and the one held: no
 /// account, an account without code at a used nonce, and other code. The refusal comes after the
 /// two EIP calls and before anything is deployed. The block after the activation block does not
@@ -458,7 +458,7 @@ fn test_an_activation_block_without_the_factory_is_refused() {
     }
 }
 
-/// [S18] No block but Satin's activation block reads the factory: over a database that fails
+/// No block but Satin's activation block reads the factory: over a database that fails
 /// every load of the factory's account, an ordinary block starts, where the activation block fails
 /// on the load as an internal error, the database's and no verdict on the block.
 ///
@@ -488,7 +488,7 @@ fn test_no_other_block_reads_the_factory() {
     assert!(error.to_string().contains("injected basic() error"), "{error}");
 }
 
-/// [S18] Satin may be active from genesis, its `satinTime` at or before the genesis block's
+/// Satin may be active from genesis, its `satinTime` at or before the genesis block's
 /// timestamp. The genesis block, which has no parent, is no activation block, whatever that time:
 /// it makes no EIP-2935 or EIP-4788 call and checks no factory, and on a state that holds none of
 /// the system contracts it installs the five and seeds the registry, at block number zero, from

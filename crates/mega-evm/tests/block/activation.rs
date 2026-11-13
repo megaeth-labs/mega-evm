@@ -91,7 +91,7 @@ fn refuses_a_user_transaction(
     refused
 }
 
-/// [S1.8] [S21.12] [S1] A node's context, built from its schedule and the parent's timestamp,
+/// A node's context, built from its schedule and the parent's timestamp,
 /// refuses a user transaction in the block in which Satin or an Optimism fork at or after Jovian
 /// activates, and in no other block; a deposit runs in all of them.
 ///
@@ -159,7 +159,7 @@ fn test_a_node_context_refuses_a_user_transaction_where_a_fork_activates() {
     }
 }
 
-/// [S1] The rule follows the Optimism fork order the dependency exports: on a chain running Satin
+/// The rule follows the Optimism fork order the dependency exports: on a chain running Satin
 /// from genesis, the block in which an Optimism fork activates refuses a user transaction exactly
 /// when the fork is Jovian or comes after it in [`OpHardfork::VARIANTS`], and every fork the
 /// dependency lists after Jovian is one.
@@ -201,7 +201,7 @@ fn factory_checked(spec: MegaHardforkConfig, parent_timestamp: u64, timestamp: u
     committed.states().iter().any(common::is_factory_check)
 }
 
-/// [S18] A node's context has the EIP-7997 factory checked in Satin's activation block and in no
+/// A node's context has the EIP-7997 factory checked in Satin's activation block and in no
 /// other: the first block at the activation and the first after a gap over it read it; the block
 /// after the activation block, every block of a chain with Satin from genesis, and Jovian's
 /// activation block on such a chain, which admits only deposits, do not.

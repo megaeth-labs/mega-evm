@@ -484,7 +484,7 @@ fn test_authorities_whose_records_would_cross_the_data_size_limit_reject_the_tra
 /// crossed by the record of the slot the frame writes after the authority's record and, with value,
 /// after its own start's record and transfer log.
 ///
-/// Rules: [S11.8], [S11.14]. Independence: constants — the limit is the byte table's sizes; what
+/// Independence: constants — the limit is the byte table's sizes; what
 /// the authority keeps is compared with a run whose frame does nothing.
 #[test]
 fn test_a_stop_keeps_what_was_applied_before_the_first_frame() {
@@ -534,7 +534,7 @@ fn test_a_stop_keeps_what_was_applied_before_the_first_frame() {
 /// deposit's mint and the state gas charged for the account. The stop is the data-size limit,
 /// crossed by the record of the slot the deposit's frame writes.
 ///
-/// Rules: [S11.13]. Independence: constants — the limit is the byte table's sizes, the caller's
+/// Independence: constants — the limit is the byte table's sizes, the caller's
 /// account the schedule's entry.
 #[test]
 fn test_a_stopped_deposit_keeps_the_caller_it_created() {
@@ -584,8 +584,8 @@ fn test_a_destruction_to_itself_grows_no_state() {
 /// back.
 ///
 /// Once the state charge is paid, a frame start still charges the caller the history of the two
-/// records the frame makes, after the gas it forwards is computed [S7.23]; one gas short of what
-/// the start costs in all is an out-of-gas too, and the frame does not start [S7.24]. A `CREATE`
+/// records the frame makes, after the gas it forwards is computed; one gas short of what
+/// the start costs in all is an out-of-gas too, and the frame does not start. A `CREATE`
 /// charges the created account before its 98/100 split, as EIP-8037 has it, so the records come
 /// out of the fiftieth the creator keeps, and the creator must hold 50 times their price after the
 /// state charge. EIP-8037 states that order for a creation alone — of a value `CALL` it says only

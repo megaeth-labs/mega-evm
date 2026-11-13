@@ -3,10 +3,10 @@
 //! byte — and held to the limits only once every part of its deposit is charged.
 //!
 //! A creation that cannot pay one of the four runs out of gas there, alone, and the chain keeps
-//! none of its code [S5.14]. Which charge it runs out on follows from where the gas comes from.
+//! none of its code. Which charge it runs out on follows from where the gas comes from.
 //! Above the execution cap the reservoir pays the code's state gas and history, so the only
 //! regular charge at the deposit is the hash. Below it there is no reservoir, and the state gas
-//! and then the history are paid out of regular gas after the hash [S5.13]. The regular deposit
+//! and then the history are paid out of regular gas after the hash. The regular deposit
 //! cost is zero under EIP-8037, so it binds only on a configuration without it: the neutral one
 //! of Osaka, where no state gas is charged and the data-size limit is the one that holds the
 //! code.
@@ -158,7 +158,7 @@ const B_AFTER: u64 = 2;
 const INIT_EXECUTION: u64 = 3 + (3 + 3 * BURNT_WORDS + BURNT_WORDS * BURNT_WORDS / 512) + 2 + 3 + 2;
 const _: () = assert!(INIT_EXECUTION == 5_273_613, "the init code's cost, written out");
 
-/// The hashing cost of the deposit: 6 gas per 32-byte word [S5.13].
+/// The hashing cost of the deposit: 6 gas per 32-byte word.
 const HASH: u64 = 6 * DEPLOYED_WORDS;
 
 /// Osaka's regular deposit cost: 200 gas per byte.
@@ -438,13 +438,12 @@ fn assert_ledgers(
 /// A creation forwarded `forward` in `pool` runs out of gas at its deposit and leaves no code:
 /// its caller goes on, the creator's nonce record is all the transaction keeps beyond its body,
 /// and every ledger is what the halt leaves — the forward consumed, no state gas, the body and
-/// one record of history [S5.14].
+/// one record of history.
 ///
 /// `left` is what the creation held when the charge it cannot pay was attempted — one gas less
 /// than that charge, or nothing — which the creation's frame still shows at its end, and which
 /// prices the charge; `state_charged` says whether the deposit's state gas was charged before
-/// the halt, which tells a creation short of its history from one short of its state gas
-/// [S5.13].
+/// the halt, which tells a creation short of its history from one short of its state gas.
 #[track_caller]
 fn assert_runs_out(name: &str, pool: Pool, forward: u64, left: u64, state_charged: bool) {
     let end = creation_end(pool, forward);
@@ -511,7 +510,7 @@ fn assert_deposits(name: &str, pool: Pool, forward: u64) {
 /// Above the execution cap the reservoir pays the code's state gas and history, so the hash is
 /// the only regular charge of the deposit: one gas short of it the creation runs out of gas with
 /// no state gas charged, and one gas more deposits the code with nothing left. The boundary is
-/// the init code's cost plus 6 gas per word of code, by hand (`independent`) [S5.13] [S5.14].
+/// the init code's cost plus 6 gas per word of code, by hand (`independent`).
 #[test]
 fn test_a_creation_one_gas_short_of_the_hash_runs_out_of_gas_above_the_cap() {
     let enough = deposits_at(Pool::AboveCap);
@@ -528,7 +527,7 @@ fn test_a_creation_one_gas_short_of_the_hash_runs_out_of_gas_above_the_cap() {
 /// and one gas more charges the state gas and runs out on the history instead — or, where the
 /// deposit's history per byte is nothing and no history charge follows, deposits the code with
 /// nothing left. The boundary is the init code, the hash and 1,530 per byte of code, by hand
-/// (`constants`: the cost per state byte in effect) [S5.13] [S5.14].
+/// (`constants`: the cost per state byte in effect).
 #[test]
 fn test_a_creation_one_gas_short_of_its_state_gas_runs_out_of_gas_with_the_hash_paid() {
     // A deposit that adds no state gas has no state gas to be short of.
@@ -559,7 +558,7 @@ fn test_a_creation_one_gas_short_of_its_state_gas_runs_out_of_gas_with_the_hash_
 /// Below the execution cap the history is the last charge of the deposit: one gas short of it
 /// the creation runs out of gas with its state gas charged, and one gas more deposits the code
 /// with nothing left. The boundary is the init code, the hash, the state gas and 88 per byte of
-/// code, by hand (`constants`: the two byte prices in effect) [S5.13] [S5.14].
+/// code, by hand (`constants`: the two byte prices in effect).
 #[test]
 fn test_a_creation_one_gas_short_of_its_history_runs_out_of_gas_with_the_state_gas_paid() {
     // A deposit that pays no history has no history to be short of, and one that adds no state
@@ -625,8 +624,6 @@ fn assert_data_size_limit_stands_aside(pool: Pool) {
 
 /// The data-size limit counts deployed code behind the same check: a creation that cannot pay the
 /// hash of its code, or its history, runs out of gas whatever the limit.
-///
-/// Rules: [S5.14], [S7.25], [S10.12], [S10.33].
 #[test]
 fn test_a_creation_that_cannot_pay_for_its_code_runs_out_of_gas_under_the_data_size_limit() {
     assert_data_size_limit_stands_aside(Pool::AboveCap);
@@ -636,8 +633,6 @@ fn test_a_creation_that_cannot_pay_for_its_code_runs_out_of_gas_under_the_data_s
 /// Without EIP-8037 the deposit's only charge is the regular deposit cost, 200 gas per byte: a
 /// creation one gas short of it runs out of gas, one gas more deposits the code with nothing
 /// left, and a creation that cannot pay it runs out of gas whatever the data-size limit.
-///
-/// Rules: [S5.13], [S5.14], [S10.12].
 #[test]
 fn test_a_creation_that_cannot_pay_the_deposit_cost_runs_out_of_gas_under_the_data_size_limit() {
     let pool = Pool::NeutralOsaka;
