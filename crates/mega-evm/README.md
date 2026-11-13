@@ -124,8 +124,8 @@ A log costs 32 bytes for its address, 32 per topic and its data; every account o
 The body is charged at validation, in the EIP-8037 intrinsic state-gas slot so the reservoir pays it first: a gas limit that cannot cover it is rejected before inclusion, and the receipt's state figure does not include it.
 Everything else is charged where the write is made and given back, at the same price, by whoever's failure takes it back.
 The records a `CALL`, `CALLCODE`, `CREATE` or `CREATE2` starts a frame for are charged to the caller out of what it kept after forwarding gas: a caller that cannot pay halts, and the frame does not start.
-A deposit, a transaction the protocol itself sent and a system call pay no history at all.
-The last two are held to no per-transaction limit either, for the same reason — the protocol's maintenance must not fail on a resource limit: no data-size, KV-update or state-growth limit and no frame budget stops them, and what they use is counted and reported all the same.
+A deposit and a transaction the protocol itself sent pay history as any transaction does; a system call pays none.
+The last two are held to no per-transaction limit, for the same reason a system call pays no history — the protocol's maintenance must not fail on a resource limit: no data-size, KV-update or state-growth limit and no frame budget stops them, and what they use is counted and reported all the same.
 A user's deposit is held to every limit.
 
 The pairing between the two counts is per record, not per transaction.

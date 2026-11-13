@@ -526,31 +526,22 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// (see [`system::is_system_originated`]). A system call always is.
     ///
     /// A transaction's answer is decided when it is validated: a system-address transaction is
-    /// recognised by the live system address its validation reads out of the `SequencerRegistry`
-    /// in the state the EVM runs on, so every EVM answers as block execution does, however it was
-    /// built. It is the common execution layer's exemption, which is decided once with it
-    /// ([`AdditionalLimit::is_exempt`]): the protocol's own work is held to no per-transaction
-    /// limit, is not detained, pays no history gas and prices at the minimum bucket, all for the
-    /// one reason.
+    /// recognised by the live system address the context holds — the one the block resolved out
+    /// of the `SequencerRegistry` after its pre-block steps, or the one an EVM built outside block
+    /// execution read off the state it runs on when it was built — so every EVM answers as block
+    /// execution does, however it was built. It is the common execution layer's exemption, which is
+    /// decided once with it ([`AdditionalLimit::is_exempt`]): the protocol's own work is held
+    /// to no per-transaction limit, is not detained and prices at the minimum bucket. History
+    /// gas is exempt only for system calls.
     pub const fn is_system_originated(&self) -> bool {
         self.additional_limit.is_exempt()
     }
 
     /// Whether the running (or last) transaction pays history gas for the bytes it appends.
     ///
-    /// Three kinds of transaction pay none: a deposit, a transaction the protocol itself produced
-    /// ([`system::is_system_originated`]) and a system call. What they append is the chain
-    /// carrying its own weight — a deposit the sequencer relays, the maintenance a system
-    /// transaction performs, the pre-block calls the protocol makes — and there is no sender to
-    /// charge for it.
-    ///
-    /// The two predicates are distinct and both are needed. A deposit is not system-originated:
-    /// it carries a user's source hash and a user's caller, so it prices its state gas by the
-    /// SALT bucket like any other transaction — it is exempt from history alone, because the
-    /// bytes it appends were paid for on L1. A system transaction is both: it prices at the
-    /// minimum bucket *and* pays no history.
-    ///
-    /// The neutral configuration prices no history at all.
+    /// Deposits and system-originated transactions pay for the history they append, even though
+    /// a deposit pays no fee. Only system calls are exempt: they append no transaction to the
+    /// block. The neutral configuration prices no history either.
     ///
     /// It is decided when the transaction is prepared, with its exemption, from what it is then
     /// (a promoted system-address transaction is the protocol's own either way) and the
@@ -558,7 +549,10 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// neither until it is prepared. Switching the context to the neutral configuration decides
     /// it too, and switching back alone does not: the next preparation decides again.
     pub const fn prices_history(&self) -> bool {
-        matches!(self.additional_limit.class(), TxClass::Ordinary)
+        matches!(
+            self.additional_limit.class(),
+            TxClass::Ordinary | TxClass::Deposit | TxClass::ProtocolOwn { prices_history: true }
+        )
     }
 
     /// The history gas of the running (or last) transaction's body — the bytes it carries and the
@@ -592,8 +586,8 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// validation has read the live system address, so the layer is prepared before anything
     /// else of the transaction runs.
     pub(crate) fn on_new_tx(&mut self, system_transaction: bool) {
-        self.prepare(system::originates_from_the_protocol(&self.inner.tx, system_transaction));
         self.system_call = false;
+        self.prepare(system::originates_from_the_protocol(&self.inner.tx, system_transaction));
         // Decided before a system-address transaction is promoted to a deposit, so it is told
         // apart by `system_transaction`, and any other deposit by its type.
         self.oracle_service =
@@ -607,8 +601,8 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// A system call is system-originated whatever caller it names: it is the protocol running,
     /// not a transaction anybody sent.
     pub(crate) fn on_new_system_call(&mut self) {
-        self.prepare(true);
         self.system_call = true;
+        self.prepare(true);
         self.oracle_service = false;
     }
 
@@ -698,9 +692,8 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     ///
     /// A system-originated transaction is exempt from every per-transaction limit — the data size
     /// and its frame budgets — before anything is counted, its body included: the protocol's own
-    /// work must not fail on a resource limit, as it pays no history gas for the same reason. What
-    /// it uses is counted all the same. A user's deposit is not system-originated and is held
-    /// to every one of them.
+    /// work must not fail on a resource limit. What it uses is counted all the same. A user's
+    /// deposit is not system-originated and is held to every one of them.
     fn prepare(&mut self, system_originated: bool) {
         self.bucket_multipliers.reset();
         self.oracle_reads.clear();
@@ -708,14 +701,14 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         // creation unsettled.
         self.keyless_creation = None;
         // The body is data size whether or not the transaction pays history for it. A deposit,
-        // a system transaction and a system call are exempt from the charge, not from the count.
+        // a system transaction and an ordinary transaction all pay for it; a system call does not.
         let body = transaction_body_bytes(self.tx());
         let class = if system_originated {
-            TxClass::ProtocolOwn
-        } else if self.inner.tx.tx_type() == DEPOSIT_TRANSACTION_TYPE {
-            TxClass::Deposit
+            TxClass::ProtocolOwn { prices_history: !self.system_call && !self.runs_neutral() }
         } else if self.runs_neutral() {
             TxClass::Neutral
+        } else if self.inner.tx.tx_type() == DEPOSIT_TRANSACTION_TYPE {
+            TxClass::Deposit
         } else {
             TxClass::Ordinary
         };
@@ -724,7 +717,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         // The protocol's own transactions are not detained: they maintain the volatile data. Their
         // reads set no cap.
         let limits = self.additional_limit.limits();
-        let (block_env_cap, oracle_cap) = if class == TxClass::ProtocolOwn {
+        let (block_env_cap, oracle_cap) = if self.additional_limit.is_exempt() {
             (u64::MAX, u64::MAX)
         } else {
             (limits.block_env_access_compute_gas_limit, limits.oracle_access_compute_gas_limit)
@@ -805,9 +798,9 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
 /// estimation reads the execution cap off it — then reads the configuration the EVM runs with.
 /// Applying it twice changes nothing.
 ///
-/// A deposit, a system-originated transaction and a system call pay no history gas, and the EVM
-/// runs them on a schedule that prices a deposited byte at nothing; it installs that schedule for
-/// such a transaction and the spec's own for every other, so a configuration never carries it.
+/// A system call pays no history gas, and the EVM runs it on a schedule that prices a deposited
+/// byte at nothing. Every transaction runs the spec's own history pricing, deposits and
+/// system-originated transactions included; a configuration never carries the exemption.
 ///
 /// Satin runs the Satin gas schedule (see [`satin_gas_params`]) on its Karst base, with EIP-8037
 /// state gas and the EIP-2780 intrinsic cost switched on and gas above the execution cap going to
@@ -1430,10 +1423,9 @@ mod tests {
         assert!(emits_transfer_logs(ctx.journal_ref()));
     }
 
-    /// The protocol's own work is held to no per-transaction limit, pays no history and is not
-    /// detained, all off the one exemption the layer begins it with: a call from the EIP-4788
-    /// system address and a system call are; a user's transaction is held, pays and is detained,
-    /// and a user's deposit is held and detained but pays no history.
+    /// The protocol's own work is held to no per-transaction limit and is not detained. Only
+    /// a system call is exempt from history: a system-originated transaction and a user's
+    /// deposit both pay it.
     #[test]
     fn test_the_protocols_own_work_is_exempt_from_every_hold() {
         let mut ctx = MegaContext::new(EmptyDB::default(), MegaSpecId::SATIN);
@@ -1442,8 +1434,8 @@ mod tests {
         deposit.0.base.tx_type = DEPOSIT_TRANSACTION_TYPE;
         for (case, tx, own, pays) in [
             ("a user's transaction", call_from(Address::repeat_byte(0x11)), false, true),
-            ("a user's deposit", deposit, false, false),
-            ("a call from the system address", call_from(SYSTEM_ADDRESS), true, false),
+            ("a user's deposit", deposit, false, true),
+            ("a call from the system address", call_from(SYSTEM_ADDRESS), true, true),
         ] {
             ctx.set_tx(tx);
             ctx.on_new_tx(false);

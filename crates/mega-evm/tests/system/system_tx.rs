@@ -653,13 +653,16 @@ fn test_validating_a_system_transaction_charges_its_caller_as_any_senders() {
     );
 }
 
-/// A system transaction spends nothing on the history ledger: the protocol's own maintenance is
-/// exempt from history gas.
+/// A system transaction pays for its body, calldata and the Oracle slot it writes.
 #[test]
-fn test_a_system_transaction_spends_no_history_gas() {
+fn test_a_system_transaction_pays_history_gas() {
     let outcome = run_outcome(chain_db(), system_tx(0, B256::with_last_byte(0x66)));
     assert!(outcome.result.is_success(), "{:?}", outcome.result);
-    assert_eq!(outcome.gas.history, 0, "the protocol's own transaction pays no history gas");
+    assert_eq!(
+        outcome.gas.history,
+        mega_evm::history_gas(mega_evm::TX_BODY_SIZE + 196).unwrap() +
+            mega_evm::write_record_history_gas(1).unwrap()
+    );
 }
 
 /// A deposit-like transaction whose caller does not exist yet creates that account, and pays

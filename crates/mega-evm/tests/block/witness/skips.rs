@@ -2,18 +2,21 @@
 //! with less gas than the cold surcharge, and reads a frame that switched its volatile-data access
 //! off is refused. None reaches the database, none is in the record, and the replay skips them the
 //! same way. An Oracle read is not one of them: it is made before its charge, so a frame that
-//! cannot pay it reads the slot and asks the service all the same, and the replay does too.
+//! cannot pay it reads the slot and asks the service all the same, and the replay does too. Nor is
+//! the target of a call refused at its EIP-7702 delegate: the call loads its target as it would
+//! with access on, and is refused at the delegate's load.
 
 use alloy_primitives::{address, Address, Bytes, U256};
 use alloy_sol_types::SolCall;
 use mega_evm::{
     system::{IMegaAccessControl, IOracle, ACCESS_CONTROL_ADDRESS, ORACLE_CONTRACT_ADDRESS},
-    test_utils::BytecodeBuilder,
+    test_utils::{BytecodeBuilder, MemoryDatabase},
     volatile_data_access_disabled_revert_data, OracleRead, VolatileDataAccess,
 };
 use revm::{
     bytecode::opcode::{
-        BALANCE, BLOCKHASH, CALL, CALLCODE, GAS, MSTORE, POP, PUSH0, RETURN, SLOAD,
+        BALANCE, BLOCKHASH, CALL, CALLCODE, GAS, MSTORE, POP, PUSH0, RETURN, RETURNDATASIZE, SLOAD,
+        STATICCALL,
     },
     context::result::ExecutionResult,
     context_interface::cfg::GasId,
@@ -285,12 +288,12 @@ fn test_a_refused_oracle_read_reads_nothing() {
     assert!(run.record.storage.contains_key(&slot), "and the slot is read from the database");
 }
 
-/// With access off, a call opcode reads its target's account and code to find the EIP-7702
-/// delegate it would follow, before it charges or checks anything: a `CALLCODE` of a delegator
-/// of the block beneficiary, with an input of 1 MiB its 1,000 gas cannot pay, is refused, and the
-/// delegator's account and code are in the record and the witness, which the replay reads alike.
-#[test]
-fn test_a_refused_call_reads_its_targets_account_and_code() {
+/// A child of [`CONTRACT`], which runs the calls whose reads the access-off tests count.
+const CHILD: Address = address!("0x5000000000000000000000000000000000000007");
+
+/// A database holding [`DELEGATOR`], an EIP-7702 delegator of the block beneficiary, and the
+/// delegation its code is.
+fn with_the_delegator() -> (MemoryDatabase, Bytecode) {
     let delegation = Bytecode::new_eip7702(Address::ZERO);
     let mut db = common::database();
     db.insert_account_info(
@@ -301,6 +304,16 @@ fn test_a_refused_call_reads_its_targets_account_and_code() {
             ..Default::default()
         },
     );
+    (db, delegation)
+}
+
+/// With access off, a call opcode loads its target as it would with access on, once it paid its
+/// static gas and its memory: a `CALLCODE` of a delegator of the block beneficiary with an input
+/// of 1 MiB its frame cannot pay runs out of gas on its memory, and the delegator's account is in
+/// neither the record nor the witness, which the replay reads alike.
+#[test]
+fn test_a_call_short_of_its_memory_reads_no_target() {
+    let (mut db, _) = with_the_delegator();
     let then = BytecodeBuilder::default()
         .append_many([PUSH0, PUSH0])
         .push_number(0x10_0000_u32)
@@ -310,17 +323,63 @@ fn test_a_refused_call_reads_its_targets_account_and_code() {
         .append(CALLCODE)
         .stop();
     db.set_account_code(CONTRACT, disabled_then(then));
-    let replay = Case::new("refused call of a delegator", db)
+    let replay = Case::new("call of a delegator short of its memory", db)
         .tx(call(0, CONTRACT, Bytes::new(), 1_000_000 + common::body_history(0)))
         .run();
     let run = &replay.recorded;
-    match &run.tx(0).result {
-        ExecutionResult::Revert { output, .. } => assert_eq!(
-            output,
-            &volatile_data_access_disabled_revert_data(VolatileDataAccess::BENEFICIARY_BALANCE)
-        ),
-        other => panic!("expected the refusal, got {other:?}"),
+    assert!(matches!(run.tx(0).result, ExecutionResult::Halt { .. }), "{:?}", run.tx(0).result);
+    assert!(!run.record.accounts.contains_key(&DELEGATOR), "the target is not read");
+}
+
+/// With access off, a call of a delegator of the block beneficiary is refused where it loads the
+/// delegate, its target's account and code read by then: a `STATICCALL` of it from a child holding
+/// 2,999 at the call — its static gas and one short of the cold surcharge — runs out of gas without
+/// reading the delegator; one holding 3,050 reads it and runs out of gas at the check that it
+/// holds the delegate's warm access; one holding 3,100 is refused, and the delegator's account and
+/// code are in the record and the witness, which the replay reads alike.
+#[test]
+fn test_a_refused_call_reads_its_targets_account_and_code() {
+    let params = mega_evm::satin_gas_params();
+    let warm = params.get(GasId::warm_storage_read_cost());
+    let surcharge = params.get(GasId::cold_account_additional_cost());
+    let child = BytecodeBuilder::default()
+        .append_many([PUSH0, PUSH0, PUSH0, PUSH0])
+        .push_address(DELEGATOR)
+        .append_many([PUSH0, STATICCALL])
+        .stop()
+        .build();
+    let pushes = 4 * 2 + 3 + 2;
+    let refused =
+        volatile_data_access_disabled_revert_data(VolatileDataAccess::BENEFICIARY_BALANCE);
+    // (what the child holds at the call, whether it is refused, whether it reads the delegator)
+    for (left, is_refused, reads) in [
+        (warm + surcharge - 1, false, false),
+        (warm + surcharge + warm / 2, false, true),
+        (warm + surcharge + warm, true, true),
+    ] {
+        let (mut db, delegation) = with_the_delegator();
+        let then = BytecodeBuilder::default()
+            .append_many([PUSH0, PUSH0, PUSH0, PUSH0, PUSH0])
+            .push_address(CHILD)
+            .push_number(pushes + left)
+            .append_many([CALL, POP, RETURNDATASIZE, PUSH0, MSTORE])
+            .push_number(32_u8)
+            .append_many([PUSH0, RETURN]);
+        db.set_account_code(CONTRACT, disabled_then(then));
+        db.set_account_code(CHILD, child.clone());
+        let replay = Case::new("call of a delegator of the beneficiary", db)
+            .tx(call(0, CONTRACT, Bytes::new(), 1_000_000 + common::body_history(0)))
+            .run();
+        let run = &replay.recorded;
+        assert!(run.tx(0).result.is_success(), "{left}: {:?}", run.tx(0).result);
+        let returned = U256::from_be_slice(run.tx(0).result.output().expect("the size"));
+        let expected = if is_refused { refused.len() } else { 0 };
+        assert_eq!(returned, U256::from(expected), "{left}: the child's revert data");
+        assert_eq!(run.record.accounts.contains_key(&DELEGATOR), reads, "{left}: the account");
+        assert_eq!(
+            run.record.codes.contains_key(&delegation.hash_slow()),
+            reads,
+            "{left}: and its code"
+        );
     }
-    assert!(run.record.accounts.contains_key(&DELEGATOR), "the target's account is read");
-    assert!(run.record.codes.contains_key(&delegation.hash_slow()), "and its code");
 }

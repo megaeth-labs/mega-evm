@@ -73,8 +73,7 @@ fn block() -> BlockEnv {
 
 /// Runs `tx` on `db` through a neutral `MegaEvm` for `fork` and through op-revm's `OpEvm` on the
 /// configuration that context holds, and returns both outcomes and the history ledger `MegaEvm`
-/// reported. The read of the live system address, which op-revm does not make, is taken out of
-/// `MegaEvm`'s state.
+/// reported.
 fn run_both(fork: EthSpecId, db: MemoryDatabase, tx: TxEnv) -> (Outcome, Outcome, u64) {
     let ctx = MegaContext::new(db.clone(), MegaSpecId::SATIN)
         .with_neutral_cfg(neutral_cfg(fork).expect("a neutral fork"))
@@ -266,7 +265,7 @@ fn test_neutral_nested_value_call_matches_op_revm() {
 ///
 /// op-revm credits the three fee vaults with nothing here and so touches them; the touched, empty
 /// accounts it leaves are not Ethereum's, and are taken out of `MegaEvm`'s state before the two
-/// are compared, with the read of the live system address.
+/// are compared.
 fn run_against_ethereum(fork: EthSpecId, db: MemoryDatabase, tx: TxEnv) -> (Outcome, Outcome, u64) {
     let block = BlockEnv { basefee: 0, ..block() };
     let tx = TxEnv { gas_price: 0, ..tx };

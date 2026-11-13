@@ -8,10 +8,13 @@
 //!
 //! A system-address transaction has a fixed shape
 //! ([`has_system_transaction_shape`]): a legacy transaction calling a contract on
-//! [`MEGA_SYSTEM_TX_WHITELIST`]. Every transaction reads the live system address out of the
-//! registry when it is validated
-//! ([`load_system_address`](crate::system::load_system_address)), and one of the system shape
-//! whose caller is that address is a system-address transaction. A transaction from that address
+//! [`MEGA_SYSTEM_TX_WHITELIST`]. The live system address is the one the registry names, which the
+//! block resolves once, after its pre-block steps
+//! ([`resolve_system_address`](crate::system::resolve_system_address)), and an EVM built outside
+//! block execution reads once, when it is built
+//! ([`live_system_address`](crate::system::live_system_address)); no transaction reads the
+//! registry for its classification. A transaction of the system shape whose caller is that address
+//! is a system-address transaction. A transaction from that address
 //! of any other shape is invalid ([`SYSTEM_ADDRESS_WITHOUT_SYSTEM_SHAPE`]): the Oracle's
 //! `onlySystemAddress` tests the sender alone, so the system key must send nothing the Oracle
 //! would accept as an ordinary transaction. A deposit is never of the system shape, so a deposit

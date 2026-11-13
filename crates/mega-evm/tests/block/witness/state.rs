@@ -565,7 +565,7 @@ fn test_a_mega_system_transaction_reports_the_footprint_scalar_it_reads() {
     let replay = Case::new("system transaction alone", db).tx(common::system_tx()).run();
     let run = &replay.recorded;
     assert!(run.tx(0).result.is_success(), "{:?}", run.tx(0).result);
-    assert_eq!(run.tx(0).gas.history, 0, "the protocol's own transaction");
+    assert_eq!(run.tx(0).gas.history, common::body_history(36), "the protocol's own transaction");
     assert_read_only("the system transaction", l1_account(&run.tx(0).state), &footprint);
     assert_eq!(run.tx(0).da_footprint, run.tx(0).da_size * u64::from(PARENT_FOOTPRINT_SCALAR));
 
@@ -601,7 +601,10 @@ fn test_the_l1_attributes_deposit_first_prices_the_transactions_after_it() {
             0,
             U256::ZERO,
             Bytes::from(word.to_be_bytes::<32>()),
-            200_000 + common::new_account_state_gas(),
+            200_000 +
+                common::new_account_state_gas() +
+                common::body_history(32) +
+                mega_evm::write_record_history_gas(1).unwrap(),
         ))
         .tx(call(0, CONTRACT, slot(1), write_gas()))
         .run();
@@ -647,7 +650,10 @@ fn scalars_emptied_in_the_block(overhead: U256) -> Case {
             0,
             U256::ZERO,
             Bytes::new(),
-            200_000 + common::new_account_state_gas(),
+            200_000 +
+                common::new_account_state_gas() +
+                common::body_history(0) +
+                mega_evm::write_record_history_gas(1).unwrap(),
         ))
         .tx(call(0, CONTRACT, slot(1), write_gas()))
 }
@@ -848,7 +854,10 @@ fn test_a_deposit_creating_the_l1_block_contract_adds_no_slot_read() {
             1_000,
             U256::from(1_000),
             Bytes::new(),
-            200_000 + 2 * common::new_account_state_gas(),
+            200_000 +
+                2 * common::new_account_state_gas() +
+                common::body_history(0) +
+                mega_evm::write_record_history_gas(1).unwrap(),
         ))
         .tx(call(0, CONTRACT, slot(1), write_gas()));
     let recorded = case.record();

@@ -27,9 +27,8 @@
 //! block with no base fee, and op-revm's three fee vaults, touched empty, are taken out of
 //! `MegaEvm`'s state before the two are compared, as `tests/satin/neutral.rs` does.
 //!
-//! Neither reference reads the live system address, which every Satin transaction does when it is
-//! validated: the read-only entry it leaves in `MegaEvm`'s state is taken out before either
-//! comparison, and taking it out fails when it is anything but the read.
+//! No Satin transaction reads the live system address either: the EVM reads it when it is built,
+//! outside every transaction, so the states compare as they are.
 
 use std::sync::atomic::{AtomicU32, Ordering};
 

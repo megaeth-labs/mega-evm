@@ -129,10 +129,11 @@ fn both_evms(
 /// against the EIP-7623 floor, so a floor that binds op-revm's receipt need not bind Satin's;
 /// the whole `ResultGas` is still compared, with the two fields history moves rebuilt.
 ///
-/// The state is compared with the read of the live system address taken out, which holds because
-/// these transactions carry no gas price: a priced transaction pays the extra gas out of the
-/// sender's balance ([`test_fees_match_op_revm`]).
-fn assert_same_but_history(mega: &MegaTransactionOutcome, op: &Settled) {
+/// The state is compared whole, which holds because these transactions carry no gas price: a
+/// priced transaction pays the extra gas out of the sender's balance ([`test_fees_match_op_revm`]).
+/// No Satin transaction reads the live system address, so the state carries no entry op-revm's
+/// lacks.
+pub(super) fn assert_same_but_history(mega: &MegaTransactionOutcome, op: &Settled) {
     let history = mega.gas.history;
     assert!(history >= body_history(0), "every Satin transaction pays for its own body");
     let (m, o) = (mega.result.gas(), op.result.gas());
@@ -581,7 +582,7 @@ fn test_the_created_deposit_caller_diverges_from_op_revm() {
     let (mut mega, mut op, cfg) = both_evms(MemoryDatabase::default(), block());
     assert_satin_cfg(&cfg);
 
-    let mega_outcome = mega.transact(OpTx(deposit(tx.clone()))).unwrap();
+    let mega_outcome = mega.execute_transaction(OpTx(deposit(tx.clone()))).unwrap();
     let op_outcome = op.transact(deposit(tx)).unwrap();
 
     assert!(mega_outcome.result.is_success() && op_outcome.result.is_success());
@@ -594,6 +595,12 @@ fn test_the_created_deposit_caller_diverges_from_op_revm() {
         op_outcome.result.gas().state_gas_spent_final(),
         0,
         "op-revm charges nothing for it",
+    );
+    assert_eq!(mega_outcome.gas.history, body_history(0));
+    assert_eq!(mega_outcome.gas.history_bytes, TX_BODY_SIZE);
+    assert_eq!(
+        mega_outcome.result.gas().total_gas_spent(),
+        op_outcome.result.gas().total_gas_spent() + account_state_gas() + body_history(0)
     );
 }
 

@@ -260,14 +260,14 @@ fn registry_call_from(sender: Address, input: Vec<u8>) -> Recovered<MegaTxEnvelo
 }
 
 /// Asserts `sender` is the block's system address: its Oracle call runs as the protocol's own
-/// transaction, with no fee and no history gas, from an account holding nothing. Answers the
+/// transaction, with no fee but with history gas, from an account holding nothing. Answers the
 /// outcome, not committed.
 fn assert_is_the_system_address(executor: &mut Executor<'_>, sender: Address) -> Outcome {
     let outcome = executor
         .run_transaction(&oracle_call_from(sender, 0))
         .expect("a system-address transaction is accepted without a balance");
     assert!(outcome.result.is_success(), "{:?}", outcome.result);
-    assert_eq!(outcome.gas.history, 0, "the protocol's own transaction pays no history");
+    assert_eq!(outcome.gas.history, common::body_history(36), "the Oracle read pays body history");
     assert!(executor.evm().ctx().is_system_originated(), "it is the protocol's own transaction");
     outcome
 }
@@ -447,7 +447,8 @@ fn test_an_estimate_outside_block_execution_costs_what_the_block_charges() {
         db.set_account_storage(TWIN, CURRENT_SYSTEM_ADDRESS, common::word(MEGA_SYSTEM_ADDRESS));
         db
     };
-    // The gas the block charges `tx` and the gas an estimate on the same state charges it.
+    // The gas the block charges `tx`, which an estimate on the same state charges it too, and
+    // whether the block took it for a Mega System Transaction.
     let both = |tx: &Recovered<MegaTxEnvelope>| {
         let mut state = State::builder().with_database(db()).build();
         let mut executor = executor(&mut state, envs_at(1), common::BLOCK_GAS_LIMIT);
@@ -461,11 +462,13 @@ fn test_an_estimate_outside_block_execution_costs_what_the_block_charges() {
         let estimate = outside.execute_transaction(tx.to_tx_env()).expect("estimated");
         assert_eq!(estimate.result, in_block.inner.result);
         assert_eq!(estimate.gas, in_block.inner.gas, "the estimate is the block's charge");
-        estimate.gas
+        (estimate.gas, in_block.is_system_transaction)
     };
-    let system = both(&write());
-    assert_eq!(system.history, 0, "a Mega System Transaction");
-    assert_eq!(both(&read(SEQUENCER_REGISTRY_ADDRESS)), both(&read(TWIN)), "the registry is cold");
+    let (_, system) = both(&write());
+    assert!(system, "a Mega System Transaction");
+    let (registry, ordinary) = both(&read(SEQUENCER_REGISTRY_ADDRESS));
+    assert!(!ordinary, "an ordinary transaction");
+    assert_eq!(registry, both(&read(TWIN)).0, "the registry is cold");
 }
 
 /// A deposit from `sender` to the Oracle's `setSlots`, minting `mint` to it: a write the Oracle

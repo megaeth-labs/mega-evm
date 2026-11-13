@@ -472,7 +472,8 @@ where
     /// A failed deposit still bumps its caller's nonce and mints, so one whose caller had no
     /// account creates it: one account of state growth, which the transaction reports and its
     /// block counts, though it pays no state gas for it and no limit stops a deposit that already
-    /// failed.
+    /// failed. Its body and calldata remain history bytes even when validation never admitted
+    /// their charge; no history gas is reported because the whole gas limit is regular gas.
     ///
     /// It is the fatal cleanup of every entry point, so nothing the failed execution left is read
     /// by the next one on the same EVM, whatever cleanup op-revm made:
@@ -506,8 +507,12 @@ where
                 ..
             })
         );
-        if failed_deposit && deposit_created_caller(evm.ctx()) {
-            evm.ctx_mut().additional_limit.count_created_caller();
+        if failed_deposit {
+            let priced = evm.ctx_ref().prices_history();
+            evm.ctx_mut().additional_limit.settle_failed_deposit_history(priced);
+            if deposit_created_caller(evm.ctx()) {
+                evm.ctx_mut().additional_limit.count_created_caller();
+            }
         }
         result
     }
@@ -1625,10 +1630,10 @@ fn applied_authorities<DB: Database, ExtEnvs: ExternalEnvTypes>(
 /// The authorities' records are the transaction's own and outlive a first frame that fails; the
 /// first frame's record does not, so that frame carries what it cost as its start charge, which
 /// its failure gives back. A first frame revm refuses to start on its sender's account makes no
-/// record, and gets the charge back as any frame that kept nothing does: among the transactions
-/// that pay history, that is a creation from an account whose nonce cannot be bumped, which only a
-/// caller that turned the nonce check off can run, and which revm answers with a success and no
-/// address.
+/// record. A value the sender cannot fund is never charged; a creation whose sender's nonce
+/// cannot be bumped gets the charge back when its start keeps nothing. A deposit or a caller
+/// that turned the nonce check off can reach that nonce, which revm answers with a success and
+/// no address.
 ///
 /// Answers the history gas the first frame's record was charged, which pre-execution keeps for
 /// the frame's input to carry, and nothing for a transaction that pays no history; `None` when the
@@ -1647,13 +1652,19 @@ fn charge_records_made_outside_a_frame<DB: Database, ExtEnvs: ExternalEnvTypes>(
 
 /// The write records the transaction's own frame makes, as the journal's state stands before the
 /// first frame: the recipient's, when the value changes an account the transaction has not
-/// changed, or the account a creation creates ([`charge_records_made_outside_a_frame`]).
+/// changed, or the account a creation creates. A value the sender cannot fund, its deposit mint
+/// already credited, makes no record ([`charge_records_made_outside_a_frame`]).
 fn first_frame_records<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &MegaContext<DB, ExtEnvs>,
 ) -> u64 {
     let tx = ctx.tx();
     match tx.kind() {
-        TxKind::Create => 1,
+        TxKind::Create => u64::from(
+            ctx.journal_ref()
+                .state
+                .get(&tx.caller())
+                .is_some_and(|caller| caller.info.balance >= tx.value()),
+        ),
         TxKind::Call(to) => {
             let predicted = ctx.accounts().transfer_records(tx.caller(), to, tx.value()).transfer;
             debug_assert_eq!(predicted.taken, 0, "the sender's value returns no account");
