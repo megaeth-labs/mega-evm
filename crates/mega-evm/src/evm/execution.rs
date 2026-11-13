@@ -198,18 +198,20 @@ where
         Ok(Some(PreExecutionOutput { eip7702_refund, checkpoint }))
     }
 
-    /// Reads the live system address out of the registry, then decides whether the transaction
-    /// is a system-address transaction and prepares the common execution layer for it, then
-    /// validates a system-address transaction and promotes it to a deposit, then validates the
-    /// transaction as op-revm does — as a deposit, when it was promoted.
+    /// Decides, against the live system address the context holds, whether the transaction is a
+    /// system-address transaction and prepares the common execution layer for it, then validates
+    /// a system-address transaction and promotes it to a deposit, then validates the transaction
+    /// as op-revm does — as a deposit, when it was promoted.
     ///
     /// This is the handler's first phase, so the layer is prepared before anything else of the
-    /// transaction runs, and a read the database cannot serve fails the transaction through the
-    /// handler's error path, which discards what the journal loaded. Every transaction reads the
-    /// live system address, whatever its shape, and the read leaves the registry's account and
-    /// its slot warm for the rest of the transaction, as EIP-3651 leaves the block beneficiary.
+    /// transaction runs. The transaction does not read the registry: the context resolved the
+    /// address outside every transaction — block execution after the block's pre-block steps, any
+    /// other EVM when it was built — so no transaction finds the registry's account or slot warm
+    /// or pays for the read. Only when that read failed does the context make it again here, off
+    /// the database and outside the journal, and a failure again fails the transaction through
+    /// the handler's error path.
     fn validate_env(&self, evm: &mut Self::Evm) -> Result<(), Self::Error> {
-        let system_address = crate::system::load_system_address(evm.ctx_mut().journal_mut())?;
+        let system_address = evm.ctx_mut().live_system_address()?;
         self.validate_env_as(evm, system_address, true)
     }
 

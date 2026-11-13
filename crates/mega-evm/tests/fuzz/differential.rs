@@ -27,17 +27,15 @@
 //! block with no base fee, and op-revm's three fee vaults, touched empty, are taken out of
 //! `MegaEvm`'s state before the two are compared, as `tests/satin/neutral.rs` does.
 //!
-//! Neither reference reads the live system address, which every Satin transaction does when it is
-//! validated: the read-only entry it leaves in `MegaEvm`'s state is taken out before either
-//! comparison, and taking it out fails when it is anything but the read.
+//! No Satin transaction reads the live system address either: the EVM reads it when it is built,
+//! outside every transaction, so the states compare as they are.
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use alloy_op_evm::OpTx;
 use mega_evm::{
     test_utils::{
-        neutral_cfg, neutral_gas_table, neutralize_evm, take_system_address_read,
-        zero_fee_l1_block_info, MemoryDatabase,
+        neutral_cfg, neutral_gas_table, neutralize_evm, zero_fee_l1_block_info, MemoryDatabase,
     },
     EthSpecId, EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
 };
@@ -110,9 +108,7 @@ fn run_mega(
     let outcome = mega
         .execute_transaction(OpTx(tx))
         .map(|outcome| {
-            let mut state = outcome.result_and_state.state;
-            take_system_address_read(&mut state);
-            ExecResultAndState::new(outcome.result_and_state.result, state)
+            ExecResultAndState::new(outcome.result_and_state.result, outcome.result_and_state.state)
         })
         .map_err(|error| format!("{error}"));
     (outcome, cfg)

@@ -39,9 +39,9 @@ The three Rex6 blocks of `tests/fixtures/blocks.tar.xz`, each replayed on both e
 
 | Block | Transactions | Legacy gas | Satin gas | Satin / legacy | Regular | State | History | Status differs | Logs | Refused |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|
-| 26400001 | 39 | 10592072 | 14178164 | 1.33 | 8788572 | 0 | 5399592 | 18 | 138 -> 121 | 5 |
-| 26400007 | 25 | 8428932 | 11068218 | 1.31 | 6143826 | 0 | 4924392 | 2 | 119 -> 119 | 2 |
-| 26400110 | 27 | 8051381 | 10874000 | 1.35 | 5999856 | 0 | 4874144 | 3 | 121 -> 121 | 3 |
+| 26400001 | 39 | 10592072 | 14207564 | 1.34 | 8817972 | 0 | 5399592 | 18 | 138 -> 121 | 5 |
+| 26400007 | 25 | 8428932 | 11107418 | 1.31 | 6183026 | 0 | 4924392 | 2 | 119 -> 119 | 2 |
+| 26400110 | 27 | 8051381 | 10908300 | 1.35 | 6034156 | 0 | 4874144 | 3 | 121 -> 121 | 3 |
 
 ## Recorded transactions by call target
 
@@ -49,7 +49,7 @@ The transactions of the three blocks grouped by the contract they call and the s
 
 | Call target | Selector | Transactions | Legacy gas | Satin gas | Satin / legacy | State gas | Status differs | Logs |
 |---|---|---:|---:|---:|---:|---:|---:|---|
-| 0x6342000000000000000000000000000000000001 | 0x01caec13 | 31 | 2532545 | 1631763 | 0.64 | 0 | 10 | 0 -> 0 |
+| 0x6342000000000000000000000000000000000001 | 0x01caec13 | 31 | 2532545 | 1734663 | 0.68 | 0 | 10 | 0 -> 0 |
 | 0x897a33a0af45b3ba097bd6045187d622252e6acd | 0x9aec351f | 30 | 18019164 | 26445264 | 1.46 | 0 | 0 | 330 -> 330 |
 | deposit | - | 3 | 304908 | 280152 | 0.91 | 0 | 0 | 0 -> 0 |
 | 0x12759afca690637b425ffba3265f0dc2f6242a8d | 0x21d5c9bb | 2 | 601407 | 832935 | 1.38 | 0 | 0 | 6 -> 6 |

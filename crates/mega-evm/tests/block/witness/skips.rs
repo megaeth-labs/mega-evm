@@ -144,10 +144,15 @@ fn test_a_cold_account_load_short_of_gas_reads_no_account() {
     assert_eq!(replay.recorded.record.accounts.get(&STRANGER), Some(&None));
 }
 
-/// Code that calls the Oracle forwarding `gas` and returns whether the call succeeded, as a word.
+/// Code that calls the Oracle's `getSlot(42)` forwarding `gas` and returns whether the call
+/// succeeded, as a word.
 fn calls_the_oracle_forwarding(gas: u64) -> Bytes {
+    let input = IOracle::getSlotCall { slot: U256::from(42) }.abi_encode();
     BytecodeBuilder::default()
-        .append_many([PUSH0, PUSH0, PUSH0, PUSH0, PUSH0])
+        .mstore(0, &input)
+        .append_many([PUSH0, PUSH0])
+        .push_number(input.len() as u64)
+        .append_many([PUSH0, PUSH0])
         .push_address(ORACLE_CONTRACT_ADDRESS)
         .push_number(gas)
         .append_many([CALL, PUSH0, MSTORE])
@@ -156,21 +161,44 @@ fn calls_the_oracle_forwarding(gas: u64) -> Bytes {
         .build()
 }
 
-/// An Oracle read is made before any of its 2,100 is charged: whatever its frame holds at the
-/// `SLOAD` — 50, 2,099, 2,100 or 4,099 — the slot is read from the database and the service
-/// asked, on a chain that holds the Oracle, and the frame then runs out of gas on the first two
-/// and completes the other two. The replay reads and asks the same, and replays the recorded
-/// answer at each.
+/// The regular gas the chain's Oracle spends in its own frame on `getSlot(42)` before its `SLOAD`,
+/// and after the `SLOAD` to the frame's end, measured under a gas inspector on an EVM over the
+/// chain the blocks run on: the block deploys the Oracle at its own code, which these figures are
+/// of.
+fn oracle_get_slot_gas() -> (u64, u64) {
+    use alloy_evm::{EvmFactory, ToTxEnv};
+    let db = chain_with_oracle().account_code(CONTRACT, calls_the_oracle_forwarding(1_000_000));
+    let mut evm = mega_evm::MegaEvmFactory::new().create_evm_with_inspector(
+        db,
+        common::evm_env(),
+        mega_evm::test_utils::GasInspector::new(),
+    );
+    let tx = common::recovered(common::tx(0, CONTRACT, Bytes::new(), 3_000_000));
+    let outcome = evm.execute_transaction(tx.to_tx_env()).expect("the probe runs");
+    assert!(outcome.result.is_success(), "{:?}", outcome.result);
+    // The transaction's frame is at depth 1, the Oracle's below it at 2.
+    let oracle: Vec<_> =
+        evm.inspector().records().into_iter().filter(|record| record.depth == 2).collect();
+    let sload = oracle.iter().find(|record| record.opcode.get() == SLOAD).expect("its read");
+    let start = oracle.first().expect("the Oracle ran").gas_before;
+    let end = oracle.last().expect("the Oracle ran").gas_after;
+    (start - sload.gas_before, sload.gas_after - end)
+}
+
+/// An Oracle read is made before any of its 2,100 is charged: whatever the Oracle's frame holds at
+/// its `SLOAD` — 50, 2,099, or 2,100 and 4,099 with what the frame spends after it — the slot is
+/// read from the database and the service asked, on a chain that holds the Oracle, and the frame
+/// then runs out of gas on the first two and completes the other two. The replay reads and asks
+/// the same, and replays the recorded answer at each.
 #[test]
 fn test_an_oracle_read_is_read_and_asked_whatever_its_frame_holds() {
     let slot = (ORACLE_CONTRACT_ADDRESS, U256::from(42));
-    for (left, completes) in [(50, false), (2_099, false), (2_100, true), (4_099, true)] {
+    let (before, after) = oracle_get_slot_gas();
+    for (left, completes) in
+        [(50, false), (2_099, false), (2_100 + after, true), (4_099 + after, true)]
+    {
         let mut db = chain_with_oracle();
-        db.set_account_code(
-            ORACLE_CONTRACT_ADDRESS,
-            BytecodeBuilder::default().push_number(42_u8).append(SLOAD).stop().build(),
-        );
-        db.set_account_code(CONTRACT, calls_the_oracle_forwarding(3 + left));
+        db.set_account_code(CONTRACT, calls_the_oracle_forwarding(before + left));
         let replay = Case::new("oracle read by gas", db)
             .envs(super::harness::Envs::new().with_oracle_storage(U256::from(42), U256::from(1)))
             .tx(call(0, CONTRACT, Bytes::new(), 1_000_000 + common::body_history(0)))

@@ -18,8 +18,8 @@ use alloy_op_evm::OpTx;
 use alloy_primitives::{address, Address, Bytes, TxKind, U256};
 use mega_evm::{
     test_utils::{
-        neutral_cfg, neutralize_evm, op_transaction, take_system_address_read,
-        zero_fee_l1_block_info, BytecodeBuilder, MemoryDatabase,
+        neutral_cfg, neutralize_evm, op_transaction, zero_fee_l1_block_info, BytecodeBuilder,
+        MemoryDatabase,
     },
     EthSpecId, EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
     VolatileDataAccess,
@@ -73,8 +73,7 @@ fn block() -> BlockEnv {
 
 /// Runs `tx` on `db` through a neutral `MegaEvm` for `fork` and through op-revm's `OpEvm` on the
 /// configuration that context holds, and returns both outcomes and the history ledger `MegaEvm`
-/// reported. The read of the live system address, which op-revm does not make, is taken out of
-/// `MegaEvm`'s state.
+/// reported.
 fn run_both(fork: EthSpecId, db: MemoryDatabase, tx: TxEnv) -> (Outcome, Outcome, u64) {
     let ctx = MegaContext::new(db.clone(), MegaSpecId::SATIN)
         .with_neutral_cfg(neutral_cfg(fork).expect("a neutral fork"))
@@ -89,9 +88,8 @@ fn run_both(fork: EthSpecId, db: MemoryDatabase, tx: TxEnv) -> (Outcome, Outcome
     let mut mega = MegaEvm::new(ctx);
     neutralize_evm(&mut mega, fork).expect("a neutral fork");
     let outcome = mega.execute_transaction(OpTx(op_transaction(tx.clone()))).unwrap();
-    let mut state = outcome.result_and_state.state;
-    take_system_address_read(&mut state);
-    let mega = ExecResultAndState::new(outcome.result_and_state.result, state);
+    let mega =
+        ExecResultAndState::new(outcome.result_and_state.result, outcome.result_and_state.state);
 
     let op = OpEvm::new(op_ctx, NoOpInspector).transact(op_transaction(tx)).unwrap();
     (mega, op, outcome.gas.history)
@@ -267,7 +265,7 @@ fn test_neutral_nested_value_call_matches_op_revm() {
 ///
 /// op-revm credits the three fee vaults with nothing here and so touches them; the touched, empty
 /// accounts it leaves are not Ethereum's, and are taken out of `MegaEvm`'s state before the two
-/// are compared, with the read of the live system address.
+/// are compared.
 fn run_against_ethereum(fork: EthSpecId, db: MemoryDatabase, tx: TxEnv) -> (Outcome, Outcome, u64) {
     let block = BlockEnv { basefee: 0, ..block() };
     let tx = TxEnv { gas_price: 0, ..tx };
@@ -280,7 +278,6 @@ fn run_against_ethereum(fork: EthSpecId, db: MemoryDatabase, tx: TxEnv) -> (Outc
     neutralize_evm(&mut mega, fork).expect("a neutral fork");
     let outcome = mega.execute_transaction(OpTx(op_transaction(tx.clone()))).unwrap();
     let mut state = outcome.result_and_state.state;
-    take_system_address_read(&mut state);
     for vault in [BASE_FEE_RECIPIENT, L1_FEE_RECIPIENT, OPERATOR_FEE_RECIPIENT] {
         if state.get(&vault).is_some_and(|account| account.is_empty()) {
             state.remove(&vault);

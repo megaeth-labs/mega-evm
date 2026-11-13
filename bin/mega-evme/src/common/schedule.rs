@@ -3,8 +3,10 @@
 use std::sync::OnceLock;
 
 use mega_evm::{
-    alloy_hardforks::ForkCondition, ChainActivation, MegaHardfork, MegaHardforkConfig,
-    MegaHardforks, MegaSpecId, ProtocolLimits, SatinChainConfig,
+    alloy_hardforks::ForkCondition,
+    system::{SequencerRegistryBootstrap, MEGA_SYSTEM_ADDRESS},
+    ChainActivation, MegaHardfork, MegaHardforkConfig, MegaHardforks, MegaSpecId, ProtocolLimits,
+    SatinChainConfig,
 };
 use serde_json::{Map, Value};
 
@@ -36,11 +38,24 @@ pub fn satin_schedule(chain_id: u64, timestamp: u64) -> Result<MegaHardforkConfi
     schedule_for(chain, timestamp)
 }
 
+/// The `SequencerRegistry` bootstrap values a counterfactual gives a chain whose schedule carries
+/// none, as the legacy engine did for a chain without a published schedule: the system address in
+/// both roles and the shortest rotation delay. They matter only to a block that seeds a registry
+/// its state does not hold; on a chain whose registry is deployed its storage decides the roles.
+const PLACEHOLDER_BOOTSTRAP: SequencerRegistryBootstrap =
+    SequencerRegistryBootstrap::new(MEGA_SYSTEM_ADDRESS, MEGA_SYSTEM_ADDRESS, 1);
+
 /// The schedule of a Satin counterfactual on the chain whose schedule is `chain`: that schedule
 /// with Satin from genesis, or, for a chain neither the engine's table nor a genesis file names,
-/// the engine's base forks with Satin from genesis.
+/// the engine's base forks with Satin from genesis and [`PLACEHOLDER_BOOTSTRAP`], since a schedule
+/// that activates Satin carries the registry's bootstrap values.
 fn counterfactual(chain: Option<MegaHardforkConfig>) -> MegaHardforkConfig {
-    chain.unwrap_or_default().with(MegaHardfork::Satin, ForkCondition::Timestamp(0))
+    let schedule = chain.unwrap_or_default().with(MegaHardfork::Satin, ForkCondition::Timestamp(0));
+    if schedule.sequencer_registry_bootstrap().is_some() {
+        schedule
+    } else {
+        schedule.with_sequencer_registry_bootstrap(PLACEHOLDER_BOOTSTRAP)
+    }
 }
 
 /// The protocol limits a Satin run is held to: Satin's ([`ProtocolLimits::for_spec`]), the ones
@@ -96,6 +111,9 @@ pub fn chain_activation(chain_id: u64) -> Option<ChainActivation> {
         Some(genesis) if genesis.chain_id == chain_id => Some(ChainActivation {
             chain_id,
             satin: genesis.satin.map(|satin| satin.activation_time),
+            sequencer_registry_bootstrap: genesis
+                .satin
+                .map(|satin| satin.sequencer_registry_bootstrap),
         }),
         _ => mega_evm::chain_activation(chain_id),
     }
@@ -233,12 +251,14 @@ mod tests {
     const ACTIVATION: u64 = 1_800_000_000;
 
     fn scheduled() -> MegaHardforkConfig {
-        ChainActivation { chain_id: MAINNET_CHAIN_ID, satin: Some(ACTIVATION) }.hardforks()
+        let mainnet = mega_evm::chain_activation(MAINNET_CHAIN_ID).expect("a known chain");
+        ChainActivation { satin: Some(ACTIVATION), ..mainnet }.hardforks()
     }
 
     /// A counterfactual runs on the chain's own schedule with Satin from genesis, whatever the
     /// chain; a chain the engine does not know gets the engine's base forks with Satin from
-    /// genesis. No block of a counterfactual is Satin's activation block.
+    /// genesis and the placeholder bootstrap values, a known chain keeps its own, and each
+    /// schedule loads. No block of a counterfactual is Satin's activation block.
     #[test]
     fn test_a_counterfactual_runs_on_the_chains_schedule_with_satin_from_genesis() {
         for chain_id in [MAINNET_CHAIN_ID, TESTNET_CHAIN_ID, 6342, 1] {
@@ -246,6 +266,13 @@ mod tests {
             assert_eq!(schedule.spec_id(0), Some(MegaSpecId::SATIN), "chain {chain_id}");
             assert!(!schedule.is_satin_activation_block(0, 1_700_000_000), "chain {chain_id}");
             assert_eq!(schedule.validate_schedule(), Ok(()));
+            let own = mega_evm::chain_activation(chain_id)
+                .and_then(|activation| activation.sequencer_registry_bootstrap);
+            assert_eq!(
+                schedule.sequencer_registry_bootstrap(),
+                Some(own.unwrap_or(PLACEHOLDER_BOOTSTRAP)),
+                "chain {chain_id}"
+            );
         }
         let known = mega_evm::hardfork_schedule(MAINNET_CHAIN_ID).unwrap();
         let counterfactual = satin_schedule(MAINNET_CHAIN_ID, 1_700_000_000).unwrap();
@@ -324,10 +351,21 @@ mod tests {
         );
     }
 
-    /// A genesis file whose `config` carries `chainId` and the Satin key: Satin at
-    /// [`ACTIVATION`].
+    /// The bootstrap values the tests' genesis files carry.
+    const BOOTSTRAP: mega_evm::system::SequencerRegistryBootstrap =
+        mega_evm::system::SequencerRegistryBootstrap::new(
+            alloy_primitives::address!("0x0000000000000000000000000000000000000033"),
+            alloy_primitives::address!("0x0000000000000000000000000000000000000044"),
+            1,
+        );
+
+    /// A genesis file whose `config` carries `chainId` and the Satin keys: Satin at
+    /// [`ACTIVATION`], and [`BOOTSTRAP`].
     fn genesis_file(dir: &tempfile::TempDir, chain_id: u64) -> (String, SatinChainConfig) {
-        let satin = SatinChainConfig { activation_time: ACTIVATION };
+        let satin = SatinChainConfig {
+            activation_time: ACTIVATION,
+            sequencer_registry_bootstrap: BOOTSTRAP,
+        };
         let mut config = serde_json::to_value(satin).unwrap();
         config["chainId"] = serde_json::json!(chain_id);
         config["optimism"] = serde_json::json!({ "eip1559Elasticity": 6 });
@@ -412,10 +450,24 @@ mod tests {
         assert_eq!(parse_genesis(&bare), Ok(GenesisChain { chain_id: 7, satin: None }));
         let no_chain_id = write("no-id.json", serde_json::json!({ "config": {} }));
         assert!(parse_genesis(&no_chain_id).unwrap_err().contains("chainId"));
-        let satin = write("satin.json", serde_json::json!({ "chainId": 7, "satinTime": 0 }));
-        let expected =
-            GenesisChain { chain_id: 7, satin: Some(SatinChainConfig { activation_time: 0 }) };
+        let satin = write(
+            "satin.json",
+            serde_json::json!({
+                "chainId": 7,
+                "satinTime": 0,
+                "rex5InitialSequencer": "0x0000000000000000000000000000000000000033",
+                "rex5InitialAdmin": "0x0000000000000000000000000000000000000044",
+                "rex6MinRotationDelay": 1,
+            }),
+        );
+        let config =
+            SatinChainConfig { activation_time: 0, sequencer_registry_bootstrap: BOOTSTRAP };
+        let expected = GenesisChain { chain_id: 7, satin: Some(config) };
         assert_eq!(parse_genesis(&satin), Ok(expected));
+        let without_bootstrap =
+            write("no-bootstrap.json", serde_json::json!({ "chainId": 7, "satinTime": 0 }));
+        let error = parse_genesis(&without_bootstrap).unwrap_err();
+        assert!(error.contains("must carry `rex5InitialSequencer`"), "{error}");
         let old = write(
             "old.json",
             serde_json::json!({ "chainId": 7, "satinTime": 0, "satinInitialAdmin": "0x33" }),

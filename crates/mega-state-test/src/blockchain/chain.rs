@@ -43,9 +43,9 @@ use mega_evm::{
         DatabaseCommit,
     },
     system::{
-        keyless::KEYLESS_DEPLOY_ADDRESS, ACCESS_CONTROL_ADDRESS, CREATE2_FACTORY_ADDRESS,
-        HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS, LIMIT_CONTROL_ADDRESS, MEGA_SYSTEM_ADDRESS,
-        ORACLE_CONTRACT_ADDRESS, SEQUENCER_REGISTRY_ADDRESS,
+        keyless::KEYLESS_DEPLOY_ADDRESS, SequencerRegistryBootstrap, ACCESS_CONTROL_ADDRESS,
+        CREATE2_FACTORY_ADDRESS, HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS, LIMIT_CONTROL_ADDRESS,
+        MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS, SEQUENCER_REGISTRY_ADDRESS,
     },
     test_utils::{
         rex6_predeploys, RecordingDatabase, RecordingEnvFactory, SequencerRegistryRoles,
@@ -169,9 +169,15 @@ pub fn registry_roles() -> SequencerRegistryRoles {
     SequencerRegistryRoles::from(MEGA_SYSTEM_ADDRESS)
 }
 
-/// The schedule the blocks run on: every fork active from genesis.
+/// The schedule the blocks run on: every fork active from genesis, carrying the
+/// `SequencerRegistry` bootstrap values the roles of [`registry_roles`] are, as a schedule that
+/// activates Satin must. A registry is seeded into every pre-state that lacks one, so no block
+/// seeds one from them.
 pub fn chain_spec() -> MegaHardforkConfig {
-    MegaHardforkConfig::default().with_all_activated()
+    let roles = registry_roles();
+    let bootstrap =
+        SequencerRegistryBootstrap::new(roles.sequencer, roles.admin, roles.min_rotation_delay);
+    MegaHardforkConfig::default().with_all_activated().with_sequencer_registry_bootstrap(bootstrap)
 }
 
 /// The limits the blocks are held to in place of Satin's: none ([`ProtocolLimits::no_limits`]).

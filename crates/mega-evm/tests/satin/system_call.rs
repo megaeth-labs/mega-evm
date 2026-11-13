@@ -424,8 +424,9 @@ fn system_address_transaction(gas_limit: u64) -> (TxEnv, OpTransaction<TxEnv>) {
 /// deposit op-revm runs for it — never the system call's 30M split, which the rows between 30M and
 /// the cap would see.
 ///
-/// Satin also charges the body's history and reads the live system address from the registry.
-/// History draws from the reservoir first, just as for a user's transaction.
+/// Satin also charges the body's history, which draws from the reservoir first, just as for a
+/// user's transaction. Its state is op-revm's deposit's: no transaction reads the
+/// `SequencerRegistry` for its classification, so no entry of it is in the state.
 #[test]
 fn test_a_system_address_transaction_is_split_by_the_execution_cap() {
     for (gas_limit, reservoir) in [
@@ -453,6 +454,7 @@ fn test_a_system_address_transaction_is_split_by_the_execution_cap() {
             reservoir.saturating_sub(history),
             "{gas_limit}"
         );
+        assert!(!mega_outcome.state.contains_key(&SEQUENCER_REGISTRY_ADDRESS));
         crate::equivalence::assert_same_but_history(&mega_outcome, &op_outcome);
     }
 }

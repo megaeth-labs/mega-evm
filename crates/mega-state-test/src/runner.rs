@@ -734,6 +734,9 @@ fn execute_and_check(
             let envs = factory.external_envs(block.number.saturating_to());
             let db = RecordingDatabase::new(&mut state, reads.clone());
             let evm = config.mode.evm_with_envs(config.fork, db, block, chain_id, envs);
+            // The EVM read the live system address off the pre-state when it was built, outside
+            // the transaction: the record keeps what the transaction read.
+            drop(reads.take());
             execute(config, evm, tx, executed)
         }
     };
