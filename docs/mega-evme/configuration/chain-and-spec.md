@@ -128,8 +128,10 @@ A counterfactual on a chain the tool does not know carries placeholder `Sequence
 `--genesis <FILE>` takes it from the chain's genesis file, on every command, `replay` included.
 The file's `config` object (or a file that is the `config` object) is read for its `chainId`, its Satin key, `satinTime`, and the `SequencerRegistry`'s bootstrap keys a configuration that schedules Satin must carry (`rex5InitialSequencer`, `rex5InitialAdmin`, `rex6MinRotationDelay`), with the parser the node and the stateless validator read it with, so a key the node refuses is refused here too: a `satin`-prefixed key other than `satinTime`, the registry roles an earlier format named among them, and a missing or zero bootstrap value.
 For that chain the file replaces the tool's table: a block runs Satin from the file's `satinTime`.
-The file names no limit and no `SequencerRegistry` role: a Satin run under it is held to Satin's limits, as every Satin run is, and a Satin block reads the registry the chain's state holds, which the legacy forks deployed.
-Satin's activation block refuses a state whose registry is missing or holds other code; a later block makes no such check and runs on the state it is given, where a missing registry names no system address.
+The file names no limit: a Satin run under it is held to Satin's limits, as every Satin run is.
+Its bootstrap keys matter only to a block that seeds a `SequencerRegistry` its state does not hold, or migrates one from version 1.0.0; once the registry holds its roles, its storage decides them.
+Every Satin block deploys the system contracts before its transactions, as a node does: it installs or upgrades the five others, keeps a registry at version 2.0.0, migrates one at 1.0.0, seeds one where its address holds no code, and fails over a registry address that holds other code; it then resolves the block's live system address from the registry, once, and fails when the registry names none.
+Satin's activation block also checks the EIP-7997 factory, and fails over a state that does not hold its code.
 Every command under it holds to one rule: a run the file cannot configure is refused, never run on the tool's own table.
 
 - A command on another chain than the file's `chainId` is refused first, whatever its spec.

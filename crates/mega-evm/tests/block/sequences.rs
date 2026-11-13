@@ -99,8 +99,9 @@ fn next_block_env() -> EvmEnv<MegaSpecId> {
 }
 
 /// Satin's activation block packs a deposit and refuses a user transaction. The next block, on
-/// the state that block committed, packs the user transaction, and the predeploys the activation
-/// block checked are as they were.
+/// the state that block committed, packs the user transaction, and the predeploys are as they
+/// were: the activation block's check of the factory and every block's deployment of the system
+/// contracts only read a state that holds them.
 #[test]
 fn test_the_block_after_an_activation_block_packs_a_user_transaction() {
     let mut state = common::state();

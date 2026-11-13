@@ -2030,8 +2030,9 @@ fn test_gas_spilled_before_the_read_is_not_compute() {
     }
 }
 
-/// A slot restored to its original value refills the state gas it spilled onto regular gas; the
-/// spill here predates the read, and the refill must not give the frame compute past the cap.
+/// A slot restored to its original value gives back the state gas it spilled onto regular gas,
+/// into the reservoir alone under Satin's give-backs; the spill here predates the read, and the
+/// give-back must not give the frame compute past the cap.
 #[test]
 fn test_a_refill_after_the_read_does_not_lift_the_cap() {
     let code = BytecodeBuilder::default().sstore(U256::from(1), U256::from(1));
@@ -2049,9 +2050,9 @@ fn test_a_refill_after_the_read_does_not_lift_the_cap() {
 
 /// A slot written away from a non-zero original value and back takes its record back, and the
 /// history the record paid with it; there is no state gas to give back, since the write added no
-/// state. That history spilled onto regular gas before the read, and its refill — the
-/// completed-write hook's own, after revm's state refill — must not give the frame compute past the
-/// cap either.
+/// state. That history spilled onto regular gas before the read, and its give-back — the
+/// completed-write hook's own, after revm's state give-back, into the reservoir alone — must not
+/// give the frame compute past the cap either.
 #[test]
 fn test_a_history_refill_after_the_read_does_not_lift_the_cap() {
     // A record that costs nothing refills nothing.

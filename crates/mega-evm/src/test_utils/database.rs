@@ -24,8 +24,10 @@ const REX6_FACTORY_NONCE: u64 = 1;
 /// One predeploy as a state holds it: its address, its account and its storage slots.
 pub type PredeployAccount = (Address, AccountInfo, Vec<(U256, U256)>);
 
-/// The seven predeploys as a chain that ran Rex6 holds them, which is what Satin's activation
-/// block finds on mainnet and testnet, in [`system_contract_specs`] order.
+/// The seven predeploys as a chain that ran Rex6 holds them, which is what Satin's first block
+/// finds on mainnet and testnet, in [`system_contract_specs`] order: every block's deployment of
+/// the six system contracts then only reads them, and the activation block's check of the
+/// EIP-7997 factory finds its code.
 ///
 /// Each holds the code Satin expects. The six `MegaETH` system contracts are at nonce 0, which the
 /// legacy engine never moved; the EIP-7997 factory is at a nonzero nonce, as OP's genesis tooling
@@ -193,9 +195,10 @@ impl MemoryDatabase {
     }
 
     /// Installs the seven predeploys as a chain that ran Rex6 holds them ([`rex6_predeploys`]),
-    /// the `SequencerRegistry` holding `roles` — an address names it in every role. Satin's
-    /// activation block finds what it checks, and a legacy call from the system address to a
-    /// whitelisted contract is a system-address transaction.
+    /// the `SequencerRegistry` holding `roles` — an address names it in every role. Every block's
+    /// deployment of the system contracts only reads them, Satin's activation block finds the
+    /// factory it checks, and a legacy call from the system address to a whitelisted contract is a
+    /// system-address transaction.
     pub fn rex6_predeploys(self, roles: impl Into<SequencerRegistryRoles>) -> Self {
         rex6_predeploys(roles).into_iter().fold(self, Self::install)
     }

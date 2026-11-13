@@ -6,21 +6,22 @@
 //! becomes the chain's head and its state the chain's; a block it refuses is dropped with its copy,
 //! so the chain stays at the previous block.
 //!
-//! Satin runs on a chain that ran the legacy forks, which holds the six system contracts, and OP's
-//! EIP-7997 factory, and deploys none of them; the runner seeds each of the seven the fixture's
-//! pre-state lacks into the chain's genesis state, once, as such a chain holds them
-//! ([`rex6_predeploys`]), the `SequencerRegistry` with roles that bind nothing on an Osaka fixture
-//! ([`registry_roles`], which says why).
+//! Every Satin block deploys the six system contracts before its transactions, and OP's EIP-7997
+//! factory, which nothing deploys, is checked only in the block in which Satin activates; the
+//! runner seeds each of the seven the fixture's pre-state lacks into the chain's genesis state,
+//! once, as a chain that ran the legacy forks holds them ([`rex6_predeploys`]), so every block's
+//! deployment only reads them, the `SequencerRegistry` with roles that bind nothing on an Osaka
+//! fixture ([`registry_roles`], which says why).
 //!
 //! Each block's context tells the executor whether the block admits only deposits and whether
 //! Satin activates in it, worked out as a node works them out: from the schedule and the timestamp
 //! of the chain's head, the block's parent. Under [`chain_spec`], which activates every fork at
-//! genesis, no block the runner imports is either, so no block checks the predeploys.
+//! genesis, no block the runner imports is either, so no block checks the EIP-7997 factory.
 //!
-//! A Satin chain holds accounts an Ethereum chain does not: the seven predeploys, which Satin
-//! requires and does not create, so the chain's pre-state holds them; and the fee vaults op-revm
-//! routes fees to. [`SATIN_ACCOUNTS`] lists them, each with the rule it is taken out of the
-//! post-state by before the root is computed; any other account that differs is a failure.
+//! A Satin chain holds accounts an Ethereum chain does not: the seven predeploys, which the runner
+//! seeds into the chain's pre-state and every block's deployment then only reads; and the fee
+//! vaults op-revm routes fees to. [`SATIN_ACCOUNTS`] lists them, each with the rule it is taken out
+//! of the post-state by before the root is computed; any other account that differs is a failure.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -73,10 +74,10 @@ const BLOCK_HASH_WINDOW: u64 = 256;
 /// out.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Added {
-    /// A predeploy, which Satin requires and neither creates nor upgrades: the chain's pre-state
-    /// holds it as a chain that ran Rex6 holds it ([`rex6_predeploys`]), the `SequencerRegistry`
-    /// with the roles of [`registry_roles`]. It is taken out when it holds exactly that: the code,
-    /// the nonce, the storage, and no balance.
+    /// A predeploy, which the chain's pre-state holds as a chain that ran Rex6 holds it
+    /// ([`rex6_predeploys`]), the `SequencerRegistry` with the roles of [`registry_roles`], and
+    /// which every block's deployment of the system contracts therefore only reads. It is taken
+    /// out when it holds exactly that: the code, the nonce, the storage, and no balance.
     PreState,
     /// The vault op-revm credits the base fee to, where Ethereum burns it. It is taken out when it
     /// holds exactly the base fees of the blocks the chain accepted, and nothing else.

@@ -1281,10 +1281,11 @@ impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for AddsReservoir {
 
 /// The transaction's own frame halts, and an inspector hands back one more reservoir than it
 /// inherited: on the input, on the result, or on a tracker it built. Below the execution cap the
-/// history charged before execution for the frame's write record spilled onto regular gas, and the
-/// extra reservoir unwinds part of that spill into regular gas before the record's charge is given
-/// back. The halt burns every regular gas the settlement leaves, so the sender gets back the extra
-/// reservoir and nothing more: the transaction bills one gas less than its run without the
+/// history charged before execution for the frame's write record spilled onto regular gas; the
+/// transaction's reservoir takes the extra reservoir as it is, unwinding no spill, and the record's
+/// charge is given back into the reservoir, less the part regular gas paid, which the halt
+/// consumes. The halt burns every regular gas the settlement leaves, so the sender gets back the
+/// extra reservoir and nothing more: the transaction bills one gas less than its run without the
 /// inspector, and its gas used and the reservoir it leaves add up to its gas limit. So it does
 /// whether the transaction moves value, which makes the record, or not; below the cap, above it
 /// with a reservoir the record's charge drains, and above it with one that pays the charge.
