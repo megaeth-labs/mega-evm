@@ -186,11 +186,17 @@
 //! that delegate, since only the target's code shows it: the call runs its steps before that load
 //! as with access on — its static gas, its memory, its value transfer, the load of its target,
 //! which a frame short of the cold access skips as an out-of-gas — and the Host refuses the
-//! delegate's load. The frame then reverts on the gas it held when it reached the call, as for any
-//! refusal, so the call reads its target only once it holds the gas for it, as with access on, and
-//! a frame that cannot reach the delegate fails as it would with access on. A refusal
-//! names the kind the opcode reads — `BLOCKHASH`'s names the hash, whatever its operand — and a
-//! `SLOTNUM` refusal names access type 12
+//! delegate's load. The call has read its target by then, which is no volatile read, and pays for
+//! it as an account opcode would: the frame reverts on the gas it held when it reached the call
+//! less the target's access — the warm access, and the cold surcharge when the target was cold
+//! before the call — as two regular charges, so a cold surcharge past what gas detention lets the
+//! frame spend stops it with the compute stop instead. Nothing else of the call is paid: not its
+//! memory, its value transfer or the delegate's access. So the call reads its target only once it
+//! holds the gas for it, and pays a cold target's cold access, as with access on, and a frame that
+//! cannot reach the delegate fails as it would with access on. Every other refusal costs nothing.
+//!
+//! A refusal names the kind the opcode reads — `BLOCKHASH`'s names the hash, whatever its operand
+//! — and a `SLOTNUM` refusal names access type 12
 //! ([`SLOT_NUM_ACCESS_TYPE`](crate::system::SLOT_NUM_ACCESS_TYPE)), which the contract's
 //! `VolatileDataAccessType` does not declare. The error's argument is encoded as a `uint8`, and
 //! Solidity handlers must decode it as `uint8`: Solidity's ABI decoder reverts on an enum value

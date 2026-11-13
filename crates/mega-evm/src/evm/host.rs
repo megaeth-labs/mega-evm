@@ -32,7 +32,9 @@
 //! delegate, which only the target's code names: when the delegate is the beneficiary, the Host
 //! refuses it. A refused account or storage load fails as a skipped cold load, and a refused
 //! block-environment accessor answers zero. Nothing is loaded, and the opcode's wrapper turns the
-//! refusal into the frame's revert, on the gas the frame held when it reached the opcode.
+//! refusal into the frame's revert, on the gas the frame held when it reached the opcode, less, for
+//! a call refused at its target's delegate, the target's access: the Host notes whether the target
+//! was cold when it loads it.
 //!
 //! # The Oracle's storage
 //!
@@ -230,7 +232,9 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
     /// Loads the account, marking a read of the block beneficiary's, or refusing it in a frame
     /// whose volatile-data access is off, when the load is a read: when an opcode's read wrapper
     /// makes it. `CREATE`'s and `CREATE2`'s loads of their creator and of the created address are
-    /// no reads (see [`Detention`](crate::Detention)).
+    /// no reads (see [`Detention`](crate::Detention)). Of any other account a read wrapper's
+    /// opcode loads in a frame whose access is off, it notes whether it was cold: a call whose
+    /// delegate it then refuses pays its target's access by it.
     #[inline]
     fn load_account_info_skip_cold_load(
         &mut self,
@@ -246,6 +250,8 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
             self.inner.load_account_info_skip_cold_load(address, load_code, skip_cold_load)?;
         if beneficiary {
             self.detention.observe(VolatileDataAccess::BENEFICIARY_BALANCE);
+        } else {
+            self.detention.note_load(load.is_cold);
         }
         Ok(load)
     }
