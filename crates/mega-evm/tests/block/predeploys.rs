@@ -242,11 +242,12 @@ fn test_a_system_contract_holding_other_code_is_rewritten_keeping_its_storage() 
 }
 
 /// Where the state holds no registry, or an account without code at its address, the block
-/// deploys version 2.0.0 new, seeded from the configuration's bootstrap values: the system address
+/// deploys version 2.0.0, seeded from the configuration's bootstrap values: the system address
 /// both current and initial, the configured sequencer both current and initial, the configured
-/// admin, the block's number as its first block and the configured minimum rotation delay. An
-/// existing account keeps its nonce and its balance. The resolution then names the system address
-/// the seed wrote, and the next block finds the registry as the block left it.
+/// admin, the block's number as its first block and the configured minimum rotation delay. Where
+/// no account stood the registry is created; an existing account is not, and keeps its nonce and
+/// its balance. The resolution then names the system address the seed wrote, and the next block
+/// finds the registry as the block left it.
 ///
 /// Expected values: independent (the bootstrap values and the block number the test uses).
 #[test]
@@ -270,7 +271,8 @@ fn test_a_registry_the_state_does_not_hold_is_seeded_from_the_bootstrap_values()
         let states = start(&mut state, after_activation_ctx());
         assert_eq!(named_accounts(&states), expected_accounts(false), "{case}");
         let registry = &states[REGISTRY_DEPLOYMENT][&SEQUENCER_REGISTRY_ADDRESS];
-        assert!(registry.is_touched() && registry.is_created(), "{case}: deployed new");
+        assert!(registry.is_touched(), "{case}: deployed");
+        assert_eq!(registry.is_created(), case == "no account", "{case}: created where none stood");
         assert_eq!(registry.info.balance, balance, "{case}: the balance is kept");
         let seeded: std::collections::BTreeMap<_, _> =
             registry.storage.iter().map(|(slot, value)| (*slot, value.present_value())).collect();
@@ -290,6 +292,57 @@ fn test_a_registry_the_state_does_not_hold_is_seeded_from_the_bootstrap_values()
         let registry = &next[REGISTRY_DEPLOYMENT][&SEQUENCER_REGISTRY_ADDRESS];
         assert!(!registry.is_touched(), "{case}: the next block reads what the block deployed");
     }
+}
+
+/// Seeding the registry over an account without code keeps the account's storage, as every system
+/// contract's deployment and the migration from 1.0.0 keep it: committed through revm's `State`, as
+/// a node commits, a slot the seed does not write reads what it held in the seeding block and in
+/// the next, and the block's bundle neither destroys the account nor claims to know its storage,
+/// so what a node persists holds the slot too. A seeded slot that held a value has it as its
+/// original and the seed as its present value; the nonce and the balance are kept.
+///
+/// Expected values: independent (the slots, the nonce and the balance the test puts in the state,
+/// and the bootstrap values).
+#[test]
+fn test_seeding_the_registry_over_an_account_without_code_keeps_its_storage() {
+    use revm::database::states::bundle_state::BundleRetention;
+    const KEPT: U256 = U256::from_limbs([42, 0, 0, 0]);
+    let mut db = common::database();
+    db.cache.accounts.remove(&SEQUENCER_REGISTRY_ADDRESS);
+    db.set_account_nonce(SEQUENCER_REGISTRY_ADDRESS, 2);
+    db.set_account_balance(SEQUENCER_REGISTRY_ADDRESS, U256::from(3));
+    db.set_account_storage(SEQUENCER_REGISTRY_ADDRESS, KEPT, U256::ONE);
+    db.set_account_storage(SEQUENCER_REGISTRY_ADDRESS, ADMIN, U256::from(77));
+    // With its transitions kept for the bundle, as a node's state keeps them.
+    let mut state = State::builder().with_database(db).with_bundle_update().build();
+
+    let states = start(&mut state, after_activation_ctx());
+    let registry = &states[REGISTRY_DEPLOYMENT][&SEQUENCER_REGISTRY_ADDRESS];
+    assert!(registry.is_touched() && !registry.is_created(), "installed in the account, kept");
+    let admin = &registry.storage[&ADMIN];
+    assert_eq!(
+        (admin.original_value(), admin.present_value()),
+        (U256::from(77), word(common::ADMIN)),
+        "a seeded slot is written over what it held"
+    );
+    assert!(!registry.storage.contains_key(&KEPT), "a slot the seed does not write is not touched");
+    assert_eq!(state.storage(SEQUENCER_REGISTRY_ADDRESS, KEPT).unwrap(), U256::ONE, "in the block");
+    assert_eq!(state.storage(SEQUENCER_REGISTRY_ADDRESS, ADMIN).unwrap(), word(common::ADMIN));
+    let info = state.basic(SEQUENCER_REGISTRY_ADDRESS).unwrap().expect("the registry");
+    assert_eq!((info.nonce, info.balance), (2, U256::from(3)), "the nonce and balance are kept");
+    assert_eq!(info.code_hash, SEQUENCER_REGISTRY_CODE_HASH);
+    assert_resolves(&states[RESOLUTION], MEGA_SYSTEM_ADDRESS);
+
+    state.merge_transitions(BundleRetention::Reverts);
+    let persisted = state.bundle_state.account(&SEQUENCER_REGISTRY_ADDRESS).expect("changed");
+    assert!(!persisted.was_destroyed(), "the bundle does not destroy the account");
+    assert_eq!(persisted.storage_slot(KEPT), None, "nor claims its unwritten slots are empty");
+    assert_eq!(persisted.storage_slot(ADMIN), Some(word(common::ADMIN)));
+
+    let next = start(&mut state, after_activation_ctx());
+    assert!(!next[REGISTRY_DEPLOYMENT][&SEQUENCER_REGISTRY_ADDRESS].is_touched(), "read-only");
+    let kept = state.storage(SEQUENCER_REGISTRY_ADDRESS, KEPT).unwrap();
+    assert_eq!(kept, U256::ONE, "in the next block");
 }
 
 /// A registry at version 1.0.0 is migrated in place: its code becomes 2.0.0 and its slot 13
