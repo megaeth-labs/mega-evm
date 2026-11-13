@@ -12,7 +12,7 @@ on:
   pull_request:
   # TEMPORARY (fork validation only): run the full cargo-mutants job and the bench on a push.
   push:
-    branches: [cz/ci/mutation-incremental]
+    branches: [cz/ci/mutation-incremental, cz/ci/mutation-incremental-shards]
   schedule:
     # Nightly: full-crate cargo-mutants re-verify (the diff gate never mutates
     # #[cfg(test)] code, so the in-repo killing tests are only re-checked here),
@@ -228,7 +228,7 @@ jobs:
   # with mold as a separate leg), to compare per-mutant times and outcomes.
   mutation-bench:
     name: bench (${{ matrix.leg }})
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && github.ref_name == 'cz/ci/mutation-incremental'
     runs-on: ubuntu-24.04
     timeout-minutes: 150
     strategy:
