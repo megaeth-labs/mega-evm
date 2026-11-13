@@ -181,7 +181,8 @@ pub struct MegaBlockExecutionCtx {
     ///
     /// `None` is a block with no parent to compare against. The genesis block, number zero, has
     /// none, and neither rule applies to it: a fork active at its timestamp is active from it, so
-    /// a chain on which Satin is active from genesis has no Satin activation block. Any other block is accepted without it only where no parent could change the rules: when
+    /// a chain on which Satin is active from genesis has no Satin activation block. Any other
+    /// block is accepted without it only where no parent could change the rules: when
     /// every fork the schedule activates is active from timestamp zero. Where one could, executing
     /// the block fails with [`MegaBlockExecutionError::MissingParentTimestamp`], since the block
     /// would otherwise run as an ordinary one. A caller that executes a block with a parent must

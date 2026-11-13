@@ -127,6 +127,33 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     ) -> Self {
         let system_address = system::live_system_address(&mut db)
             .map_or(LiveSystemAddress::Unread, LiveSystemAddress::Known);
+        Self::build(db, spec, external_envs, system_address)
+    }
+
+    /// Creates a context over `db` that executes `spec` with the given external environments,
+    /// under `spec`'s limits ([`ProtocolLimits::for_spec`]), classifying every transaction
+    /// against `system_address`, the live system address, which the caller gives: nothing is read
+    /// off `db` for it. `None` makes no transaction a Mega System Transaction.
+    ///
+    /// For a caller that already knows the address — read off the state with
+    /// [`live_system_address`](crate::system::live_system_address), or resolved by a block — or
+    /// that records what is read off `db` and must not record a read no transaction made.
+    pub fn new_with_system_address(
+        db: DB,
+        spec: MegaSpecId,
+        external_envs: ExternalEnvs<ExtEnvs>,
+        system_address: Option<Address>,
+    ) -> Self {
+        Self::build(db, spec, external_envs, LiveSystemAddress::Known(system_address))
+    }
+
+    /// The context over `db` executing `spec`, classifying against `system_address`.
+    fn build(
+        db: DB,
+        spec: MegaSpecId,
+        external_envs: ExternalEnvs<ExtEnvs>,
+        system_address: LiveSystemAddress,
+    ) -> Self {
         let cfg = spec_cfg(CfgEnv::new_with_spec(spec));
         let limits = ProtocolLimits::for_spec(spec).tx_runtime_limits;
         let inner: MegaInnerContext<DB> =

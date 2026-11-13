@@ -314,6 +314,55 @@ fn test_no_transaction_reads_the_registry() {
     }
 }
 
+/// A context built without an address reads the live system address off its database when it is
+/// built — the registry's account and its system-address slot, before any transaction — and a
+/// Mega System Transaction run on it is then classified against it and reads nothing more of the
+/// registry. A context given the address reads nothing off its database for it, and classifies
+/// the same transaction the same way.
+#[test]
+fn test_a_context_reads_the_system_address_when_it_is_built_unless_given_one() {
+    use mega_evm::{
+        test_utils::{RecordingDatabase, SharedWitnessRecord},
+        ExternalEnvs,
+    };
+    let registry_reads = |record: &SharedWitnessRecord| {
+        let record = record.borrow();
+        let account = record.accounts.contains_key(&SEQUENCER_REGISTRY_ADDRESS);
+        let slot =
+            record.storage.contains_key(&(SEQUENCER_REGISTRY_ADDRESS, CURRENT_SYSTEM_ADDRESS));
+        (account, slot)
+    };
+    let mut cfg = CfgEnv::new_with_spec(mega_evm::MegaSpecId::SATIN);
+    cfg.chain_id = CHAIN_ID;
+    let tx = legacy_tx(MEGA_SYSTEM_ADDRESS, TxKind::Call(ORACLE_CONTRACT_ADDRESS), get_slot(), 0);
+
+    let built = SharedWitnessRecord::default();
+    let ctx = MegaContext::new(RecordingDatabase::new(chain_db(), built.clone()), cfg.spec);
+    assert_eq!(registry_reads(&built), (true, true), "read when the context is built");
+    assert_eq!(ctx.system_address(), Some(MEGA_SYSTEM_ADDRESS));
+    built.borrow_mut().accounts.clear();
+    built.borrow_mut().storage.clear();
+    let mut evm = MegaEvm::new(ctx.with_cfg(cfg.clone()));
+    let outcome = evm.execute_transaction(tx.clone()).expect("a Mega System Transaction");
+    assert!(evm.ctx().is_system_originated(), "classified against the address read");
+    assert!(!outcome.state.contains_key(&SEQUENCER_REGISTRY_ADDRESS));
+    assert_eq!(registry_reads(&built), (false, false), "the transaction read nothing of it");
+
+    let given = SharedWitnessRecord::default();
+    let ctx = MegaContext::new_with_system_address(
+        RecordingDatabase::new(chain_db(), given.clone()),
+        cfg.spec,
+        ExternalEnvs::default(),
+        Some(MEGA_SYSTEM_ADDRESS),
+    );
+    assert_eq!(registry_reads(&given), (false, false), "nothing read for a given address");
+    let mut evm = MegaEvm::new(ctx.with_cfg(cfg));
+    let given_outcome = evm.execute_transaction(tx).expect("a Mega System Transaction");
+    assert!(evm.ctx().is_system_originated());
+    assert_eq!(given_outcome.gas, outcome.gas, "the same charge either way");
+    assert_eq!(registry_reads(&given), (false, false));
+}
+
 /// No transaction starts with the registry's account or its system-address slot warm: a user's
 /// call to the Oracle's `setSlots` makes the Oracle ask the registry for the system address, and
 /// that `SLOAD` pays the cold price, as a legacy call and as an EIP-2930 call alike, which spend
