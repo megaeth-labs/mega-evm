@@ -279,11 +279,12 @@ where
     ///
     /// The body's history is intrinsic: it comes out of the reservoir first and its excess off the
     /// regular budget, as EIP-8037's intrinsic state gas does, so a body does not take the
-    /// execution cap away from computation; and, as intrinsic gas, no reservoir a frame hands back
-    /// unwinds it onto the regular budget, so it is charged as no spill. It is charged here rather
-    /// than before the first frame because revm's runtime out-of-gas fallback rebuilds the
-    /// transaction's gas through this phase, and a transaction that runs out of gas there keeps its
-    /// body charged. Validation admitted no gas limit that cannot pay for it
+    /// execution cap away from computation; and, as intrinsic gas, it is charged as no spill, so
+    /// no reservoir a frame hands back unwinds it onto the regular budget under EIP-8037's own
+    /// give-backs, and under Satin's no returned reservoir unwinds anything. It is charged here
+    /// rather than before the first frame because revm's runtime out-of-gas fallback rebuilds
+    /// the transaction's gas through this phase, and a transaction that runs out of gas there
+    /// keeps its body charged. Validation admitted no gas limit that cannot pay for it
     /// ([`validate_initial_tx_gas`](Handler::validate_initial_tx_gas)).
     ///
     /// revm builds a system call's gas here, on no intrinsic gas, and so does its runtime

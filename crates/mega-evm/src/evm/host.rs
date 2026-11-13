@@ -338,9 +338,10 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
     /// one of the account's slots counts nothing, and the pricing hook prices its state gas at
     /// nothing ([`state_gas_price`](revm::context_interface::Host::state_gas_price)).
     ///
-    /// A completed `SSTORE` holds the frame to the compute limit again: a slot restored to its
-    /// original value refills the state gas (revm, before this hook) and the history gas (here)
-    /// that spilled onto regular gas, and the spill may predate the limit.
+    /// A completed `SSTORE` holds the frame to the compute limit again: under EIP-8037's own
+    /// give-backs a slot restored to its original value refills the state gas (revm, before this
+    /// hook) and the history gas (here) that spilled onto regular gas, and the spill may predate
+    /// the limit; under Satin's both go into the reservoir, and the hold finds nothing grown.
     #[inline]
     fn write_completed(&mut self, write: CompletedWrite<'_>, gas: &mut GasTracker) -> WriteVerdict {
         let (from_allowance, holds_again) = match write {
@@ -496,8 +497,9 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
     /// to the reservoir, of which only the part the reservoir paid comes back: what regular gas
     /// paid of it is consumed with the frame's regular gas. revm's settlement leaves regular gas
     /// there only where an inspector makes the frame hand back more reservoir than it inherited
-    /// — on its input, or in its result's figures — which unwinds part of the spill the charges
-    /// made before the frame. A child's caller runs on, and keeps its regular gas.
+    /// — on its input, or in its result's figures — which, under EIP-8037's own give-backs,
+    /// unwinds part of the spill the charges made before the frame. A child's caller runs on, and
+    /// keeps its regular gas.
     #[inline]
     fn frame_settle(&mut self, settle: &FrameSettle, gas: &mut GasTracker) {
         self.inner.frame_settle(settle, gas);

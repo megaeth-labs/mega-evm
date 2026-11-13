@@ -93,7 +93,8 @@ Gas limit above the cap goes to the [reservoir](#reservoir).
 
 ## Reservoir
 
-_(Satin, unstable)_ The [EIP-8037](https://eips.ethereum.org/EIPS/eip-8037) state-gas reservoir: the part of a transaction's gas limit above the [execution cap](#execution-cap), which pays [state gas](#state-gas) and [history gas](#history-gas) before they spill onto regular gas.
+_(Satin, unstable)_ The [EIP-8037](https://eips.ethereum.org/EIPS/eip-8037) state-gas reservoir: the part of a transaction's gas limit above the [execution cap](#execution-cap), which pays [state gas](#state-gas) and [history gas](#history-gas) before they spill onto regular gas, after the legacy share a fresh slot, a new account or a created account takes from regular gas first.
+Every give-back of state gas or history gas goes into a reservoir, never into regular gas.
 
 The transaction's own frame, and a system call's outermost frame, receive the whole reservoir.
 
@@ -101,11 +102,10 @@ A child frame of `CALL`, `CALLCODE`, `DELEGATECALL`, `STATICCALL`, `CREATE` or `
 
 The explicit gas argument does not bound that share.
 
-What the child does not spend returns to the caller, and a failed child's charges roll back as EIP-8037 specifies.
-On every such return, whether the start was answered without building a frame or a built frame returns, the reservoir the child returns first unwinds the caller's outstanding spill, and the rest joins the reservoir the caller kept.
+What the child does not spend returns to the caller, and a reverted child's charges roll back into the reservoir it returns.
+On every such return, whether the start was answered without building a frame or a built frame returns, the reservoir the child returns joins the reservoir the caller kept, and none of it is credited to the caller's regular gas.
 The part the caller kept is not drawn.
-State gas and history gas share that spill.
-The caller's own charge for a leaf the child did not add is given back after that.
+The caller's own charge for a leaf the child did not add is given back into the caller's reservoir after that.
 
 ## Write record
 

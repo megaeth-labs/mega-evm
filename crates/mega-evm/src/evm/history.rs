@@ -3,8 +3,8 @@
 //! History gas is the third ledger of a Satin transaction. It pays for the bytes the transaction
 //! appends to the chain's history — its own body, its logs, the code it deploys and one record per
 //! account or storage write it keeps — as opposed to the bytes it adds to the world state, which
-//! EIP-8037 state gas pays for. Both draw on the same reservoir-first budget and unwind on the same
-//! paths; they are counted apart so a node can report and limit them separately.
+//! EIP-8037 state gas pays for. Both draw on the same reservoir-first budget and are given back on
+//! the same paths; they are counted apart so a node can report and limit them separately.
 //!
 //! Every charge is a byte count from the byte table (the `limit` module) times the cost per history
 //! byte, and the byte counts are the ones the data-size limit meters, so a log costs history for
