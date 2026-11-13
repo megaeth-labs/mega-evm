@@ -489,6 +489,144 @@ mod tests {
         );
     }
 
+    /// What a serializer is told of a map and given for it: the length the map announces before
+    /// its entries, and the entries that follow. JSON ignores the announced length; a format that
+    /// writes it ahead of the entries, as a length-prefixed binary format does, relies on it.
+    #[derive(Debug, Default)]
+    struct MapShape {
+        announced: Option<usize>,
+        entries: usize,
+    }
+
+    type ShapeError = serde::de::value::Error;
+    type NoCompound = serde::ser::Impossible<(), ShapeError>;
+
+    /// Refuses every value that is not a map: the configuration serializes as one map.
+    macro_rules! only_a_map {
+        ($($method:ident($($arg:ty),*);)*) => {
+            $(fn $method(self, $(_: $arg),*) -> Result<(), ShapeError> {
+                Err(serde::ser::Error::custom("the configuration serializes as a map"))
+            })*
+        };
+    }
+
+    impl serde::Serializer for &mut MapShape {
+        type Ok = ();
+        type Error = ShapeError;
+        type SerializeSeq = NoCompound;
+        type SerializeTuple = NoCompound;
+        type SerializeTupleStruct = NoCompound;
+        type SerializeTupleVariant = NoCompound;
+        type SerializeMap = Self;
+        type SerializeStruct = NoCompound;
+        type SerializeStructVariant = NoCompound;
+
+        only_a_map! {
+            serialize_bool(bool); serialize_i8(i8); serialize_i16(i16); serialize_i32(i32);
+            serialize_i64(i64); serialize_u8(u8); serialize_u16(u16); serialize_u32(u32);
+            serialize_u64(u64); serialize_f32(f32); serialize_f64(f64); serialize_char(char);
+            serialize_str(&str); serialize_bytes(&[u8]); serialize_none(); serialize_unit();
+            serialize_unit_struct(&'static str);
+            serialize_unit_variant(&'static str, u32, &'static str);
+        }
+
+        fn serialize_some<T: ?Sized + Serialize>(self, _: &T) -> Result<(), ShapeError> {
+            Err(serde::ser::Error::custom("the configuration serializes as a map"))
+        }
+
+        fn serialize_newtype_struct<T: ?Sized + Serialize>(
+            self,
+            _: &'static str,
+            _: &T,
+        ) -> Result<(), ShapeError> {
+            Err(serde::ser::Error::custom("the configuration serializes as a map"))
+        }
+
+        fn serialize_newtype_variant<T: ?Sized + Serialize>(
+            self,
+            _: &'static str,
+            _: u32,
+            _: &'static str,
+            _: &T,
+        ) -> Result<(), ShapeError> {
+            Err(serde::ser::Error::custom("the configuration serializes as a map"))
+        }
+
+        fn serialize_seq(self, _: Option<usize>) -> Result<NoCompound, ShapeError> {
+            Err(serde::ser::Error::custom("the configuration serializes as a map"))
+        }
+
+        fn serialize_tuple(self, _: usize) -> Result<NoCompound, ShapeError> {
+            Err(serde::ser::Error::custom("the configuration serializes as a map"))
+        }
+
+        fn serialize_tuple_struct(
+            self,
+            _: &'static str,
+            _: usize,
+        ) -> Result<NoCompound, ShapeError> {
+            Err(serde::ser::Error::custom("the configuration serializes as a map"))
+        }
+
+        fn serialize_tuple_variant(
+            self,
+            _: &'static str,
+            _: u32,
+            _: &'static str,
+            _: usize,
+        ) -> Result<NoCompound, ShapeError> {
+            Err(serde::ser::Error::custom("the configuration serializes as a map"))
+        }
+
+        fn serialize_map(self, len: Option<usize>) -> Result<Self, ShapeError> {
+            self.announced = len;
+            Ok(self)
+        }
+
+        fn serialize_struct(self, _: &'static str, _: usize) -> Result<NoCompound, ShapeError> {
+            Err(serde::ser::Error::custom("the configuration serializes as a map"))
+        }
+
+        fn serialize_struct_variant(
+            self,
+            _: &'static str,
+            _: u32,
+            _: &'static str,
+            _: usize,
+        ) -> Result<NoCompound, ShapeError> {
+            Err(serde::ser::Error::custom("the configuration serializes as a map"))
+        }
+    }
+
+    impl serde::ser::SerializeMap for &mut MapShape {
+        type Ok = ();
+        type Error = ShapeError;
+
+        fn serialize_key<T: ?Sized + Serialize>(&mut self, _: &T) -> Result<(), ShapeError> {
+            self.entries += 1;
+            Ok(())
+        }
+
+        fn serialize_value<T: ?Sized + Serialize>(&mut self, _: &T) -> Result<(), ShapeError> {
+            Ok(())
+        }
+
+        fn end(self) -> Result<(), ShapeError> {
+            Ok(())
+        }
+    }
+
+    /// The configuration announces the number of entries it writes, four — `satinTime` and the
+    /// three bootstrap keys — so a format that writes the length ahead of the entries encodes it
+    /// as it is.
+    #[test]
+    fn test_the_configuration_announces_the_entries_it_writes() {
+        let mut shape = MapShape::default();
+        config().serialize(&mut shape).unwrap();
+        assert_eq!(shape.entries, 4, "satinTime and the three bootstrap keys");
+        assert_eq!(shape.announced, Some(shape.entries), "the announced length");
+    }
+
     /// The schedule the configuration makes runs Satin from its activation, carries the bootstrap
     /// values, and passes the schedule's own check.
     #[test]

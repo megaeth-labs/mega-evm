@@ -934,6 +934,34 @@ mod tests {
         assert_eq!(live_system_address(wrapped).unwrap(), Some(NEXT_SYSTEM_ADDRESS));
     }
 
+    /// Each registry error says what went wrong: a zero bootstrap value names its key, a database
+    /// failure is the database's error, which it also hands on as its source, an unusable bootstrap
+    /// says the configuration carries no usable values, and a refusal says what the registry holds;
+    /// only a database failure has a source.
+    #[test]
+    fn test_the_registry_errors_name_their_cause() {
+        use core::error::Error as _;
+        let zero = ZeroBootstrapValue { key: crate::REX6_MIN_ROTATION_DELAY_KEY };
+        assert_eq!(
+            zero.to_string(),
+            "the SequencerRegistry's bootstrap value `rex6MinRotationDelay` is zero"
+        );
+
+        let database = SequencerRegistryError::Database(fmt::Error);
+        assert_eq!(database.to_string(), fmt::Error.to_string());
+        let source = database.source().map(|source| source.to_string());
+        assert_eq!(source, Some(fmt::Error.to_string()), "the database's error is the source");
+
+        let unusable = SequencerRegistryError::<fmt::Error>::UnusableBootstrap;
+        assert!(unusable.to_string().contains("no usable bootstrap values"), "{unusable}");
+        assert!(unusable.source().is_none());
+
+        let refusal = SequencerRegistryRefusal::NoSystemAddress;
+        let refused = SequencerRegistryError::<fmt::Error>::Refused(refusal.clone());
+        assert_eq!(refused.to_string(), refusal.to_string());
+        assert!(refused.source().is_none());
+    }
+
     /// A read the database cannot serve is the database's error, in the resolution, the
     /// deployment and the direct read alike: never an absent registry or a refused block.
     #[test]
