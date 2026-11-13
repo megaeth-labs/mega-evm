@@ -1266,14 +1266,19 @@ fn test_a_refusal_at_the_delegate_leaves_earlier_warmth_to_the_caller() {
 }
 
 /// A contract that switches its access off, then calls `helper` forwarding `forward` for as long
-/// as it holds `forward` and a fiftieth more, counting the calls, and returns the count.
-fn calls_the_helper_while_it_can(helper: Address, forward: u64) -> Bytes {
+/// as it holds `forward` and a fiftieth more, at most `most` times, counting the calls, and
+/// returns the count.
+fn calls_the_helper_while_it_can(helper: Address, forward: u64, most: u32) -> Bytes {
     let code = disables_volatile_access(BytecodeBuilder::default()).append(PUSH0);
     let top = code.len() as u32;
+    // The jumps to the end are patched in once the end is known: a four-byte push holds each.
+    let mut to_the_end = Vec::new();
     let code =
         code.append(JUMPDEST).push_number(forward + forward / 49 + 1_000).append_many([GAS, LT]);
-    // The jump to the end is patched in once the end is known: a four-byte push holds it.
-    let end_push = code.len();
+    to_the_end.push(code.len());
+    let code =
+        code.push_number(0_u32).append(JUMPI).push_number(most).append_many([DUP2, LT, ISZERO]);
+    to_the_end.push(code.len());
     let code = code
         .push_number(0_u32)
         .append(JUMPI)
@@ -1292,17 +1297,20 @@ fn calls_the_helper_while_it_can(helper: Address, forward: u64) -> Bytes {
         .push_number(32_u8)
         .append_many([PUSH0, RETURN]);
     let mut bytes = code.build().to_vec();
-    assert_eq!(bytes[end_push], PUSH4, "the jump's push");
-    bytes[end_push + 1..end_push + 5].copy_from_slice(&end.to_be_bytes());
+    for at in to_the_end {
+        assert_eq!(bytes[at], PUSH4, "the jump's push");
+        bytes[at + 1..at + 5].copy_from_slice(&end.to_be_bytes());
+    }
     bytes.into()
 }
 
 /// With access off, a loop cannot have the node grow memory it does not pay for. A transaction at
-/// the execution cap calls a helper as long as it can, each call forwarding the helper what its
-/// `STATICCALL` of a warm delegator of the beneficiary, with an output range of 3 MiB, needs to
-/// grow that memory and reach the delegate. Each refusal keeps the expansion charged, so the
-/// transaction makes about as many calls as the cap holds expansions, ten, and grows ten times
-/// 3 MiB; a refusal that handed the expansion back would let it grow 3 MiB for each 250 gas or so.
+/// the execution cap calls a helper as long as it can, at most 32 times, each call forwarding the
+/// helper what its `STATICCALL` of a warm delegator of the beneficiary, with an output range of
+/// 3 MiB, needs to grow that memory and reach the delegate. Each refusal keeps the expansion
+/// charged, so the transaction makes about as many calls as the cap holds expansions, ten, and
+/// grows ten times 3 MiB; a refusal that handed the expansion back would let it grow 3 MiB for
+/// each 270 gas or so, hundreds of thousands of times, which the bound of 32 calls cuts short.
 #[test]
 fn test_an_access_off_memory_loop_pays_for_the_memory_it_grows() {
     const HELPER: Address = CHILD;
@@ -1315,7 +1323,7 @@ fn test_an_access_off_memory_loop_pays_for_the_memory_it_grows() {
     let pushes = 3 + 3 + 3 + 3 + 3 + 2;
     let forward = pushes + warm + memory_cost(words) + warm;
     let db = with_delegation(MemoryDatabase::default(), DELEGATOR, BENEFICIARY)
-        .account_code(CONTRACT, calls_the_helper_while_it_can(HELPER, forward))
+        .account_code(CONTRACT, calls_the_helper_while_it_can(HELPER, forward, 32))
         .account_code(HELPER, helper);
     let mut evm = MegaEvm::new(context(db)).with_inspector(Calls::default());
     let started = std::time::Instant::now();
