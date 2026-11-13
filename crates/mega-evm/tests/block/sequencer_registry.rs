@@ -414,6 +414,60 @@ fn test_an_evm_outside_block_execution_promotes_the_rotated_address() {
     );
 }
 
+/// An account holding the registry's code and the same `_currentSystemAddress`, which no rule
+/// treats as the registry: what reading the registry costs a transaction that is not special.
+const TWIN: Address = address!("0x7000000000000000000000000000000000000007");
+
+/// A gas estimate run outside block execution — on an EVM the factory builds over the state the
+/// block's transactions run on, told nothing — costs what the block charges, on every ledger, for
+/// a Mega System Transaction whose Oracle write reads the registry to check its caller, and for an
+/// ordinary transaction that reads the registry's `currentSystemAddress()`: no transaction reads
+/// the registry for its classification, in a block or outside one, so neither finds it warm. The
+/// ordinary read costs exactly what the same read of [`TWIN`] costs, in the block and outside.
+#[test]
+fn test_an_estimate_outside_block_execution_costs_what_the_block_charges() {
+    let read = |to: Address| {
+        let input = ISequencerRegistry::currentSystemAddressCall {}.abi_encode();
+        let gas_limit = gas_limit(input.len());
+        Recovered::new_unchecked(common::tx(0, to, input.into(), gas_limit), common::CALLER)
+    };
+    let write = || {
+        let input = IOracle::setSlotsCall { slots: vec![U256::from(5)], values: vec![B256::ZERO] }
+            .abi_encode();
+        let gas_limit = gas_limit(input.len());
+        Recovered::new_unchecked(
+            common::tx(0, ORACLE_CONTRACT_ADDRESS, input.into(), gas_limit),
+            MEGA_SYSTEM_ADDRESS,
+        )
+    };
+    let db = || {
+        let mut db = registry_with(&[]);
+        let registry = db.cache.accounts[&SEQUENCER_REGISTRY_ADDRESS].info.clone();
+        db.insert_account_info(TWIN, registry);
+        db.set_account_storage(TWIN, CURRENT_SYSTEM_ADDRESS, common::word(MEGA_SYSTEM_ADDRESS));
+        db
+    };
+    // The gas the block charges `tx` and the gas an estimate on the same state charges it.
+    let both = |tx: &Recovered<MegaTxEnvelope>| {
+        let mut state = State::builder().with_database(db()).build();
+        let mut executor = executor(&mut state, envs_at(1), common::BLOCK_GAS_LIMIT);
+        executor.apply_pre_execution_changes().expect("the block starts");
+        let in_block = executor.run_transaction(tx).expect("included");
+        assert!(in_block.result.is_success(), "{:?}", in_block.result);
+        drop(executor);
+        let mut outside = MegaEvmFactory::new()
+            .with_external_env_factory(envs_at(1))
+            .create_evm(&mut state, common::evm_env());
+        let estimate = outside.execute_transaction(tx.to_tx_env()).expect("estimated");
+        assert_eq!(estimate.result, in_block.inner.result);
+        assert_eq!(estimate.gas, in_block.inner.gas, "the estimate is the block's charge");
+        estimate.gas
+    };
+    let system = both(&write());
+    assert_eq!(system.history, 0, "a Mega System Transaction");
+    assert_eq!(both(&read(SEQUENCER_REGISTRY_ADDRESS)), both(&read(TWIN)), "the registry is cold");
+}
+
 /// A deposit from `sender` to the Oracle's `setSlots`, minting `mint` to it: a write the Oracle
 /// accepts from the live system address, if the call ran.
 fn oracle_write_deposit_from(sender: Address, mint: u128) -> Recovered<MegaTxEnvelope> {
