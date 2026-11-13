@@ -1360,18 +1360,26 @@ fn stack_address(kind: u64, i: u64) -> Address {
 /// Runs a call stack of `levels` frames below a transaction's own frame that read the block's
 /// timestamp, with access off from the first level down. Each level but the deepest pushes the
 /// operands of a `STATICCALL` of its own fresh delegator, calls the next level with all its gas,
-/// drops its status, then makes that `STATICCALL`; the deepest makes its `STATICCALL` at once, the
-/// cap set so it may spend `spendable` there. Each delegator delegates to `delegate(i)`. Returns
-/// how many delegators and how many delegates the transaction read.
+/// then makes that `STATICCALL`, either dropping the next level's status first or, with
+/// `status_as_gas`, taking it, a zero once the level was stopped, as the call's gas; the deepest
+/// makes its `STATICCALL` at once, the cap set so it may spend `spendable` there. Each delegator
+/// delegates to `delegate(i)`. Returns how many delegators and how many delegates the transaction
+/// read.
 fn run_pre_built_stack(
     levels: u64,
     spendable: u64,
+    status_as_gas: bool,
     delegate: impl Fn(u64) -> Address,
 ) -> (usize, usize) {
     let level = |i: u64| if i == levels { CHILD } else { stack_address(1, i) };
     let delegator = |i: u64| stack_address(2, i);
     let staticcall = |code: BytecodeBuilder, i: u64| {
-        code.append_many([PUSH0; 4]).push_address(delegator(i)).append(PUSH0)
+        let code = code.append_many([PUSH0; 4]).push_address(delegator(i));
+        if status_as_gas && i < levels {
+            code
+        } else {
+            code.append(PUSH0)
+        }
     };
     let root = op(BytecodeBuilder::default(), TIMESTAMP)
         .append_many([PUSH0; 5])
@@ -1385,7 +1393,13 @@ fn run_pre_built_stack(
         let code = if i == levels {
             code
         } else {
-            code.append_many([PUSH0; 5]).push_address(level(i + 1)).append_many([GAS, CALL, POP])
+            let code =
+                code.append_many([PUSH0; 5]).push_address(level(i + 1)).append_many([GAS, CALL]);
+            if status_as_gas {
+                code
+            } else {
+                code.append(POP)
+            }
         };
         db = db.account_code(level(i), code.append(STATICCALL).stop().build());
         db = with_delegation(db, delegator(i), delegate(i));
@@ -1415,26 +1429,33 @@ fn run_pre_built_stack(
 /// The detention tail of a call refused at its delegate is bounded by the warm access it keeps:
 /// once what the limit leaves is below the cold access, each such call reads its cold target and
 /// is stopped at the cold surcharge, keeping 100 of compute. A call stack built in advance, whose
-/// levels each make that call as they resume, each paying 102 with its `POP`, reads at most 29
-/// delegators of the beneficiary from 2,999: the first call keeps 100, each later one 102, and 43
-/// are left. The tail every detained call has, which this path does not change, is wider: a call of
-/// a cold delegator of another cold account reads both before it charges their 5,900, so the same
-/// stack reads 58 delegators and their 58 delegates from 5,999, 85 left.
+/// levels each make that call as they resume, reads at most 29 delegators of the beneficiary from
+/// 2,999, whether each level pays a `POP` of the status first, 102 a call, 43 left, or takes the
+/// status as the call's gas, 100 a call, 99 left. The tail every detained call has, which this path
+/// does not change, is wider: a call of a cold delegator of another cold account reads both before
+/// it charges their 5,900, so the same stack reads 58 delegators and their 58 delegates from 5,999
+/// with the `POP`s, 85 left, and 59 and 59 without, 99 left.
 #[test]
 fn test_a_detained_call_stack_reads_a_bounded_tail() {
     let warm = entry(GasId::warm_storage_read_cost());
     let surcharge = entry(GasId::cold_account_additional_cost());
-    // The first call keeps the warm access; each later one also its caller's `POP`.
-    let tail = |window: u64| 1 + (window - 1 - warm) / (warm + 2);
-    // The fee settlement loads the beneficiary's account in every transaction, so only the
-    // delegators tell what the tail read.
-    let (delegators, _) = run_pre_built_stack(32, warm + surcharge - 1, |_| BENEFICIARY);
-    assert_eq!(tail(warm + surcharge), 29);
-    assert_eq!(delegators, 29, "29 delegators of the beneficiary");
+    // The first call keeps the warm access; each later one also its caller's `POP`, if any.
+    let tail = |window: u64, pop: u64| 1 + (window - 1 - warm) / (warm + pop);
     let double = warm + 2 * surcharge + warm;
-    let doubly_cold = run_pre_built_stack(60, double - 1, |i| stack_address(3, i));
-    assert_eq!(tail(double), 58);
-    assert_eq!(doubly_cold, (58, 58), "58 delegators and their 58 delegates");
+    for (status_as_gas, pop) in [(false, 2), (true, 0)] {
+        let case = format!("status as gas {status_as_gas}");
+        // The fee settlement loads the beneficiary's account in every transaction, so only the
+        // delegators tell what the tail read.
+        let (delegators, _) =
+            run_pre_built_stack(32, warm + surcharge - 1, status_as_gas, |_| BENEFICIARY);
+        assert_eq!(tail(warm + surcharge, pop), 29, "{case}");
+        assert_eq!(delegators, 29, "{case}: 29 delegators of the beneficiary");
+        let doubly_cold =
+            run_pre_built_stack(62, double - 1, status_as_gas, |i| stack_address(3, i));
+        let calls = tail(double, pop);
+        assert_eq!(calls, 58 + status_as_gas as u64, "{case}");
+        assert_eq!(doubly_cold, (calls as usize, calls as usize), "{case}: and as many delegates");
+    }
 }
 
 /// Runs a transaction whose own frame reads the block's timestamp and then calls `CHILD`, holding
