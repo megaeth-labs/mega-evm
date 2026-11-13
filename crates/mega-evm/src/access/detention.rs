@@ -186,6 +186,10 @@ pub struct Detention {
     observed: Cell<VolatileDataAccess>,
     /// What the Host refused to load for the running opcode, waiting for its wrapper.
     refused: Cell<VolatileDataAccess>,
+    /// Whether the last account the Host loaded for the running opcode, in a frame whose reads
+    /// are refused, was cold, or `None` while it loaded none: for a call the Host refused at its
+    /// target's EIP-7702 delegate, the target, whose access the refusal charges.
+    loaded_cold: Option<bool>,
     /// Whether the wrapper of an opcode that reads volatile data runs it: the Host refuses and
     /// marks a load only then.
     reading: bool,
@@ -219,6 +223,7 @@ impl Detention {
     pub(crate) fn reset(&mut self, block_env_cap: u64, oracle_cap: u64) {
         self.observed.set(VolatileDataAccess::empty());
         self.refused.set(VolatileDataAccess::empty());
+        self.loaded_cold = None;
         self.reading = false;
         self.block_env_cap = (block_env_cap != u64::MAX).then_some(block_env_cap);
         self.oracle_cap = (oracle_cap != u64::MAX).then_some(oracle_cap);
@@ -292,6 +297,16 @@ impl Detention {
         }
     }
 
+    /// Notes that the Host loaded an account that is no volatile read for the running read
+    /// wrapper's opcode, cold or warm, in a frame whose reads are refused: a call the Host then
+    /// refuses at its target's delegate charges its target's access by it.
+    #[inline]
+    pub(crate) const fn note_load(&mut self, is_cold: bool) {
+        if self.refusing && self.reading {
+            self.loaded_cold = Some(is_cold);
+        }
+    }
+
     /* The opcode wrappers */
 
     /// Whether the running frame's volatile reads are refused, so its opcodes must keep the gas
@@ -309,6 +324,7 @@ impl Detention {
     #[inline]
     pub(crate) fn begin_read(&mut self) {
         debug_assert!(!self.has_reads(), "a read left over from before the opcode");
+        self.loaded_cold = None;
         self.reading = true;
     }
 
@@ -328,6 +344,12 @@ impl Detention {
     pub(crate) fn take_refused(&self) -> Option<VolatileDataAccess> {
         let refused = self.refused.replace(VolatileDataAccess::empty());
         (!refused.is_empty()).then_some(refused)
+    }
+
+    /// Takes whether the last account the Host loaded for the running opcode, in a frame whose
+    /// reads are refused, was cold, if it loaded one ([`note_load`](Self::note_load)).
+    pub(crate) const fn take_loaded_cold(&mut self) -> Option<bool> {
+        self.loaded_cold.take()
     }
 
     /// Takes what the Host observed for the running opcode.
@@ -1276,6 +1298,43 @@ mod tests {
         assert!(detention.refuses(beneficiary));
         detention.end_read();
         assert_eq!(detention.take_refused(), Some(beneficiary));
+    }
+
+    /// Whether the account the Host loaded was cold is noted only for a read wrapper's opcode in a
+    /// frame whose access is off, the last load's, and only for that opcode: the next opcode's
+    /// wrapper and the next transaction start with none, and it is taken once.
+    #[test]
+    fn test_a_noted_load_is_the_running_opcodes_last() {
+        let mut detention = detaining();
+        let mut frame = gas(1_000_000, 0);
+        detention.on_frame_run(&mut frame, 0);
+        detention.begin_read();
+        detention.note_load(true);
+        detention.end_read();
+        assert_eq!(detention.take_loaded_cold(), None, "access on: nothing is noted");
+
+        detention.disable_access(0);
+        detention.on_frame_run(&mut frame, 0);
+        detention.note_load(true);
+        assert_eq!(detention.take_loaded_cold(), None, "outside a read: nothing is noted");
+        detention.begin_read();
+        detention.note_load(true);
+        detention.note_load(false);
+        detention.end_read();
+        assert_eq!(detention.take_loaded_cold(), Some(false), "the last load's");
+        assert_eq!(detention.take_loaded_cold(), None, "taken once");
+
+        detention.begin_read();
+        detention.note_load(true);
+        detention.end_read();
+        detention.begin_read();
+        detention.end_read();
+        assert_eq!(detention.take_loaded_cold(), None, "the next opcode starts with none");
+
+        detention.begin_read();
+        detention.note_load(true);
+        detention.reset(BLOCK_ENV_ACCESS_COMPUTE_GAS, ORACLE_ACCESS_COMPUTE_GAS);
+        assert_eq!(detention.take_loaded_cold(), None, "the next transaction starts with none");
     }
 
     /// A refusal's revert data decodes back to the kind it names, for every kind the engine

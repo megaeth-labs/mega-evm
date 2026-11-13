@@ -179,11 +179,25 @@
 //! opcode's static gas, which the wrapper charges only once it decided the read is not refused, so
 //! a frame short of the static gas is refused rather than run out of gas. An opcode volatile
 //! whatever its operands is refused before its operands are read; one volatile for the account or
-//! the storage it reads is refused once every operand it takes is on the stack, when its target,
-//! its frame or a call target's one-hop EIP-7702 delegate shows it reads the beneficiary's account
-//! or the Oracle's storage, the delegate read for the decision without warming anything. A refusal
-//! names the kind the opcode reads — `BLOCKHASH`'s names the hash, whatever its operand — and a
-//! `SLOTNUM` refusal names access type 12
+//! the storage it reads is refused once every operand it takes is on the stack, when its target or
+//! its frame shows it reads the beneficiary's account or the Oracle's storage.
+//!
+//! A call whose target's one-hop EIP-7702 delegate is the beneficiary is refused where it loads
+//! that delegate, since only the target's code shows it: the call runs its steps before that load
+//! as with access on — its static gas, its memory, its value transfer, the load of its target,
+//! which a frame short of the cold access skips as an out-of-gas — and the Host refuses the
+//! delegate's load. The call has read its target by then, which is no volatile read, and grown
+//! the frame's memory, and pays for both as with access on: the frame reverts on the gas it held
+//! when it reached the call less the warm access, the memory the call grew and, when the target
+//! was cold before the call, the cold surcharge, as regular charges in that order, so a cold
+//! surcharge past what gas detention lets the frame spend stops it with the compute stop instead.
+//! Nothing else of the call is paid: not its value transfer or the delegate's access. So the call
+//! reads its target only once it holds the gas for it, and pays a cold target's cold access and
+//! the memory it grew, as with access on, and a frame that cannot reach the delegate fails as it
+//! would with access on. Every other refusal costs nothing.
+//!
+//! A refusal names the kind the opcode reads — `BLOCKHASH`'s names the hash, whatever its operand
+//! — and a `SLOTNUM` refusal names access type 12
 //! ([`SLOT_NUM_ACCESS_TYPE`](crate::system::SLOT_NUM_ACCESS_TYPE)), which the contract's
 //! `VolatileDataAccessType` does not declare. The error's argument is encoded as a `uint8`, and
 //! Solidity handlers must decode it as `uint8`: Solidity's ABI decoder reverts on an enum value
