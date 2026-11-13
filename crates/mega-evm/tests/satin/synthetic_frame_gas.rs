@@ -226,7 +226,9 @@ fn test_an_inspectors_answer_past_the_depth_limit_is_taken_as_given() {
 
 /// A first frame answered with the stop before it runs — its body fits the limit, the record and
 /// the transfer log of its value do not — gives the whole reservoir back, and costs the same at a
-/// gas limit under the execution cap and far above it.
+/// gas limit under the execution cap and far above it. The stop gives back the new account and
+/// the record charged before the frame into the transaction's reservoir: under the cap regular gas
+/// paid them, so that is what its reservoir holds.
 #[test]
 fn test_stopped_first_frame_keeps_the_reservoir_at_any_gas_limit() {
     let at = |gas_limit: u64| {
@@ -241,7 +243,8 @@ fn test_stopped_first_frame_keeps_the_reservoir_at_any_gas_limit() {
         (*result.result.gas(), evm.ctx().additional_limit().reservoir_remaining())
     };
     let ((small, small_reservoir), (large, large_reservoir)) = (at(100_000_000), at(1_000_000_000));
-    assert_eq!(small_reservoir, 0);
+    let record = mega_evm::write_record_history_gas(1).expect("a record has a price");
+    assert_eq!(small_reservoir, crate::common::account_state_gas() + record);
     assert_eq!(large_reservoir, 1_000_000_000 - TX_GAS_LIMIT_CAP - body_history(0));
     assert_eq!(small.tx_gas_used(), large.tx_gas_used());
     assert_eq!(small.state_gas_spent_final(), large.state_gas_spent_final());
@@ -315,7 +318,17 @@ fn assert_the_reservoir_survives(to: Address, data: Bytes, value: U256, expected
              narrow limit has no reservoir, so its body's history comes off that budget too",
         );
     }
-    assert_eq!(narrow.gas.reservoir_remaining, 0, "there is no pool below the cap");
+    // A value call that is refused gives back the history its transfer's record was charged before
+    // the frame, into the reservoir: below the cap, where regular gas paid it, that is the pool.
+    let given_back = if !value.is_zero() && matches!(expected, Expected::Revert(_)) {
+        mega_evm::write_record_history_gas(1).expect("a record has a price")
+    } else {
+        0
+    };
+    assert_eq!(
+        narrow.gas.reservoir_remaining, given_back,
+        "there is no pool below the cap but what was given back"
+    );
     assert_eq!(
         wide.gas.reservoir_remaining,
         WIDE - TX_GAS_LIMIT_CAP - body_history(data.len() as u64),

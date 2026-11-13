@@ -294,8 +294,9 @@ fn test_a_rejected_transaction_is_seen_as_nothing() {
 /// depth below, the creation from the signer at the deploy address, which returns the runtime it
 /// deploys. Each reports the gas it took from its gas limit — the call what the transaction spent
 /// beyond its intrinsic gas, the creation its `gasUsed` — less, above the execution cap, the state
-/// and history gas the reservoir paid, as for any frame. The parity and geth call traces built
-/// from it say the same, and no trace has a frame of its own.
+/// and history gas the reservoir paid, as for any frame: the call's regular gas paid the legacy
+/// shares of the signer's account and of the created account. The parity and geth call traces
+/// built from it say the same, and no trace has a frame of its own.
 #[test]
 fn test_a_tracer_sees_the_call_and_the_creation_it_starts() {
     let deployment = Deployment::new(deploying(&runtime(3)));
@@ -315,8 +316,10 @@ fn test_a_tracer_sees_the_call_and_the_creation_it_starts() {
         let reference = reference(deployment.call_data(LARGE_OVERRIDE), gas_limit);
         let [spent, regular, ..] = beyond(&outcome, &reference);
         let deposit = satin_gas_params().code_deposit_state_gas(3) + history(3);
+        let shares = satin_gas_params().get(GasId::new_account_state_gas()).min(25_000) +
+            satin_gas_params().get(GasId::create_state_gas()).min(20_000);
         let (call_took, creation_took) = if gas_limit > TX_GAS_LIMIT_CAP {
-            (regular, answer.gasUsed - deposit)
+            (regular + shares, answer.gasUsed - deposit)
         } else {
             (spent, answer.gasUsed)
         };

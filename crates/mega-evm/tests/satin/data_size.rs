@@ -35,9 +35,9 @@ use revm::{
 };
 
 use crate::common::{
-    account_state_gas, body_history, call, call_with_data, constructor_returning, context, create,
-    execute_under, grown, history, history_is_free, history_rounds, holding_to_keep,
-    reservoir_giving, share, slot_state_gas,
+    account_state_gas, beneficiary_share, body_history, call, call_with_data,
+    constructor_returning, context, create, execute_under, grown, history, history_is_free,
+    history_rounds, holding_to_keep, reservoir_giving, share, slot_share, slot_state_gas,
 };
 
 const CALLER: Address = address!("0000000000000000000000000000000000300000");
@@ -1341,14 +1341,16 @@ fn test_a_record_a_limit_refuses_is_not_charged_where_the_reservoir_has_one_gas_
     let store_regular = params.get(GasId::sstore_static()) +
         params.get(GasId::cold_storage_cost()) +
         params.get(GasId::sstore_set_without_load_cost());
-    // (site, code, the child's regular gas up to and including the write, the state gas the write
-    // adds, the bytes the limit counts, the record's history bytes, the records kept, the new
-    // accounts and slots kept: the fresh slot, and `C`, which the destruction's wei creates)
+    // (site, code, the child's regular gas up to and including the write, the state gas's legacy
+    // share among it, the state gas the write adds, the bytes the limit counts, the record's
+    // history bytes, the records kept, the new accounts and slots kept: the fresh slot, and `C`,
+    // which the destruction's wei creates)
     let sites = [
         (
             "a fresh slot",
             fresh_slot(),
-            2 * 3 + store_regular,
+            2 * 3 + store_regular + slot_share(),
+            slot_share(),
             slot_state_gas(),
             WRITE_RECORD_SIZE,
             WRITE_RECORD_SIZE,
@@ -1360,6 +1362,7 @@ fn test_a_record_a_limit_refuses_is_not_charged_where_the_reservoir_has_one_gas_
             log0(1),
             2 * 3 + (375 + 8 + 3),
             0,
+            0,
             mega_evm::LOG_BASE_SIZE + 1,
             mega_evm::LOG_BASE_SIZE + 1,
             0,
@@ -1368,7 +1371,8 @@ fn test_a_record_a_limit_refuses_is_not_charged_where_the_reservoir_has_one_gas_
         (
             "a SELFDESTRUCT that moves value",
             selfdestruct_to_c(),
-            3 + (5_000 + params.selfdestruct_cost(true, true)),
+            3 + (5_000 + params.selfdestruct_cost(true, true)) + beneficiary_share(),
+            beneficiary_share(),
             account_state_gas(),
             2 * WRITE_RECORD_SIZE + TRANSFER_LOG_SIZE,
             2 * WRITE_RECORD_SIZE,
@@ -1377,11 +1381,13 @@ fn test_a_record_a_limit_refuses_is_not_charged_where_the_reservoir_has_one_gas_
         ),
     ];
     let body = body_history(0);
-    for (name, code, counted_at, state, bytes, history_bytes, records, growth) in sites {
+    for (name, code, counted_at, share_paid, state, bytes, history_bytes, records, growth) in sites
+    {
         let record = history(history_bytes);
-        // `A` holds what the body leaves of the reservoir, and hands `B` one gas short of the
-        // write's state and history, keeping the rest.
-        let given = state + record - 1;
+        // `A` holds what the body leaves of the reservoir, and hands `B` one gas short of what the
+        // reservoir pays of the write's state and history — all but the legacy share, which
+        // regular gas pays first — keeping the rest.
+        let given = state - share_paid + record - 1;
         let reservoir = body + reservoir_giving(given);
         let a_keeps = reservoir - body - given;
         let gas_limit = TX_GAS_LIMIT_CAP + reservoir;
@@ -1412,7 +1418,11 @@ fn test_a_record_a_limit_refuses_is_not_charged_where_the_reservoir_has_one_gas_
         assert_eq!(refused.gas.history, body, "{name}: the refused record was not charged");
         assert_eq!(refused.gas.state, 0, "{name}: the stop gave the state gas back");
         assert_eq!(refused.usage, body_only, "{name}: the record went with the child");
-        assert_eq!(refused.gas.reservoir_remaining, reservoir - body, "{name}: the reservoir");
+        assert_eq!(
+            refused.gas.reservoir_remaining,
+            reservoir - body + share_paid,
+            "{name}: the reservoir, and the legacy share the stop gave back into it"
+        );
 
         // The record kept: its history draws the reservoir's last `record - 1` and spills one gas
         // the child does not have, so the child runs out, and its write comes back.
@@ -1424,14 +1434,12 @@ fn test_a_record_a_limit_refuses_is_not_charged_where_the_reservoir_has_one_gas_
         assert_eq!(kept.gas.reservoir_remaining, reservoir - body, "{name}");
 
         // One gas more pays the spill: the write is kept, and the share is spent to the last gas.
-        // What `A` kept comes back with the transaction's own frame, which merged `B`'s one gas
-        // of spill, and unwinds it first: all of it when `A` kept nothing, as below a reservoir
-        // of 50, where two per cent rounds down to nothing.
+        // What `A` kept comes back with the transaction's own frame as it is: the reservoir `B`
+        // returns unwinds none of its one gas of spill.
         let paid = run(counted_at + 1, fits);
         assert!(matches!(child_bound(&paid), Bound::Success), "{name}: {:?}", paid.result);
         assert_eq!(
-            paid.gas.reservoir_remaining,
-            a_keeps.saturating_sub(1),
+            paid.gas.reservoir_remaining, a_keeps,
             "{name}: the share spent to the last gas"
         );
         assert_eq!(paid.gas.history, body + record, "{name}: the body and the record");

@@ -52,7 +52,9 @@ fn test_outcome_reports_the_ledgers() {
     let result_gas = outcome.result.gas();
     assert_eq!(gas.regular + gas.state + gas.history, result_gas.total_gas_spent());
     assert_eq!(gas.gas_used, result_gas.tx_gas_used());
-    // Both slots are new, so both draw state gas, and the reservoir is what pays it.
+    // Both slots are new, so both draw state gas, and the reservoir is what pays it but each
+    // slot's 10,000 legacy share, which regular gas pays first: state gas on the state ledger all
+    // the same.
     assert_eq!(gas.state, 2 * SLOT_STATE_GAS);
     // The body's history comes out of the same reservoir, before the state gas does, and each of
     // the two new slots leaves a write record that is history too.
@@ -63,7 +65,7 @@ fn test_outcome_reports_the_ledgers() {
     );
     assert_eq!(
         gas.reservoir_remaining,
-        1_000_000_000 - TX_GAS_LIMIT_CAP - 2 * SLOT_STATE_GAS - gas.history,
+        1_000_000_000 - TX_GAS_LIMIT_CAP - 2 * (SLOT_STATE_GAS - 10_000) - gas.history,
     );
     assert_eq!(
         outcome.usage,

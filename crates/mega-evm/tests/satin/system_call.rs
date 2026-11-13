@@ -45,7 +45,7 @@ use revm::{
 };
 
 use crate::{
-    common::{runs_at_measurement_prices, state_is_free},
+    common::{runs_at_measurement_prices, slot_share, state_is_free},
     op_reference::{self, Op, OpContext, Settled},
 };
 
@@ -62,6 +62,12 @@ const DEFAULT_RESERVOIR: u64 = SYSTEM_CALL_GAS_LIMIT - SYSTEM_CALL_REGULAR_GAS_L
 /// own, [`SLOT_STATE_GAS`], or the one a measurement build's byte prices built.
 fn slot() -> u64 {
     satin_gas_params().get(GasId::sstore_set_state_gas())
+}
+
+/// What the reservoir pays of a fresh slot: its state gas but its legacy share, which a system
+/// call's regular gas pays first, as any frame's does.
+fn slot_from_the_reservoir() -> u64 {
+    slot() - slot_share()
 }
 
 fn block() -> BlockEnv {
@@ -163,7 +169,8 @@ fn db_with(code: Bytes) -> MemoryDatabase {
 }
 
 /// A system call runs on 30M of regular gas, which is what `GAS` reads, and carries the rest of
-/// its gas limit as its reservoir: the fresh slot is paid out of it, and what is left is reported.
+/// its gas limit as its reservoir: the fresh slot is paid out of it but its legacy share, and what
+/// is left is reported.
 #[test]
 fn test_a_system_call_above_30m_carries_the_excess_as_reservoir() {
     let (mega, op) = run_both(both_evms(db_with(gas_to_slot())), CALLER, CONTRACT, Bytes::new());
@@ -173,24 +180,28 @@ fn test_a_system_call_above_30m_carries_the_excess_as_reservoir() {
     assert!(gas > SYSTEM_CALL_REGULAR_GAS_LIMIT - 10, "all of it: {gas}");
     assert_eq!(
         mega.reservoir_remaining,
-        DEFAULT_RESERVOIR.saturating_sub(slot()),
-        "the excess, less the one slot it paid for",
+        DEFAULT_RESERVOIR.saturating_sub(slot_from_the_reservoir()),
+        "the excess, less the one slot it paid for but its legacy share",
     );
     assert_same(&mega, &op);
 }
 
-/// The default reservoir holds sixteen fresh slots at Satin's price. That many writes empty it and
-/// spend no regular gas on state; the next one spills what the reservoir cannot pay onto the
-/// regular budget. `GAS`, read after the writes, shows the spill: the regular gas the next write
-/// took is its own regular cost, which the writes before it show, plus the part of its slot the
-/// reservoir did not hold.
+/// The default reservoir holds sixteen fresh slots at Satin's price. Writes it holds spend no
+/// regular gas on state but each slot's legacy share; once it is empty, the next write spills what
+/// the reservoir cannot pay onto the regular budget. `GAS`, read after the writes, shows the
+/// spill: the regular gas the next write took is its own regular cost and share, which the writes
+/// before it show, plus the part of its slot the reservoir did not hold.
 ///
 /// Where a slot is far cheaper, the default reservoir holds more fresh slots than the regular
 /// budget can write, and there is no spill to reach.
 #[test]
 fn test_a_system_call_s_state_draws_the_reservoir_first_then_spills() {
     // Slots that cost nothing never empty the reservoir, and there is nothing to spill.
-    if state_is_free() || slot() == 0 {
+    if state_is_free() {
+        return;
+    }
+    if slot_from_the_reservoir() == 0 {
+        note_price_guard("a fresh slot's legacy share takes the whole of its state gas");
         return;
     }
     if !runs_at_measurement_prices() {
@@ -200,7 +211,7 @@ fn test_a_system_call_s_state_draws_the_reservoir_first_then_spills() {
     let reservoir = DEFAULT_RESERVOIR;
     // A fresh write's regular gas does not move with the byte prices, and 30M of it writes well
     // over a thousand slots, so a reservoir that holds no more than that can be emptied.
-    if reservoir / slot() > 1_000 {
+    if reservoir / slot_from_the_reservoir() > 1_000 {
         note_price_guard("the default reservoir holds more fresh slots than 30M can write");
         return;
     }
@@ -219,14 +230,14 @@ fn test_a_system_call_s_state_draws_the_reservoir_first_then_spills() {
     };
 
     // The most slots the reservoir holds, and what the one after them spills.
-    let held = reservoir / slot();
-    let spill = (held + 1) * slot() - reservoir;
+    let held = reservoir / slot_from_the_reservoir();
+    let spill = (held + 1) * slot_from_the_reservoir() - reservoir;
     let (two_short, _) = run(held - 2);
     let (one_short, reservoir_one_short) = run(held - 1);
     let (at, reservoir_at) = run(held);
     let (past, reservoir_past) = run(held + 1);
-    assert_eq!(reservoir_one_short, reservoir - (held - 1) * slot());
-    assert_eq!(reservoir_at, reservoir - held * slot(), "empty at Satin's price");
+    assert_eq!(reservoir_one_short, reservoir - (held - 1) * slot_from_the_reservoir());
+    assert_eq!(reservoir_at, reservoir - held * slot_from_the_reservoir(), "the reservoir held");
     assert_eq!(reservoir_past, 0);
     // A write the reservoir holds takes regular gas for itself alone, the same for each.
     let one_write = one_short - at;
@@ -239,13 +250,14 @@ fn test_a_system_call_s_state_draws_the_reservoir_first_then_spills() {
 #[test]
 fn test_reservoir_remaining_is_what_the_writes_left() {
     // As many as five writes, and no more than the reservoir holds at the byte prices in effect.
-    let most = DEFAULT_RESERVOIR.checked_div(slot()).map_or(5, |held| held.min(5));
+    let most =
+        DEFAULT_RESERVOIR.checked_div(slot_from_the_reservoir()).map_or(5, |held| held.min(5));
     for writes in [0, 1, most] {
         let code = fresh_writes(writes).stop().build();
         let (mega, op) = run_both(both_evms(db_with(code)), CALLER, CONTRACT, Bytes::new());
         assert_eq!(
             mega.reservoir_remaining,
-            DEFAULT_RESERVOIR - writes * slot(),
+            DEFAULT_RESERVOIR - writes * slot_from_the_reservoir(),
             "{writes} writes",
         );
         assert_same(&mega, &op);
@@ -253,14 +265,18 @@ fn test_reservoir_remaining_is_what_the_writes_left() {
 }
 
 /// A system call that fails settles as op-revm settles it: a revert gives the state gas of what
-/// it wrote back to the reservoir and keeps its regular gas; a halt spends the regular budget and
-/// still gives the reservoir back.
+/// it wrote back to the reservoir, the legacy shares its regular gas paid included, and keeps its
+/// regular gas; a halt spends the regular budget and gives back the reservoir it was given.
 #[test]
 fn test_a_failing_system_call_settles_like_op_revm() {
     let reverting = fresh_writes(3).revert().build();
     let (mega, op) = run_both(both_evms(db_with(reverting)), CALLER, CONTRACT, Bytes::new());
     assert!(matches!(mega.result, ExecutionResult::Revert { .. }), "{:?}", mega.result);
-    assert_eq!(mega.reservoir_remaining, DEFAULT_RESERVOIR, "nothing kept");
+    assert_eq!(
+        mega.reservoir_remaining,
+        DEFAULT_RESERVOIR + 3 * slot_share(),
+        "nothing kept, and the shares regular gas paid come back into the reservoir"
+    );
     assert_eq!(mega.result.gas().state_gas_spent_final(), 0);
     assert_same(&mega, &op);
 
@@ -322,8 +338,8 @@ fn registry_with_a_due_change() -> MemoryDatabase {
 
 /// The pre-block `applyPendingChanges()` call in a crowded SALT region runs on the pre-block
 /// budget and applies the change at the minimum bucket's price: its fresh slots are paid out of
-/// the reservoir, which holds them, and it is what op-revm charges on the same budget, which has no
-/// SALT.
+/// the reservoir, which holds them, but their legacy shares, and it is what op-revm charges on the
+/// same budget, which has no SALT.
 #[test]
 fn test_the_pre_block_apply_pending_changes_is_priced_at_the_minimum_bucket() {
     let crowded =
@@ -353,8 +369,9 @@ fn test_the_pre_block_apply_pending_changes_is_priced_at_the_minimum_bucket() {
     if !runs_at_measurement_prices() {
         assert_eq!(
             mega.reservoir_remaining,
-            PRE_BLOCK_CALL_GAS_LIMIT - SYSTEM_CALL_REGULAR_GAS_LIMIT - state,
-            "the reservoir paid for every slot",
+            PRE_BLOCK_CALL_GAS_LIMIT - SYSTEM_CALL_REGULAR_GAS_LIMIT - state +
+                state / slot() * slot_share(),
+            "the reservoir paid for every slot but its legacy share",
         );
     }
     assert_eq!(crowded.total_bucket_queries(), 0);
@@ -396,7 +413,10 @@ fn test_the_default_pre_block_calls_keep_the_30m_regular_budget_in_a_crowded_reg
 
         assert!(mega_outcome.result.is_success(), "{:?}", mega_outcome.result);
         assert_eq!(mega.ctx().tx().gas_limit(), SYSTEM_CALL_GAS_LIMIT, "not the block's 10B");
-        assert_eq!(mega_outcome.reservoir_remaining, DEFAULT_RESERVOIR - slots * slot());
+        assert_eq!(
+            mega_outcome.reservoir_remaining,
+            DEFAULT_RESERVOIR - slots * slot_from_the_reservoir()
+        );
         assert_eq!(crowded.total_bucket_queries(), 0);
         assert_same(&mega_outcome, &op_outcome);
     }

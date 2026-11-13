@@ -19,8 +19,8 @@ use revm::{
 };
 
 use crate::common::{
-    body_history, call, call_with_data, create, deploying, execute, history, history_is_free,
-    history_rounds, reservoir_share, runs_at_measurement_prices,
+    account_share, body_history, call, call_with_data, create, create_share, deploying, execute,
+    history, history_is_free, history_rounds, reservoir_share, runs_at_measurement_prices,
 };
 
 const CALLER: Address = address!("0000000000000000000000000000000000200000");
@@ -362,12 +362,13 @@ fn test_every_call_kind_charges_its_records_after_its_forward() {
             assert_eq!(exact.usage.write_records, records, "{case}");
             assert_eq!(exact.gas.history, body(0) + price, "{case}: the body and the records");
             // The share paid first. The part of the reservoir its caller kept comes back with the
-            // transaction's own frame, which merged the spill: it unwinds that spill onto regular
-            // gas before any of it joins the reservoir, so none is left.
-            if reservoir.is_some() {
+            // transaction's own frame and joins its reservoir as it is: a returned reservoir
+            // unwinds no spill, so what was kept is what is left.
+            if let Some(reservoir) = reservoir {
                 assert_eq!(
-                    exact.gas.reservoir_remaining, 0,
-                    "{case}: the spill took what was kept"
+                    exact.gas.reservoir_remaining,
+                    reservoir - given,
+                    "{case}: what was kept is left"
                 );
             }
 
@@ -400,7 +401,12 @@ fn test_no_gas_limit_buys_a_write_record_for_nothing() {
     }
     let reservoirs = [1, body(0) / 2, body(0) + WRITE_RECORD_SIZE * CPHB, 1_000_000, 100_000_000];
     let above_the_cap = reservoirs.map(|reservoir| TX_GAS_LIMIT_CAP + reservoir);
-    for code in [transfers_everything_to(CONTRACT), creates_everything()] {
+    // The transfer creates `CONTRACT`, and the creation its account: regular gas pays each
+    // account's legacy share before the reservoir pays any of the rest.
+    for (code, shares) in [
+        (transfers_everything_to(CONTRACT), account_share()),
+        (creates_everything(), create_share()),
+    ] {
         for limit in [300_000, 400_000, 600_000, 800_000, 1_000_000, 5_000_000]
             .into_iter()
             .chain(above_the_cap)
@@ -411,8 +417,9 @@ fn test_no_gas_limit_buys_a_write_record_for_nothing() {
                 assert!(outcome.result.is_success(), "{:?}", outcome.result);
                 assert_eq!(
                     outcome.gas.reservoir_remaining,
-                    reservoir.saturating_sub(outcome.gas.state + outcome.gas.history),
-                    "at a {limit} gas limit: the reservoir paid what it could of state and history",
+                    reservoir.saturating_sub(outcome.gas.state + outcome.gas.history - shares),
+                    "at a {limit} gas limit: the reservoir paid what it could of state and \
+                     history but the legacy shares",
                 );
             }
             assert_eq!(

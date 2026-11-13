@@ -313,11 +313,22 @@ fn test_the_table_shows_where_satin_differs_from_amsterdam() {
     // land on Amsterdam's numbers because the provisional cost per state byte is the one
     // Glamsterdam uses. The history entry is the one Satin adds — upstream prices no history byte
     // at all — and so is the quotient of the regular gas a call forwards, Rex6's 98/100 in place
-    // of EIP-150's 63/64. The parts of the pools and of the reservoir a caller keeps from the
-    // frame it starts, and a value call's history allowance, are the engine's and in no entry.
+    // of EIP-150's 63/64, and so are the legacy shares of the four state charges an opcode makes,
+    // which Amsterdam leaves at zero. The parts of the pools and of the reservoir a caller keeps
+    // from the frame it starts, and a value call's history allowance, are the engine's and in no
+    // entry.
+    let mut differing = differing;
+    differing.sort_unstable();
     assert_eq!(
         differing,
-        ["call_stipend_reduction", "code_deposit_history_gas"],
+        [
+            "call_stipend_reduction",
+            "code_deposit_history_gas",
+            "create_state_gas_legacy_share",
+            "new_account_state_gas_legacy_share",
+            "selfdestruct_new_account_state_gas_legacy_share",
+            "sstore_set_state_gas_legacy_share",
+        ],
         "the entries Satin prices differently from Amsterdam"
     );
 }

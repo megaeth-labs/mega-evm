@@ -26,13 +26,14 @@
 //!
 //! Every figure is predicted by a model of the two pools ([`Pools`]) and the three counted budgets
 //! ([`Budget`]) built from the spec's rules and the static opcode costs — a regular charge draws
-//! regular gas only, a state or history charge draws the reservoir first and spills onto regular
-//! gas, `GAS` reads regular gas; a call forwards at most all but 2 per cent of its caller's regular
-//! gas and hands the child all but 2 per cent of its caller's reservoir; the child hands back what
-//! it leaves, its reservoir unwinding the caller's spill before the rest joins what the caller
-//! kept, and a frame that reverts or halts gives its charges back, its share of the reservoir
-//! with them; a child's data-size, KV and state-growth budgets are 98/100 of what its caller has
-//! left, and a charge that crosses one reverts the frame with the stop — and each run is held to
+//! regular gas only, a state or history charge draws its legacy share from regular gas, then the
+//! reservoir, and spills the rest onto regular gas, `GAS` reads regular gas; a call forwards at
+//! most all but 2 per cent of its caller's regular gas and hands the child all but 2 per cent of
+//! its caller's reservoir; the child hands back what it leaves, its reservoir joining what the
+//! caller kept and unwinding nothing; a frame that reverts gives every charge it made back into its
+//! reservoir, whichever pool paid it, and one that halts hands back the share it was given; a
+//! child's data-size, KV and state-growth budgets are 98/100 of what its caller has left, and a
+//! charge that crosses one reverts the frame with the stop — and each run is held to
 //! it: the forward, the share, the charges `C` made, the pools it left, `A`'s `GAS` around the
 //! call, whether `A`'s work completed, and the receipt with its ledgers and counts. The figures are
 //! read by an inspector, and the same run without one settles the same. The tests print their
@@ -67,8 +68,9 @@ use revm::{
 };
 
 use crate::common::{
-    account_state_gas, body_history, call, context, execute, forward_cap, history,
-    reservoir_giving, reservoir_share, runs_at_measurement_prices, share, slot_state_gas,
+    account_state_gas, body_history, call, context, create_share, execute, forward_cap, history,
+    reservoir_giving, reservoir_share, runs_at_measurement_prices, share, slot_share,
+    slot_state_gas,
 };
 
 const SENDER: Address = address!("0000000000000000000000000000000000710000");
@@ -119,8 +121,7 @@ const SWEEP: [u64; 5] = [400_000_000, 800_000_000, 1_200_000_000, 1_600_000_000,
 struct Halt;
 
 /// A frame's two pools — its regular gas and the EIP-8037 reservoir — and the state and history
-/// gas its charges spilled onto its regular gas, which a returning child's reservoir unwinds
-/// first.
+/// gas its regular gas paid, a legacy share or a spill, which no give-back lowers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Pools {
     regular: u64,
@@ -139,16 +140,19 @@ impl Pools {
         Ok(())
     }
 
-    /// A state or history charge draws the reservoir first and spills the rest onto regular gas.
-    fn draw(&mut self, cost: u64) -> Result<(), Halt> {
-        let from_reservoir = cost.min(self.reservoir);
-        let spill = cost - from_reservoir;
-        if spill > self.regular {
+    /// A state or history charge draws its legacy share, `min(cost, share)`, from regular gas,
+    /// then the reservoir, and spills the rest onto regular gas; regular gas must pay the share
+    /// and the spill together.
+    fn draw(&mut self, cost: u64, share: u64) -> Result<(), Halt> {
+        let share = cost.min(share);
+        let from_reservoir = (cost - share).min(self.reservoir);
+        let from_regular = cost - from_reservoir;
+        if from_regular > self.regular {
             return Err(Halt);
         }
         self.reservoir -= from_reservoir;
-        self.regular -= spill;
-        self.spill += spill;
+        self.regular -= from_regular;
+        self.spill += from_regular;
         Ok(())
     }
 
@@ -161,18 +165,14 @@ impl Pools {
         Self::new(gas, reservoir)
     }
 
-    /// A child's return, handing back `child`: its regular gas comes back, a kept child's spill
-    /// joins this frame's, and the reservoir it hands back unwinds this frame's spill onto its
-    /// regular gas before the rest joins what this frame kept.
-    fn absorb(&mut self, child: Self, kept: bool) {
+    /// A child's return, handing back `child`: its regular gas comes back, what its regular gas
+    /// paid for state and history joins this frame's count, and the reservoir it hands back joins
+    /// what this frame kept, unwinding nothing. A child that halted hands back no regular gas and
+    /// no count.
+    fn absorb(&mut self, child: Self) {
         self.regular += child.regular;
-        if kept {
-            self.spill += child.spill;
-        }
-        let unwound = child.reservoir.min(self.spill);
-        self.regular += unwound;
-        self.spill -= unwound;
-        self.reservoir += child.reservoir - unwound;
+        self.spill += child.spill;
+        self.reservoir += child.reservoir;
     }
 }
 
@@ -184,7 +184,7 @@ fn first_frame(gas_limit: u64) -> Pools {
         gas_limit.min(TX_GAS_LIMIT_CAP) - INTRINSIC,
         gas_limit.saturating_sub(TX_GAS_LIMIT_CAP),
     );
-    pools.draw(body_history(0)).expect("the body fits");
+    pools.draw(body_history(0), 0).expect("the body fits");
     Pools { spill: 0, ..pools }
 }
 
@@ -379,9 +379,10 @@ impl Charge {
     }
 
     /// The regular gas of one charge, operands included: what an iteration's `GAS` drop is when
-    /// the reservoir paid the whole charge, less the closing `GAS`.
+    /// the reservoir paid the whole charge but its legacy share, which regular gas pays first, less
+    /// the closing `GAS`.
     fn body_regular(self) -> u64 {
-        self.operands_regular() + self.opcode_regular()
+        self.operands_regular() + self.opcode_regular() + self.share()
     }
 
     /// The bytes one charge appends: a log's 32 for its address and 32 per topic plus its data,
@@ -405,6 +406,14 @@ impl Charge {
         }
     }
 
+    /// The legacy share of one charge's state gas, which regular gas pays before the reservoir.
+    fn share(self) -> u64 {
+        match self {
+            Self::Log0Data | Self::Log4 => 0,
+            Self::FreshSlot => slot_share(),
+        }
+    }
+
     /// The state gas of one charge.
     fn state(self) -> u64 {
         match self {
@@ -421,7 +430,12 @@ impl Charge {
     /// The regular gas the callee keeps before another iteration: that iteration with its whole
     /// charge spilled onto regular gas, and the way out.
     fn reserve(self) -> u64 {
-        self.body_regular() + LOOP_REGULAR + self.state() + self.history() + 64
+        self.operands_regular() +
+            self.opcode_regular() +
+            LOOP_REGULAR +
+            self.state() +
+            self.history() +
+            64
     }
 }
 
@@ -576,12 +590,12 @@ fn model_callee(callee: Callee, start: Pools, budget: Budget) -> CalleeModel {
                 return Err(Halt);
             }
             pools.regular(charge.opcode_regular())?;
-            pools.draw(charge.state())?;
+            pools.draw(charge.state(), charge.share())?;
             // The completed-write hook counts the write before it charges its history.
             if let Err(stop) = budget.count(charge.counts()) {
                 return Ok(CalleeEnd::Crossed(stop));
             }
-            pools.draw(charge.history())?;
+            pools.draw(charge.history(), 0)?;
             state += charge.state();
             history += charge.history();
             pools.regular(G_BASE)?;
@@ -602,11 +616,16 @@ fn model_callee(callee: Callee, start: Pools, budget: Budget) -> CalleeModel {
     .unwrap_or(CalleeEnd::Halted);
     let (handed_back, kept) = match end {
         CalleeEnd::Returned => (pools, minus(budget.given, budget.left)),
-        // The revert gives the charges back: what the reservoir paid to the share, what spilled
-        // to the regular gas it hands back.
-        CalleeEnd::Crossed(_) => {
-            (Pools::new(pools.regular + pools.spill, start.reservoir), LimitUsage::ZERO)
-        }
+        // The revert gives every charge back into the reservoir, whichever pool paid it: the
+        // share the frame was given, and what its regular gas paid on top, which stays counted.
+        CalleeEnd::Crossed(_) => (
+            Pools {
+                regular: pools.regular,
+                reservoir: start.reservoir + pools.spill,
+                spill: pools.spill,
+            },
+            LimitUsage::ZERO,
+        ),
         CalleeEnd::Halted => (Pools::new(0, start.reservoir), LimitUsage::ZERO),
     };
     let (state, history) = if end == CalleeEnd::Returned { (state, history) } else { (0, 0) };
@@ -701,11 +720,11 @@ fn model_work(slots: u64, mut pools: Pools, mut budget: Budget) -> WorkEnd {
                 return Err(Halt);
             }
             pools.regular(G_SSTORE_SET_COLD)?;
-            pools.draw(slot_state_gas())?;
+            pools.draw(slot_state_gas(), slot_share())?;
             if let Err(stop) = budget.count(SLOT_COUNTS) {
                 return Ok(WorkEnd::Stopped(stop, pools));
             }
-            pools.draw(history(WRITE_RECORD_SIZE))?;
+            pools.draw(history(WRITE_RECORD_SIZE), 0)?;
             pools.regular(WORK_AFTER)?;
         }
         pools.regular(WORK_OUT)?;
@@ -790,11 +809,11 @@ fn predict(scenario: Scenario, work: Option<u64>) -> Prediction {
 
     // After a callee that burns its forward and charges the reservoir nothing.
     let mut kept_by_a_single_pool = pools;
-    kept_by_a_single_pool.absorb(Pools::new(0, handed.reservoir), false);
+    kept_by_a_single_pool.absorb(Pools::new(0, handed.reservoir));
     kept_by_a_single_pool.regular(G_BASE).unwrap();
     let work = work.unwrap_or_else(|| capacity(kept_by_a_single_pool, budget_after_call));
 
-    pools.absorb(callee.handed_back, callee.end == CalleeEnd::Returned);
+    pools.absorb(callee.handed_back);
     budget_after_call.merge(callee.kept);
     let pools_after_return = pools;
     pools.regular(G_BASE).unwrap();
@@ -952,9 +971,10 @@ impl Measured {
         self.forward() - self.callee.pools.regular
     }
 
-    /// The reservoir `C` consumed: what `A` held at the call less what it holds after it.
+    /// The reservoir `C` consumed: what `A` held at the call less what it holds after it, nothing
+    /// when `C` handed back more than it was given.
     fn consumed(&self) -> u64 {
-        self.reservoir_at_call - self.reservoir_after_call
+        self.reservoir_at_call.saturating_sub(self.reservoir_after_call)
     }
 
     fn completed(&self) -> bool {
@@ -1031,10 +1051,13 @@ fn assert_settled(
 ) {
     let (callee_state, callee_history, callee_kept) = callee;
     let body = body_history(0);
-    let nothing_kept = |what: &str| {
+    // `given_back` is what regular gas paid of the charges a failure gave back into the
+    // reservoir: nothing on a halt, which consumes it.
+    let nothing_kept = |what: &str, given_back: u64| {
         assert_eq!(
-            outcome.gas.reservoir_remaining, p.reservoir_at_call,
-            "{name}: the reservoir comes back whole on {what}"
+            outcome.gas.reservoir_remaining,
+            p.reservoir_at_call + given_back,
+            "{name}: the reservoir comes back whole on {what}, with what regular gas paid"
         );
         assert_eq!(outcome.gas.history, body, "{name}: the body alone on {what}");
         assert_eq!(outcome.gas.state, 0, "{name}: no state on {what}");
@@ -1086,7 +1109,7 @@ fn assert_settled(
             );
             // The halt gives A's state and history back, C's merged charges included, and burns
             // the regular gas: the receipt is the execution cap and the body.
-            nothing_kept("a halt");
+            nothing_kept("a halt", 0);
             assert_eq!(
                 outcome.gas.gas_used,
                 scenario.gas_limit - p.reservoir_at_call,
@@ -1114,9 +1137,10 @@ fn assert_settled(
                 }),
                 "{name}: the stop the outcome names"
             );
-            // The revert gives A's state and history back, C's merged charges included, the
-            // spill to the regular gas, which comes back to the sender with the reservoir.
-            nothing_kept("a stop");
+            // The revert gives A's state and history back into its reservoir, C's merged charges
+            // included: the reservoir it was given and what its regular gas paid, which comes back
+            // to the sender with its regular gas.
+            nothing_kept("a stop", at.spill);
             assert_eq!(
                 outcome.gas.gas_used,
                 scenario.gas_limit - p.reservoir_at_call - at.regular - at.spill,
@@ -1218,7 +1242,7 @@ fn run_with(scenario: Scenario, work: Option<u64>) -> Measured {
             );
         }
     }
-    // What C hands back, its reservoir unwinding A's spill first, is what A holds after the call.
+    // What C hands back, its reservoir joining what A kept, is what A holds after the call.
     assert_eq!(after_return, p.pools_after_return, "{name}: A's pools after the call");
     assert_eq!(measured.gas_after_call, p.gas_after_call, "{name}: A's GAS after the call");
 
@@ -1569,14 +1593,17 @@ fn test_the_reservoir_a_logging_callee_consumes_grows_with_its_forward() {
     print_table("4b. Forward sizes, LOG4 with no data (400M)", &log4);
 }
 
-/// The same with fresh `SSTORE`s, whose state and history both draw the reservoir: past the forward
-/// at every explicit size and growing with it, until the callee's state-growth budget, 98/100 of
-/// the 1,000 new slots the transaction may add, stops it.
+/// The same with fresh `SSTORE`s, whose state and history both draw the reservoir, each slot but
+/// its legacy share, which regular gas pays first: past the forward from a forward of 1,000,000
+/// and growing with it, until the callee's state-growth budget, 98/100 of the 1,000 new slots the
+/// transaction may add, stops it. A forward of 100,000 leaves the callee one slot before what it
+/// keeps for another, and of that slot the reservoir pays 91,440, less than the forward.
 ///
 /// Forwarding all, the callee's 981st slot crosses its budget of 980 before the share runs out: it
-/// reverts, and its charges and the share come back to `A`, which consumes nothing of the
-/// reservoir. The slots the callee keeps at an explicit forward come out of the 1,000 too, so `A`'s
-/// 1,000 are stopped by the limit after them.
+/// reverts, and its charges and the share come back to `A`, with the legacy shares of the 981
+/// slots its regular gas paid on top, so `A` holds more reservoir than at the call. The slots the
+/// callee keeps at an explicit forward come out of the 1,000 too, so `A`'s 1,000 are stopped by
+/// the limit after them.
 #[test]
 fn test_a_writing_callees_state_growth_budget_stops_it_before_its_share_runs_out() {
     if runs_at_measurement_prices() {
@@ -1584,11 +1611,17 @@ fn test_a_writing_callees_state_growth_budget_stops_it_before_its_share_runs_out
     }
     let rows = forward_sizes(Charge::FreshSlot);
     let (all, explicit) = rows.split_last().unwrap();
-    assert_past_the_forward(explicit);
+    let (one_slot, past) = explicit.split_first().unwrap();
+    assert_eq!(one_slot.charges, 1, "a forward of 100,000 writes one slot");
+    assert!(one_slot.consumed() < one_slot.forward(), "of which the reservoir pays less");
+    assert_past_the_forward(past);
     for row in explicit {
         assert_eq!(
             row.consumed(),
-            row.charges * (Charge::FreshSlot.state() + Charge::FreshSlot.history())
+            row.charges *
+                (Charge::FreshSlot.state() - Charge::FreshSlot.share() +
+                    Charge::FreshSlot.history()),
+            "the reservoir pays each slot but its legacy share"
         );
         assert_eq!(
             row.prediction.budget_after_call.left.state_growth,
@@ -1599,7 +1632,8 @@ fn test_a_writing_callees_state_growth_budget_stops_it_before_its_share_runs_out
     let growth = share(TX_STATE_GROWTH_LIMIT);
     assert_eq!(all.prediction.budget.given.state_growth, growth);
     assert!(
-        all.handed.reservoir > (growth + 1) * (slot_state_gas() + history(WRITE_RECORD_SIZE)),
+        all.handed.reservoir >
+            (growth + 1) * (slot_state_gas() - slot_share() + history(WRITE_RECORD_SIZE)),
         "the share would pay for the slot past the budget"
     );
     assert_eq!(all.charges, growth + 1, "the crossing slot is the one past the budget");
@@ -1608,7 +1642,11 @@ fn test_a_writing_callees_state_growth_budget_stops_it_before_its_share_runs_out
         Some((LimitKind::StateGrowth, growth)),
         "C's state-growth budget stops it"
     );
-    assert_eq!(all.consumed(), 0, "C's charges and its share come back to A");
+    assert_eq!(
+        all.reservoir_after_call,
+        all.reservoir_at_call + all.charges * slot_share(),
+        "C's charges and its share come back to A, with the shares C's regular gas paid"
+    );
     assert!(all.completed(), "A's work completes");
     print_table("5. Forward sizes, fresh SSTOREs (400M)", &rows);
 }
@@ -1699,7 +1737,11 @@ fn test_a_deploying_callee_charges_the_reservoir_hundreds_of_times_its_forward()
         let created_with = meter.created_with.expect("C created");
         assert_eq!(
             created_with.reservoir,
-            reservoir_share(p.handed.reservoir - account_state_gas() - creation_records_history()),
+            reservoir_share(
+                p.handed.reservoir -
+                    (account_state_gas() - create_share()) -
+                    creation_records_history()
+            ),
             "{name}: the creation's share"
         );
         assert!(deposit_charges(size) <= created_with.reservoir, "{name}: the share pays it");
@@ -1709,7 +1751,11 @@ fn test_a_deploying_callee_charges_the_reservoir_hundreds_of_times_its_forward()
         assert!(callee_regular <= forward, "{name}: regular gas stays within the forward");
         let after = meter.after_return.expect("A resumed");
         let consumed = p.reservoir_at_call - after.reservoir;
-        assert_eq!(consumed, deployment_charges(size), "{name}: the reservoir paid the deployment");
+        assert_eq!(
+            consumed,
+            deployment_charges(size) - create_share(),
+            "{name}: the reservoir paid the deployment but the created account's legacy share"
+        );
         assert!(consumed > 100 * forward, "{name}: a hundred times the forward: {consumed}");
 
         let mut after_gas = after;

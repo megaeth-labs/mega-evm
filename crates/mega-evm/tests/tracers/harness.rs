@@ -404,35 +404,30 @@ pub(crate) fn assert_ledgers(traced: &Traced, expected: Ledgers) {
 ///
 /// revm-inspectors records the regular gas the engine handed the transaction's frame as the root
 /// node's `gas_limit` and, when the frame ends, what the frame spent of it as `gas_used`
-/// (`Gas::total_gas_spent`: the limit less what is left, so state and history gas that spilled
-/// onto regular gas is in it, and what the reservoir paid is not). What the frame did not spend
-/// and the reservoir left are the gas the transaction did not use; everything else its gas limit
-/// bought is its raw spend, the three ledgers' sum:
+/// (`Gas::total_gas_spent`: the limit less what is left, so state and history gas that regular gas
+/// paid is in it, and what the reservoir paid is not). What the frame did not spend and the
+/// reservoir left are the gas the transaction did not use; everything else its gas limit bought
+/// is its raw spend, the three ledgers' sum:
 ///
-/// `gas_limit = (regular + state + history) + (root.gas_limit − root.gas_used) + given_back +
-/// reservoir left`
+/// `gas_limit = (regular + state + history) + (root.gas_limit − root.gas_used) + reservoir left`
 ///
 /// The refund and the EIP-7623 floor change only how much of that the receipt bills, so neither
-/// is in it.
-///
-/// `given_back` is the state and history gas the frame spilled onto its regular gas and got back
-/// because it failed. revm gives a failed frame that gas back when the frame's result is merged
-/// (`handle_reservoir_remaining_gas`, for the transaction's own frame in `last_frame_result`),
-/// which is after the inspector's `call_end` read it: the tracer counts it as spent, the receipt
-/// does not bill it.
+/// is in it. A frame that failed gives back the state and history gas its regular gas paid into
+/// the reservoir, never into its regular gas, so the frame's unspent regular gas the tracer read is
+/// what the transaction gets back of it, and the give-back is in the reservoir left.
 ///
 /// The first run's inspector is read here: the node path overwrites the root's gas limit with the
 /// transaction's.
-pub(crate) fn assert_root_frame_settles(traced: &Traced, given_back: u64) {
+pub(crate) fn assert_root_frame_settles(traced: &Traced) {
     let root = &traced.inspector.traces().nodes()[0].trace;
     let unspent = root.gas_limit - root.gas_used;
     let gas = &traced.outcome.gas;
     let spent = gas.regular + gas.state + gas.history;
     assert_eq!(
         traced.gas_limit(),
-        spent + unspent + given_back + gas.reservoir_remaining,
-        "the raw spend ({spent}), the root frame's unspent gas ({unspent}), what its failure gave \
-         back ({given_back}) and the reservoir left do not make up the gas limit"
+        spent + unspent + gas.reservoir_remaining,
+        "the raw spend ({spent}), the root frame's unspent gas ({unspent}) and the reservoir left \
+         do not make up the gas limit"
     );
 }
 

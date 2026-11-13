@@ -375,8 +375,8 @@ impl<DB: revm::Database>
 
 /// The call, the transaction's own frame, takes the whole reservoir; the creation it starts takes
 /// all but the call's 2 per cent of what the call has left once it paid for the creation's start —
-/// the signer's account, the created account and the two records — as a `CREATE` opcode's child
-/// does.
+/// the signer's account and the created account, each but its legacy share, which regular gas
+/// pays first, and the two records — as a `CREATE` opcode's child does.
 #[test]
 fn test_the_creation_takes_the_reservoir_share_of_what_the_call_has_left() {
     let deployment = Deployment::new(deploying(&runtime(RUNTIME_LEN)));
@@ -389,9 +389,9 @@ fn test_the_creation_takes_the_reservoir_share_of_what_the_call_has_left() {
     assert_eq!(returned(&outcome).deployedAddress, deployment.address);
 
     let whole = gas_limit - TX_GAS_LIMIT_CAP - history(mega_evm::TX_BODY_SIZE + data.len() as u64);
-    let left = whole -
-        entry(GasId::new_account_state_gas()) -
-        entry(GasId::create_state_gas()) -
-        2 * record();
+    let account = entry(GasId::new_account_state_gas());
+    let created = entry(GasId::create_state_gas());
+    let left =
+        whole - (account - account.min(25_000)) - (created - created.min(20_000)) - 2 * record();
     assert_eq!(evm.inspector().0, [whole, left - left * 2 / 100]);
 }

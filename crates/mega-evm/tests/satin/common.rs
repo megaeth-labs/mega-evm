@@ -252,6 +252,34 @@ pub(crate) fn account_state_gas() -> u64 {
     mega_evm::satin_gas_params().get(revm::context_interface::cfg::GasId::new_account_state_gas())
 }
 
+/// The legacy share of a fresh slot's state gas at the byte prices in effect, in the minimum
+/// bucket: the part regular gas pays before the reservoir, the slot's charge up to 10,000, the
+/// pre-Satin 20,000 of a fresh slot's `SSTORE` less the 10,000 its write charges.
+pub(crate) fn slot_share() -> u64 {
+    slot_state_gas().min(10_000)
+}
+
+/// The legacy share of the state gas of the account a value call creates, at the byte prices in
+/// effect, in the minimum bucket: the charge up to the pre-Satin 25,000. A keyless deployment's
+/// signer takes the same.
+pub(crate) fn account_share() -> u64 {
+    account_state_gas().min(25_000)
+}
+
+/// The legacy share of the state gas of the account a `SELFDESTRUCT` creates for its beneficiary,
+/// at the byte prices in effect, in the minimum bucket: the charge up to the pre-Satin 25,000 less
+/// the 9,000 of regular gas the schedule charges that beneficiary.
+pub(crate) fn beneficiary_share() -> u64 {
+    account_state_gas().min(16_000)
+}
+
+/// The legacy share of the state gas of the account a `CREATE`, a `CREATE2` or a keyless
+/// deployment creates, at the byte prices in effect, in the minimum bucket: the charge up to the
+/// pre-Satin 32,000 less the creation's 12,000 access.
+pub(crate) fn create_share() -> u64 {
+    account_state_gas().min(20_000)
+}
+
 /// The history gas `bytes` bytes cost at the byte prices in effect, by hand rather than through
 /// the engine's pricing: the bytes times `COST_PER_HISTORY_BYTE`, 88 gas, at the spec's price.
 ///

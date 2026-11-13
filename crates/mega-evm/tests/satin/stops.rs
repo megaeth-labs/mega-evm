@@ -365,8 +365,18 @@ fn assert_cell(limit: Limit, crossing: usize, gas_limit: u64) {
         assert_eq!(outcome.gas.state, twin.gas.state, "{cell}: state");
         assert_eq!(outcome.gas.history, twin.gas.history, "{cell}: history");
         assert_eq!(outcome.gas.history_bytes, twin.gas.history_bytes, "{cell}");
+        // Every charge the failed frames made comes back into the reservoir, the part regular gas
+        // paid included: the twin's crossing write charged its record's history too, which the
+        // stopped write never charges, so below the execution cap, where regular gas paid it, the
+        // twin's reservoir holds it on top.
+        let unpaid_record = if gas_limit <= TX_GAS_LIMIT_CAP && limit != Limit::Compute {
+            crate::common::history(WRITE_RECORD_SIZE)
+        } else {
+            0
+        };
         assert_eq!(
-            outcome.gas.reservoir_remaining, twin.gas.reservoir_remaining,
+            outcome.gas.reservoir_remaining,
+            twin.gas.reservoir_remaining - unpaid_record,
             "{cell}: the reservoir comes back, less what was kept"
         );
         assert_eq!(
@@ -1123,11 +1133,15 @@ fn with_oracle_read(db: MemoryDatabase) -> MemoryDatabase {
 /// set, billed the intrinsic gas plus the compute up to the charge that crosses that limit, `left`
 /// short of it, and nothing of the gas the transaction had left. `A` crossed it, and ran the last
 /// step: itself, or after a callee that crossed first returned the stop into it, on what the limit
-/// left it. Returns the limit and what the transaction read.
+/// left it. The stop gives every charge its frames made back into the reservoir, of which regular
+/// gas paid `shares`, the legacy shares of the fresh slots written before the crossing: the
+/// reservoir holds them on top of what the intrinsic run leaves. Returns the limit and what the
+/// transaction read.
 fn assert_detention_stop(
     db: MemoryDatabase,
     limits: EvmTxRuntimeLimits,
     left: u64,
+    shares: u64,
 ) -> (u64, mega_evm::VolatileDataAccess) {
     let intrinsic = intrinsic(roomy());
     let (recorded, last) =
@@ -1154,7 +1168,7 @@ fn assert_detention_stop(
     assert_eq!(outcome.limit_exceeded, Some(stop));
     assert_eq!(outcome.gas.regular, intrinsic.gas.regular + used);
     assert_eq!(outcome.gas.gas_used, intrinsic.gas.gas_used + used);
-    assert_eq!(outcome.gas.reservoir_remaining, intrinsic.gas.reservoir_remaining);
+    assert_eq!(outcome.gas.reservoir_remaining, intrinsic.gas.reservoir_remaining + shares);
     assert!(outcome.result.logs().is_empty());
     (limit, detention.accessed())
 }
@@ -1180,7 +1194,8 @@ fn test_volatile_data_access_oog_does_not_consume_all_gas() {
     let code = writes_past_the_cap(BytecodeBuilder::default().append_many([TIMESTAMP, POP]));
     let db = MemoryDatabase::default().account_code(A, code.stop().build());
     let left = pop_then_writes().left(CAP);
-    let (limit, accessed) = assert_detention_stop(db, detention_limits(), left);
+    let shares = pop_then_writes().shares_before_crossing(CAP);
+    let (limit, accessed) = assert_detention_stop(db, detention_limits(), left, shares);
     assert!(limit - CAP < 1_000, "the read came first: {}", limit - CAP);
     assert_eq!(accessed, mega_evm::VolatileDataAccess::TIMESTAMP);
 }
@@ -1197,9 +1212,12 @@ fn test_nested_call_block_env_access_child_oog() {
         .account_code(B, child.stop().build());
     // The child's crossing, then the caller's `POP` and write, from the room the child's crossing
     // charge was not made from.
+    let shares = pop_then_writes().shares_before_crossing(CAP);
     let left = pop_then_writes().left(CAP);
-    let left = Charges::default().then(&[2]).fresh_writes(1).left(left);
-    let (limit, _) = assert_detention_stop(db, detention_limits(), left);
+    let after = Charges::default().then(&[2]).fresh_writes(1);
+    let shares = shares + after.shares_before_crossing(left);
+    let left = after.left(left);
+    let (limit, _) = assert_detention_stop(db, detention_limits(), left, shares);
     assert!(limit - CAP < 10_000, "the child read near the start: {}", limit - CAP);
 }
 
@@ -1215,11 +1233,11 @@ fn test_parent_block_env_access_oog_after_nested_call() {
         .account_code(B, child.stop().build());
     // The read's `POP`, the call's five pushes, its address, `GAS` and cold access, the child's
     // two pushes, `ADD` and `POP`, the caller's `POP`, then the writes.
-    let left = Charges::default()
+    let charges = Charges::default()
         .then(&[2, 2, 2, 2, 2, 2, 3, 2, cold_access(), 3, 3, 3, 2, 2])
-        .fresh_writes(slots_past_the_cap())
-        .left(CAP);
-    let (limit, _) = assert_detention_stop(db, detention_limits(), left);
+        .fresh_writes(slots_past_the_cap());
+    let (left, shares) = (charges.left(CAP), charges.shares_before_crossing(CAP));
+    let (limit, _) = assert_detention_stop(db, detention_limits(), left, shares);
     assert!(limit - CAP < 1_000, "the read came first: {}", limit - CAP);
 }
 
@@ -1231,7 +1249,8 @@ fn test_an_oracle_read_holds_the_transaction_to_its_cap() {
     let code = writes_past_the_cap(call_oracle(BytecodeBuilder::default(), None));
     let db = with_oracle_read(MemoryDatabase::default().account_code(A, code.stop().build()));
     let left = oracle_pops_then_writes().left(ORACLE_ACCESS_COMPUTE_GAS);
-    let (limit, accessed) = assert_detention_stop(db, detention_limits(), left);
+    let shares = oracle_pops_then_writes().shares_before_crossing(ORACLE_ACCESS_COMPUTE_GAS);
+    let (limit, accessed) = assert_detention_stop(db, detention_limits(), left, shares);
     assert!(limit - ORACLE_ACCESS_COMPUTE_GAS < 10_000, "{}", limit - ORACLE_ACCESS_COMPUTE_GAS);
     assert_eq!(accessed, mega_evm::VolatileDataAccess::ORACLE);
 }
@@ -1242,7 +1261,8 @@ fn test_oracle_volatile_data_access_oog_does_not_consume_all_gas() {
     let code = writes_past_the_cap(call_oracle(BytecodeBuilder::default(), Some(0xffff)));
     let db = with_oracle_read(MemoryDatabase::default().account_code(A, code.stop().build()));
     let left = oracle_pops_then_writes().left(ORACLE_ACCESS_COMPUTE_GAS);
-    assert_detention_stop(db, detention_limits(), left);
+    let shares = oracle_pops_then_writes().shares_before_crossing(ORACLE_ACCESS_COMPUTE_GAS);
+    assert_detention_stop(db, detention_limits(), left, shares);
 }
 
 /// A contract that calls one that reads the Oracle's storage and then writes the fresh slots: the
@@ -1261,6 +1281,7 @@ fn test_parent_runs_out_of_gas_after_oracle_access() {
     // The middle contract's crossing, then the outer one's `POP`, `PUSH0` and cold `SLOAD`: its
     // static gas, then the cold surcharge; then its loop, in a memory of nothing.
     let left = oracle_pops_then_writes().left(ORACLE_ACCESS_COMPUTE_GAS);
+    let shares = oracle_pops_then_writes().shares_before_crossing(ORACLE_ACCESS_COMPUTE_GAS);
     let params = mega_evm::satin_gas_params();
     let sload = [
         2,
@@ -1270,7 +1291,8 @@ fn test_parent_runs_out_of_gas_after_oracle_access() {
         2,
     ];
     let left = Charges::default().then(&sload).spin(0).left(left);
-    let (_, accessed) = assert_detention_stop(with_oracle_read(db), detention_limits(), left);
+    let (_, accessed) =
+        assert_detention_stop(with_oracle_read(db), detention_limits(), left, shares);
     assert_eq!(accessed, mega_evm::VolatileDataAccess::ORACLE);
 }
 
@@ -1284,7 +1306,8 @@ fn test_both_volatile_data_access_oog_does_not_consume_all_gas() {
     let db = MemoryDatabase::default().account_code(A, writes_past_the_cap(code).stop().build());
     let limits = detention_limits().with_oracle_access_compute_gas_limit(ORACLE_CAP);
     let left = oracle_pops_then_writes().left(ORACLE_CAP);
-    let (limit, accessed) = assert_detention_stop(with_oracle_read(db), limits, left);
+    let shares = oracle_pops_then_writes().shares_before_crossing(ORACLE_CAP);
+    let (limit, accessed) = assert_detention_stop(with_oracle_read(db), limits, left, shares);
     assert!(limit - ORACLE_CAP < 10_000, "the Oracle's read binds: {limit}");
     assert_eq!(
         accessed,
@@ -1299,7 +1322,7 @@ fn test_volatile_access_post_access_cap_enforced() {
     let code = work(BytecodeBuilder::default().append_many([TIMESTAMP, POP]), ROUNDS);
     let db = MemoryDatabase::default().account_code(A, code.stop().build());
     let left = Charges::default().then(&[2]).work(ROUNDS, 0).left(CAP);
-    let (limit, _) = assert_detention_stop(db, detention_limits(), left);
+    let (limit, _) = assert_detention_stop(db, detention_limits(), left, 0);
     assert!(limit - CAP < 1_000, "{}", limit - CAP);
 }
 
@@ -1776,9 +1799,26 @@ fn assert_answered_cell(answered: Answered, gas_limit: u64) {
         assert_eq!(outcome.gas.state, state, "{cell}: the state gas");
         assert_eq!(outcome.gas.history, history, "{cell}: the history gas");
         assert_eq!(outcome.gas.history_bytes, intrinsic.gas.history_bytes, "{cell}");
+        // The start's charges — the account its wei would create and its two records — and what
+        // regular gas paid of them: all of it below the execution cap, the account's legacy share
+        // above it. The stop gives them back into the reservoir; the rewritten success keeps them,
+        // the share on the state ledger.
+        let (paid, share) = match answered {
+            Answered::StartRecords => (
+                crate::common::account_state_gas() + crate::common::history(2 * WRITE_RECORD_SIZE),
+                crate::common::account_share(),
+            ),
+            Answered::PastTheAllowance | Answered::Precompile => (0, 0),
+        };
+        let reservoir = if gas_limit > TX_GAS_LIMIT_CAP {
+            intrinsic.gas.reservoir_remaining + share - kept
+        } else if column == "not rewritten" {
+            paid
+        } else {
+            0
+        };
         assert_eq!(
-            outcome.gas.reservoir_remaining,
-            intrinsic.gas.reservoir_remaining.saturating_sub(kept),
+            outcome.gas.reservoir_remaining, reservoir,
             "{cell}: the reservoir comes back, less the body it paid and what is kept"
         );
         assert_eq!(outcome.gas.gas_used, intrinsic.gas.gas_used + ran + kept, "{cell}: gas used");
