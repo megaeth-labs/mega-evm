@@ -272,10 +272,13 @@ fn test_a_failing_system_call_settles_like_op_revm() {
     let reverting = fresh_writes(3).revert().build();
     let (mega, op) = run_both(both_evms(db_with(reverting)), CALLER, CONTRACT, Bytes::new());
     assert!(matches!(mega.result, ExecutionResult::Revert { .. }), "{:?}", mega.result);
+    // The reservoir paid each slot but its share, as far as it went, and regular gas the rest;
+    // the revert gives all three slots back into the reservoir.
+    let from_reservoir = DEFAULT_RESERVOIR.min(3 * (slot() - slot_share()));
     assert_eq!(
         mega.reservoir_remaining,
-        DEFAULT_RESERVOIR + 3 * slot_share(),
-        "nothing kept, and the shares regular gas paid come back into the reservoir"
+        DEFAULT_RESERVOIR - from_reservoir + 3 * slot(),
+        "nothing kept, and what regular gas paid comes back into the reservoir with the rest"
     );
     assert_eq!(mega.result.gas().state_gas_spent_final(), 0);
     assert_same(&mega, &op);

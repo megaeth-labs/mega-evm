@@ -26,8 +26,8 @@ use revm::bytecode::opcode::{
 };
 
 use crate::common::{
-    account_share, authorizing_call, beneficiary_share, call, create, create_share, execute,
-    runs_at_measurement_prices, slot_share,
+    account_share, account_state_gas, authorizing_call, beneficiary_share, call, create,
+    create_share, execute, runs_at_measurement_prices, slot_share,
 };
 
 const CALLER: Address = address!("0000000000000000000000000000000000710000");
@@ -182,7 +182,7 @@ fn test_a_code_deposit_takes_no_legacy_share() {
 fn test_the_transactions_own_recipient_takes_no_legacy_share() {
     let outcome = execute(db(), call(CALLER, NEW, U256::from(1), ABOVE_CAP));
     assert!(outcome.result.is_success(), "{:?}", outcome.result);
-    assert!(outcome.gas.state > 0, "the recipient is a new account");
+    assert!(account_state_gas() == 0 || outcome.gas.state > 0, "the recipient is a new account");
     assert_eq!(paid_by_regular(&outcome, ABOVE_CAP), 0);
 }
 
@@ -192,7 +192,7 @@ fn test_a_creation_transactions_account_and_code_take_no_legacy_share() {
     let init_code = Bytes::from_static(&[PUSH1, 1, PUSH0, RETURN]);
     let outcome = execute(db(), create(CALLER, init_code, ABOVE_CAP));
     assert!(outcome.result.is_success(), "{:?}", outcome.result);
-    assert!(outcome.gas.state > 0, "the created account and its code");
+    assert!(account_state_gas() == 0 || outcome.gas.state > 0, "the created account and its code");
     assert_eq!(paid_by_regular(&outcome, ABOVE_CAP), 0);
 }
 
@@ -209,7 +209,10 @@ fn test_an_authority_and_its_delegation_indicator_take_no_legacy_share() {
             .is_some_and(|account| account.info.code_hash != revm::primitives::KECCAK_EMPTY),
         "the authority is delegated",
     );
-    assert!(outcome.gas.state > 0, "the authority's account and its delegation indicator");
+    assert!(
+        account_state_gas() == 0 || outcome.gas.state > 0,
+        "the authority's account and its delegation indicator"
+    );
     assert_eq!(paid_by_regular(&outcome, ABOVE_CAP), 0);
 }
 

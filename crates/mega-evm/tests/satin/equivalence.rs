@@ -354,12 +354,10 @@ fn test_a_slot_written_back_departs_from_eip_8037_by_crediting_the_reservoir() {
         .stop()
         .build();
     let db = MemoryDatabase::default().account_code(CALLEE, code);
-    let tx = TxEnv {
-        caller: CALLER,
-        kind: TxKind::Call(CALLEE),
-        gas_limit: 1_000_000,
-        ..Default::default()
-    };
+    // Regular room on top of the body's history and the slot and its record at the prices in
+    // effect, below the execution cap.
+    let gas_limit = 500_000 + body_history(0) + slot_state_gas() + history(WRITE_RECORD_SIZE);
+    let tx = TxEnv { caller: CALLER, kind: TxKind::Call(CALLEE), gas_limit, ..Default::default() };
     let (mut mega, _, cfg) = both_evms(db.clone(), block());
     assert_satin_cfg(&cfg);
     let mega = mega.execute_transaction(OpTx(op_transaction(tx.clone()))).unwrap();

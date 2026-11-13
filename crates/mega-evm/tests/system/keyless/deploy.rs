@@ -170,26 +170,27 @@ fn deploy_forwarding(init_code: Bytes, forward: u64) -> (MegaTransactionOutcome,
     (outcome, returned)
 }
 
-/// A constructor that writes a fresh slot and reverts, run on 500,000 of forward and no
-/// reservoir: regular gas paid the slot's state gas and its record's history, and the revert gives
-/// both back into the creation's reservoir, so the creation returns its unspent regular gas and a
-/// reservoir of exactly those two. `gasUsed` nets both pools: the regular gas spent less the
-/// reservoir it returned, which is the constructor's regular charges alone — 12,109, at any byte
-/// price.
+/// A constructor that writes a fresh slot and reverts, run on no reservoir and a forward of
+/// 398,560 of room on top of what the slot adds, 500,000 at the spec's prices: regular gas paid
+/// the slot's state gas and its record's history, and the revert gives both back into the
+/// creation's reservoir, so the creation returns its unspent regular gas and a reservoir of exactly
+/// those two. `gasUsed` nets both pools: the regular gas spent less the reservoir it returned,
+/// which is the constructor's regular charges alone — 12,109, at any byte price.
 #[test]
 fn test_a_reverting_constructor_returns_its_slot_as_reservoir_and_reports_its_regular_charges() {
-    const FORWARD: u64 = 500_000;
+    let given_back = crate::common::slot_state_gas() +
+        mega_evm::write_record_history_gas(1).expect("a record has a price");
+    let forward = 398_560 + given_back;
     let init_code = Bytes::from_static(&[0x60, 0x01, PUSH0, SSTORE, PUSH0, PUSH0, REVERT]);
-    let (outcome, (regular, reservoir)) = deploy_forwarding(init_code, FORWARD);
+    let (outcome, (regular, reservoir)) = deploy_forwarding(init_code, forward);
     let KeylessDeployError::ExecutionReverted { gas_used, .. } = failure(&outcome) else {
         panic!("expected ExecutionReverted: {:?}", outcome.result);
     };
-    let given_back = crate::common::slot_state_gas() +
-        mega_evm::write_record_history_gas(1).expect("a record has a price");
     assert_eq!(gas_used, 12_109, "the constructor's regular charges");
     assert_eq!(reservoir, given_back, "the slot and its record come back as reservoir");
-    assert_eq!(regular, FORWARD - gas_used - given_back, "regular gas paid the slot");
+    assert_eq!(regular, forward - gas_used - given_back, "regular gas paid the slot");
     if mega_evm::active_satin_prices().is_constants() {
+        assert_eq!(forward, 500_000);
         assert_eq!((regular, reservoir), (386_451, 101_440));
     }
 }
