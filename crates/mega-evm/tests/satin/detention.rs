@@ -301,9 +301,11 @@ pub(crate) fn assert_caught_with_stipends(
 /// some number of times, or forever.
 ///
 /// The stop lands on the first charge the limit leaves no room for: that charge is not made, and
-/// the stopped frame keeps what it had before it ([`left`](Self::left)).
+/// the stopped frame keeps what it had before it ([`left`](Self::left)). A part can carry a state
+/// charge's legacy share each round makes once its regular charges are paid, which regular gas pays
+/// and which is no compute ([`shares_before_crossing`](Self::shares_before_crossing)).
 #[derive(Clone, Debug, Default)]
-pub(crate) struct Charges(Vec<(Vec<u64>, Option<u64>)>);
+pub(crate) struct Charges(Vec<(Vec<u64>, Option<u64>, u64)>);
 
 impl Charges {
     /// `charges`, once.
@@ -312,14 +314,20 @@ impl Charges {
     }
 
     /// `charges`, `times` times over.
-    pub(crate) fn repeat(mut self, charges: &[u64], times: u64) -> Self {
-        self.0.push((charges.to_vec(), Some(times)));
+    pub(crate) fn repeat(self, charges: &[u64], times: u64) -> Self {
+        self.repeat_with_share(charges, times, 0)
+    }
+
+    /// `charges`, `times` times over, each round making a state charge whose legacy share is
+    /// `share` once its regular charges are paid.
+    fn repeat_with_share(mut self, charges: &[u64], times: u64, share: u64) -> Self {
+        self.0.push((charges.to_vec(), Some(times), share));
         self
     }
 
     /// `charges`, over and over.
     pub(crate) fn forever(mut self, charges: &[u64]) -> Self {
-        self.0.push((charges.to_vec(), None));
+        self.0.push((charges.to_vec(), None, 0));
         self
     }
 
@@ -327,7 +335,7 @@ impl Charges {
     pub(crate) fn total(&self) -> u64 {
         self.0
             .iter()
-            .map(|(charges, times)| {
+            .map(|(charges, times, _)| {
                 charges.iter().sum::<u64>() * times.expect("a program that ends")
             })
             .sum()
@@ -340,8 +348,21 @@ impl Charges {
     }
 
     /// [`left`](Self::left), or `None` when the program ends within `allowance`.
-    pub(crate) fn crossing(&self, mut allowance: u64) -> Option<u64> {
-        for (charges, times) in &self.0 {
+    pub(crate) fn crossing(&self, allowance: u64) -> Option<u64> {
+        self.crossing_and_shares(allowance).0
+    }
+
+    /// The legacy shares of the state charges the program made before the charge `allowance`
+    /// cannot pay: what regular gas paid of them, which the stop's rollback gives back into the
+    /// reservoir.
+    pub(crate) fn shares_before_crossing(&self, allowance: u64) -> u64 {
+        self.crossing_and_shares(allowance).1
+    }
+
+    /// [`crossing`](Self::crossing), with the legacy shares of the rounds made before it.
+    fn crossing_and_shares(&self, mut allowance: u64) -> (Option<u64>, u64) {
+        let mut shares = 0;
+        for (charges, times, share) in &self.0 {
             let round: u64 = charges.iter().sum();
             if round == 0 {
                 continue;
@@ -349,18 +370,20 @@ impl Charges {
             let rounds = allowance / round;
             if times.is_some_and(|times| rounds >= times) {
                 allowance -= round * times.unwrap();
+                shares += share * times.unwrap();
                 continue;
             }
             allowance -= round * rounds;
+            shares += share * rounds;
             for charge in charges {
                 if *charge > allowance {
-                    return Some(allowance);
+                    return (Some(allowance), shares);
                 }
                 allowance -= charge;
             }
             unreachable!("a round the allowance cannot pay whole has a charge it cannot pay");
         }
-        None
+        (None, shares)
     }
 
     /// The charges of [`spin`]'s loop in a frame whose memory holds `words` words: `JUMPDEST`, the
@@ -403,9 +426,14 @@ impl Charges {
 
     /// The charges of `count` writes of a fresh, cold slot, each pushing its value and its slot:
     /// two pushes, then `SSTORE`'s static gas and its dynamic gas, the cold access and the set.
-    /// Their state and history gas are not compute.
+    /// Their state and history gas are not compute, the slot's legacy share, which regular gas
+    /// pays, included.
     pub(crate) fn fresh_writes(self, count: u64) -> Self {
-        self.repeat(&[3, 3, sstore_static(), fresh_sstore()], count)
+        self.repeat_with_share(
+            &[3, 3, sstore_static(), fresh_sstore()],
+            count,
+            crate::common::slot_share(),
+        )
     }
 }
 

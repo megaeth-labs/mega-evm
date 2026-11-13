@@ -149,21 +149,20 @@ A KZG call given at least 100,000 gas that fails otherwise — an input of the w
 #### New behavior
 
 A node MUST apply [EIP-8037](https://eips.ethereum.org/EIPS/eip-8037) as of [commit `c406bdb2ff`](https://github.com/ethereum/EIPs/commit/c406bdb2ffbf2fbf9d85698e97b3b2e8b6e79112) (4 September 2026), with the parameters below, and with the later changes this section names.
-Satin adopts the child-merge return of [commit `3ff5cff17a`](https://github.com/ethereum/EIPs/commit/3ff5cff17a11ab31273ee14ebea0df8bbc4f4aef) (4 September 2026) as the reference implementation performs it, and does not adopt the transaction gas cap of [commit `d7087803ca`](https://github.com/ethereum/EIPs/commit/d7087803ca236498c73f64665df0ddac7d621950) (14 September 2026).
-On the return of every start, whether the start is answered without building a frame (a precompile, a call to an account with no code, an interceptor's answer) or a built frame returns, the reservoir the child returns MUST first unwind the caller's outstanding spill, and the rest MUST join the reservoir the caller kept.
-`d = min(returned reservoir, the caller's outstanding spill)`.
-The caller's regular gas increases by `d`, its spill decreases by `d`, and its reservoir increases by the returned reservoir less `d`.
-The reservoir the caller kept MUST NOT be drawn.
-State charges and history charges share that spill (see [History Gas](#7-history-gas)).
-A successful child's own spill MUST be added to the caller's spill before this unwind.
-A revert or a halt MUST NOT add the child's spill: the child's rollback already credited that spill to the gas the child returns, and a halt then consumes it.
+Satin adopts, of the child-merge return of [commit `3ff5cff17a`](https://github.com/ethereum/EIPs/commit/3ff5cff17a11ab31273ee14ebea0df8bbc4f4aef) (4 September 2026) and the failure outcome of [commit `9dcd72754f`](https://github.com/ethereum/EIPs/commit/9dcd72754f3fe4b48a4dbeffee669dc4c60f7ec5) (14 September 2026), what its give-back rule leaves of them (see [History Gas](#7-history-gas)), and does not adopt the transaction gas cap of [commit `d7087803ca`](https://github.com/ethereum/EIPs/commit/d7087803ca236498c73f64665df0ddac7d621950) (14 September 2026).
+On the return of every start, whether the start is answered without building a frame (a precompile, a call to an account with no code, an interceptor's answer, a refused start) or a built frame returns, the reservoir the child returns MUST join the reservoir the caller kept, and the caller's regular gas MUST rise by the regular gas the child returns and by nothing else.
+The returned reservoir MUST NOT be credited to the caller's regular gas, and the reservoir the caller kept MUST NOT be drawn.
+A caller with 100 of reservoir after the start's charges keeps 2 and gives the child 98; a child that returns all 98 leaves the caller 100, whatever regular gas the caller paid for state before.
+State charges and history charges are given back by the same rule (see [History Gas](#7-history-gas)).
 A node MUST NOT cap a transaction's gas limit at `TX_MAX_TOTAL_GAS_LIMIT` = 2^32 − 1.
 The gas limit stays bounded by the block's gas limit.
 That cap stays open until EIP-8037 is final.
-An authority charge made before the first frame is not committed out of the outstanding spill when that frame starts.
-The reservoir the first frame returns unwinds that spill by the same rule, together with any other spill still outstanding.
-A failure of the first frame returns no reservoir that charge had already drawn, so the charge stays (see [The Revert-Class Stop](#11-the-revert-class-stop)).
-That is the failure outcome of [commit `9dcd72754f`](https://github.com/ethereum/EIPs/commit/9dcd72754f3fe4b48a4dbeffee669dc4c60f7ec5) (14 September 2026), and not its commit of the pre-execution spill, which would keep a later return from unwinding it.
+A charge made before the first frame — the caller a deposit creates, an authorization's charges, the history of the records made outside a frame, the state gas of the first frame's recipient or created account — MUST draw the reservoir first and the regular budget for the rest, and the first frame receives the reservoir it left.
+The part the regular budget pays stays spent: no reservoir a frame returns credits it back to regular gas.
+A failure of the first frame returns no reservoir an authority charge had already drawn, so that charge stays (see [The Revert-Class Stop](#11-the-revert-class-stop)).
+The first frame's own start record and its recipient's or created account's state gas come back into the transaction's reservoir when that frame reverts or is stopped, and, when it halts, only for the part the reservoir paid: the part regular gas paid is consumed with the frame's regular gas.
+Of the history charged before the first frame the reservoir pays the authorities' records first, so the part of the start record it paid is what they leave it.
+That is the failure outcome of [commit `9dcd72754f`](https://github.com/ethereum/EIPs/commit/9dcd72754f3fe4b48a4dbeffee669dc4c60f7ec5), and not its commit of the pre-execution spill as a rule of its own: under the give-back rule the part of any charge regular gas paid stays spent, a charge made before the first frame included.
 A creation does not collide on storage (see [Resource Limits](#10-resource-limits)), which is the collision rule of [commit `dbc6d457cb`](https://github.com/ethereum/EIPs/commit/dbc6d457cbf90d5f9d55552f3fd91d58b88cc898) (18 September 2026).
 The removal of an unused counter ([commit `052029f362`](https://github.com/ethereum/EIPs/commit/052029f3625328d6f51dec8e62a7090201e66f17)), the co-author lines and the move to Last Call change no rule a transaction executes, and Satin does not track them.
 
@@ -183,7 +182,9 @@ The removal of an unused counter ([commit `052029f362`](https://github.com/ether
 
 - **Three kinds of charge.**
   A regular charge (every inherited opcode and intrinsic cost) MUST draw only the regular budget.
-  A state charge (see [State Gas](#6-state-gas-and-salt-pricing)) and a history charge (see [History Gas](#7-history-gas)) MUST draw the reservoir first and spill onto the regular budget only past it.
+  A state charge (see [State Gas](#6-state-gas-and-salt-pricing)) and a history charge (see [History Gas](#7-history-gas)) MUST draw the pools of the frame that makes it in this order: first the charge's legacy share, which only the state charges of [the legacy share](#the-legacy-share) have, from the frame's regular gas; then the reservoir, until it is zero; then the rest, the spill, from the regular budget.
+  A frame whose regular gas cannot pay the legacy share or the spill MUST run out of gas, whatever its reservoir holds.
+  The part of a state or history charge that regular gas pays is spent, and no give-back credits it to regular gas again.
   `GAS` MUST return the regular budget the frame has left, not the reservoir.
 - **Frames.**
   A call or creation MUST forward regular gas as [Gas Forwarding](#9-gas-forwarding) specifies.
@@ -192,12 +193,14 @@ The removal of an unused counter ([commit `052029f362`](https://github.com/ether
   `remaining` is that reservoir, and the division is integer division, truncating toward zero.
   The regular gas the caller asks to forward MUST NOT bound `reservoir_share`.
   What the child leaves of its share MUST return to the caller by the child-merge rule above.
-  When a frame reverts or halts, the state and history gas it charged MUST be given back as [EIP-8037](https://eips.ethereum.org/EIPS/eip-8037) specifies: the part the reservoir paid returns to the reservoir, and the part that spilled returns to the frame's regular budget.
-  A revert then returns the frame's unspent regular gas to its caller; an exceptional halt consumes it, the returned spill included.
-  A failed child therefore returns the share it was given, whether the start was answered without building a frame (a precompile, a call to an account with no code, an interceptor's answer) or a built frame returns.
-  That share unwinds the caller's outstanding spill before the rest joins the reservoir the caller kept.
-  When the caller has no outstanding spill, the caller holds the reservoir it had after the charges it made for the start.
-  The caller's own charge for a leaf the child did not add is given back after that.
+  When a frame reverts or is stopped by a limit, its reservoir MUST become `reservoir + net_charged`.
+  `reservoir` is the frame's reservoir when it fails: what it kept of the reservoir it received and of what its successful children returned, every give-back it holds, and the reservoir its failed children returned after their own rollback.
+  `net_charged` is the state and history gas charged since the frame started, by the frame and by the children that succeeded and merged into it, legacy shares included, less every give-back they received; a failed child's charges are not part of it, that child's rollback having already returned them.
+  Every state and history charge the revert undoes therefore ends in the frame's reservoir, whichever pool paid it, and the frame's unspent regular gas, which none of it reaches, returns to its caller.
+  When a frame halts exceptionally, its reservoir MUST become the reservoir it received when it started, and its regular gas, with the part of its charges regular gas paid, is consumed; reservoir its failed children returned to it is consumed with it.
+  A failed frame's charges therefore never return to regular gas.
+  A failed child returns the share it was given, after its rollback, whether the start was answered without building a frame (a precompile, a call to an account with no code, an interceptor's answer) or a built frame returns, and that reservoir joins the reservoir the caller kept.
+  The caller's own charge for a leaf the child did not add, its legacy share included, is given back into the caller's reservoir after that.
 - **The transaction.**
   When the transaction ends, the reservoir left MUST return to the sender, and so MUST the unspent regular gas unless the transaction's own frame halted; this holds when the transaction reverts or is stopped by a limit (see [The Revert-Class Stop](#11-the-revert-class-stop)).
   A failed deposit is the exception: it MUST use its whole gas limit, the reservoir included, and nothing returns (see [Transaction and Block Refusals](#21-transaction-and-block-refusals)); a deposit that succeeds, reverts or is stopped by a limit is not a failed deposit and settles as above.
@@ -209,7 +212,7 @@ The removal of an unused counter ([commit `052029f362`](https://github.com/ether
   - _state gas_ — the state charges it kept;
   - _history gas_ — the history charges it kept, the body included.
 
-  State or history gas that spilled onto the regular budget stays on its own ledger.
+  State or history gas that regular gas paid, a legacy share or a spill, stays on its own ledger.
   The [EIP-7623](https://eips.ethereum.org/EIPS/eip-7623) floor, as [EIP-7976](https://eips.ethereum.org/EIPS/eip-7976) and [EIP-7981](https://eips.ethereum.org/EIPS/eip-7981) amend it, MUST be computed and validated as Amsterdam computes it; the figure a block counts on its execution ledger is `max(regular, floor)`, with history gas taken out of the regular ledger before the floor applies.
 
 - **Validation.**
@@ -235,19 +238,23 @@ Its freeze point is [commit `dbc6d457cb`](https://github.com/ethereum/EIPs/commi
 - **Base.**
   EIP-8037 as of [commit `c406bdb2ff`](https://github.com/ethereum/EIPs/commit/c406bdb2ffbf2fbf9d85698e97b3b2e8b6e79112) (4 September 2026), with the parameters this section and [State Gas and SALT Pricing](#6-state-gas-and-salt-pricing) set: the execution cap, and MegaETH's cost per state byte scaled by the bucket multiplier.
 - **Later commits taken.**
-  The child-merge return of [commit `3ff5cff17a`](https://github.com/ethereum/EIPs/commit/3ff5cff17a11ab31273ee14ebea0df8bbc4f4aef), as the reference implementation performs it.
+  Of the child-merge return of [commit `3ff5cff17a`](https://github.com/ethereum/EIPs/commit/3ff5cff17a11ab31273ee14ebea0df8bbc4f4aef), what the give-back rule leaves of it: a returned reservoir joins the reservoir its caller kept and never draws it.
   The failure outcome of [commit `9dcd72754f`](https://github.com/ethereum/EIPs/commit/9dcd72754f3fe4b48a4dbeffee669dc4c60f7ec5): a failure of the first frame does not give back the reservoir that an authority charge made before the frame had drawn.
   The collision rule of [commit `dbc6d457cb`](https://github.com/ethereum/EIPs/commit/dbc6d457cbf90d5f9d55552f3fd91d58b88cc898): a creation does not collide on storage.
 - **Later commits declined.**
   The transaction gas cap of [commit `d7087803ca`](https://github.com/ethereum/EIPs/commit/d7087803ca236498c73f64665df0ddac7d621950).
-  The commit of the pre-execution spill in [commit `9dcd72754f`](https://github.com/ethereum/EIPs/commit/9dcd72754f3fe4b48a4dbeffee669dc4c60f7ec5), which would keep a later return from unwinding it.
+  The commit of the pre-execution spill in [commit `9dcd72754f`](https://github.com/ethereum/EIPs/commit/9dcd72754f3fe4b48a4dbeffee669dc4c60f7ec5) as a rule of its own: under the give-back rule the part of any charge regular gas paid stays spent.
 - **Later commits not tracked.**
   The removal of an unused counter ([commit `052029f362`](https://github.com/ethereum/EIPs/commit/052029f3625328d6f51dec8e62a7090201e66f17)), which changes no rule a transaction executes.
 - **Satin's own departures from the EIP.**
   - The reservoir share: a child frame receives `reservoir_share = remaining − remaining × 2 / 100` of the reservoir its caller has left, and the caller keeps the rest, where EIP-8037 passes the whole reservoir (see [Gas Forwarding](#9-gas-forwarding)).
-    The reservoir a child returns joins what the caller kept, after it unwinds the caller's outstanding spill (the child-merge rule above).
-  - History gas: a history charge draws the reservoir first and shares the spill with state charges, is given back with them when its frame fails, and is booked on a ledger of its own; the history gas of the transaction's body is the intrinsic state gas (see [History Gas](#7-history-gas)).
+    The reservoir a child returns joins what the caller kept (the child-merge rule above).
+  - History gas: a history charge draws the reservoir first and spills onto regular gas as a state charge does, is given back with the state charges when its frame fails, and is booked on a ledger of its own; the history gas of the transaction's body is the intrinsic state gas (see [History Gas](#7-history-gas)).
   - The destruction-table refill: the first effective `SELFDESTRUCT` of an account created in the same transaction refills the state gas of each part of it that was absent at the transaction's start, where EIP-8037 specifies that this destruction produces no state-gas refills (see [The destruction table](#the-destruction-table)).
+  - The give-back rule: every give-back of state or history gas — a refill, a take-back, a rollback — goes into a reservoir and never into regular gas, and a returned reservoir joins the caller's without unwinding anything, where EIP-8037 at that commit credits a refill to regular gas first, up to the state gas the frame's regular gas paid, unwinds that spill when a child returns reservoir, and returns it to regular gas when the frame reverts (see [History Gas](#7-history-gas)).
+  - The legacy share: a state charge for a fresh slot, a new account or a created account that an opcode or a keyless deployment makes takes a fixed pre-Satin part from regular gas before the reservoir (see [the legacy share](#the-legacy-share)).
+
+  The last two follow the rule [ethereum/EIPs#12581](https://github.com/ethereum/EIPs/pull/12581) proposes for EIP-8037, which is not merged; they are stated here in Satin's own words, and the pull request is their provenance, not a rule of this specification.
 
 A change to EIP-8037 after [commit `dbc6d457cb`](https://github.com/ethereum/EIPs/commit/dbc6d457cbf90d5f9d55552f3fd91d58b88cc898) is an input to a later spec, not to Satin.
 The co-author lines and the move to Last Call came after it and change no rule a transaction executes.
@@ -364,7 +371,7 @@ Every EIP-8037 state charge MUST be `entry × m`:
 - A bucket's multiplier MUST be read at most once per transaction: every later charge, and every give-back, in that bucket MUST use the same `m`, so a give-back cancels its charge exactly.
 - A bucket capacity below `MIN_BUCKET_SIZE`, or a capacity the node cannot read, is a fault of the node, including for a deposit: the transaction MUST NOT be priced at any multiplier or settled, and the node MUST report an internal error (see [Transaction and Block Refusals](#21-transaction-and-block-refusals)).
 - The only `SSTORE` that charges fresh-slot state gas is one whose original value is zero, whose present value is zero, and whose new value is not.
-  The only `SSTORE` that refills it is one whose original value is zero, whose present value is not, and whose new value is zero, except on an account marked for deletion (see [Resource Limits](#10-resource-limits)), and that refill MUST be the price the slot was charged, in the refill order of [History Gas](#7-history-gas).
+  The only `SSTORE` that refills it is one whose original value is zero, whose present value is not, and whose new value is zero, except on an account marked for deletion (see [Resource Limits](#10-resource-limits)), and that refill MUST be the price the slot was charged, its legacy share included, and go into the frame's reservoir (see [History Gas](#7-history-gas)).
   Every other `SSTORE` transition charges no fresh-slot state gas and refills none.
   That is the same transition table as the state-growth change of an `SSTORE` (see [Resource Limits](#10-resource-limits)).
 - The first effective `SELFDESTRUCT` of an account created in the same transaction refills state gas for each part the [destruction table](#the-destruction-table) names.
@@ -373,6 +380,32 @@ Every EIP-8037 state charge MUST be `entry × m`:
   A deposit that is not system-originated is not one of them and MUST be priced by bucket, and MUST pay history gas (see [History Gas](#7-history-gas)).
 
 At `m = 1` every state charge is the schedule's own number, so, unlike Rex6, a fresh slot or account in a minimum-size bucket is not free: it pays its state gas.
+
+##### The legacy share
+
+A state charge an opcode or a keyless deployment makes for a fresh slot, a new account or a created account MUST take its legacy share from the frame's regular gas before the reservoir pays any of it, and pay the rest as every state charge is paid (see [Two-Pool Gas](#4-two-pool-gas-eip-8037-replaces-the-dual-gas-model)):
+
+`legacy_share = min(state_charge, max(0, PRE_FORK_COST − execution_charge))`
+
+- `state_charge` — the charge, `entry × m`.
+- `PRE_FORK_COST` and `execution_charge` — by the component that creates the state:
+
+| State charge                                                                  | `PRE_FORK_COST`                      | `execution_charge`                                  | Legacy share at `m = 1` |
+| ----------------------------------------------------------------------------- | ------------------------------------ | --------------------------------------------------- | ----------------------- |
+| Fresh storage slot, by `SSTORE`                                               | `PRE_FORK_SSTORE_SET_COST` = 20,000  | the fresh slot's write, 10,000                      | 10,000                  |
+| New account, by a value `CALL`, or a keyless deployment's signer              | `PRE_FORK_NEW_ACCOUNT_COST` = 25,000 | 0                                                   | 25,000                  |
+| New account, by a `SELFDESTRUCT`'s beneficiary                                | `PRE_FORK_NEW_ACCOUNT_COST` = 25,000 | the schedule's new account of `SELFDESTRUCT`, 9,000 | 16,000                  |
+| Created account, by `CREATE` or `CREATE2`, or a keyless deployment's creation | `PRE_FORK_CREATE_COST` = 32,000      | the creation's access, 12,000                       | 20,000                  |
+
+- `PRE_FORK_COST` is a fixed pre-Satin price: it MUST NOT be scaled by the bucket multiplier and does not move when the schedule's prices do.
+- Every other state charge MUST have a legacy share of zero: deployed code, a delegation indicator, and every charge made before the first frame — the caller a deposit creates, an authorization's, the transaction's recipient or created account.
+  A history charge has none.
+- The legacy share is state gas: it is counted on the state ledger and given back with the rest of its charge, into a reservoir (see [History Gas](#7-history-gas)).
+  A frame whose regular gas cannot pay it runs out of gas, whatever its reservoir holds.
+- A value `CALL` and a creation opcode take the share before they compute their forward, so it shrinks the forward as a spill does.
+
+So each of these operations draws from regular gas what it drew before Satin when it creates state, whatever the reservoir holds: a fresh slot's `SSTORE` 22,100 with the cold access, a `SELFDESTRUCT` to a new beneficiary 30,000, a `CREATE` or `CREATE2` 32,000.
+Without the share, a sender who adds a reservoir could write a slot from a failure handler with 12,100 of regular gas.
 
 ### 7. History Gas
 
@@ -422,7 +455,7 @@ When each charge is made:
 - A `CALL`, `CALLCODE`, `CREATE` or `CREATE2` MUST charge its own frame for the records the frame it starts makes (the accounts a value transfer changes from what the transaction loaded; a creation's created account, unless the transaction changed it already, and, when the bump changes the creator's account from what the transaction loaded, its creator nonce — see [Resource Limits](#10-resource-limits)), after the gas it forwards is computed, so the forward is not reduced by them.
   A caller that cannot pay MUST halt with out-of-gas, and the frame MUST NOT start.
   The price of a record the start takes back — an account the transfer returns to what the transaction loaded — MUST be given back to the caller once the frame returned with its start kept.
-  A value `CALL` to an empty account (EIP-161) MUST charge its caller in this order: its regular gas — the access's static 100, memory, the value transfer, then the cold surcharge with the new account's regular gas, which is zero — then the new account's state gas, reservoir first, then the 98/100 forward of the regular gas left (see [Gas Forwarding](#9-gas-forwarding)), then the history of the start's records; a state charge that spills onto the regular budget so shrinks the forward, and the records' history does not.
+  A value `CALL` to an empty account (EIP-161) MUST charge its caller in this order: its regular gas — the access's static 100, memory, the value transfer, then the cold surcharge with the new account's regular gas, which is zero — then the new account's state gas, its legacy share from regular gas and the rest reservoir first (see [the legacy share](#the-legacy-share)), then the 98/100 forward of the regular gas left (see [Gas Forwarding](#9-gas-forwarding)), then the history of the start's records; the legacy share and a state charge that spills onto the regular budget so shrink the forward, and the records' history does not.
   That forward is regular gas only.
   The child is given its reservoir share after the history charge, from the reservoir the charge left the caller, and the gas the caller asks to forward does not bound the share.
   A `CREATE` or `CREATE2` likewise charges the created account's state gas, when the account at the created address is empty, before it computes the forward, and gives the creation its reservoir share at the same point a call does, after the history of the start's records.
@@ -430,10 +463,9 @@ When each charge is made:
 - What a frame does not keep — a failed frame's records and logs, a slot written back to its original value, an account returned to what the transaction loaded — MUST be given back at the price it was charged, to whoever paid it.
   A part the [destruction table](#the-destruction-table) takes back is the exception: it is given back to the destroying frame, including when another frame paid it, and a failure of that frame discards the give-back.
 
-Every give-back of state gas or of history gas MUST follow one refill order.
-The frame's regular gas is credited first, up to the spill still outstanding on that frame, and the rest goes to its reservoir.
-State charges and history charges share that spill.
-A give-back inside a frame uses this order, as the rollback of a failed frame does (see [Two-Pool Gas](#4-two-pool-gas-eip-8037-replaces-the-dual-gas-model)).
+Every give-back of state gas or of history gas — a refill, a take-back, a rollback — MUST go into a reservoir, at the price it was charged, its legacy share included, and MUST NOT be credited to regular gas, whichever pool paid the charge.
+A give-back inside a frame goes into the reservoir of the frame that makes it, and the rollback of a failed frame into that frame's (see [Two-Pool Gas](#4-two-pool-gas-eip-8037-replaces-the-dual-gas-model)).
+A frame can pay later state and history charges with gas given back so, but it cannot compute with it; what it does not spend returns up the chain with its reservoir when it succeeds.
 
 A record an opcode commits — a storage write, a log, a `SELFDESTRUCT`'s records — MUST be checked against the limits before its history is charged, so a record a limit refuses is not charged.
 A frame that cannot pay that history charge MUST halt with out-of-gas, keeping neither the record nor its bytes.
@@ -502,11 +534,10 @@ Where it binds, the gas used is the floor, drawn from the whole gas limit, the r
   A keyless deployment's creation receives this share of the reservoir the call has left after the call's start charges (see [Native Keyless Deployment](#15-native-keyless-deployment)).
   That creation's regular-gas forward is `min(gasLimitOverride, remaining gas)`, and the 98/100 cap does not apply to it, as Rex6's sandbox envelope was that minimum and the call charges nothing after the creation returns.
   What the child leaves of its share MUST return to the caller by the child-merge rule of [Two-Pool Gas](#4-two-pool-gas-eip-8037-replaces-the-dual-gas-model).
-  A frame that reverts or halts gives its state and history charges back as EIP-8037 specifies.
-  A failed child therefore returns the share it was given, whether the start was answered without building a frame (a precompile, a call to an account with no code, an interceptor's answer) or a built frame returns.
-  That share unwinds the caller's outstanding spill before the rest joins the reservoir the caller kept.
-  When the caller has no outstanding spill, the caller holds the reservoir it had after the charges it made for the start.
-  The caller's own charge for a leaf the child did not add is given back after that.
+  A frame that reverts or is stopped gives its state and history charges back into its reservoir, and one that halts returns the reservoir it received, as [Two-Pool Gas](#4-two-pool-gas-eip-8037-replaces-the-dual-gas-model) specifies.
+  A failed child therefore returns the share it was given, whether the start was answered without building a frame (a precompile, a call to an account with no code, an interceptor's answer) or a built frame returns, and a reverted child returns with it what it charged and the rollback gave back.
+  That reservoir joins the reservoir the caller kept, and none of it is credited to the caller's regular gas.
+  The caller's own charge for a leaf the child did not add, its legacy share included, is given back into the caller's reservoir after that.
   The reservoir share uses this gas-forwarding formula.
   A frame budget under [Resource Limits](#10-resource-limits) uses `remaining × 98 / 100`, rounded down.
   The two 98/100 rules are different integers.
@@ -687,17 +718,17 @@ A part that existed at the start is an ordinary deletion.
 | Slot          | zero                       | zero     | deleted | nothing: the slot is already clear                                                                                                                                                                                             |
 | Slot          | non-zero                   | any      | deleted | nothing of the refill or the fall. The write record of a slot the transaction loaded stands, and the deletion makes it when that loaded slot still holds its original value. A slot the transaction did not load has no record |
 
-A refill MUST be the price that part was charged, the schedule entry times the bucket multiplier of that charge, and it MUST go to the destroying frame, including when another frame paid it.
+A refill MUST be the price that part was charged, the schedule entry times the bucket multiplier of that charge, its legacy share included, and it MUST go into the destroying frame's reservoir, including when another frame paid it.
 On the absent row, the account leaf's charge is the one this transaction made for that leaf: at the value transfer that funded the address, at a `SELFDESTRUCT` that paid it, at the transaction's own value, or at the creation when the created address was empty.
 State growth falls for the absent leaf and for each slot on the zero, non-zero, deleted row, and for nothing else in the table.
 The fall of the absent leaf stands even when the creation itself added no rise, as when the transaction funded the address and then created onto it.
 An address that held a balance before the transaction is the present row: the creation adds no rise for that leaf, the destruction subtracts none, and the write record the nonce bump made stands.
-The write record taken back returns its data size to the destroying frame's budget and its history gas to that frame, and the KV count falls by that record.
+The write record taken back returns its data size to the destroying frame's budget and its history gas into that frame's reservoir, and the KV count falls by that record.
 When the destroying frame is the transaction's own frame and that frame succeeds, this return is the record's history gas, once.
 The settlement of that frame MUST NOT give the same charge back again (see [History Gas](#7-history-gas)).
 Deployed code is not a write record and not a unit of state growth.
 Code on the absent, present, deleted row returns its data size and its history gas the same way.
-The give-back MUST follow the refill order of [History Gas](#7-history-gas).
+The give-back MUST go into the destroying frame's reservoir, by the give-back rule of [History Gas](#7-history-gas).
 It is a give-back of state gas or of history gas, as a slot written back to zero is, and not an EIP-3529 refund.
 EIP-8037 specifies that this destruction produces no state-gas refills, and Rex6 refunded none of the storage gas.
 Satin refills the state gas because a part the transaction made does not remain for a node to store, so the count and the charge stay aligned.
@@ -956,11 +987,11 @@ A contract can revert with the same bytes, and so can a caller that re-raises th
   A `CREATE` or `CREATE2` MUST NOT be marked as a read, nor refused in a frame whose access is off (see [Volatile-Data Access Control](#13-volatile-data-access-control-and-remainingcomputegas)), even when its creator or its created address is the block beneficiary: the loads it makes of them — the creator's, to check its balance and nonce, and the created address's, to decide the created account's state gas — are the creation's own checks, which revm's creation opcode makes under EIP-8037, and not volatile reads, as a value call's check of its caller's balance is not one, and as Rex6 neither marked nor refused a creation.
   A frame then running as the beneficiary marks the beneficiary's account by its own `SELFBALANCE`, `SELFDESTRUCT` and the other reads above, and with access off is refused them.
 - **Compute.**
-  A transaction's compute is every regular charge its frames make, whoever funds it: the running frame's regular gas spent, plus every suspended caller's, each less the gas it forwarded its child, less the state and history gas that spilled onto regular gas, and less what halting frames burned.
+  A transaction's compute is every regular charge its frames make, whoever funds it: the running frame's regular gas spent, plus every suspended caller's, each less the gas it forwarded its child, less the state and history gas its regular gas paid — a legacy share or a part the reservoir could not pay —, also when that charge is later given back into a reservoir by a take-back or a rollback, and less what halting frames burned.
   A value call's 2,300 stipend is not forwarded gas: what the callee runs on it MUST count as compute, as the rest of what it runs does.
   The stipend MUST NOT lower compute either: when a value call returns, what the callee left of the stipend comes back to its caller with the rest of the callee's gas, and compute MUST NOT fall with the caller's spent regular gas.
   So compute exceeds the transaction's regular ledger by the stipends of its value calls, gas no pool of the transaction paid.
-  What a halting frame burns — the regular gas it had left when it halted — MUST NOT count as compute, whatever it could not pay: a dynamic charge, an opcode's static gas, a cold access, or state or history gas that spilled past the reservoir.
+  What a halting frame burns — the regular gas it had left when it halted — MUST NOT count as compute, whatever it could not pay: a dynamic charge, an opcode's static gas, a cold access, or state or history gas its regular gas had to pay.
   A precompile that runs out of gas counts nothing of its forward as compute: it burns the forward, a value call's stipend included, as a halting frame burns what it had left, unless it is the crossing (see Precompiles, below), and then the forward returns to its caller.
 - **The limit.**
   A read MUST set `limit = compute_at_read + cap`, with `cap` = `BLOCK_ENV_ACCESS_COMPUTE_GAS` = 20,000,000 for the block environment and the beneficiary and `ORACLE_ACCESS_COMPUTE_GAS` = 20,000,000 for the Oracle; the limit only goes down, so the most restrictive read binds.
@@ -968,12 +999,12 @@ A contract can revert with the same bytes, and so can a caller that re-raises th
   Both are below 199,987,900, the most compute a transaction can spend, so that they can stop one: the execution cap less EIP-2780's base cost of 12,000, which every transaction pays, and the 100 of a warm account access, the least a frame pays for the code it runs.
 - **Withheld gas.**
   Once a limit is set, every frame's regular gas MUST be split into a spendable part, held at what the limit leaves the transaction (`limit − compute`, or zero once the compute is past the limit), and a withheld part, the rest.
-  The split MUST be applied when the read's opcode completes, when a frame starts or resumes, and after an `SSTORE` (whose restore of a slot can refill regular gas).
+  The split MUST be applied when the read's opcode completes and when a frame starts or resumes: a give-back never raises a frame's regular gas, so those are the points at which it can grow.
   Only a regular charge MUST be limited to the spendable part.
   Every other reader of the frame's gas MUST see both parts: `GAS`, the 98/100 forward and the clamp of an explicit call gas, the `SSTORE` minimum-gas check, the checks that decide whether a cold load is attempted, the gas a child returns, and the settlement at the end of the transaction.
   At the settlement the withheld part MUST be unspent gas: it returns to the sender with the rest of the unspent gas, and it is not part of the gas used that caps the EIP-3529 refund at a fifth.
   A failed deposit MUST return none of it, as it returns no unspent gas and no reservoir (see [Transaction and Block Refusals](#21-transaction-and-block-refusals)).
-  A forward and a spill of state or history gas MUST draw the withheld part first.
+  A forward, and the part of a state or history charge that regular gas pays — its legacy share, and what the reservoir cannot pay — MUST draw the withheld part first.
   So a transaction that read volatile data runs exactly as it would without the read until a regular charge needs the withheld part.
 - **The crossing.**
   A regular charge that the spendable part cannot pay but the frame's whole regular gas can is the crossing: the charge MUST NOT be made, the frame's gas MUST be put back to what it was before the charge, and the frame MUST be stopped with `MegaLimitExceeded(2, limit)` (see [The Revert-Class Stop](#11-the-revert-class-stop)).
@@ -994,7 +1025,7 @@ A contract can revert with the same bytes, and so can a caller that re-raises th
   A call refused on its caller's account runs no precompile and is answered as without the read.
   A call runs a precompile, and is priced by it, only once it reaches the precompile's dispatch, whatever code the state holds at the address, an EIP-7702 delegation indicator included; the call opcode's earlier charges, checks and refusal come first, so with access off a call of a precompile's address whose indicator names the block beneficiary ends at or before the delegate's load and never reaches the dispatch (see [Volatile-Data Access Control](#13-volatile-data-access-control-and-remainingcomputegas)).
 - **Interceptor answers.**
-  A system contract's intercepted answer that spent more regular gas than the frame's allowance, state and history gas that spilled onto its regular gas not counted, MUST be the crossing.
+  A system contract's intercepted answer that spent more regular gas than the frame's allowance, state and history gas its regular gas paid not counted, MUST be the crossing.
   The answer's whole regular spend MUST be treated as the one charge that crossed: none of it is billed, the part within the allowance included, so the stop's compute is the transaction's compute when the frame started.
 - **Refused reads.**
   See [Volatile-Data Access Control](#13-volatile-data-access-control-and-remainingcomputegas).
@@ -1090,6 +1121,7 @@ The reference implementation has no price for one, so it runs such a precompile 
 
 - `remainingComputeGas()` MUST answer the lesser of two figures, read when the call reaches the interceptor: the calling frame's own regular gas with the gas the call forwarded counted back, and, once a read of volatile data set a limit, what the limit leaves the transaction.
   It is regular gas only: the reservoir is not in it, so a transaction above the execution cap hears at most the cap's share.
+  What the limit leaves counts as spent no state or history gas the transaction's regular gas paid, also when that charge was given back into a reservoir since: a transaction below the execution cap that reads `TIMESTAMP`, writes a zero slot to 1 and back to 0 at `m = 1`, and then calls it hears the cap less its regular charges alone, the 101,440 its regular gas paid and its reservoir now holds not counted.
   A transaction that calls the contract directly hears its own frame's regular gas, or less when it is detained from its start (its sender is the block beneficiary, or an EIP-7702 authority it applies is).
 
 ### 14. EIP-7708 Transfer Logs
@@ -1134,23 +1166,23 @@ The call MUST make these charges and checks, in this order.
 A rule's refusal reverts the call with the error named: the state and history gas the call was charged are given back, and the regular gas it spent stays spent.
 An out-of-gas step halts the call, consuming its regular gas.
 
-| Step | Check or charge                                                                                                                                                                                                                                                                                                                                                                       | Refusal                                                          |
-| ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
-| 1    | Charge `KEYLESS_DEPLOY_OVERHEAD_GAS` = 100,000 regular gas                                                                                                                                                                                                                                                                                                                            | Out-of-gas                                                       |
-| 2    | The call carries no value                                                                                                                                                                                                                                                                                                                                                             | `NoEtherTransfer()`, before the frame is built: no value moves   |
-| 3    | The carried transaction decodes (the arguments decoded when the call was recognized): a signed legacy creation, no chain id, no trailing bytes                                                                                                                                                                                                                                        | `MalformedEncoding()`, `NotContractCreation()`, `NotPreEIP155()` |
-| 4    | The carried transaction's nonce is 0                                                                                                                                                                                                                                                                                                                                                  | `NonZeroTxNonce(uint64)`                                         |
-| 5    | The initcode is within `MAX_INITCODE_SIZE`                                                                                                                                                                                                                                                                                                                                            | `InitCodeTooLarge(uint64,uint64)`                                |
-| 6    | `gasLimitOverride` covers the signed gas limit                                                                                                                                                                                                                                                                                                                                        | `GasLimitTooLow(uint64,uint64)`                                  |
-| 7    | The signer can be recovered, from a signature with a low or a high `s` value: EIP-2's bound on `s` does not apply                                                                                                                                                                                                                                                                     | `InvalidSignature()`                                             |
-| 8    | The signer's nonce is at most 1                                                                                                                                                                                                                                                                                                                                                       | `SignerNonceTooHigh(uint64)`                                     |
-| 9    | Unless EIP-3607 is disabled, the signer has no code other than an EIP-7702 delegation                                                                                                                                                                                                                                                                                                 | `SignerHasCode()`                                                |
-| 10   | If the signer's account is empty (EIP-161), charge its new-account state gas (`183,600 × m`)                                                                                                                                                                                                                                                                                          | Out-of-gas                                                       |
-| 11   | `min(gasLimitOverride, remaining gas)` still covers the signed gas limit                                                                                                                                                                                                                                                                                                              | `GasLimitTooLow(uint64,uint64)`                                  |
-| 12   | The deploy address `keccak256(rlp([signer, 0]))[12:]` holds no code                                                                                                                                                                                                                                                                                                                   | `ContractAlreadyExists()`                                        |
-| 13   | The signer's balance covers the carried value                                                                                                                                                                                                                                                                                                                                         | `InsufficientBalance()`                                          |
-| 14   | Charge what a `CREATE` charges its frame: 12,000 plus EIP-3860's initcode cost, the created account's state gas if the deploy address is empty, and the history gas of the created account's record, unless the transaction changed the deploy address already, and, unless it changed the signer's account already — the transaction's sender among them — the signer's nonce record | Out-of-gas                                                       |
-| 15   | `min(gasLimitOverride, remaining gas)` still covers the signed gas limit                                                                                                                                                                                                                                                                                                              | `GasLimitTooLow(uint64,uint64)`                                  |
+| Step | Check or charge                                                                                                                                                                                                                                                                                                                                                                                                                          | Refusal                                                          |
+| ---- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
+| 1    | Charge `KEYLESS_DEPLOY_OVERHEAD_GAS` = 100,000 regular gas                                                                                                                                                                                                                                                                                                                                                                               | Out-of-gas                                                       |
+| 2    | The call carries no value                                                                                                                                                                                                                                                                                                                                                                                                                | `NoEtherTransfer()`, before the frame is built: no value moves   |
+| 3    | The carried transaction decodes (the arguments decoded when the call was recognized): a signed legacy creation, no chain id, no trailing bytes                                                                                                                                                                                                                                                                                           | `MalformedEncoding()`, `NotContractCreation()`, `NotPreEIP155()` |
+| 4    | The carried transaction's nonce is 0                                                                                                                                                                                                                                                                                                                                                                                                     | `NonZeroTxNonce(uint64)`                                         |
+| 5    | The initcode is within `MAX_INITCODE_SIZE`                                                                                                                                                                                                                                                                                                                                                                                               | `InitCodeTooLarge(uint64,uint64)`                                |
+| 6    | `gasLimitOverride` covers the signed gas limit                                                                                                                                                                                                                                                                                                                                                                                           | `GasLimitTooLow(uint64,uint64)`                                  |
+| 7    | The signer can be recovered, from a signature with a low or a high `s` value: EIP-2's bound on `s` does not apply                                                                                                                                                                                                                                                                                                                        | `InvalidSignature()`                                             |
+| 8    | The signer's nonce is at most 1                                                                                                                                                                                                                                                                                                                                                                                                          | `SignerNonceTooHigh(uint64)`                                     |
+| 9    | Unless EIP-3607 is disabled, the signer has no code other than an EIP-7702 delegation                                                                                                                                                                                                                                                                                                                                                    | `SignerHasCode()`                                                |
+| 10   | If the signer's account is empty (EIP-161), charge its new-account state gas (`183,600 × m`), its legacy share of 25,000 from regular gas first                                                                                                                                                                                                                                                                                          | Out-of-gas                                                       |
+| 11   | `min(gasLimitOverride, remaining gas)` still covers the signed gas limit                                                                                                                                                                                                                                                                                                                                                                 | `GasLimitTooLow(uint64,uint64)`                                  |
+| 12   | The deploy address `keccak256(rlp([signer, 0]))[12:]` holds no code                                                                                                                                                                                                                                                                                                                                                                      | `ContractAlreadyExists()`                                        |
+| 13   | The signer's balance covers the carried value                                                                                                                                                                                                                                                                                                                                                                                            | `InsufficientBalance()`                                          |
+| 14   | Charge what a `CREATE` charges its frame: 12,000 plus EIP-3860's initcode cost, the created account's state gas if the deploy address is empty, its legacy share of 20,000 from regular gas first, and the history gas of the created account's record, unless the transaction changed the deploy address already, and, unless it changed the signer's account already — the transaction's sender among them — the signer's nonce record | Out-of-gas                                                       |
+| 15   | `min(gasLimitOverride, remaining gas)` still covers the signed gas limit                                                                                                                                                                                                                                                                                                                                                                 | `GasLimitTooLow(uint64,uint64)`                                  |
 
 - Steps 1 to 13 keep Rex6's order, so a call several rules refuse reports the Rex6 error.
 - The read of the signer's account that steps 8 to 10 and 13 check, and the deploy-address read of step 12, MUST load the account into the transaction's state as an account access loads it, warm, the deploy address without its code.
@@ -1178,8 +1210,12 @@ An out-of-gas step halts the call, consuming its regular gas.
   A signer whose own code spent a nonce during the creation that survives it keeps every bump.
 - **The answer.**
   The call MUST succeed with `(gasUsed, deployedAddress, errorData)`: the deploy address and empty `errorData` when the deploy address holds code afterwards; otherwise the zero address and `ExecutionReverted(uint64 gasUsed, bytes output)`, `ExecutionHalted(uint64 gasUsed)` or `EmptyCodeDeployed(uint64 gasUsed)` — the last for a creation that returned empty code for the deploy address, which is refused and reverts, and also for a constructor that destroyed its own account.
-  `gasUsed` MUST be what the creation spent from both pools, with no intrinsic gas and before the EIP-3529 refund: the regular gas it spent and the state and history gas it kept, net of every give-back within the creation — a slot written back to its original value, a record taken back, the upfront state gas of a frame it started that failed, and the state gas and the history gas a same-transaction destruction gives back, the deployed code's history gas included; the call's own charges of steps 1 and 14 are not in it, and a give-back is not an EIP-3529 refund.
-  It is never less than the regular gas the creation spent.
+  `gasUsed` MUST be what the creation spent from both pools taken together, with no intrinsic gas and before the EIP-3529 refund: the regular gas and the reservoir the creation was given, less the regular gas and the reservoir it returned — its regular charges plus the state and history gas it kept, net of every give-back within the creation of a charge the creation made — a slot written back to its original value, a record taken back, the upfront state gas of a frame it started that failed, and the state gas and the history gas a same-transaction destruction gives back, the deployed code's history gas included; the call's own charges of steps 1 and 14 are not in it, and a give-back is not an EIP-3529 refund.
+  A give-back the creation receives for a charge it did not make MUST NOT lower `gasUsed`: the one such give-back is the destruction table's for the account being created, when a destruction of it stands when the creation ends, which returns step 14's state gas of the created account and history gas of its write record within the creation, and it MUST be added back.
+  So `gasUsed` is `(regular given − regular returned) + (reservoir given − reservoir returned) + the give-backs of step 14's charges the creation received`, the two pools netted together and not each clipped at zero.
+  A constructor that writes a fresh slot at `m = 1` from regular gas alone and reverts returns that state as reservoir, and reports 12,109 for its regular charges, not 113,549.
+  A constructor `ORIGIN; SELFDESTRUCT` at `m = 1`, given 500,000 of regular gas and no reservoir, with a zero balance, returns 494,998 of regular gas and 187,120 of reservoir, step 14's charges given back by the destruction, and reports `EmptyCodeDeployed(5002)`, not −182,118.
+  It is never less than the creation's regular charges, the regular gas it spent on anything but state and history.
 - **Limits.**
   A limit the creation crosses stops the creation, and the call answers `ExecutionReverted` with the stop's revert data.
   The creation keeps only the creator-side effects an ordinary failed creation keeps, under the nonce rule above.
@@ -1284,8 +1320,8 @@ An out-of-gas step halts the call, consuming its regular gas.
   A transaction is not a system call: every transaction's gas is split by the execution cap, a Mega System Transaction's included.
 - **The pre-block budget.**
   Each pre-block call MUST run from `0xfffffffffffffffffffffffffffffffffffffffe` on `PRE_BLOCK_CALL_GAS_LIMIT` = 31,566,720 gas, whatever the block's gas limit: 30,000,000 of regular gas, and a reservoir of 1,566,720, the state gas of sixteen fresh storage slots at the minimum bucket.
-  State gas the reservoir cannot pay spills onto the regular gas (see [Two-Pool Gas](#4-two-pool-gas-eip-8037-replaces-the-dual-gas-model)).
-  On MegaETH's chains, whose EIP-2935 and EIP-4788 addresses hold those EIPs' own code, a pre-block call writes at most six fresh slots — an `applyPendingChanges()` that applies both roles — so at Satin's state-gas price the reservoir pays all of it; other code at those addresses runs on the same budget, and what its state gas the reservoir cannot pay spills.
+  A fresh slot's legacy share comes out of the regular gas, and state gas the reservoir cannot pay spills onto it (see [Two-Pool Gas](#4-two-pool-gas-eip-8037-replaces-the-dual-gas-model)).
+  On MegaETH's chains, whose EIP-2935 and EIP-4788 addresses hold those EIPs' own code, a pre-block call writes at most six fresh slots — an `applyPendingChanges()` that applies both roles — so at Satin's state-gas price the reservoir pays all of it but the slots' legacy shares; other code at those addresses runs on the same budget, and what its state gas the reservoir cannot pay spills.
   The block's gas limit, which a pre-block call does not draw on, does not set the budget; on MegaETH's chains neither EIP-2935's nor EIP-4788's code nor `applyPendingChanges()` reads `GAS`, so how much of the budget is reservoir changes no call's result.
 - **The pre-block sequence.**
   Before its transactions, a block MUST, in order:
@@ -1550,6 +1586,8 @@ Calldata, logs and deployed code cost 88 gas per byte of history; a fresh slot o
 
 Gas limits above 200,000,000 behave differently: at most 200,000,000, less the intrinsic regular gas, is available to computation and `GAS`, and the rest can pay only state and history gas.
 A contract that checks `gasleft()` against a large constant sees at most the regular budget.
+A fresh slot, a new account or a created account an opcode adds takes its pre-Satin part of the state gas from regular gas first (the [legacy share](#the-legacy-share)), so a fresh `SSTORE` draws 22,100 of regular gas with its cold access, and a `CREATE` 32,000, whatever the reservoir holds.
+Gas given back — a slot written back to its original value, a reverted frame's state and history charges — goes into the reservoir and never into regular gas: a frame can pay later state and history charges with it, but cannot compute with it.
 
 A frame stopped by a resource limit or by gas detention now reverts rather than halting the transaction, with `MegaLimitExceeded(kind, limit)` as its output: its caller sees a failed call whose return data is the stop, and can catch it and carry on within what the limits leave.
 A transaction whose own frame is stopped reverts with the stop, and its sender pays only for what ran.

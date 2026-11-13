@@ -216,10 +216,12 @@ fn keyless_failure(outcome: &mega_evm::MegaTransactionOutcome) -> KeylessDeployE
     decode_error_result(&ret.errorData).expect("errorData is a keyless error")
 }
 
-/// The creation's state-gas and history charges the call makes before it forwards the reservoir:
-/// the signer's leaf, the deploy address's leaf, and one record for each.
+/// What the reservoir pays of the creation's state-gas and history charges the call makes before
+/// it forwards the reservoir: the signer's leaf and the deploy address's leaf, each but its legacy
+/// share, which regular gas pays first, and one record for each.
 fn start_charges() -> u64 {
-    2 * common::account_state_gas() + 2 * common::history(super::WRITE_RECORD_SIZE)
+    2 * common::account_state_gas() - common::account_share() - common::create_share() +
+        2 * common::history(super::WRITE_RECORD_SIZE)
 }
 
 /// 1,001 distinct new authorities, below the execution cap. Apply none. The transaction's own
@@ -575,9 +577,10 @@ fn test_a_keyless_creation_from_nonce_1_takes_the_bump_back() {
 /// The constructor `DELEGATECALL`s a library that self-destructs the account, then returns one
 /// byte of runtime. The creation's EVM result succeeds, and the call answers `EmptyCodeDeployed`
 /// with the zero address. The destruction gives the deploy address's leaf and its record back to
-/// the destroying frame, inside the creation, so what the creation spent from both pools net of
-/// that give-back is below its regular gas, and `gasUsed` is the regular gas it spent. The code is
-/// deposited after the mark: no state gas, and its data size and history stay charged. The
+/// the destroying frame, inside the creation: charges the call made, not the creation, so the
+/// give-back is added back to what the creation returned. The code is deposited after the mark:
+/// no state gas, and its data size and history stay charged, paid from the reservoir the give-back
+/// filled. `gasUsed` is the regular gas the creation spent and the deposited byte's history. The
 /// account is removed at the end of the transaction.
 #[test]
 fn test_a_keyless_constructor_that_self_destructs_answers_empty_code() {
@@ -604,7 +607,11 @@ fn test_a_keyless_constructor_that_self_destructs_answers_empty_code() {
     };
     let (forwarded, _) = probe.created.expect("the creation started");
     let left = probe.create_end_remaining.expect("the creation ended");
-    assert_eq!(gas_used, forwarded - left, "gasUsed is the creation's regular gas");
+    assert_eq!(
+        gas_used,
+        forwarded - left + super::HISTORY_GAS_PER_BYTE,
+        "gasUsed is the creation's regular gas and the history it kept"
+    );
     assert_eq!(outcome.gas.state, ACCOUNT_LEAF_STATE_GAS_M1, "only the signer's leaf stands");
     // The signer's record and the deposited byte stay; the deploy address's record goes.
     assert_eq!(

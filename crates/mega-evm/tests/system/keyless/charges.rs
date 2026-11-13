@@ -78,6 +78,31 @@ fn test_an_empty_signer_is_charged_its_account_once() {
     }
 }
 
+/// Above the execution cap, where the reservoir could pay every charge alone, the call's regular
+/// gas pays the legacy share of the signer's account its nonce bump creates and of the account the
+/// creation creates, 25,000 and 20,000 at the spec's prices, and the reservoir the rest. A signer
+/// that holds a wei is no new account, and its deployment takes the creation's share alone.
+#[test]
+fn test_the_call_pays_the_legacy_shares_of_the_accounts_it_creates() {
+    let deployment = Deployment::new(deploying(&runtime(RUNTIME_LEN)));
+    let gas_limit = GAS_LIMITS[1];
+    let paid_by_regular = |outcome: &MegaTransactionOutcome| {
+        let reservoir_paid = gas_limit - TX_GAS_LIMIT_CAP - outcome.gas.reservoir_remaining;
+        outcome.gas.state + outcome.gas.history - reservoir_paid
+    };
+    let empty = deploy(db_for(&deployment, U256::ZERO), &deployment, gas_limit);
+    let funded = deploy(db_for(&deployment, U256::from(1)), &deployment, gas_limit);
+    assert_eq!(returned(&empty).deployedAddress, deployment.address);
+    assert_eq!(returned(&funded).deployedAddress, deployment.address);
+    let account = entry(GasId::new_account_state_gas()).min(25_000);
+    let created = entry(GasId::create_state_gas()).min(20_000);
+    assert_eq!(paid_by_regular(&empty), account + created, "the signer's and the creation's");
+    assert_eq!(paid_by_regular(&funded), created, "the creation's alone");
+    if mega_evm::active_satin_prices().is_constants() {
+        assert_eq!((account, created), (25_000, 20_000));
+    }
+}
+
 /// The created account is charged only when the deploy address is empty, as the `CREATE` opcode
 /// charges it: an address that already holds a balance is an account already, the deployment
 /// lands on it, and the balance stays.
@@ -375,8 +400,8 @@ impl<DB: revm::Database>
 
 /// The call, the transaction's own frame, takes the whole reservoir; the creation it starts takes
 /// all but the call's 2 per cent of what the call has left once it paid for the creation's start —
-/// the signer's account, the created account and the two records — as a `CREATE` opcode's child
-/// does.
+/// the signer's account and the created account, each but its legacy share, which regular gas
+/// pays first, and the two records — as a `CREATE` opcode's child does.
 #[test]
 fn test_the_creation_takes_the_reservoir_share_of_what_the_call_has_left() {
     let deployment = Deployment::new(deploying(&runtime(RUNTIME_LEN)));
@@ -389,9 +414,9 @@ fn test_the_creation_takes_the_reservoir_share_of_what_the_call_has_left() {
     assert_eq!(returned(&outcome).deployedAddress, deployment.address);
 
     let whole = gas_limit - TX_GAS_LIMIT_CAP - history(mega_evm::TX_BODY_SIZE + data.len() as u64);
-    let left = whole -
-        entry(GasId::new_account_state_gas()) -
-        entry(GasId::create_state_gas()) -
-        2 * record();
+    let account = entry(GasId::new_account_state_gas());
+    let created = entry(GasId::create_state_gas());
+    let left =
+        whole - (account - account.min(25_000)) - (created - created.min(20_000)) - 2 * record();
     assert_eq!(evm.inspector().0, [whole, left - left * 2 / 100]);
 }

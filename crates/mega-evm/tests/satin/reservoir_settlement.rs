@@ -1,14 +1,16 @@
 //! What a frame's caller holds of the EIP-8037 reservoir once its frame settled into it: the part
-//! of its reservoir it kept while the frame ran, and what the frame hands back on top, once that
-//! has unwound the caller's outstanding spill, last in first out. The transaction's frame is given
-//! the whole reservoir, of which the transaction's gas keeps a copy until the frame settles, and
-//! the transaction's gas then holds what its frame hands back alone.
+//! of its reservoir it kept while the frame ran, and what the frame hands back on top, as it is —
+//! a returned reservoir unwinds nothing. The transaction's frame is given the whole reservoir, of
+//! which the transaction's gas keeps a copy until the frame settles, and the transaction's gas then
+//! holds what its frame hands back alone.
 //!
 //! An inspector reads the transaction's frame's gas at the end of each `CALL` it makes, once the
 //! start took the child's share out of it; the child's gas when the child ends, before revm settles
 //! it; and the frame's gas again at the instruction after the `CALL`, once the child settled into
-//! it. A child that failed hands back the share it was given, its draws undone; one that succeeded
-//! hands back what it left, and its spill joins the caller's.
+//! it. A child that succeeded hands back what it left, and what its regular gas paid for state and
+//! history joins its caller's count of that; one that reverted hands back its share with every
+//! charge it made in it, the part its regular gas paid included, which joins the count too; one
+//! that halted hands back the share it was given, and what its regular gas paid is consumed.
 
 use alloy_primitives::{address, Address, U256};
 use mega_evm::{
@@ -29,7 +31,8 @@ use revm::{
 };
 
 use crate::common::{
-    body_history, call, context, history, history_is_free, slot_state_gas, state_is_free,
+    body_history, call, context, history, history_is_free, slot_share, slot_state_gas,
+    state_is_free,
 };
 
 const SENDER: Address = address!("0000000000000000000000000000000000740000");
@@ -48,8 +51,8 @@ const IDLE: Address = address!("0000000000000000000000000000000000740006");
 /// The new slots [`SPENDER`] writes.
 const SPENT_SLOTS: u64 = 4;
 
-/// What funds a frame's state and history charges beside its regular gas: its reservoir, and the
-/// spill those charges made onto its regular gas that is still outstanding.
+/// What funds a frame's state and history charges beside its regular gas: its reservoir, and what
+/// its regular gas paid of those charges, a legacy share or a spill, which no give-back lowers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Funding {
     reservoir: u64,
@@ -128,10 +131,19 @@ impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for Settlements {
             2 => {
                 let index = self.children.len() - 1;
                 let child = &mut self.children[index];
+                // A revert puts every charge the child made back into its reservoir, whichever
+                // pool paid it, and keeps the count of what regular gas paid; a halt gives back
+                // the share and consumes what regular gas paid, which stays counted.
+                let charged = gas.state_gas_spent() + gas.history_gas_spent();
                 child.handed_back = Some(if result.is_ok() {
                     funding(gas)
+                } else if result.is_revert() {
+                    Funding {
+                        reservoir: gas.reservoir().saturating_add_signed(charged),
+                        spilled: gas.state_gas_spilled(),
+                    }
                 } else {
-                    Funding { reservoir: child.share, spilled: 0 }
+                    Funding { reservoir: child.share, spilled: gas.state_gas_spilled() }
                 });
                 self.settling = Some(index);
             }
@@ -205,23 +217,23 @@ fn run(db: MemoryDatabase, gas_limit: u64, value: u64) -> Run {
 }
 
 /// What a caller that kept `kept` holds once a child that hands back `handed_back` settled into
-/// it: the reservoir the child hands back unwinds the caller's spill, the child's own merged in,
-/// as far as it goes, and the rest joins the part the caller kept.
+/// it: the reservoir the child hands back joins the part the caller kept, unwinding nothing, and
+/// what the child's regular gas paid joins the caller's count of it.
 const fn after_settlement(kept: Funding, handed_back: Funding) -> Funding {
-    let spilled = kept.spilled + handed_back.spilled;
-    let unwound = if handed_back.reservoir < spilled { handed_back.reservoir } else { spilled };
     Funding {
-        reservoir: kept.reservoir + handed_back.reservoir - unwound,
-        spilled: spilled - unwound,
+        reservoir: kept.reservoir + handed_back.reservoir,
+        spilled: kept.spilled + handed_back.spilled,
     }
 }
 
 /// Each child of the transaction's frame settles into what the frame kept of its reservoir: one
-/// that succeeded after a write hands back what it left of its share, one that reverted or halted
-/// after a write its whole share, and one that spent past its share hands back nothing and its
-/// spill; the next child's share then unwinds that spill as it comes back. The frame kept two per
-/// cent of its reservoir at every start, and the transaction's gas, which holds none of it, ends
-/// with what the frame hands back.
+/// that succeeded after a write hands back what it left of its share, one that reverted after a
+/// write its share and the write's charges, its legacy share included, one that halted after a
+/// write its share, and every one the count of what its regular gas paid, which no give-back and no
+/// halt takes back — one that spent past its share hands back nothing but that count; the next
+/// child's share then joins what the frame kept, and the count stands. The frame kept two per cent
+/// of its reservoir at every start, and the transaction's gas, which holds none of it, ends with
+/// what the frame hands back.
 #[test]
 fn test_a_callers_reservoir_after_a_child_is_what_it_kept_with_what_the_child_hands_back() {
     if state_is_free() {
@@ -241,14 +253,30 @@ fn test_a_callers_reservoir_after_a_child_is_what_it_kept_with_what_the_child_ha
             "{child}: kept {kept:?}, handed back {handed_back:?}"
         );
     }
-    let [ok, _, _, spender, idle] = read.children[..] else { unreachable!() };
+    let [ok, reverter, halter, spender, idle] = read.children[..] else { unreachable!() };
     let kept = ok.kept.expect("the CALL ended").reservoir;
     assert!(kept > 0, "the frame keeps part of its reservoir: {kept}");
     assert_eq!(kept, (kept + ok.share) * 2 / 100, "two per cent of it");
+    // The reverter's write took its legacy share from regular gas and the rest, with the record's
+    // history, from its share, which covers them: the revert gives back all of it.
+    assert_eq!(
+        reverter.handed_back,
+        Some(Funding { reservoir: reverter.share + slot_share(), spilled: slot_share() }),
+        "the reverter hands back its share and what its regular gas paid"
+    );
+    assert_eq!(
+        halter.handed_back,
+        Some(Funding { reservoir: halter.share, spilled: slot_share() }),
+        "the halter hands back its share, and its legacy share stays counted as regular-paid"
+    );
     assert!(spender.handed_back.expect("ended").spilled > 0, "the spender spills");
     let idle_kept = idle.kept.expect("the CALL ended");
-    assert!(idle_kept.spilled > 0 && idle.share > 0, "the idle child's share unwinds the spill");
-    assert_eq!(idle.after.expect("settled").spilled, idle_kept.spilled - idle.share);
+    assert!(idle_kept.spilled > 0 && idle.share > 0, "the idle child's share and the spill");
+    assert_eq!(
+        idle.after,
+        Some(Funding { reservoir: idle_kept.reservoir + idle.share, spilled: idle_kept.spilled }),
+        "the idle child's share joins what was kept, and unwinds no spill"
+    );
 
     let (result, ended) = read.frame_ended.expect("the frame ended");
     assert!(result.is_ok(), "{result:?}");
@@ -258,11 +286,12 @@ fn test_a_callers_reservoir_after_a_child_is_what_it_kept_with_what_the_child_ha
 
 /// The transaction's frame hands back what a child's would, into gas whose copy of the reservoir it
 /// gave the frame the settlement replaces, nothing added back: what the frame left after a child
-/// that kept a part of it and a write of its own when it succeeds, the whole reservoir it was
-/// given when it reverts or halts. A halt of a frame whose value transfer was charged a start
-/// charge gives the charge back first and then burns the transaction's regular gas: above the cap
-/// the charge comes back into the reservoir; below it, where the charge spilled onto the
-/// transaction's regular gas, it comes back there and is burned with the rest.
+/// that kept a part of it and a write of its own when it succeeds; the reservoir it was given and
+/// every charge it and the child made, the two writes' legacy shares regular gas paid included,
+/// when it reverts; the reservoir it was given when it halts. A halt of a frame whose value
+/// transfer was charged a start charge gives back the part of the charge the reservoir paid and
+/// then burns the transaction's regular gas: above the cap the reservoir paid all of it, which
+/// comes back into the reservoir; below it regular gas paid it, and it is burned with the rest.
 #[test]
 fn test_the_transactions_gas_holds_what_its_frame_hands_back_and_nothing_more() {
     if state_is_free() {
@@ -293,6 +322,8 @@ fn test_the_transactions_gas_holds_what_its_frame_hands_back_and_nothing_more() 
         assert_eq!(start_refund != 0, value != 0 && !ok && !history_is_free(), "{case}");
         let expected = if ok {
             after_settlement(Funding::NONE, ended).reservoir
+        } else if end == revm::bytecode::opcode::REVERT {
+            given + 2 * slot_share()
         } else if gas_limit > TX_GAS_LIMIT_CAP {
             given + start_refund
         } else {

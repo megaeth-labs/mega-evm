@@ -27,12 +27,15 @@ use revm::{
 };
 
 use crate::common::{
-    account_state_gas, body_history, call, context, forward_cap, history, holding_to_keep,
+    account_share, account_state_gas, body_history, call, context, create_share, forward_cap,
+    history, holding_to_keep,
 };
 
 const SENDER: Address = address!("0000000000000000000000000000000000730000");
 const A: Address = address!("0000000000000000000000000000000000730001");
 const B: Address = address!("0000000000000000000000000000000000730002");
+/// An account the state does not hold.
+const NEW: Address = address!("0000000000000000000000000000000000730003");
 
 /// The value call's stipend.
 const STIPEND: u64 = 2_300;
@@ -211,7 +214,7 @@ impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for Held {
     }
 
     fn call(&mut self, _: &mut MegaContext<DB>, inputs: &mut CallInputs) -> Option<CallOutcome> {
-        if inputs.target_address == B {
+        if inputs.target_address != A {
             self.forwarded = Some(inputs.gas_limit);
         }
         None
@@ -232,6 +235,7 @@ impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for Held {
 fn held_and_forwarded(code: Bytes) -> (u64, u64) {
     let db = MemoryDatabase::default()
         .account_balance(SENDER, U256::from(10_u64.pow(18)))
+        .account_balance(A, U256::from(1))
         .account_balance(B, U256::from(1))
         .account_code(A, code);
     let mut evm = MegaEvm::new(context(db)).with_inspector(Held::default());
@@ -260,9 +264,32 @@ fn test_a_call_forwards_all_but_two_percent_of_what_its_charge_leaves() {
     assert_eq!(forwarded, forward_cap(left));
 }
 
+/// A value `CALL` to an account empty under EIP-161 forwards all but 2 per cent of what its caller
+/// holds once the call's own charges — the cold access, the value transfer and the new account's
+/// legacy share, which regular gas pays before the reservoir pays the rest of its state gas — are
+/// paid, and its child gets the stipend on top: the share comes off the forward.
+#[test]
+fn test_a_value_call_to_a_new_account_forwards_what_its_charges_and_the_share_leave() {
+    let params = mega_evm::satin_gas_params();
+    let code = BytecodeBuilder::default()
+        .append_many([PUSH0, PUSH0, PUSH0, PUSH0])
+        .push_number(1_u8)
+        .push_address(NEW)
+        .append_many([revm::bytecode::opcode::GAS, CALL, STOP])
+        .build();
+    let (held, forwarded) = held_and_forwarded(code);
+    let left = held -
+        params.get(GasId::warm_storage_read_cost()) -
+        params.get(GasId::cold_account_additional_cost()) -
+        params.get(GasId::transfer_value_cost()) -
+        account_share();
+    assert_eq!(forwarded, forward_cap(left) + STIPEND);
+}
+
 /// A `CREATE` forwards all but 2 per cent of what its creator holds once the creation's own
-/// charges — the `create` entry, EIP-3860's word and the memory the init code occupies — are paid;
-/// the created account's state gas comes out of the reservoir.
+/// charges — the `create` entry, EIP-3860's word, the memory the init code occupies and the
+/// created account's legacy share — are paid; the rest of the created account's state gas comes
+/// out of the reservoir.
 #[test]
 fn test_a_creation_forwards_all_but_two_percent_of_what_its_charges_leave() {
     let params = mega_evm::satin_gas_params();
@@ -271,6 +298,10 @@ fn test_a_creation_forwards_all_but_two_percent_of_what_its_charges_leave() {
         .append_many([PUSH0, PUSH0, CREATE, STOP])
         .build();
     let (held, forwarded) = held_and_forwarded(code);
-    let left = held - params.get(GasId::create()) - params.get(GasId::initcode_per_word()) - 3;
+    let left = held -
+        params.get(GasId::create()) -
+        params.get(GasId::initcode_per_word()) -
+        3 -
+        create_share();
     assert_eq!(forwarded, forward_cap(left));
 }

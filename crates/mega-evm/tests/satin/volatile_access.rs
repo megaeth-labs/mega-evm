@@ -1134,6 +1134,57 @@ fn test_a_refusal_at_the_delegate_takes_back_everything_but_the_targets_access_a
     }
 }
 
+/// A child that wrote a fresh slot and wrote it back before its call is then refused at the call's
+/// delegate. Regular gas paid the slot's legacy share — below the execution cap, where the child
+/// holds no reservoir, the whole slot and its record — and the write back gave all of it into the
+/// child's reservoir. The refusal puts the frame's gas back to what it held at the call and charges
+/// the target's access again: it restores no give-back, so the reservoir still holds what the write
+/// back gave into it and the count of what regular gas paid is as at the call. The child's revert
+/// gives back its net charges, which are nothing, so the transaction ends with the give-back in its
+/// reservoir: the slot's share above the cap, the slot and its record below it.
+#[test]
+fn test_a_refusal_at_the_delegate_restores_no_give_back() {
+    let (call, _) = call_of(STATICCALL, DELEGATOR, 0, 0);
+    let child = BytecodeBuilder::default()
+        .sstore(U256::from(1), U256::from(1))
+        .sstore(U256::from(1), U256::ZERO)
+        .append_many(call.iter().copied())
+        .build();
+    let slot = crate::common::slot_state_gas();
+    let record = mega_evm::write_record_history_gas(1).expect("a record has a price");
+    for gas_limit in TIERS {
+        let parent = calls_child(BytecodeBuilder::default(), None).stop().build();
+        let db = with_delegation(MemoryDatabase::default(), DELEGATOR, BENEFICIARY)
+            .account_code(CONTRACT, parent)
+            .account_code(CHILD, child.clone());
+        let mut evm = MegaEvm::new(context(db).with_volatile_access_disabled_from(1))
+            .with_inspector(AtTheCall::default());
+        let run = run_on(&mut evm, tx(CALLER, CONTRACT, gas_limit));
+        assert!(run.outcome.result.is_success(), "{gas_limit}: {:?}", run.outcome.result);
+        let inspector = evm.inspector();
+        assert_eq!(inspector.child.clone(), Some(refused(VolatileDataAccess::BENEFICIARY_BALANCE)));
+
+        let (before, after) = (inspector.before.unwrap().0, inspector.after.unwrap().0);
+        let paid_by_regular =
+            if gas_limit > TX_GAS_LIMIT_CAP { crate::common::slot_share() } else { slot + record };
+        assert_eq!(before.state_gas_spilled(), paid_by_regular, "{gas_limit}: paid at the call");
+        if gas_limit < TX_GAS_LIMIT_CAP {
+            assert_eq!(before.reservoir(), slot + record, "{gas_limit}: the give-back alone");
+        }
+        let mut expected = before;
+        assert!(expected.record_regular_cost(cold_access()), "{gas_limit}");
+        assert_eq!(after, expected, "{gas_limit}: the gas at the call, less the target's access");
+
+        let given_back = if gas_limit > TX_GAS_LIMIT_CAP {
+            gas_limit - TX_GAS_LIMIT_CAP - body_history(0) + crate::common::slot_share()
+        } else {
+            slot + record
+        };
+        assert_eq!(run.outcome.gas.reservoir_remaining, given_back, "{gas_limit}");
+        assert_eq!((run.outcome.gas.state, run.outcome.gas.history), (0, body_history(0)));
+    }
+}
+
 /// A `STATICCALL` of `to` forwarding nothing, with an input of `input.1` bytes at `input.0` and an
 /// output of `output.1` bytes at `output.0`, after `prefix`, then a `STOP`.
 fn call_with_ranges(

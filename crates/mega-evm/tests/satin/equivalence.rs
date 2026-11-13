@@ -51,8 +51,8 @@ use revm::{
 
 use crate::{
     common::{
-        account_state_gas, body_history, history, holding_to_keep, runs_at_measurement_prices,
-        slot_state_gas,
+        account_share, account_state_gas, body_history, history, holding_to_keep,
+        runs_at_measurement_prices, slot_share, slot_state_gas,
     },
     op_reference::{self, Op, OpContext, Settled},
 };
@@ -190,6 +190,7 @@ fn assert_satin_cfg(cfg: &CfgEnv<OpSpecId>) {
     assert_eq!(cfg.limit_contract_initcode_size, Some(MAX_INITCODE_SIZE));
     assert!(cfg.enable_amsterdam_eip7708);
     assert!(!cfg.amsterdam_eip7708_disabled);
+    assert!(cfg.reservoir_only_give_backs, "every give-back credits a reservoir");
 }
 
 #[test]
@@ -294,8 +295,9 @@ fn test_a_nested_value_call_with_a_reservoir_matches_op_revm() {
     );
     assert_eq!(
         mega.gas.reservoir_remaining,
-        reservoir - mega.gas.state - mega.gas.history,
-        "the reservoir paid the state and the history, and nothing came back",
+        reservoir - (mega.gas.state - account_share()) - mega.gas.history,
+        "the reservoir paid the state but the new account's legacy share, which regular gas paid, \
+         and the history, and nothing came back",
     );
     assert_same_but_history(&mega, &op);
 }
@@ -322,6 +324,66 @@ fn test_sstore_matches_op_revm() {
     // draws too: the schedule is configuration, not engine behavior.
     assert_eq!(mega.result.gas().state_gas_spent_final(), SLOT_STATE_GAS);
     assert_same_but_history(&mega, &op);
+}
+
+/// Where Satin departs from EIP-8037's tracker: a give-back credits a reservoir and never regular
+/// gas. A slot written and written back below the execution cap, where the reservoir is empty and
+/// regular gas paid the slot, gives its state gas back into Satin's reservoir, where op-revm on
+/// EIP-8037's tracker — the same configuration with the fork's switch off and no legacy shares —
+/// credits it to regular gas. Both return what is left of either pool to the sender, so the two
+/// spend the same but for Satin's history, the record it took back included, and Satin ends with
+/// the slot's state gas and the record's history in its reservoir where op-revm ends with none.
+///
+/// Expected values: the reservoir is the slot's state gas at the byte price in effect and one
+/// record's history (`constants`); the spend is op-revm's run (`external`).
+#[test]
+fn test_a_slot_written_back_departs_from_eip_8037_by_crediting_the_reservoir() {
+    let code = BytecodeBuilder::default()
+        .sstore(U256::ZERO, U256::from(1))
+        .sstore(U256::ZERO, U256::ZERO)
+        .stop()
+        .build();
+    let db = MemoryDatabase::default().account_code(CALLEE, code);
+    // Regular room on top of the body's history and the slot and its record at the prices in
+    // effect, below the execution cap.
+    let gas_limit = 500_000 + body_history(0) + slot_state_gas() + history(WRITE_RECORD_SIZE);
+    let tx = TxEnv { caller: CALLER, kind: TxKind::Call(CALLEE), gas_limit, ..Default::default() };
+    let (mut mega, _, cfg) = both_evms(db.clone(), block());
+    assert_satin_cfg(&cfg);
+    let mega = mega.execute_transaction(OpTx(op_transaction(tx.clone()))).unwrap();
+
+    let mut eip8037 = cfg.with_reservoir_only_give_backs(false);
+    eip8037.gas_params.override_gas(
+        [
+            GasId::sstore_set_state_gas_legacy_share(),
+            GasId::new_account_state_gas_legacy_share(),
+            GasId::selfdestruct_new_account_state_gas_legacy_share(),
+            GasId::create_state_gas_legacy_share(),
+        ]
+        .map(|id| (id, 0)),
+    );
+    let op_ctx = OpContext::new(db, OpSpecId::KARST)
+        .with_cfg(eip8037)
+        .with_block(block())
+        .with_chain(zero_fee_l1_block_info());
+    let mut op = OpEvm::new(op_ctx, NoOpInspector);
+    let op = op_reference::transact(&mut op, op_transaction(tx)).unwrap();
+
+    assert!(mega.result.is_success(), "{:?}", mega.result);
+    assert!(op.result.is_success(), "{:?}", op.result);
+    assert_eq!((mega.gas.state, op.result.gas().state_gas_spent_final()), (0, 0));
+    assert_eq!(mega.gas.history, body_history(0), "the record was taken back");
+    assert_eq!(
+        mega.result.gas().total_gas_spent(),
+        op.result.gas().total_gas_spent() + mega.gas.history,
+        "the two spend the same but for Satin's history",
+    );
+    assert_eq!(op.reservoir_remaining, 0, "EIP-8037 credits the give-back to regular gas");
+    assert_eq!(
+        mega.gas.reservoir_remaining,
+        slot_state_gas() + history(WRITE_RECORD_SIZE),
+        "Satin credits the slot's state gas and its record's history to the reservoir",
+    );
 }
 
 const COINBASE: Address = address!("0x00000000000000000000000000000000000c0ffe");
@@ -441,11 +503,13 @@ fn test_system_call_matches_op_revm() {
     )
     .unwrap();
     assert!(mega_outcome.result.is_success());
+    // A system call's opcodes take their legacy shares as any frame's: the fresh slot's from its
+    // regular gas, the rest from its reservoir.
     assert_eq!(
         mega_outcome.reservoir_remaining,
         SYSTEM_CALL_GAS_LIMIT -
             SYSTEM_CALL_REGULAR_GAS_LIMIT -
-            satin_gas_params().get(GasId::sstore_set_state_gas()),
+            (satin_gas_params().get(GasId::sstore_set_state_gas()) - slot_share()),
     );
     assert_same(&mega_outcome, &op_outcome);
 }

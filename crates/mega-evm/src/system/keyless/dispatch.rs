@@ -52,6 +52,25 @@ pub(crate) struct Started {
     /// Whether the deposit of empty code at the deploy address was refused, which reverts the
     /// creation ([`refuses_empty_deposit`](super::settle::refuses_empty_deposit)).
     pub(super) empty_deposit_refused: bool,
+    /// The reservoir the creation was started with, its share of what the call had left.
+    pub(super) reservoir_share: u64,
+    /// What the destruction table gave the creation back for the deploy address's leaf, the last
+    /// time a `SELFDESTRUCT` the creation runs destroyed it: the leaf's state gas and the history
+    /// of its write record. Charges the creation did not make — the call made them, or the
+    /// transfer that funded the address — so the answer adds them back to what the creation
+    /// spent while the destruction stands
+    /// ([`note_leaf_given_back`](Self::note_leaf_given_back)).
+    pub(super) leaf_given_back: u64,
+}
+
+impl Started {
+    /// Notes `amount`, what the destruction table just gave back for the leaf of the account at
+    /// `address`, when that is the deploy address.
+    pub(crate) fn note_leaf_given_back(&mut self, address: Address, amount: u64) {
+        if address == self.deploy_address {
+            self.leaf_given_back = amount;
+        }
+    }
 }
 
 /// The `keylessDeploy` call `frame_init` starts when the dispatch takes it: a `CALL` at depth 0 to
@@ -150,7 +169,8 @@ pub(crate) fn ready<DB: Database, ExtEnvs: ExternalEnvTypes>(
 /// 8. Unless EIP-3607 is disabled, the signer has no code other than an EIP-7702 delegation
 ///    (`SignerHasCode()`).
 /// 9. The signer's account, when the creation's nonce bump is what creates it: state gas, priced by
-///    the signer's SALT bucket. A call that cannot pay runs out of gas.
+///    the signer's SALT bucket, its legacy share, a value call's new account's, from regular gas
+///    before the reservoir. A call that cannot pay runs out of gas.
 /// 10. `gasLimitOverride`, capped to what the call has left, still covers the signed gas limit
 ///     (`GasLimitTooLow`).
 /// 11. The deploy address holds no code (`ContractAlreadyExists()`), read without its code, so the
@@ -159,8 +179,9 @@ pub(crate) fn ready<DB: Database, ExtEnvs: ExternalEnvTypes>(
 /// 13. What the `CREATE` opcode charges its frame for the creation's start, in the opcode's order:
 ///     its regular gas — the schedule's `create` entry and EIP-3860's cost per word of init code —
 ///     the created account when the deploy address is empty — state gas, priced by the deploy
-///     address's SALT bucket — and the write records of the two accounts, as history. A call that
-///     cannot pay runs out of gas.
+///     address's SALT bucket, its legacy share from regular gas before the reservoir, as a
+///     `CREATE`'s — and the write records of the two accounts, as history. A call that cannot pay
+///     runs out of gas.
 /// 14. The gas the creation is forwarded is `gasLimitOverride`, capped to what the call has left,
 ///     and must still cover the signed gas limit (`GasLimitTooLow`).
 ///
@@ -170,8 +191,9 @@ pub(crate) fn ready<DB: Database, ExtEnvs: ExternalEnvTypes>(
 /// engine's, made after every rule, and step 14 holds the forward to them.
 ///
 /// A refusal writes nothing, so its return takes back the state and history gas the call was
-/// charged; the regular gas it spent stays spent, as a frame's does — the overhead, and, for the
-/// refusal at step 14, the `CREATE` opcode's regular gas. A database read or a SALT lookup that
+/// charged, into the call's reservoir, as a reverting frame's rollback does; the regular gas it
+/// spent stays spent, as a frame's does — the overhead, the legacy shares, and, for the refusal at
+/// step 14, the `CREATE` opcode's regular gas. A database read or a SALT lookup that
 /// fails fails the transaction with its cause, as it does at every other site.
 ///
 /// # The creation
@@ -219,6 +241,8 @@ pub(crate) fn start<DB: Database, ExtEnvs: ExternalEnvTypes>(
         signer_nonce: deployment.signer_nonce,
         signer_account_charged: deployment.signer_account_charged,
         empty_deposit_refused: false,
+        reservoir_share: reservoir,
+        leaf_given_back: 0,
     });
     Ok(InterpreterAction::NewFrame(FrameInput::Create(Box::new(create))))
 }
@@ -362,11 +386,16 @@ fn prepare<DB: Database, ExtEnvs: ExternalEnvTypes>(
     }
 
     // The signer's nonce bump is what creates an empty signer's account: a caller the `CREATE`
-    // opcode starts from exists already. It is charged where the legacy engine charged it, and
-    // the forward checked right after, before the deploy address and the balance are.
+    // opcode starts from exists already. It is charged where the legacy engine charged it, its
+    // legacy share first from regular gas as a value call's new account's is, and the forward
+    // checked right after, before the deploy address and the balance are.
     let signer_account_charged = signer_info.is_empty();
-    if signer_account_charged && !gas.record_state_cost(state_gas(ctx, signer_account(signer))?) {
-        return Ok(Err(Refusal::OutOfGas));
+    if signer_account_charged {
+        let share = ctx.cfg().gas_params().new_account_state_gas_legacy_share();
+        let price = state_gas(ctx, signer_account(signer))?;
+        if !gas.record_state_cost_with_legacy_share(price, share) {
+            return Ok(Err(Refusal::OutOfGas));
+        }
     }
     forward!();
     if ctx.journal_mut().load_account(deploy_address)?.data.info.code_hash != KECCAK_EMPTY {
@@ -386,9 +415,10 @@ fn prepare<DB: Database, ExtEnvs: ExternalEnvTypes>(
     let charged_create_state_gas =
         ctx.journal_ref().state.get(&deploy_address).is_none_or(|account| account.info.is_empty());
     if charged_create_state_gas {
+        let share = ctx.cfg().gas_params().create_state_gas_legacy_share();
         let charge =
             StateGasCharge::one(GasId::create_state_gas(), StateGasSite::account(deploy_address));
-        if !gas.record_state_cost(state_gas(ctx, charge)?) {
+        if !gas.record_state_cost_with_legacy_share(state_gas(ctx, charge)?, share) {
             return Ok(Err(Refusal::OutOfGas));
         }
     }

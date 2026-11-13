@@ -265,6 +265,82 @@ fn test_remaining_compute_gas_clamped_by_detention_limit() {
     }
 }
 
+/// Below the execution cap, a read of the block environment, then a fresh slot written and
+/// written back at the minimum bucket, then the query: regular gas paid the slot's state gas and
+/// its record's history, and the write back gave both back into the reservoir, not into regular
+/// gas, so `GAS` after the query reads them as spent. They are not compute, though: the answer is
+/// the cap less the regular charges alone, which is what `GAS` measures since the read less those
+/// two. The transaction ends with them in its reservoir, which returns to the sender.
+#[test]
+fn test_a_slot_written_back_after_the_read_is_not_compute() {
+    let code = BytecodeBuilder::default()
+        .append_many([TIMESTAMP, POP, GAS])
+        .append_many([PUSH0, MSTORE])
+        .sstore(U256::from(1), U256::from(1))
+        .sstore(U256::from(1), U256::ZERO);
+    let code = returning(query(code, CALL, None, 1), 3);
+    let outcome = execute(system_db().account_code(CONTRACT, code), tx(CONTRACT, &[], BELOW));
+    let words = words(&outcome);
+    let [at_read, answer, after] = words[..] else { panic!("{words:?}") };
+    let given_back = crate::common::slot_state_gas() +
+        mega_evm::write_record_history_gas(1).expect("a record has a price");
+    let gas_since_the_read = (at_read + 2 + 2) - (after + READING);
+    assert_eq!(answer, CAP - (gas_since_the_read - given_back), "the regular charges alone");
+    assert_eq!(outcome.gas.reservoir_remaining, given_back, "the give-back is reservoir");
+}
+
+/// After a read of the block environment, a child forwarded a fixed 1,000,000 writes a fresh slot
+/// and then stops, reverts or halts, and its caller queries. What regular gas paid of the slot's
+/// state gas and of its record's history is not compute in any of the three: below the cap, where
+/// the child has no reservoir, that is the slot and its record; above it, where the reservoir pays
+/// the rest, the slot's legacy share. The revert gives both back into the child's reservoir, never
+/// into regular gas, so the caller reads the same gas as after the success; the halt burns the rest
+/// of the child's forward, which is no compute either. So all three answers are the cap less the
+/// regular charges alone.
+#[test]
+fn test_a_childs_regular_paid_slot_is_not_compute_whether_it_succeeds_reverts_or_halts() {
+    const FORWARD: u64 = 1_000_000;
+    let slot = crate::common::slot_state_gas();
+    let record = mega_evm::write_record_history_gas(1).expect("a record has a price");
+    for gas_limit in TIERS {
+        let paid_by_regular =
+            if gas_limit < TX_GAS_LIMIT_CAP { slot + record } else { slot.min(10_000) };
+        let run = |ending: &[u8]| {
+            let child = BytecodeBuilder::default()
+                .sstore(U256::from(1), U256::from(1))
+                .append_many(ending.to_vec());
+            let caller = BytecodeBuilder::default()
+                .append_many([TIMESTAMP, POP, GAS])
+                .append_many([PUSH0, MSTORE])
+                .append_many([PUSH0, PUSH0, PUSH0, PUSH0, PUSH0])
+                .push_address(CONTRACT2)
+                .push_number(FORWARD)
+                .append_many([CALL, POP]);
+            let caller = returning(query(caller, CALL, None, 1), 3);
+            let db =
+                system_db().account_code(CONTRACT, caller).account_code(CONTRACT2, child.build());
+            let words = words(&execute(db, tx(CONTRACT, &[], gas_limit)));
+            let [at_read, answer, after] = words[..] else { panic!("{words:?}") };
+            (at_read, answer, after)
+        };
+        let (at_read, succeeded, after) = run(&[PUSH0, PUSH0, RETURN]);
+        let gas_since_the_read = (at_read + 2 + 2) - (after + READING);
+        assert_eq!(
+            succeeded,
+            CAP - (gas_since_the_read - paid_by_regular),
+            "the regular charges alone, at {gas_limit}",
+        );
+        let (_, reverted, after_revert) = run(&[PUSH0, PUSH0, REVERT]);
+        assert_eq!(
+            after_revert, after,
+            "the revert gives nothing back into regular gas, at {gas_limit}"
+        );
+        assert_eq!(reverted, succeeded, "at {gas_limit}");
+        let (_, halted, _) = run(&[PUSH0, PUSH0, INVALID]);
+        assert_eq!(halted, succeeded, "at {gas_limit}");
+    }
+}
+
 /* ---------- the four boundaries: below and above the cap, with and without a read ---------- */
 
 /// A transaction that is the beneficiary is detained from its start, before its frame: calling

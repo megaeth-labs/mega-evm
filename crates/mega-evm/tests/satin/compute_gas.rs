@@ -42,7 +42,10 @@ use revm::{
 };
 
 use crate::{
-    common::{call, call_with_data, context, execute, runs_at_measurement_prices},
+    common::{
+        beneficiary_share, call, call_with_data, context, execute, runs_at_measurement_prices,
+        slot_share,
+    },
     salt::{crowded_account, entry, minimal_envs},
 };
 
@@ -76,14 +79,15 @@ fn arithmetic(count: usize) -> Bytes {
 
 /// The three ledgers split the raw spend, the regular one is what is neither state nor history,
 /// and the figure a block counts is that ledger at least the floor. Above the execution cap the
-/// reservoir paid the state and history ledgers, and nothing else.
-fn assert_ledgers(name: &str, gas_limit: u64, outcome: &MegaTransactionOutcome) {
+/// reservoir paid the state and history ledgers but for `shares`, the legacy shares of the state
+/// charges, which regular gas paid first: state gas on the state ledger all the same.
+fn assert_ledgers(name: &str, gas_limit: u64, outcome: &MegaTransactionOutcome, shares: u64) {
     let gas = &outcome.gas;
     if gas_limit > TX_GAS_LIMIT_CAP {
         assert_eq!(
             gas.reservoir_remaining,
-            gas_limit - TX_GAS_LIMIT_CAP - gas.state - gas.history,
-            "{name}: the reservoir paid the state and history ledgers",
+            gas_limit - TX_GAS_LIMIT_CAP - (gas.state - shares) - gas.history,
+            "{name}: the reservoir paid the state and history ledgers but the legacy shares",
         );
     }
     let result = outcome.result.gas();
@@ -119,7 +123,7 @@ fn test_a_floor_bound_transaction_counts_its_floor_and_history_comes_out_first()
         let tx = call_with_data(CALLER, CALLEE, Bytes::from(vec![0; CALLDATA as usize]), gas_limit);
         let outcome = execute(funded(), tx);
         assert!(outcome.result.is_success(), "{:?}", outcome.result);
-        assert_ledgers("floor-bound", gas_limit, &outcome);
+        assert_ledgers("floor-bound", gas_limit, &outcome, 0);
 
         let gas = outcome.gas;
         assert_eq!(gas.history, (TX_BODY_SIZE + CALLDATA) * COST_PER_HISTORY_BYTE);
@@ -177,7 +181,7 @@ fn test_gas_an_inspector_edits_moves_the_compute_figure_with_the_receipt() {
             .execute_transaction(call(CALLER, CALLEE, U256::ZERO, gas_limit))
             .expect("the transaction is valid");
         assert!(outcome.result.is_success(), "{:?}", outcome.result);
-        assert_ledgers("edited", gas_limit, &outcome);
+        assert_ledgers("edited", gas_limit, &outcome, 0);
         outcome.gas
     };
 
@@ -201,12 +205,15 @@ fn test_gas_an_inspector_edits_moves_the_compute_figure_with_the_receipt() {
 
 /* ---------- what the figure counts ---------- */
 
-/// Runs `code` at [`CALLEE`] under a plain call at `gas_limit` and requires it to succeed.
+/// Runs `code` at [`CALLEE`] under a plain call at `gas_limit` and requires it to succeed. The
+/// state charges it keeps take nothing from regular gas but the legacy shares of the fresh slots it
+/// fills, its state ledger over a fresh slot's charge.
 fn computes(code: Bytes, gas_limit: u64) -> MegaGasUsage {
     let outcome =
         execute(funded().account_code(CALLEE, code), call(CALLER, CALLEE, U256::ZERO, gas_limit));
     assert!(outcome.result.is_success(), "{:?}", outcome.result);
-    assert_ledgers("computes", gas_limit, &outcome);
+    let shares = outcome.gas.state / SLOT_STATE_GAS * slot_share();
+    assert_ledgers("computes", gas_limit, &outcome, shares);
     outcome.gas
 }
 
@@ -314,7 +321,7 @@ fn test_a_refund_does_not_lower_the_compute_figure() {
         );
         let outcome = execute(db, call(CALLER, CALLEE, U256::ZERO, gas_limit));
         assert!(outcome.result.is_success(), "{:?}", outcome.result);
-        assert_ledgers("a slot written with a refund", gas_limit, &outcome);
+        assert_ledgers("a slot written with a refund", gas_limit, &outcome, 0);
         outcome.gas
     };
     for gas_limit in GAS_LIMITS {
@@ -342,7 +349,7 @@ fn test_state_gas_stays_off_the_compute_figure_whatever_it_costs() {
         let db = funded().account_code(CALLEE, code.clone()).account_balance(CALLEE, U256::from(5));
         let envs = crowded_account(minimal_envs(), FRESH, m);
         let outcome = crate::salt::run(db, envs, call(CALLER, CALLEE, U256::ZERO, gas_limit));
-        assert_ledgers("a SELFDESTRUCT to a new account", gas_limit, &outcome);
+        assert_ledgers("a SELFDESTRUCT to a new account", gas_limit, &outcome, beneficiary_share());
         outcome.gas
     };
     let regular = destructs(1, GAS_LIMITS[0]).regular;
@@ -379,7 +386,7 @@ fn with_child(rounds: usize, reverts: bool, gas_limit: u64) -> MegaGasUsage {
     let db = funded().account_code(CALLEE, caller).account_code(CHILD, child(rounds, reverts));
     let outcome = execute(db, call(CALLER, CALLEE, U256::ZERO, gas_limit));
     assert!(outcome.result.is_success(), "{:?}", outcome.result);
-    assert_ledgers("a caller and its child", gas_limit, &outcome);
+    assert_ledgers("a caller and its child", gas_limit, &outcome, 0);
     outcome.gas
 }
 
@@ -415,8 +422,8 @@ fn test_each_transaction_computes_its_own() {
         let first = evm.execute_transaction(call(CALLER, CALLEE, U256::ZERO, gas_limit)).unwrap();
         let second = evm.execute_transaction(call(CALLER, CALLEE, U256::ZERO, gas_limit)).unwrap();
         assert!(first.result.is_success() && second.result.is_success());
-        assert_ledgers("the first transaction", gas_limit, &first);
-        assert_ledgers("the second transaction", gas_limit, &second);
+        assert_ledgers("the first transaction", gas_limit, &first, 0);
+        assert_ledgers("the second transaction", gas_limit, &second, 0);
         assert_eq!(first.gas.regular, second.gas.regular);
     }
 }
@@ -465,7 +472,7 @@ fn test_below_the_cap_the_gas_limit_is_the_compute_budget() {
             funded().account_code(CALLEE, arithmetic(2_000)),
             call(CALLER, CALLEE, U256::ZERO, gas_limit),
         );
-        assert_ledgers("the compute budget", gas_limit, &outcome);
+        assert_ledgers("the compute budget", gas_limit, &outcome, 0);
         outcome
     };
     let spent = run(GAS_LIMITS[0]).gas.gas_used;
@@ -502,7 +509,7 @@ fn test_computation_past_the_execution_cap_is_an_ordinary_out_of_gas() {
             outcome.result
         );
         assert_eq!(outcome.limit_exceeded, None, "no limit of this engine stopped it");
-        assert_ledgers("past the cap", gas_limit, &outcome);
+        assert_ledgers("past the cap", gas_limit, &outcome, 0);
         assert_eq!(outcome.gas.regular, TX_GAS_LIMIT_CAP, "the whole execution budget, no more");
         assert_eq!(outcome.gas.history, TX_BODY_SIZE * COST_PER_HISTORY_BYTE);
         assert_eq!(outcome.gas.reservoir_remaining, reservoir - outcome.gas.history);
@@ -529,7 +536,7 @@ fn test_a_nested_call_cannot_compute_past_the_cap() {
     let db = funded().account_code(CALLEE, caller).account_code(CHILD, past_the_cap());
     let outcome = execute(db, call(CALLER, CALLEE, U256::ZERO, GAS_LIMITS[1]));
     assert!(outcome.result.is_success(), "{:?}", outcome.result);
-    assert_ledgers("a nested call past the cap", GAS_LIMITS[1], &outcome);
+    assert_ledgers("a nested call past the cap", GAS_LIMITS[1], &outcome, 0);
     assert_eq!(
         outcome.state[&CALLEE].storage[&U256::ZERO].present_value,
         U256::ZERO,
@@ -568,7 +575,12 @@ fn test_intrinsic_gas_past_the_execution_cap_is_rejected_before_it_runs() {
     let inside = (TX_GAS_LIMIT_CAP - EMPTY_CALL) / address;
     let admitted = execute(funded(), with_addresses(inside as usize));
     assert!(admitted.result.is_success(), "{:?}", admitted.result);
-    assert_ledgers("an access list just inside the cap", TX_GAS_LIMIT_CAP + 200_000_000, &admitted);
+    assert_ledgers(
+        "an access list just inside the cap",
+        TX_GAS_LIMIT_CAP + 200_000_000,
+        &admitted,
+        0,
+    );
     assert_eq!(admitted.gas.regular, EMPTY_CALL + address * inside);
     assert_eq!(
         rejection(with_addresses(inside as usize + 1)),
@@ -663,7 +675,7 @@ fn test_a_precompile_in_a_nested_call_is_computed() {
                 .account_code(CHILD, child(gas).stop().build());
             let outcome = execute(db, call(CALLER, CALLEE, U256::ZERO, gas_limit));
             assert!(outcome.result.is_success(), "{:?}", outcome.result);
-            assert_ledgers("a precompile in a nested call", gas_limit, &outcome);
+            assert_ledgers("a precompile in a nested call", gas_limit, &outcome, 0);
             outcome.gas.regular
         };
         run(100_000) - run(0)

@@ -39,7 +39,7 @@ use revm::{
 };
 
 use crate::{
-    common::{body_history, call, context, reservoir_share},
+    common::{body_history, call, context, reservoir_share, slot_share},
     salt::entry,
 };
 use mega_evm::test_utils::{record_start_ledger_settlements, take_start_ledger_settlements};
@@ -453,10 +453,10 @@ fn test_a_cheatcode_at_foundrys_default_gas_limit_leaves_its_caller_what_it_kept
     assert_eq!(cheated.state[&TARGET].info.balance, U256::ONE, "the cheatcode ran");
     let (plain, _) = run_with_gas_limit(db(), false, FOUNDRY_GAS_LIMIT);
     // `TEST` holds the whole reservoir when it calls the cheatcode, and the two fresh slots draw
-    // it.
+    // it but their legacy shares, which regular gas pays first.
     let whole = FOUNDRY_GAS_LIMIT - mega_evm::constants::TX_GAS_LIMIT_CAP - body_history(0);
     let record = mega_evm::history_gas(WRITE_RECORD_SIZE).expect("a record has a price");
-    let slots = 2 * (entry(GasId::sstore_set_state_gas()) + record);
+    let slots = 2 * (entry(GasId::sstore_set_state_gas()) - slot_share() + record);
     assert_eq!(plain.gas.reservoir_remaining, whole - slots, "the slots drew the reservoir");
     let kept = whole - reservoir_share(whole);
     assert!(kept > slots, "what `TEST` kept pays for both slots");

@@ -40,7 +40,8 @@ use revm::{
 
 use crate::{
     common::{
-        assert_answered_at_unlimited_budgets, authorizing_call, history_is_free, state_is_free,
+        assert_answered_at_unlimited_budgets, authorizing_call, create_share, history_is_free,
+        slot_share, state_is_free,
     },
     salt::{
         create_with, crowded_account, db, entry, minimal_envs, salt_context, tx_with_gas,
@@ -168,17 +169,37 @@ fn body_usage(tx: &MegaTransaction) -> LimitUsage {
     LimitUsage { data_size: transaction_body_bytes(tx), write_records: 0, state_growth: 0 }
 }
 
+/// What regular gas paid of `charges`, state and history charges a failure gave back, at
+/// `gas_limit`: every one of them below the execution cap, where there is no reservoir, and their
+/// legacy shares, `shares`, above it. A give-back goes into a reservoir, so that is what the
+/// transaction's reservoir holds beyond what its own reservoir left; a frame that halts consumes
+/// it instead, and is given back nothing of it.
+const fn regular_paid(gas_limit: u64, charges: u64, shares: u64) -> u64 {
+    if gas_limit > TX_GAS_LIMIT_CAP {
+        shares
+    } else {
+        charges
+    }
+}
+
 /// A transaction that keeps nothing but its body: no state gas, its body's history alone, and its
 /// body's bytes alone on the data size. Above the execution cap the reservoir paid for the body and
-/// nothing else, so what is left of it comes back.
-fn assert_keeps_only_its_body(case: &str, tx: &MegaTransaction, outcome: &MegaTransactionOutcome) {
+/// nothing else, so what is left of it comes back, with `given_back`: what regular gas paid of the
+/// charges its failures gave back ([`regular_paid`]), which went into a reservoir.
+fn assert_keeps_only_its_body(
+    case: &str,
+    tx: &MegaTransaction,
+    outcome: &MegaTransactionOutcome,
+    given_back: u64,
+) {
     let body = transaction_body_bytes(tx);
     assert_eq!(outcome.gas.state, 0, "{case}: no state gas");
     assert_eq!(outcome.gas.history, history_gas(body).unwrap(), "{case}: the body's history");
     assert_eq!(
         outcome.gas.reservoir_remaining,
-        tx.gas_limit().saturating_sub(TX_GAS_LIMIT_CAP).saturating_sub(outcome.gas.history),
-        "{case}: the reservoir less the body's history"
+        tx.gas_limit().saturating_sub(TX_GAS_LIMIT_CAP).saturating_sub(outcome.gas.history) +
+            given_back,
+        "{case}: the reservoir less the body's history, and what was given back"
     );
     assert_eq!(outcome.gas.history_bytes, body, "{case}: the body's bytes");
     assert_eq!(outcome.usage, body_usage(tx), "{case}");
@@ -231,7 +252,11 @@ fn test_a_failed_call_revived_into_a_success_settles_as_a_success() {
         assert_eq!(kept.gas.state, entry(GasId::sstore_set_state_gas()), "the fresh slot");
         assert_eq!(kept.usage.write_records, 2, "and both slots are records");
         let failed = plain(reverting.clone(), minimal_envs(), tx.clone());
-        assert_keeps_only_its_body("the failed call", &tx, &failed);
+        // The reverted frame gives back its fresh slot, its two slots' records and its log.
+        let record = history_gas(mega_evm::WRITE_RECORD_SIZE).unwrap();
+        let charges = entry(GasId::sstore_set_state_gas()) + 2 * record + history_gas(160).unwrap();
+        let given_back = regular_paid(gas_limit, charges, slot_share());
+        assert_keeps_only_its_body("the failed call", &tx, &failed, given_back);
 
         let revived = inspected(reverting.clone(), minimal_envs(), tx.clone(), Revives);
         assert!(revived.result.is_success(), "{case}: {:?}", revived.result);
@@ -276,7 +301,12 @@ fn test_a_failed_value_call_revived_into_a_success_keeps_its_charges() {
         assert!(holds_something(&ran, PAIRING), "the pairing ran and kept the wei");
         assert_eq!(ran.gas.state, 3 * entry(GasId::new_account_state_gas()), "in its bucket");
         let failed = plain(db(caller(0)), envs(), tx.clone());
-        assert_keeps_only_its_body("the failed call", &tx, &failed);
+        // The halted call's caller is given back the account in its bucket and the start's two
+        // records.
+        let account = 3 * entry(GasId::new_account_state_gas());
+        let charges = account + history_gas(2 * mega_evm::WRITE_RECORD_SIZE).unwrap();
+        let given_back = regular_paid(gas_limit, charges, account.min(25_000));
+        assert_keeps_only_its_body("the failed call", &tx, &failed, given_back);
 
         let revived = inspected(db(caller(0)), envs(), tx.clone(), Revives);
         assert!(revived.result.is_success(), "{case}: {:?}", revived.result);
@@ -309,7 +339,8 @@ fn test_the_transactions_own_failed_frame_revived_into_a_success_keeps_its_charg
         let tx = to(ADDITION, 1, point_off_the_curve.clone(), gas_limit);
         let failed = plain(db(Bytes::new()), envs(), tx.clone());
         assert!(failed.result.is_halt(), "{:?}", failed.result);
-        assert_keeps_only_its_body("the failed transaction", &tx, &failed);
+        // A halt of the transaction's own frame consumes what regular gas paid.
+        assert_keeps_only_its_body("the failed transaction", &tx, &failed, 0);
 
         let revived = inspected(db(Bytes::new()), envs(), tx.clone(), Revives);
         assert!(revived.result.is_success(), "{case}: the inspector's: {:?}", revived.result);
@@ -581,10 +612,18 @@ fn test_a_retargeted_value_calls_upfront_charge_comes_back_at_the_new_targets_pr
             assert!(!holds_something(&reverted, EMPTY), "{case}: no account");
             let body = history_gas(transaction_body_bytes(&tx)).unwrap();
             assert_eq!(reverted.gas.history, body, "{case}: the start's records given back");
+            // The upfront charge took its legacy share from regular gas and the rest from the
+            // reservoir; everything given back — the charge at the new target's price and the
+            // start's two records — went into the reservoir.
             let kept = i128::from(account_m * account) - i128::from(retarget_m * account);
+            let records = i128::from(history_gas(2 * mega_evm::WRITE_RECORD_SIZE).unwrap());
             let reservoir =
                 i128::from(gas_limit.saturating_sub(TX_GAS_LIMIT_CAP).saturating_sub(body));
-            let reservoir = if reservoir == 0 { (-kept).max(0) } else { reservoir - kept };
+            let reservoir = if reservoir == 0 {
+                i128::from(retarget_m * account) + records
+            } else {
+                reservoir - kept + i128::from((account_m * account).min(25_000))
+            };
             assert_eq!(
                 i128::from(reverted.gas.state),
                 kept.max(0),
@@ -686,11 +725,21 @@ fn test_a_value_call_rewritten_into_a_failure_keeps_its_state_and_bills_its_body
     let envs = || crowded_account(minimal_envs(), EMPTY, 3);
     let caller = value_call(EMPTY).append(POP).stop().build();
     for gas_limit in GAS_LIMITS {
+        // The account in its bucket and the start's records: charged before the transaction's own
+        // frame, which has no legacy share, or by the call one down, whose share regular gas pays.
+        let account = 3 * entry(GasId::new_account_state_gas());
+        let records = |count| history_gas(count * mega_evm::WRITE_RECORD_SIZE).unwrap();
         let cases = [
-            ("the transaction's own", Bytes::new(), to(EMPTY, 1, Bytes::new(), gas_limit)),
-            ("one call down", caller.clone(), to(CONTRACT, 0, Bytes::new(), gas_limit)),
+            ("the transaction's own", Bytes::new(), to(EMPTY, 1, Bytes::new(), gas_limit), 1, 0),
+            (
+                "one call down",
+                caller.clone(),
+                to(CONTRACT, 0, Bytes::new(), gas_limit),
+                2,
+                account.min(25_000),
+            ),
         ];
-        for (at, code, tx) in cases {
+        for (at, code, tx, record_count, shares) in cases {
             let db = || db(code.clone());
             let ran = plain(db(), envs(), tx.clone());
             assert!(holds_something(&ran, EMPTY), "{at}: run, the call adds the account");
@@ -702,7 +751,15 @@ fn test_a_value_call_rewritten_into_a_failure_keeps_its_state_and_bills_its_body
                     rewritten.state[&EMPTY].info, ran.state[&EMPTY].info,
                     "{case}: the account the success added"
                 );
-                assert_keeps_only_its_body(&case, &tx, &rewritten);
+                // A revert gives the charges back; a halt of the transaction's own frame consumes
+                // what regular gas paid of them, while one call down the caller survives the halt
+                // and is given them back.
+                let given_back = if at == "the transaction's own" && result.is_halt() {
+                    0
+                } else {
+                    regular_paid(gas_limit, account + records(record_count), shares)
+                };
+                assert_keeps_only_its_body(&case, &tx, &rewritten, given_back);
             }
         }
     }
@@ -1085,7 +1142,9 @@ fn test_a_creation_refused_on_its_creators_account_counts_no_record() {
 
 /// [`assert_keeps_only_its_body`], for a creation an inspector made revm refuse: the history of
 /// the record of its creator's nonce, which its `CREATE` was charged and its start did not declare,
-/// is on the history ledger beyond the body's bytes.
+/// is on the history ledger beyond the body's bytes. The refused start gives back the created
+/// account's state gas and its record's history into the creator's reservoir, of which regular gas
+/// paid all below the execution cap and the account's legacy share above it.
 fn assert_keeps_only_its_body_and_the_opcodes_charge(
     case: &str,
     tx: &MegaTransaction,
@@ -1093,12 +1152,18 @@ fn assert_keeps_only_its_body_and_the_opcodes_charge(
 ) {
     let body = transaction_body_bytes(tx);
     let charged = history_gas(body + mega_evm::WRITE_RECORD_SIZE).unwrap();
+    let account = entry(GasId::create_state_gas());
+    let given_back = regular_paid(
+        tx.gas_limit(),
+        account + history_gas(mega_evm::WRITE_RECORD_SIZE).unwrap(),
+        create_share(),
+    );
     assert_eq!(outcome.gas.state, 0, "{case}: no state gas");
     assert_eq!(outcome.gas.history, charged, "{case}: the body's history and the opcode's charge");
     assert_eq!(
         outcome.gas.reservoir_remaining,
-        tx.gas_limit().saturating_sub(TX_GAS_LIMIT_CAP).saturating_sub(charged),
-        "{case}: the reservoir less what the history ledger bills"
+        tx.gas_limit().saturating_sub(TX_GAS_LIMIT_CAP).saturating_sub(charged) + given_back,
+        "{case}: the reservoir less what the history ledger bills, and what was given back"
     );
     assert_eq!(outcome.gas.history_bytes, body, "{case}: the body's bytes");
     assert_eq!(outcome.usage, body_usage(tx), "{case}");
@@ -1279,10 +1344,10 @@ fn test_a_halting_child_handed_more_reservoir_leaves_its_caller_its_regular_gas(
 /// The transaction's own frame halts with no start charge to give back — it moves no value, so it
 /// makes no write record — after an authorization the transaction applied before it, whose account
 /// and record were charged below the execution cap and spilled onto regular gas. An inspector
-/// hands the frame back one more reservoir than it inherited, which unwinds one gas of that spill
-/// into regular gas, so no reservoir is left. With nothing to give back nothing is burned, as
-/// revm's settlement burned nothing then: the sender keeps that one gas, and the transaction bills
-/// one gas less than its run without the inspector, with the same history and reservoir.
+/// hands the frame back one more reservoir than it inherited, which the transaction's reservoir
+/// takes as it is: a returned reservoir unwinds no spill. With nothing to give back nothing is
+/// burned: the sender gets that one gas back with the reservoir, and the transaction bills one gas
+/// less than its run without the inspector, with the same history.
 #[test]
 fn test_the_transactions_own_halt_with_no_start_charge_keeps_what_its_settlement_left() {
     if history_is_free() || state_is_free() {
@@ -1300,7 +1365,11 @@ fn test_the_transactions_own_halt_with_no_start_charge_keeps_what_its_settlement
         let halted = inspected(invalid(), minimal_envs(), tx.clone(), adds);
         assert!(halted.result.is_halt(), "{case}: {:?}", halted.result);
         assert_eq!(halted.gas.history, ran.gas.history, "{case}: the history");
-        assert_eq!(halted.gas.reservoir_remaining, ran.gas.reservoir_remaining, "{case}: unwound");
+        assert_eq!(
+            halted.gas.reservoir_remaining,
+            ran.gas.reservoir_remaining + 1,
+            "{case}: the extra reservoir stays a reservoir"
+        );
         assert_eq!(halted.gas.gas_used, ran.gas.gas_used - 1, "{case}: one regular gas kept");
     }
 }

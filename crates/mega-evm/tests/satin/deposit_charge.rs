@@ -40,7 +40,10 @@ use revm::{
 };
 
 use crate::{
-    common::{call, context, history, history_rounds, runs_at_measurement_prices, state_is_free},
+    common::{
+        call, context, create_share, history, history_rounds, runs_at_measurement_prices,
+        state_is_free,
+    },
     salt::entry,
 };
 
@@ -214,12 +217,13 @@ fn holding_for(pool: Pool, forward: u64) -> u64 {
 
 /// The gas `A` calls `B` with for the creation to be forwarded exactly `forward` in `pool`: what
 /// `B` must hold at the split, plus what it spends before it. Below the cap the created account's
-/// state gas spills onto `B`'s regular gas before the split too; above it the reservoir pays it,
-/// and Osaka charges none.
+/// state gas spills onto `B`'s regular gas before the split too; above it regular gas pays its
+/// legacy share before the reservoir pays the rest, and Osaka charges none.
 fn call_gas(pool: Pool, forward: u64) -> u64 {
     let spilled = match pool {
         Pool::BelowCap => created_account_state_gas(),
-        Pool::AboveCap | Pool::NeutralOsaka => 0,
+        Pool::AboveCap => create_share(),
+        Pool::NeutralOsaka => 0,
     };
     let holding = holding_for(pool, forward);
     if pool == Pool::BelowCap {
@@ -416,8 +420,16 @@ fn assert_ledgers(
         regular(pool, spent) + state + history,
         "{name}: the receipt is the three ledgers, with nothing refunded and no floor binding",
     );
+    // Every give-back goes into a reservoir. Above the cap regular gas paid the created
+    // account's legacy share, which stays on the state ledger when the creation deposits and comes
+    // back into `B`'s reservoir when it fails, the rest of the charge with it. Below it a creation
+    // that failed — no state gas kept — gives `B` back the created account's state gas and its
+    // record's history into its reservoir, which regular gas paid.
     let reservoir = match pool {
-        Pool::AboveCap => RESERVOIR - state - history,
+        Pool::AboveCap => RESERVOIR + create_share() - state - history,
+        Pool::BelowCap if state == 0 => {
+            created_account_state_gas() + history_in(pool, WRITE_RECORD_SIZE)
+        }
         Pool::BelowCap | Pool::NeutralOsaka => 0,
     };
     assert_eq!(outcome.gas.reservoir_remaining, reservoir, "{name}: the reservoir");

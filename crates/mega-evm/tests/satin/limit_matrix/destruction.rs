@@ -517,7 +517,9 @@ fn test_value_then_create2_then_destruct_gives_the_value_calls_leaf_back() {
 /// beneficiary, moving its endowment. The destruction would give back 477,360 at `m` = 1, the
 /// leaf's 183,600 and three slots of 97,920, but the beneficiary's new-account charge, 183,600,
 /// is made first and cannot be paid: the constructor halts out of gas, the give-back is not
-/// credited, and the creation fails with no beneficiary.
+/// credited, and the creation fails with no beneficiary. Its creator is given back the created
+/// account's state gas and its record's history, which its own regular gas paid, into its
+/// reservoir, which the transaction ends with.
 #[test]
 fn test_a_beneficiary_charge_the_frame_cannot_pay_halts_before_the_give_back() {
     if !pins_state() {
@@ -553,7 +555,11 @@ fn test_a_beneficiary_charge_the_frame_cannot_pay_halts_before_the_give_back() {
     assert_eq!(output.data().as_ref(), &[0_u8; 32], "the creation failed");
     assert_eq!(balance_of(&outcome, BENEFICIARY), U256::ZERO, "no beneficiary is kept");
     assert_eq!(outcome.gas.state, 0, "nothing of the failed creation stays charged");
-    assert_eq!(outcome.gas.reservoir_remaining, 0);
+    assert_eq!(
+        outcome.gas.reservoir_remaining,
+        ACCOUNT_LEAF_STATE_GAS_M1 + RECORD_HISTORY,
+        "the failed creation's account and record come back into the creator's reservoir"
+    );
 }
 
 /// After the mark, an `SSTORE` of the destroyed account's own slot, `(original 0, present
@@ -1278,14 +1284,15 @@ impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for DestructionGas
 }
 
 /// The transaction is below the execution cap, so the reservoir is empty. The destroying frame
-/// stores two fresh slots of its own, which spill 195,840 of state gas and 7,040 of history onto
-/// its regular gas, and self-destructs to a warm existing account. The table gives back the leaf
-/// and its record, slot 1 and its record from the constructor, the code's state gas and history,
-/// and the frame's own two slots and records. The frame's regular gas is credited first, up to
-/// the 202,880 still spilled, and the rest goes to its reservoir. Read at the opcode with an
-/// inspector. At the transaction's end nothing is left in the reservoir and no state gas stays.
+/// stores two fresh slots of its own, which its regular gas pays, 195,840 of state gas and 7,040
+/// of history, and self-destructs to a warm existing account. The table gives back the leaf and
+/// its record, slot 1 and its record from the constructor, the code's state gas and history, and
+/// the frame's own two slots and records, all of it into the frame's reservoir: no give-back
+/// credits regular gas, which falls by the opcode's own 5,000 alone. Read at the opcode with an
+/// inspector. At the transaction's end the reservoir holds the whole give-back, which returns to
+/// the sender, and no state gas stays.
 #[test]
-fn test_a_give_back_onto_an_empty_reservoir_credits_the_spill_first() {
+fn test_a_give_back_onto_an_empty_reservoir_goes_into_the_reservoir_alone() {
     if !pins_state() {
         return;
     }
@@ -1320,10 +1327,14 @@ fn test_a_give_back_onto_an_empty_reservoir_credits_the_spill_first() {
     let (before, reservoir_before) = probe.before.expect("the account self-destructed");
     let (after, reservoir_after) = probe.after.expect("the opcode completed");
     assert_eq!(reservoir_before, 0, "the reservoir is empty");
-    assert_eq!(after + 5_000, before + spilled, "regular gas is credited up to the spill");
-    assert_eq!(reservoir_after, rest, "the rest goes to the reservoir");
+    assert_eq!(after + 5_000, before, "regular gas is credited nothing");
+    assert_eq!(reservoir_after, spilled + rest, "the whole give-back goes to the reservoir");
     assert_eq!(outcome.gas.state, 0);
-    assert_eq!(outcome.gas.reservoir_remaining, 0, "the credit meets the callers' spill too");
+    assert_eq!(
+        outcome.gas.reservoir_remaining,
+        spilled + rest,
+        "the reservoir returns to the callers as it is"
+    );
 }
 
 /// A creation transaction whose constructor destroys its own account. On success the created

@@ -116,7 +116,10 @@ impl FrameFigures {
 ///
 /// Compute is the regular gas the transaction's frames spend on what they run, whoever funds it. A
 /// frame's regular gas spent is read off its [`Gas`]: its limit, less what it has left, less the
-/// state and history gas that spilled onto its regular gas, which are not compute. What it has
+/// state and history gas its regular gas paid, which are not compute. Under Satin's give-backs,
+/// which credit the reservoir alone, that figure is never lowered by a give-back: what regular gas
+/// paid stays spent, and stays out of compute, when the charge later comes back into a reservoir
+/// by a take-back or a rollback. What it has
 /// left is the whole of its regular gas, the part withheld from regular charges included, so
 /// withheld gas is never spent, and every other reader of the frame's gas sees the same figure.
 ///
@@ -148,8 +151,10 @@ impl FrameFigures {
 /// then refuses the call or its creation runs.
 ///
 /// The one part of the regular ledger that is not compute is what a halt burns (`burned`): a
-/// frame that halts consumes the gas it had left, and its spill, without running anything with
-/// it. A frame answered without running that halts burns its whole gas limit: a precompile that
+/// frame that halts consumes the gas it had left without running anything with it. What its
+/// regular gas paid of state and history gas, which the halt consumes too, stays out of compute by
+/// its caller's count under Satin's give-backs, and is burned with the rest under EIP-8037's own. A
+/// frame answered without running that halts burns its whole gas limit: a precompile that
 /// runs out of gas counts nothing of its forward, nor of a value call's stipend, as compute. An
 /// out-of-gas zeroes what the frame had before the frame returns; the revm fork records it first,
 /// before every deduction that fails — an opcode's static gas, which the interpreter's step loop
@@ -398,8 +403,10 @@ impl Detention {
     /// read set one.
     ///
     /// Called where the frame's spendable gas can have grown past it: when the frame starts, when
-    /// it resumes on the gas a child handed back, and after a storage write, whose restore of a
-    /// slot to its original value refills the state and history gas that spilled onto regular gas.
+    /// it resumes on the gas a child handed back, and after a storage write. Under EIP-8037's own
+    /// give-backs a restore of a slot to its original value refills the state and history gas
+    /// that spilled onto regular gas; under Satin's it refills the reservoir alone, and the hold
+    /// there finds nothing grown.
     #[inline]
     pub(crate) fn hold(&self, gas: &mut GasTracker) {
         if let Some(limit) = self.limit {
@@ -486,9 +493,14 @@ impl Detention {
                 return Some(ComputeStop { limit, used: self.compute(gas.tracker()) });
             }
         }
-        // The settlement rolls the spill back into regular gas and burns it all.
+        // The halt burns what the frame had left. Under EIP-8037's own give-backs it burns the
+        // spill too: the settlement rolls it back into regular gas and burns it all, and the
+        // caller's count does not take it. Under Satin's the caller's count takes what the
+        // frame's regular gas paid of state and history gas, which keeps it out of the caller's
+        // regular gas spent, so it is not burned a second time here.
         let left = gas.failed_charge_remaining().unwrap_or_else(|| gas.remaining());
-        self.burned = self.burned.saturating_add(left).saturating_add(gas.state_gas_spilled());
+        let spill = if gas.reservoir_only_give_backs() { 0 } else { gas.state_gas_spilled() };
+        self.burned = self.burned.saturating_add(left).saturating_add(spill);
         None
     }
 
@@ -510,8 +522,8 @@ impl Detention {
     /// the allowance it was held to ([`restore_forward`](Self::restore_forward)) — crossed the
     /// limit. Otherwise, an answer that halts burns the whole gas limit: nothing ran with it. An
     /// answer that spent more regular gas than the limit leaves the frame — the allowance it would
-    /// have run on — is a charge the frame could not have made; state and history gas that spilled
-    /// onto its regular gas are not counted, as they are not a running frame's compute. Such an
+    /// have run on — is a charge the frame could not have made; state and history gas its regular
+    /// gas paid are not counted, as they are not a running frame's compute. Such an
     /// answer is answered out of gas and marked as a crossing, the answer's spending being the
     /// charge that crossed. A crossing is settled by the same rule as a frame that ran
     /// ([`stop`](Self::stop)): the frame spent nothing before the charge, so it is given its whole
@@ -554,7 +566,7 @@ impl Detention {
                 return None;
             }
             let allowance = self.allowance(depth, gas_limit)?;
-            // The regular gas the answer spent: state and history gas that spilled onto it are not
+            // The regular gas the answer spent: state and history gas its regular gas paid are not
             // compute, as they are not a running frame's.
             let spent = gas_limit
                 .saturating_sub(result.gas.remaining())
@@ -569,9 +581,10 @@ impl Detention {
             // so the stop settles on what the frame was forwarded.
             //
             // The record holds the regular gas the frame had before the charge: the gas limit,
-            // less the state and history gas that spilled onto it, which the revert that settles
-            // the stop credits back. The spill is below the gas limit, less the regular gas the
-            // answer spent, so what is left is never zero.
+            // less the state and history gas its regular gas paid, which the revert that settles
+            // the stop gives back into the frame's reservoir under Satin's give-backs, and into
+            // its regular gas under EIP-8037's own. That part is below the gas limit, less the
+            // regular gas the answer spent, so what is left is never zero.
             let remaining = NonZeroU64::new(gas_limit - result.gas.state_gas_spilled())?;
             result.result = InstructionResult::OutOfGas;
             result.gas.tracker_mut().set_limit(gas_limit);
@@ -579,9 +592,10 @@ impl Detention {
         }
         let limit = self.stop(&mut result.gas)?;
         // Every crossing an answer carries was marked by the engine with the regular gas the frame
-        // had before the charge: the forward less the spill here, the forward for a precompile's,
-        // which spills nothing. Put back, it leaves the answer no regular gas spent, so the stop's
-        // compute is the transaction's when the frame started.
+        // had before the charge: the forward less what its regular gas paid of state and history
+        // gas here, the forward for a precompile's, which pays none. Put back, it leaves the answer
+        // no regular gas spent, so the stop's compute is the transaction's when the frame
+        // started.
         debug_assert_eq!(regular_spent(result.gas.tracker()), 0, "a stopped answer spent nothing");
         Some(ComputeStop { limit, used: self.compute_at_start(depth, gas_limit) })
     }
@@ -751,7 +765,7 @@ const fn is_out_of_gas(result: InstructionResult) -> bool {
 }
 
 /// The regular gas a frame spent: its limit, less what it has left — the withheld part included —
-/// less the state and history gas that spilled onto its regular gas.
+/// less the state and history gas its regular gas paid.
 #[inline]
 pub(crate) const fn regular_spent(gas: &GasTracker) -> u64 {
     gas.limit().saturating_sub(gas.remaining()).saturating_sub(gas.state_gas_spilled())
@@ -1088,7 +1102,7 @@ mod tests {
 
     /// An answer that halts burns the gas limit; one that spent more regular gas than the frame's
     /// allowance is answered out of gas and stops at the limit, with its whole gas limit back but
-    /// the spill. State gas that spilled onto the answer's regular gas is not compute.
+    /// what its regular gas paid of state gas, which is not compute.
     #[test]
     fn test_an_answer_is_held_to_the_allowance_it_would_have_run_on() {
         let mut detention = detaining();
@@ -1119,7 +1133,8 @@ mod tests {
         detention.burned = 0;
 
         // The answer's spending is the charge that crossed: before it the frame had its whole gas
-        // limit, less the spill, which the revert that settles the stop credits back.
+        // limit, less what its regular gas paid of state gas, which the revert that settles the
+        // stop gives back.
         let limit = BLOCK_ENV_ACCESS_COMPUTE_GAS;
         for spill in [0, 1_000] {
             let mut beyond = answer(BLOCK_ENV_ACCESS_COMPUTE_GAS + 1, InstructionResult::Return);

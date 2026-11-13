@@ -198,10 +198,12 @@ fn test_gas_answers_the_whole_regular_gas_after_a_read() {
 
 /// A callee started after the caller's read with an explicit gas stays bounded by it: its state
 /// writes draw the reservoir the transaction has, not the caller's withheld gas. The bound pays
-/// the compute of three fresh slots and what one of them spills: below the execution cap, where
-/// every slot's state gas and history spill onto it, the callee runs out of gas before its third
-/// write completes — at the spec's prices already on its second write's state gas, which is more
-/// than one write's compute; above it the reservoir pays all three — each as without the read.
+/// the compute and the legacy share of three fresh slots, and what one of them spills past its
+/// share: below the execution cap, where every slot's state gas and history spill onto it, the
+/// callee runs out of gas before its third write completes — at the spec's prices already on its
+/// second write's state gas, which is more than one write's compute — unless a write spills no
+/// more than its share; above it the reservoir pays all three but their shares — each as without
+/// the read.
 #[test]
 fn test_a_bounded_callee_writes_what_it_writes_without_the_read() {
     let child = BytecodeBuilder::default()
@@ -210,9 +212,11 @@ fn test_a_bounded_callee_writes_what_it_writes_without_the_read() {
         .sstore(U256::from(3), U256::from(1))
         .stop()
         .build();
-    let bound = u32::try_from(3 * fresh_write() + fresh_write_spill()).expect("a bound in a push");
-    // Where a write spills nothing, the bound pays all three below the cap too.
-    let below = u64::from(fresh_write_spill() == 0);
+    let share = crate::common::slot_share();
+    let bound = u32::try_from(3 * (fresh_write() + share) + fresh_write_spill() - share)
+        .expect("a bound in a push");
+    // Where a write spills no more than its share, the bound pays all three below the cap too.
+    let below = u64::from(fresh_write_spill() == share);
     for (gas_limit, status) in [(BELOW, below), (ABOVE, 1)] {
         let (detained, plain) = with_and_without_read(|first| {
             let parent =

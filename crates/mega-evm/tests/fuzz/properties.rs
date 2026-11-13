@@ -185,11 +185,13 @@ fn destroyed_in_the_transaction(account: &revm::state::Account) -> bool {
 /// - the receipt's figure is the raw spend less the refund, at least the floor, at most the gas
 ///   limit;
 /// - the refund is within its cap, a fifth of the raw spend;
-/// - the reservoir is the gas above the execution cap, and it pays the state and history gas before
-///   the regular budget does and nothing else: what is gone from it is exactly the state and
-///   history ledgers, or all of it when they exceed it. Two rules bill it otherwise and are left
-///   out: the EIP-7623 floor, when it is the receipt's figure, and op-revm's failed deposit, which
-///   bills the whole gas limit;
+/// - the reservoir is the gas above the execution cap, and it pays state and history gas and
+///   nothing else, after a state charge's legacy share, which regular gas pays first; every
+///   give-back goes into a reservoir, whichever pool paid the charge, so what comes back of it can
+///   exceed what it held, and what is gone from it is at most the state and history ledgers. What
+///   comes back of it and the spend fit in the gas limit. Two rules bill it otherwise and are left
+///   out of the last: the EIP-7623 floor, when it is the receipt's figure, and op-revm's failed
+///   deposit, which bills the whole gas limit;
 /// - every transaction reports at least its body as history bytes and pays at most their price, the
 ///   allowances paying some logs and a failed deposit reporting no history gas;
 /// - value is conserved: the balances change by what a deposit minted, less what a self-destruction
@@ -240,14 +242,14 @@ fn test_property_gas_ledgers() {
 
             let reservoir = gas_limit.saturating_sub(gas_limit.min(TX_GAS_LIMIT_CAP));
             prop_check!(
-                gas.reservoir_remaining <= reservoir,
-                "no more comes back than was in the reservoir"
+                total + gas.reservoir_remaining <= gas_limit,
+                "the spend and the reservoir that comes back fit in the gas limit"
             );
             if !failed_deposit && gas.gas_used != gas.floor {
-                prop_eq!(
-                    reservoir - gas.reservoir_remaining,
-                    reservoir.min(gas.state + gas.history),
-                    "the reservoir pays the state and history gas first, and nothing else"
+                prop_check!(
+                    reservoir.saturating_sub(gas.reservoir_remaining) <= gas.state + gas.history,
+                    "the reservoir pays no more than the state and history gas the transaction \
+                     kept, and nothing else"
                 );
             }
 

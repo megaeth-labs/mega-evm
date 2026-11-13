@@ -183,9 +183,9 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     ///
     /// The fields the spec fixes are set from the spec, whatever `cfg` holds: the gas schedule,
     /// the EIP-8037 and EIP-2780 switches, the execution cap, the EIP-7708 switch and its
-    /// disabling flag, the chain-id check, the two code-size limits and the fork's switch back to
-    /// revm 40.0.3's journal semantics. Every other field (chain id, the other disabled checks,
-    /// blob schedule) is taken from `cfg`.
+    /// disabling flag, the chain-id check, the two code-size limits, the fork's switch back to
+    /// revm 40.0.3's journal semantics and its switch that credits every give-back to a reservoir.
+    /// Every other field (chain id, the other disabled checks, blob schedule) is taken from `cfg`.
     ///
     /// A context that ran the neutral configuration returns to the spec's.
     pub fn with_cfg(mut self, cfg: CfgEnv<MegaSpecId>) -> Self {
@@ -209,9 +209,11 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     ///
     /// - Every field is taken from `cfg`, including the ones [`with_cfg`](Self::with_cfg) sets from
     ///   the spec: the gas schedule, the EIP-8037, EIP-2780 and EIP-7708 switches, the execution
-    ///   cap and the code-size limits. The one exception is the fork's switch back to revm 40.0.3's
-    ///   journal semantics, which stays off: the journal's semantics are part of the machinery
-    ///   under test, not of what is priced.
+    ///   cap and the code-size limits. The two exceptions are the fork's switch back to revm
+    ///   40.0.3's journal semantics, which stays off, the journal's semantics being part of the
+    ///   machinery under test, not of what is priced; and its switch that credits every give-back
+    ///   to a reservoir, which stays off too, so a give-back is credited as EIP-8037 credits it.
+    ///   The fixture fork's schedule carries no legacy share.
     /// - No transaction pays history gas, and none has its schedule swapped for its history
     ///   exemption: every transaction runs `cfg`'s schedule.
     /// - A system call's gas is not split: its whole gas limit is regular gas, as revm's own runner
@@ -233,8 +235,10 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     /// the fixture fork's replaces it on the [`MegaEvm`](crate::MegaEvm).
     #[cfg(any(test, feature = "test-utils"))]
     pub fn with_neutral_cfg(mut self, mut cfg: CfgEnv<MegaSpecId>) -> Self {
-        // The journal's semantics are part of the machinery, not of what is priced.
+        // The journal's semantics are part of the machinery, not of what is priced. Where a
+        // give-back goes is `MegaETH`'s pricing: the fixture's fork credits it as EIP-8037 does.
         cfg.legacy_journal_semantics = false;
+        cfg.reservoir_only_give_backs = false;
         self.inner = self.inner.with_cfg(op_cfg(&cfg));
         self.cfg = cfg;
         self.neutral = true;
@@ -821,6 +825,13 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
 /// The chain-id check is on, whatever the caller's configuration says: a transaction that carries
 /// a chain id must carry the chain's, and one of a type other than legacy must carry one. Which
 /// transactions a chain accepts is the chain's rule, not a caller's choice.
+///
+/// Every give-back of state or history gas goes into a reservoir and never into regular gas, the
+/// fork's switch for it set on whatever the caller's configuration says: a slot written back, a
+/// record taken back, the destruction table's give-back, a start's charge given back when the start
+/// fails, a failed frame's rollback and a reservoir a child returns. A frame's regular gas rises
+/// within the frame only by the regular gas a child returns, and a frame that halts consumes its
+/// regular gas with what it paid of its charges and gives back the reservoir it received.
 pub fn spec_cfg(mut cfg: CfgEnv<MegaSpecId>) -> CfgEnv<MegaSpecId> {
     cfg.gas_params = satin_gas_params();
     cfg.enable_amsterdam_eip8037 = true;
@@ -832,6 +843,7 @@ pub fn spec_cfg(mut cfg: CfgEnv<MegaSpecId>) -> CfgEnv<MegaSpecId> {
     cfg.limit_contract_code_size = Some(constants::MAX_CONTRACT_SIZE);
     cfg.limit_contract_initcode_size = Some(constants::MAX_INITCODE_SIZE);
     cfg.legacy_journal_semantics = false;
+    cfg.reservoir_only_give_backs = true;
     cfg
 }
 

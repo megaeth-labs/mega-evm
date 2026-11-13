@@ -28,7 +28,9 @@ use revm::{
     ExecuteEvm,
 };
 
-use crate::common::{context, deposit, runs_at_measurement_prices};
+use crate::common::{
+    account_share, context, create_share, deposit, runs_at_measurement_prices, slot_share,
+};
 
 const CALLER: Address = address!("0000000000000000000000000000000000400000");
 const CONTRACT: Address = address!("0000000000000000000000000000000000400001");
@@ -293,7 +295,10 @@ fn test_only_a_system_call_reports_no_history_bytes() {
     }
     const RESERVOIR: u64 = 100_000_000;
     for gas_limit in [GAS_LIMIT, TX_GAS_LIMIT_CAP + RESERVOIR] {
-        let run = |mut tx: MegaTransaction| {
+        // `shares` is what regular gas paid of the state charges, their legacy shares: the
+        // program's fresh slot, the account its value call creates and the account it creates;
+        // the system transaction's fresh slot in the Oracle.
+        let run = |mut tx: MegaTransaction, shares: u64| {
             tx.0.base.gas_limit = gas_limit;
             let outcome = MegaEvm::new(context(db()))
                 .execute_transaction(tx)
@@ -302,14 +307,15 @@ fn test_only_a_system_call_reports_no_history_bytes() {
             if gas_limit > TX_GAS_LIMIT_CAP {
                 assert_eq!(
                     gas.reservoir_remaining,
-                    RESERVOIR - gas.state - gas.history,
-                    "the reservoir paid the state and history ledgers",
+                    RESERVOIR + shares - gas.state - gas.history,
+                    "the reservoir paid the state and history ledgers but the legacy shares",
                 );
             }
             outcome
         };
+        let program_shares = slot_share() + account_share() + create_share();
 
-        let paying = run(call_from(CALLER, CONTRACT)).gas;
+        let paying = run(call_from(CALLER, CONTRACT), program_shares).gas;
         assert!(paying.history_bytes > 0);
         assert_eq!(
             paying.history,
@@ -317,14 +323,14 @@ fn test_only_a_system_call_reports_no_history_bytes() {
             "at {gas_limit}: the control pays for every byte it reports",
         );
 
-        let deposit = run(deposit(call_from(CALLER, CONTRACT))).gas;
+        let deposit = run(deposit(call_from(CALLER, CONTRACT)), program_shares).gas;
         assert_eq!(
             (deposit.history, deposit.history_bytes),
             (PROGRAM_HISTORY_BYTES * COST_PER_HISTORY_BYTE, PROGRAM_HISTORY_BYTES),
             "at {gas_limit}: a deposit"
         );
         assert!(deposit.state > 0, "at {gas_limit}: state is charged too");
-        let system = run(system_tx());
+        let system = run(system_tx(), slot_share());
         assert!(system.result.is_success(), "at {gas_limit}: {:?}", system.result);
         assert_eq!(written_oracle_slot(&system), Some(ORACLE_VALUE), "at {gas_limit}");
         let system = system.gas;
