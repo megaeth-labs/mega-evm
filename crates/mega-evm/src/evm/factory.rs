@@ -228,8 +228,8 @@ mod tests {
         let (mega, _) = runs_with(&evm);
         assert_eq!(
             mega.gas_params,
-            crate::satin_gas_params_history_exempt(),
-            "a deposit runs the schedule that prices no history",
+            crate::satin_gas_params(),
+            "a deposit runs the same history pricing as every transaction",
         );
         assert_eq!(
             mega.with_spec_and_gas_params(exported.spec, exported.gas_params.clone()),

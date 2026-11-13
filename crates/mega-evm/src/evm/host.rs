@@ -27,10 +27,14 @@
 //! `load_account_code` and `load_account_code_hash` are the trait's own, built on it.
 //!
 //! While volatile-data access is switched off for the running frame, the opcode's wrapper refuses
-//! a volatile read before the opcode runs, so the Host loads none. Were one reached, the Host
-//! would refuse it: an account or storage load fails as a skipped cold load, and a
+//! a read its operands and its frame name before the opcode runs, so the Host loads none of those.
+//! The one volatile load a wrapper leaves to the Host is a call's load of its target's EIP-7702
+//! delegate, which only the target's code names: when the delegate is the beneficiary, the Host
+//! refuses it. A refused account or storage load fails as a skipped cold load, and a refused
 //! block-environment accessor answers zero. Nothing is loaded, and the opcode's wrapper turns the
-//! refusal into the frame's revert.
+//! refusal into the frame's revert, on the gas the frame held when it reached the opcode, less, for
+//! a call refused at its target's delegate, the target's access and the memory the call grew: the
+//! Host notes whether the target was cold when it loads it.
 //!
 //! # The Oracle's storage
 //!
@@ -85,7 +89,7 @@ use std::format;
 
 use delegate::delegate;
 use revm::{
-    context::{ContextTr, JournalTr},
+    context::ContextTr,
     context_interface::{
         cfg::{gas::GasTracker, GasId, GasParams, StateGasCharge, StateGasSite},
         context::{ContextError, SStoreResult, SelfDestructResult, StateLoad},
@@ -95,13 +99,10 @@ use revm::{
         },
         journaled_state::AccountInfoLoad,
     },
-    interpreter::InstructionResult,
     primitives::{Address, Log, StorageKey, StorageValue, B256, U256},
-    state::Bytecode,
     Database,
 };
 
-use super::execution::{mark, revert_to};
 use crate::{
     charge_write_records_history, history_gas,
     limit::{DestroyedParts, HistoryBytes},
@@ -231,7 +232,9 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
     /// Loads the account, marking a read of the block beneficiary's, or refusing it in a frame
     /// whose volatile-data access is off, when the load is a read: when an opcode's read wrapper
     /// makes it. `CREATE`'s and `CREATE2`'s loads of their creator and of the created address are
-    /// no reads (see [`Detention`](crate::Detention)).
+    /// no reads (see [`Detention`](crate::Detention)). Of any other account a read wrapper's
+    /// opcode loads in a frame whose access is off, it notes whether it was cold: a call whose
+    /// delegate it then refuses pays its target's access by it.
     #[inline]
     fn load_account_info_skip_cold_load(
         &mut self,
@@ -247,6 +250,8 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
             self.inner.load_account_info_skip_cold_load(address, load_code, skip_cold_load)?;
         if beneficiary {
             self.detention.observe(VolatileDataAccess::BENEFICIARY_BALANCE);
+        } else {
+            self.detention.note_load(load.is_cold);
         }
         Ok(load)
     }
@@ -711,35 +716,6 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         };
         self.detention.observe(VolatileDataAccess::ORACLE);
         Ok(answer.unwrap_or(loaded))
-    }
-
-    /// The one-hop EIP-7702 delegate a call of `target` would follow, read for a frame whose
-    /// volatile-data access is off to decide, before the call charges or checks anything, whether
-    /// the call reads the block beneficiary's account: the address `target`'s code delegates to,
-    /// or `None` when its code is not a delegation.
-    ///
-    /// The read loads `target`'s account and code, and not the delegate's: it is in the
-    /// transaction's state, and so in a stateless witness, as the call's own load of its target
-    /// would be. It warms nothing: the journal is taken back to where it stood, so the account is
-    /// as warm or as cold as it was, and a call the read does not refuse pays its target's access
-    /// as it would with access on.
-    ///
-    /// The read is required: a database error is recorded as the transaction's, which fails with
-    /// it, and is never taken for a target without a delegate.
-    pub(crate) fn call_target_delegate(
-        &mut self,
-        target: Address,
-    ) -> Result<Option<Address>, InstructionResult> {
-        let journal = &mut self.inner.journaled_state;
-        let start = mark(journal);
-        let delegate = journal
-            .load_account_with_code(target)
-            .map(|account| account.data.info.code.as_ref().and_then(Bytecode::eip7702_address));
-        revert_to(journal, start);
-        delegate.map_err(|error| {
-            *self.error() = Err(ContextError::Db(error));
-            InstructionResult::FatalExternalError
-        })
     }
 }
 

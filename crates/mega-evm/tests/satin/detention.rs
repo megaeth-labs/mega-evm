@@ -1614,9 +1614,11 @@ impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for Calls {
 ///
 /// An opcode volatile whatever its operands is refused before it reads them, so a `BLOCKHASH` on
 /// an empty stack is refused rather than halting on the underflow; one volatile for the account
-/// or the storage it reads is refused once its operands are on the stack, before its body checks
-/// anything — a large copy, a call's memory, a value transfer it could not fund, a call to an
-/// EIP-7702 delegator of the beneficiary — and so is an `SLOAD` in the Oracle's own frame.
+/// or the storage its operands or its frame name is refused once its operands are on the stack,
+/// before its body checks anything — a large copy, a call's memory, a value transfer it could not
+/// fund — and so is an `SLOAD` in the Oracle's own frame. A call whose target is an EIP-7702
+/// delegator of the beneficiary is not among them: it is refused where it loads the delegate,
+/// after its own steps.
 #[test]
 fn test_a_refused_read_reverts_the_frame_and_charges_nothing() {
     // Pushes the operands of a call of `to` through `scheme`, carrying `value` when the scheme
@@ -1693,16 +1695,16 @@ fn test_a_refused_read_reverts_the_frame_and_charges_nothing() {
             VolatileDataAccess::BENEFICIARY_BALANCE,
         ),
         (
-            "CALL of a delegator of the beneficiary, with a value it cannot fund",
+            "CALL of the beneficiary, with a value it cannot fund",
             CHILD,
-            call_with_memory(CALL, 200, DELEGATOR),
+            call_with_memory(CALL, 200, BENEFICIARY),
             2 + 2 + 3 + 2 + 3 + 3 + 3,
             VolatileDataAccess::BENEFICIARY_BALANCE,
         ),
         (
-            "STATICCALL of a delegator of the beneficiary",
+            "STATICCALL of the beneficiary",
             CHILD,
-            call_with_memory(STATICCALL, 0, DELEGATOR),
+            call_with_memory(STATICCALL, 0, BENEFICIARY),
             2 + 2 + 3 + 2 + 3 + 3,
             VolatileDataAccess::BENEFICIARY_BALANCE,
         ),

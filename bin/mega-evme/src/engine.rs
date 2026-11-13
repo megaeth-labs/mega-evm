@@ -213,7 +213,8 @@ mod tests {
     /// block at the timestamp is the first Satin one. A chain without a table has no engine.
     #[test]
     fn test_a_scheduled_chain_switches_at_the_timestamp() {
-        let scheduled = ChainActivation { chain_id: MAINNET_CHAIN_ID, satin: Some(1_800_000_000) };
+        let mainnet = mega_evm::chain_activation(MAINNET_CHAIN_ID).expect("a known chain");
+        let scheduled = ChainActivation { satin: Some(1_800_000_000), ..mainnet };
         assert_eq!(Engine::under(Some(scheduled), 1_799_999_999), Some(Engine::Legacy));
         assert_eq!(Engine::under(Some(scheduled), 1_800_000_000), Some(Engine::Satin));
         assert_eq!(Engine::under(None, 0), None);

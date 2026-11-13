@@ -1,5 +1,5 @@
 ---
-description: Satin network upgrade (unstable). MegaETH's execution rules restated on Optimism Karst (Ethereum Osaka): EIP-8037 regular and state gas under a 200,000,000 execution cap with a state-gas reservoir, a history-gas ledger for the bytes a transaction appends, SALT-scaled state gas, data-size, KV and state-growth limits that stop the frame that crosses them with a revert, 98/100 forwarding of regular gas and of the reservoir, gas detention on withheld gas, EIP-7708 transfer logs, keyless deployment as a native creation, system calls on a split budget, the live system address read by the transaction itself, block data-size, KV and state-growth limits as packing budgets, and the witness a stateless validator re-executes a block from.
+description: Satin network upgrade (unstable). MegaETH's execution rules restated on Optimism Karst (Ethereum Osaka): EIP-8037 regular and state gas under a 200,000,000 execution cap with a state-gas reservoir, a history-gas ledger for the bytes a transaction appends, SALT-scaled state gas, data-size, KV and state-growth limits that stop the frame that crosses them with a revert, 98/100 forwarding of regular gas and of the reservoir, gas detention on withheld gas, EIP-7708 transfer logs, keyless deployment as a native creation, system calls on a split budget, the system contracts deployed in every block and the live system address resolved once per block, block data-size, KV and state-growth limits as packing budgets, and the witness a stateless validator re-executes a block from.
 ---
 
 # Satin Network Upgrade
@@ -26,7 +26,7 @@ Compute is regular gas, bounded by the execution cap and by [gas detention](../e
 Every limit, data size, KV updates, state growth and detention's compute limit, stops the frame that crosses it with a revert carrying `MegaLimitExceeded(kind, limit)`: the frame's caller can catch the stop and carry on within what the limits leave, and a transaction whose own frame is stopped pays only for what ran.
 Detention holds each frame's spendable regular gas inside the frame's own gas, so a transaction that read volatile data runs exactly as it would have without the read until a regular charge needs the gas it is not allowed to spend.
 
-Satin also brings EIP-7708 transfer logs, deploys a `keylessDeploy` transaction as a native creation instead of in a sandbox, runs system calls on at most 30,000,000 of regular gas with the rest as reservoir, has a system-address transaction read the live system address itself, and makes the block's data-size, KV and state-growth limits packing budgets that exempt deposits and hold Mega System Transactions as any other non-deposit transaction.
+Satin also brings EIP-7708 transfer logs, deploys a `keylessDeploy` transaction as a native creation instead of in a sandbox, runs system calls on at most 30,000,000 of regular gas with the rest as reservoir, deploys the system contracts in every block and resolves the live system address once per block as Rex6 does, and makes the block's data-size, KV and state-growth limits packing budgets that exempt deposits and hold Mega System Transactions as any other non-deposit transaction.
 
 Satin follows [Rex6](rex6.md) on the spec ladder, so every **Previous behavior** below is Rex6's.
 Satin does not add to the Rex6 rules one by one: it restates the execution layer, and a Rex6 rule this page does not carry over does not apply under Satin.
@@ -341,7 +341,7 @@ Deposited code MUST be charged, once the creation's code passed its checks and i
 A creation that cannot pay any of the four runs out of gas and leaves no code.
 
 A node MUST charge account access to the addresses the inherited rules treat as warm from the start of a transaction — precompiles, the block beneficiary and access-list addresses listed without storage keys — as warm, as [EIP-2929](https://eips.ethereum.org/EIPS/eip-2929) has it: Rex6's cold charge on the first `CALL`-family or `SELFDESTRUCT`-beneficiary touch of such an address does not apply.
-The `SequencerRegistry`'s account and its `_currentSystemAddress` slot MUST be warm from the start of every transaction as well, the slot as an access-list storage key is: validation reads both for every transaction (see [The Live System Address](#17-the-live-system-address)).
+No transaction finds the `SequencerRegistry`'s account or its `_currentSystemAddress` slot warm for its classification: the block resolves the live system address once, outside every transaction (see [The Live System Address](#17-the-live-system-address)).
 The sender, and the recipient of a call, are warm from the start as well, as [EIP-2929](https://eips.ethereum.org/EIPS/eip-2929) leaves them.
 
 ### 6. State Gas and SALT Pricing
@@ -377,7 +377,7 @@ Every EIP-8037 state charge MUST be `entry × m`:
 - The first effective `SELFDESTRUCT` of an account created in the same transaction refills state gas for each part the [destruction table](#the-destruction-table) names.
   EIP-8037 specifies that this destruction produces no state-gas refills.
 - The protocol's own transactions MUST be priced at `m = 1` whatever their buckets hold (see [The Protocol's Own Transactions](#19-the-protocols-own-transactions)).
-  A deposit that is not system-originated is not one of them and MUST be priced by bucket, although it pays no history gas (see [History Gas](#7-history-gas)).
+  A deposit that is not system-originated is not one of them and MUST be priced by bucket, and MUST pay history gas (see [History Gas](#7-history-gas)).
 
 At `m = 1` every state charge is the schedule's own number, so, unlike Rex6, a fresh slot or account in a minimum-size bucket is not free: it pays its state gas.
 
@@ -438,7 +438,7 @@ The bytes MUST be those of the byte table below, which is also the table the dat
 When each charge is made:
 
 - The body — `TX_BODY_SIZE`, the calldata, the access list and the authorizations — MUST be charged before execution, as intrinsic state gas: the reservoir pays it first and its excess the regular budget, and it is not part of the intrinsic regular gas the execution cap is validated against.
-  A gas limit that cannot cover it MUST make the transaction invalid (see [Two-Pool Gas](#4-two-pool-gas-eip-8037-replaces-the-dual-gas-model)).
+  A gas limit that cannot cover it MUST make an ordinary transaction invalid and a deposit a failed deposit (see [Two-Pool Gas](#4-two-pool-gas-eip-8037-replaces-the-dual-gas-model)).
   The body's history gas MUST NOT be reported on the state ledger.
 - The records of the applied EIP-7702 authorities, and the record the transaction's own frame makes (its value's recipient or its created account), MUST be charged before the first frame.
   A list the KV or state-growth limit skips has no authority records, and that history is not charged.
@@ -476,12 +476,16 @@ These MUST NOT pay history gas:
 
 - an [EIP-7708 transfer log](#14-eip-7708-transfer-logs), which is data size only;
 - an Oracle hint's payload, which goes to the oracle service rather than into a block;
-- any byte of a deposit transaction, of a system-originated transaction, or of a system call (see [The Protocol's Own Transactions](#19-the-protocols-own-transactions)).
-  For these the deposited-code history gas MUST be zero too.
-  The exemption is from history gas alone: a deposit that is not system-originated MUST still be priced by bucket (see [State Gas and SALT Pricing](#6-state-gas-and-salt-pricing)), held to every per-transaction limit and detained (see [The Protocol's Own Transactions](#19-the-protocols-own-transactions)).
+- any byte of a system call (see [The Protocol's Own Transactions](#19-the-protocols-own-transactions)).
+  Its deposited-code history gas MUST be zero too.
+
+A deposit and a system-originated transaction MUST pay history gas as any transaction does: for their body, calldata, logs, write records and deposited code.
+They MUST report their retained history bytes; a system call MUST report zero history bytes.
+A failed deposit MUST report its body and calldata as history bytes even when validation fails before those bytes are admitted, while reporting zero history gas.
+A deposit that is not system-originated MUST still be priced by bucket (see [State Gas and SALT Pricing](#6-state-gas-and-salt-pricing)), held to every per-transaction limit and detained (see [The Protocol's Own Transactions](#19-the-protocols-own-transactions)).
 
 The EIP-7623 floor is still computed and validated.
-At these prices it never raises the gas used of a transaction that pays history gas, because the history gas of the same bytes is higher; it can still raise that of a transaction exempt from history gas, a deposit or one of the protocol's own; and it does bind the figure a block counts on its execution ledger, `max(regular, floor)` (see [Two-Pool Gas](#4-two-pool-gas-eip-8037-replaces-the-dual-gas-model)).
+At these prices it never raises the gas used of a transaction that pays history gas, because the history gas of the same bytes is higher; it does bind the figure a block counts on its execution ledger, `max(regular, floor)` (see [Two-Pool Gas](#4-two-pool-gas-eip-8037-replaces-the-dual-gas-model)).
 Where it binds, the gas used is the floor, drawn from the whole gas limit, the reservoir included, and the transaction gets back its gas limit less the floor (see [Two-Pool Gas](#4-two-pool-gas-eip-8037-replaces-the-dual-gas-model)); a deposit, which paid nothing, is charged nothing either way, and only its receipt's and the block's figures move.
 
 ### 8. History Allowance Replaces the Storage Gas Stipend
@@ -860,7 +864,7 @@ A deposit that runs to a success or a revert and creates its caller is the ordin
   A skipped list keeps no authority account, no authority write record, no authority state gas and no authority history.
   The intrinsic regular gas, the body's history gas and the body's data size stay.
   No delegation is written, and no authority nonce is bumped beyond the sender's validation bump.
-  The consulted authorities are not made warm, except an authority that was already warm from the start of the transaction: the sender, the recipient of a call, the block beneficiary, an access-list address, a precompile, or the `SequencerRegistry`'s account (see [Gas Schedule and Intrinsic Gas](#5-gas-schedule-and-intrinsic-gas)).
+  The consulted authorities are not made warm, except an authority that was already warm from the start of the transaction: the sender, the recipient of a call, the block beneficiary, an access-list address or a precompile (see [Gas Schedule and Intrinsic Gas](#5-gas-schedule-and-intrinsic-gas)).
   The witness MUST hold every authority account the simulation loaded, with the code the chain held, whether or not the list is applied (see [The Stateless Witness](#22-the-stateless-witness)).
   The skip is all or nothing, including an authority that would have fitted by itself.
   That all-or-nothing skip is Rex6's rule for this list.
@@ -957,7 +961,7 @@ The revert data:
 | 3      | State growth            | The limit or frame budget crossed, as a count of new accounts and new slots                        |
 
 The discriminants are Rex6's, so a decoder of the Rex6 revert data decodes Satin's.
-Every limit stop carries `MegaLimitExceeded`, in every dimension, and a refusal the protocol makes that is not a limit stop MUST NOT carry it: a refused volatile read reverts with `VolatileDataAccessDisabled(uint8)` (see [Volatile-Data Access Control](#13-volatile-data-access-control-and-remainingcomputegas)), the system contracts' and a keyless deployment's refusals carry their own errors (see [Native Keyless Deployment](#15-native-keyless-deployment)), a call past the call-depth limit or with a value its caller cannot fund fails with empty return data, and a halt has no return data.
+Every limit stop carries `MegaLimitExceeded`, in every dimension, and a refusal the protocol makes that is not a limit stop MUST NOT carry it: a refused volatile read whose charges are not gas detention's crossing reverts with `VolatileDataAccessDisabled(uint8)` (see [Volatile-Data Access Control](#13-volatile-data-access-control-and-remainingcomputegas)), the system contracts' and a keyless deployment's refusals carry their own errors (see [Native Keyless Deployment](#15-native-keyless-deployment)), a call past the call-depth limit or with a value its caller cannot fund fails with empty return data, and a halt has no return data.
 Kind 0, kind 1 and kind 3 name the frame budget when that budget is crossed, including when the transaction limit of the same dimension is crossed too.
 They name the transaction limit when the frame budget is not crossed, whether or not a frame budget applies to the operation (see [Resource Limits](#10-resource-limits)).
 Kind 2 names the compute limit, which the transaction's compute does not exceed (see [Gas Detention on Withheld Gas](#12-gas-detention-on-withheld-gas)).
@@ -1011,6 +1015,7 @@ A contract can revert with the same bytes, and so can a caller that re-raises th
   A regular charge beyond the frame's whole regular gas, and every other out-of-gas, MUST halt as it would without the read.
   Each part an opcode deducts from regular gas is one charge, held to the spendable part where the opcode deducts it, in the opcode's order: its static gas, then each dynamic part it deducts on its own; the first part the spendable part cannot pay decides, as the crossing when the frame's whole regular gas can pay it and as an out-of-gas when it cannot.
   An Oracle read's cold access and an interceptor's answer are each one charge instead (see Interceptor answers, below, and [Oracle Storage Reads and Hints](#16-oracle-storage-reads-and-hints)): an `SLOAD` of another contract's storage pays its static 100 and then its cold access as two charges, the Oracle's `SLOAD` its 2,100 as one.
+  For a call refused at its target's EIP-7702 delegate, the restoration and the charges of the refusal come before the crossing is decided: the call's gas is restored to what it held at the opcode, its static cost and its memory expansion are charged again, and only its cold surcharge, charged last, can cross, so the value-transfer cost the restoration gave back is not among what stays spent (see [Volatile-Data Access Control](#13-volatile-data-access-control-and-remainingcomputegas)).
 - **Precompiles.**
   The call's own regular charges come first, as any opcode's: one that crosses MUST stop the calling frame before the price is consulted (see Order at one site in [Resource Limits](#10-resource-limits)).
   A call to a precompile forwarded more regular gas than the frame's allowance MUST be decided from the precompile's price before it runs: priced within the allowance, it runs on its whole forward; priced past the allowance but within the forward, it MUST NOT run and is the crossing; priced past its whole forward, it runs on the forward and fails, as without the read.
@@ -1018,6 +1023,7 @@ A contract can revert with the same bytes, and so can a caller that re-raises th
   Every precompile of the Satin set has a price for every input: an input over an Optimism pairing or MSM size limit is priced at zero, since it is refused before any gas check, and a ModExp input is priced by its Osaka formula whatever its lengths, one over EIP-7823's bound included, since ModExp charges that price before it checks the bound.
   An input priced between the allowance and the forward that would fail a check the precompile makes after its gas check — a ModExp input over EIP-7823's bound among them — is the crossing too.
   A call refused on its caller's account runs no precompile and is answered as without the read.
+  A call runs a precompile, and is priced by it, only once it reaches the precompile's dispatch, whatever code the state holds at the address, an EIP-7702 delegation indicator included; the call opcode's earlier charges, checks and refusal come first, so with access off a call of a precompile's address whose indicator names the block beneficiary ends at or before the delegate's load and never reaches the dispatch (see [Volatile-Data Access Control](#13-volatile-data-access-control-and-remainingcomputegas)).
 - **Interceptor answers.**
   A system contract's intercepted answer that spent more regular gas than the frame's allowance, state and history gas its regular gas paid not counted, MUST be the crossing.
   The answer's whole regular spend MUST be treated as the one charge that crossed: none of it is billed, the part within the allowance included, so the stop's compute is the transaction's compute when the frame started.
@@ -1036,6 +1042,8 @@ The reference implementation has no price for one, so it runs such a precompile 
 #### Previous behavior
 
 - A read refused by `disableVolatileDataAccess()` reverts the frame immediately with `VolatileDataAccessDisabled(VolatileDataAccessType)`; `BLOCKHASH` and `BLOBHASH` are refused before their operands are checked.
+- A refused read pays nothing, not even its opcode's static gas, whatever gas the frame holds.
+  A call opcode whose target's one-hop EIP-7702 delegate is the beneficiary is refused the same way, before any of its charges: the node looks the target's account and code up first, as a best-effort read, even in a frame that could not pay the call's static gas.
 - `MegaLimitControl.remainingComputeGas()` answers from a separate compute-gas ledger with per-frame budgets of 98/100 of the caller's remaining compute, and can exceed the caller's gas.
 
 #### New behavior
@@ -1045,14 +1053,51 @@ The reference implementation has no price for one, so it runs such a precompile 
 - An opcode volatile whatever its operands — `NUMBER`, `TIMESTAMP`, `COINBASE`, `PREVRANDAO`, `GASLIMIT`, `BASEFEE`, `BLOBBASEFEE`, `SLOTNUM` and `BLOCKHASH` — MUST be refused before its operands are checked, so a `BLOCKHASH` on an empty stack is refused rather than halting on the underflow.
   A `BLOCKHASH` is refused as `BLOCKHASH` (7) whatever its operand.
 - An opcode volatile only for the account or the storage it reads — `BALANCE`, `SELFBALANCE`, `EXTCODESIZE`, `EXTCODECOPY`, `EXTCODEHASH`, the four call opcodes, `SELFDESTRUCT` and an `SLOAD` of the Oracle's storage — MUST first have every operand it takes on the stack: one that fails on its operands (a stack underflow, for example) fails as it would with access on.
-  Once its operands are there, it MUST be refused when what it reads is the beneficiary's account or the Oracle's storage, as its operands and its frame show it: the target operand of `BALANCE`, `EXTCODESIZE`, `EXTCODECOPY`, `EXTCODEHASH` or a call opcode, or a call target's one-hop EIP-7702 delegate; the executing frame's own address for `SELFBALANCE`, and for `SELFDESTRUCT`, whose target operand is checked too; the frame's storage for an `SLOAD`.
+  Once its operands are there, it MUST be refused when what its operands and its frame name is the beneficiary's account or the Oracle's storage: the target operand of `BALANCE`, `EXTCODESIZE`, `EXTCODECOPY`, `EXTCODEHASH` or a call opcode; the executing frame's own address for `SELFBALANCE`, and for `SELFDESTRUCT`, whose target operand is checked too; the frame's storage for an `SLOAD`.
   The refusal comes before the opcode charges anything and before any other check its body makes — a memory expansion, a copy, a static-context check, a value transfer, a state charge — so an `EXTCODECOPY` of the beneficiary with a large length, or a call to it the frame could not fund, is refused rather than running out of gas.
-  Either refusal comes before the opcode pushes its result, so a read on a full stack is refused rather than overflowing it.
-- A call opcode whose target's EIP-7702 delegate is the block beneficiary MUST be refused as the beneficiary's account (10): in a frame whose access is off, the opcode reads its target's account and code — not the delegate's — to find the delegate, one hop, before it charges anything, unless the target is itself the beneficiary.
-  That read lands in the transaction's read set but makes neither account warm, so a call it does not refuse is priced as it would be with access on.
-  The read is required: a failed read of the target's account or code gives the transaction no outcome (see [Transaction and Block Refusals](#21-transaction-and-block-refusals)), and is never taken as a target without a delegate.
-- A refused read MUST revert the frame with `VolatileDataAccessDisabled(accessType)` and MUST NOT consume any gas: neither the opcode's static gas nor any dynamic cost — a cold access, a copy's memory, a call's memory or value transfer.
-  The frame reverts on the gas it held when it reached the opcode, nothing having been charged, and a frame whose regular gas is below the opcode's static gas, or below what the opcode's body would charge, is refused all the same and does not run out of gas: with access off, an `EXTCODECOPY` of the beneficiary of 1 MiB on 1,000 regular gas reverts with `VolatileDataAccessDisabled(10)` keeping the 1,000.
+  A call whose target operand is not the beneficiary but whose target delegates to it follows the rule below.
+  Every refusal comes before the opcode pushes its result, so a read on a full stack is refused rather than overflowing it.
+- In a frame whose access is off, a call opcode (`CALL`, `CALLCODE`, `DELEGATECALL` or `STATICCALL`) whose target operand is not the block beneficiary MUST look nothing up before its own steps, and MUST make the steps before its delegate's load as it would with access on:
+  - its static cost, `WARM_STORAGE_READ_COST` (100), and the static-context check of a `CALL` that carries value;
+  - its memory expansion for its input and output ranges, and the value-transfer cost of a `CALL` or `CALLCODE` that carries value;
+  - the load of its target's account and code, skipped with an out-of-gas halt when the target is not warm and the regular gas left, both parts counted, is below the cold surcharge, `COLD_ACCOUNT_ACCESS − WARM_STORAGE_READ_COST` (2,900);
+  - when the target holds an EIP-7702 delegation indicator, the delegation guard, which halts the call out of gas unless the regular gas left, both parts counted, covers the target's cold surcharge, not yet deducted (2,900 for a target that was not warm, zero for one that was), plus `WARM_STORAGE_READ_COST` for the delegate's access; the static cost the call has paid is not counted again.
+
+  A call that fails at one of these steps, or is stopped at one as gas detention's crossing, has not reached its delegate's load and ends as it would with access on; it has read its target's account and code exactly when it made the target's load, which a cold load skipped for its surcharge does not make.
+  When the call reaches its delegate's load and that one-hop delegate is the block beneficiary, the load MUST be refused as the beneficiary's account (10) before anything else on the call's path: before the target's cold surcharge, any new-account state gas, the forward and the start's history gas, and before any frame starts.
+  The beneficiary's account is not loaded and nothing is marked for gas detention.
+
+- The call has made its earlier steps and read its target's account and code, which is not a volatile read, so it MUST pay its target's access and its memory expansion, and nothing else:
+  - its regular gas, the spendable and the withheld part, MUST be restored to what it held when the opcode was reached;
+  - it MUST then be charged, as regular charges and in this order: its static cost, `WARM_STORAGE_READ_COST`; its memory expansion; and, when the target was not warm, its cold surcharge, `COLD_ACCOUNT_ACCESS − WARM_STORAGE_READ_COST`, last;
+  - its memory expansion is this opcode's own growth of memory for its input and output ranges together, at the base layer's price, and nothing for a range already within the frame's memory; it is not the frame's whole memory cost.
+
+  The first two charges leave the call's gas as it was just after its memory expansion: the static cost and the memory expansion stay charged and count as compute once, as the charges made again, and the value-transfer cost of a call that carries value is given back and is not compute; the refused delegate's access is never charged.
+  Nothing before the delegate's load draws on the reservoir, so the restoration and the charges leave it as the opcode found it; the frame's end rolls back its own state and history charges as any revert or stop does.
+  The memory stays grown.
+  For these rules the target was warm when it was among EIP-2929's accessed addresses as they stood when the call reached the target's load: the addresses warm from the transaction's start — the precompiles, the block beneficiary, the addresses of the access list, the sender and the recipient, and the `SequencerRegistry`'s account (see [Gas Schedule and Intrinsic Gas](#5-gas-schedule-and-intrinsic-gas)) — and every address an earlier access warmed that no rollback has taken back, the authorities the authorization list's application warmed included; the call's own load of the target does not count.
+  No charge of that settlement can run out of gas: the static cost and the memory expansion were paid from the same gas before the delegate's load, and the delegation guard held the regular gas left after them and after the value-transfer cost to at least the cold surcharge plus `WARM_STORAGE_READ_COST`.
+  The cold surcharge MUST therefore be paid, or be gas detention's crossing when the spendable part cannot pay it, and MUST NOT halt the frame out of gas; when it is the crossing, the gas is put back to what it was just before it, so the memory expansion stays charged at the stop as well.
+  A call that carries value always pays it: the value-transfer cost it paid from its spendable gas before the load, and was given back, leaves room for the surcharge there.
+  The frame MUST revert with `VolatileDataAccessDisabled(10)`, or, when the cold surcharge is gas detention's crossing, MUST be stopped with `MegaLimitExceeded(2, limit)` instead (see [Gas Detention on Withheld Gas](#12-gas-detention-on-withheld-gas)).
+  The frame's end, the revert or the stop, leaves the target's account and code in the transaction's read set, and rolls EIP-2929's accessed addresses back to the ending frame's checkpoint, taken when that frame started: the warming the frame took, its warming of the target included, is undone, and a warmth from before the frame started stays.
+  Whenever the call makes its target's load, the load is a required read: a failed read of the target's account or code gives the transaction no outcome (see [Transaction and Block Refusals](#21-transaction-and-block-refusals)), and is never taken as a target without a delegate.
+  A precompile's address is no exception: a call of one whose state holds an indicator naming the beneficiary is refused at the delegate's load, before the precompile's dispatch, paying the warm access and its memory expansion, and the precompile does not run.
+  So a call of a delegator of the beneficiary with no input and no value is refused from a frame holding its static cost, the target's cold surcharge when the target is cold, and the delegate's warm access — 3,100 for a cold target, 200 for a warm one — paying 3,000 or 100 and handing the rest back to its caller; a frame holding less runs out of gas: holding 2,999 at a call of a cold delegator, before its target is read; holding 3,000 to 3,099, after.
+
+- Under gas detention a cold load is decided on the frame's whole regular gas and each charge on its spendable part, so near the limit a load can complete and the charge after it cross.
+  On this path that charge is the cold surcharge: such a stop reads one target and keeps at least the static cost, `WARM_STORAGE_READ_COST`, as compute, and the first can come only once the allowance, what the limit leaves the transaction, is below `COLD_ACCOUNT_ACCESS` after the call's memory expansion, so at most 29 such reads fit in a transaction's last allowance window, whatever the program.
+  The inherited call path has a tail of its own, which this rule does not change: a call whose target and non-beneficiary delegate are both cold loads both accounts before it deducts their combined charge, 5,900 after its static cost, so its window is an allowance below 6,000, and at most 59 such calls, 118 accounts, fit in it.
+  A pre-built call stack that discards each returned status reads 116 accounts in 58 calls; reusing that status as the next call's gas operand permits 59 calls and 118 account reads.
+  Both bounds are accepted: they follow from deciding a load on the whole regular gas and a charge on the spendable part, and they apply once, at the end of a transaction's allowance.
+- Against Rex6, which read the target before any charge and refused such a call for free:
+  - a call that reaches the delegate refusal pays its own memory expansion and 3,000 for a cold target or 100 for a warm one, and when the cold surcharge is gas detention's crossing only 100 and the memory expansion stay charged;
+  - a call that fails or is stopped before its target's load, or whose cold load is skipped for insufficient whole regular gas, does not read its target, which Rex6 read; a target loaded before a failed delegation guard stays in the read set;
+  - either failure ends the frame with an out-of-gas halt, which returns no data and none of the frame's gas, or with the stop, where Rex6 reverted with `VolatileDataAccessDisabled(10)` and returned the frame's gas;
+  - a cold surcharge that is gas detention's crossing ends the frame with the 68 bytes of `MegaLimitExceeded(2, limit)` instead of the 36 bytes of `VolatileDataAccessDisabled(10)`.
+- A refused read MUST revert the frame with `VolatileDataAccessDisabled(accessType)`, unless it is a call refused at its target's delegate whose cold surcharge is gas detention's crossing, which MUST stop the frame with `MegaLimitExceeded(2, limit)` instead.
+  A read refused before the opcode's body — every refusal but a call's at its target's delegate — MUST NOT consume any gas: neither the opcode's static gas nor any dynamic cost, a cold access, a copy's memory, a call's memory or value transfer.
+  Such a frame MUST revert on the gas it held when the opcode was reached — its regular gas, both the spendable and the withheld parts, and its reservoir — nothing having been charged, and a frame whose regular gas is below the opcode's static gas, or below what the opcode's body would charge, is refused all the same and does not run out of gas: with access off, an `EXTCODECOPY` of the beneficiary of 1 MiB on 1,000 regular gas reverts with `VolatileDataAccessDisabled(10)` keeping the 1,000.
   A refused read marks nothing for gas detention and asks no oracle service.
 - The error's argument MUST be ABI-encoded as a `uint8`:
 
@@ -1240,23 +1285,24 @@ An out-of-gas step halts the call, consuming its regular gas.
 #### New behavior
 
 - The system shape is tested on the transaction's own fields: type `0x0`, a call (not a creation) to an address on `MEGA_SYSTEM_TX_WHITELIST` (the Oracle).
-- Every transaction MUST read the registry when it is validated, whatever its shape and whoever sent it: the node loads the registry's account and, from the transaction's own state, its `_currentSystemAddress` slot.
-  When the registry's code hash is that of version 2.0.0, which this spec requires, and the slot holds a non-zero address, that address is the live system address.
+- Once per block, after every other pre-block step (see [System Calls and Pre-Block Calls](#18-system-calls-and-pre-block-calls)), the node MUST resolve the block's live system address from the registry, as Rex6 does: it loads the registry's account and its `_currentSystemAddress` slot from the state those steps left, compares the account's code hash with that of version 2.0.0, and takes the address the slot holds.
   The read compares the registry's code hash and MUST NOT load or run the registry's code.
-  The account and the slot MUST be warm for the rest of the transaction, as the block beneficiary is under [EIP-3651](https://eips.ethereum.org/EIPS/eip-3651), whatever the registry holds: an access to either costs every transaction the same, whatever its envelope.
-  The read is not charged and writes nothing, so committing the transaction leaves the registry as it was.
-  It lands in the transaction's returned state, and so in the block's witness, whatever the pre-block states also hold of the registry; it does not load the registry's code, but the witness carries that code as it carries the code of every account the block loads (see [The Stateless Witness](#22-the-stateless-witness)), and the Oracle's own check of its caller runs it.
+  It is not charged, writes nothing, and is committed as a read-only state of the pre-block phase, the last one, so it lands in the block's witness (see [The Stateless Witness](#22-the-stateless-witness)).
+- Every transaction of the block MUST be classified against that address, and no transaction reads the registry for its classification: no transaction finds the registry's account or slot warm unless it accessed them itself, and none carries them in its returned state for that reason.
+  A transaction that accesses the registry pays for it as for any account, cold on its first access; the Oracle's own check of its caller, which a Mega System Transaction runs, reads the registry's slot and pays for it cold.
+- A registry that is absent, holds other code, or whose `_currentSystemAddress` is zero when the block resolves the live system address MUST make the block invalid, as in Rex6.
+  The registry's deployment, which precedes the resolution, seeds a registry the state does not hold and refuses one that holds other code, so the resolution finds the registry absent or holding other code only in a state built apart from the chain.
+- A transaction executed outside block execution — a call, a gas estimate, a simulation — is classified against the address the registry names in the state it runs on, read once by the reference implementation when its EVM is built, directly off the state and outside every transaction: nothing is warmed or charged, so a gas estimate is what the transaction costs in a block.
+  Where that registry names no address, no transaction is a Mega System Transaction there.
 - A transaction of the system shape whose caller is the live system address is a Mega System Transaction.
-  A registry that is absent, holds other code, or names the zero address names no live system address, and MUST make no transaction a Mega System Transaction.
-  Satin's activation block refuses a chain whose registry is absent or holds other code (see [System Calls and Pre-Block Calls](#18-system-calls-and-pre-block-calls)), so on a chain Satin runs on those two arise only in a state built apart from the chain, such as a test's.
 - A transaction from the live system address without the system shape MUST be invalid, whatever its type, a deposit included: a transaction other than a deposit is rejected, and a deposit, which is never of the system shape, is included as a failed deposit, which runs no call (see [Transaction and Block Refusals](#21-transaction-and-block-refusals)).
   That includes a deposit carrying the source hash the promotion stamps, which a block never holds: a Mega System Transaction is promoted from its legacy envelope, and one handed to a node already promoted is a failed deposit.
   The Oracle authorizes writes on the sender alone, so no transaction from the system address other than a Mega System Transaction reaches the Oracle.
 - A transaction from any other address is never a Mega System Transaction, and is an ordinary transaction, validated and charged as a user's: that includes a transaction from an address a rotation retired, which is no longer the live system address.
 - A Mega System Transaction MUST be validated before it is promoted to a deposit, and a failure is a rejection: it MUST carry the chain's id, which a user's legacy transaction may omit and it MUST NOT; its nonce MUST be the system address's; and the system address MUST have no code, as [EIP-3607](https://eips.ethereum.org/EIPS/eip-3607) requires of any sender.
   It is then executed as a deposit, which checks no signature, nonce or fee of its own.
-- Because a role change can only be scheduled for a later block — the registry refuses an activation block at or before the current one — and is applied by that block's pre-block call, every transaction of a block reads the address the block's pre-block step left; a call to `applyPendingChanges()` inside the block, which anyone may make, finds no change due that the pre-block step did not apply.
-- A registry read the node fails to make gives the transaction no outcome (see [Transaction and Block Refusals](#21-transaction-and-block-refusals)).
+- Because a role change can only be scheduled for a later block — the registry refuses an activation block at or before the current one — and is applied by that block's pre-block call, every transaction of a block is classified against the address the block resolved after its pre-block steps; a call to `applyPendingChanges()` inside the block, which anyone may make, finds no change due that the pre-block step did not apply.
+- A registry read the node fails to make — in the resolution, in the due-change read or in the registry's deployment — is an internal error of the node, never an invalid block or a transaction's result (see [Transaction and Block Refusals](#21-transaction-and-block-refusals)).
 
 ### 18. System Calls and Pre-Block Calls
 
@@ -1281,19 +1327,37 @@ An out-of-gas step halts the call, consuming its regular gas.
   Before its transactions, a block MUST, in order:
   1. make the EIP-2935 call;
   2. make the EIP-4788 call (a block without a parent beacon block root is invalid, as EIP-4788 defines);
-  3. in the block in which Satin activates, and in no other, check the six MegaETH system contracts in address order — Oracle, High-Precision Timestamp, KeylessDeploy, MegaAccessControl, MegaLimitControl, SequencerRegistry — and then the [EIP-7997](https://eips.ethereum.org/EIPS/eip-7997) `CREATE2` factory at `0x4e59b44847b379578588920ca78fbf26c0b4956c`, as below;
-  4. read whether the `SequencerRegistry` has a role change due in the block, and if it has, call `applyPendingChanges()`.
+  3. in the block in which Satin activates, and in no other, check the [EIP-7997](https://eips.ethereum.org/EIPS/eip-7997) `CREATE2` factory at `0x4e59b44847b379578588920ca78fbf26c0b4956c`, as below;
+  4. deploy the Oracle, the High-Precision Timestamp, KeylessDeploy, MegaAccessControl and MegaLimitControl, in that order, each as a step of its own, as below;
+  5. read whether the `SequencerRegistry` has a role change due in the block, and if it has, call `applyPendingChanges()`;
+  6. deploy the `SequencerRegistry`, as below;
+  7. resolve the block's live system address from the registry (see [The Live System Address](#17-the-live-system-address)).
 
+  The genesis block, number zero, makes no EIP-2935 call and no EIP-4788 call, and its parent beacon block root MUST be zero, as those EIPs define; it makes the other steps as every block does.
+  Each step's state MUST be committed on its own, in that order, before the next step runs and before the block's first transaction, read-only entries included; so every step sees the ones before it, which Rex6, committing its steps' outcomes only after all of them had run, did not.
   The sequence reads nothing of the L1 block contract: a transaction reads it when it needs it, as [the stateless witness](#22-the-stateless-witness) lays out.
+  No step is charged, and none counts toward the block's counters.
 
-- **The activation check.**
-  Satin runs on a chain that ran the legacy forks, which installed the six MegaETH system contracts at the versions Satin runs, and whose genesis OP's tooling gave the EIP-7997 factory: Satin deploys, upgrades and seeds none of them.
-  The block in which Satin activates — Satin active at its timestamp and not at its parent's — MUST read the seven addresses, and each MUST hold exactly the code Satin expects: the Oracle and the SequencerRegistry at version 2.0.0, the other four system contracts at the bytecode Rex6 runs, and the factory's runtime, code hash `0x2fa86add0aed31f33a762c9d88e807c475bd51d0f52bd0955754b2608f7e4989`.
-  Their nonces, balances and storage are not checked.
-  An address with no account, an account without code, an older version of its contract or any other code MUST make the block invalid.
-  The reference implementation reports every such refusal as one error, `MegaBlockExecutionError::UnexpectedSystemContractCode`, which names the address, the code hash expected and the one held, and is a verdict on the block.
-  The check writes nothing: each address it reads is a read-only entry of the activation block's pre-block states, in the order above.
-  No other block reads the seven addresses before its transactions.
+- **The deployment of the system contracts.**
+  Every block deploys the MegaETH system contracts, as Rex6 does, so a chain need not have run a Rex6 block before `satinTime`: Satin may be active from genesis.
+  The Oracle, the High-Precision Timestamp, KeylessDeploy, MegaAccessControl and MegaLimitControl are deployed by one rule: an address with no account is given an account holding the contract's code; an account whose code hash is not the one Satin runs — the Oracle at version 2.0.0, the other four at the bytecode Rex6 runs — has its code replaced by it, its nonce, balance and storage kept; an account that holds it is left as it is, and recorded as a read-only entry of the step's state.
+  On a chain that ran Rex6 every one of them holds its code, so each step is a read-only entry; a chain whose Oracle is still at 1.0.0 or 1.1.0, or which lacks KeylessDeploy, MegaAccessControl or MegaLimitControl, gets them in its first Satin block.
+  The `SequencerRegistry` holds roles and histories, and is deployed by its own rule:
+  - at version 2.0.0, it is left as it is and recorded as a read-only entry;
+  - at version 1.0.0, it is migrated in place: its code replaced by version 2.0.0, its slot 13 (`_minRotationDelay`) written with the configured minimum rotation delay, and every other slot, its nonce and its balance kept;
+  - an address with no account, or an account without code, receives version 2.0.0 as a new contract, an existing account's nonce and balance kept and its storage cleared, seeded with: slots 0 and 4 (the current and initial system address) `0xA887dCB9D5f39Ef79272801d05Abdf707CFBbD1d`, slots 1 and 5 (the current and initial sequencer) the configured initial sequencer, slot 2 (the admin) the configured initial admin, slot 6 (`_initialFromBlock`) the block's number, and slot 13 the configured minimum rotation delay;
+  - any other code MUST make the block invalid: the registry's storage is never overwritten by code it was not migrated to.
+
+  The configured values are the chain configuration's bootstrap keys, the ones the Rex era introduced (see the chain configuration under [Node integrators](#node-integrators)); once the registry holds its roles, its storage, not the configuration, decides them.
+  The reference implementation reports a registry it cannot migrate, and one the resolution of the live system address refuses, as `MegaBlockExecutionError::SequencerRegistry`, a verdict on the block; its schedule validation (`MegaHardforks::validate_schedule`) refuses a schedule that activates Satin without the bootstrap values or with one of them zero when it is loaded, as the genesis parser refuses such a configuration, and a block that must seed or migrate the registry on a schedule that skipped that validation fails with `MegaBlockExecutionError::UnusableRegistryBootstrap`, an internal error of the node.
+
+- **The factory check.**
+  Satin does not deploy the EIP-7997 factory: OP's genesis tooling gives the chain one.
+  The block in which Satin activates — Satin active at its timestamp and not at its parent's — MUST read the factory's address, which MUST hold an account whose code hash is `0x2fa86add0aed31f33a762c9d88e807c475bd51d0f52bd0955754b2608f7e4989`; its nonce, balance and storage are not checked.
+  An address with no account, an account without code or any other code MUST make the block invalid.
+  The reference implementation reports the refusal as `MegaBlockExecutionError::UnexpectedSystemContractCode`, which names the address, the code hash expected and the one held, and is a verdict on the block.
+  The check writes nothing: the address it reads is a read-only entry of the activation block's pre-block states.
+  No other block reads the factory before its transactions, and a chain on which Satin is active from genesis has no activation block and checks it in no block.
 - **Oracle reads in a system call.**
   A system call MUST NOT ask the oracle service: an `SLOAD` in the Oracle's own frame during one reads the slot's value on the chain, which is loaded and priced as an Oracle read is (see [Oracle Storage Reads and Hints](#16-oracle-storage-reads-and-hints)), and records no answer.
   The pre-block calls run whatever code sits at the EIP-2935 and EIP-4788 addresses: on MegaETH's chains that is EIP-2935's and EIP-4788's own code, which reads no Oracle, and the rule keeps a system call a function of the state a stateless validator is given, which carries no service answer, whatever that code is.
@@ -1301,7 +1365,8 @@ An out-of-gas step halts the call, consuming its regular gas.
 - **Failure.**
   A pre-block call that does not succeed MUST make the block invalid, before its state is used.
   A database error the node's database declares fatal is an internal error of the node, not a verdict on the block; any other failure of a call — a non-fatal database error, another EVM error, an outcome that is not a success — makes the block invalid.
-  A database error in the activation check or in the due-change read is always an internal error.
+  A database error in the factory check, in a deployment, in the due-change read or in the resolution of the live system address is always an internal error.
+  A registry the deployment cannot migrate, and one the resolution finds absent, holding other code or naming no system address, MUST make the block invalid.
   No pre-block step reads the L1 block contract, so a node whose database cannot serve a slot of it that no transaction of the block reads executes the block: a block of deposits alone, which reads none, or a block whose transactions never read the overhead slot (5).
 
 ### 19. The Protocol's Own Transactions
@@ -1319,14 +1384,14 @@ Only a deposit carries a source hash: a transaction handed to a node with one is
 A system-originated transaction and every system call:
 
 - MUST be priced at `m = 1` and MUST NOT read a bucket capacity;
-- MUST pay no history gas, the body and deposited code included;
 - MUST NOT be stopped by any per-transaction limit or frame budget, data size, KV updates and state growth included;
 - MUST NOT be detained;
 - still have their usage counted.
 
 A system-originated transaction's usage is reported and counts towards the block's counters; the pre-block calls do not count towards the block's counters or limits.
 
-A deposit pays no history gas either (see [History Gas](#7-history-gas)), but a user's deposit is not system-originated: it is held to every per-transaction limit, detained, and priced by bucket (see [State Gas](#6-state-gas-and-salt-pricing)).
+A system call MUST pay no history gas; a system-originated transaction and a deposit MUST pay it as any transaction does (see [History Gas](#7-history-gas)).
+A user's deposit is not system-originated: it is held to every per-transaction limit, detained, and priced by bucket (see [State Gas](#6-state-gas-and-salt-pricing)).
 
 ### 20. Block Limits
 
@@ -1404,6 +1469,7 @@ A deposit MUST NOT be rejected for failing a validation check: a deposit that fa
 A read the node fails to make is not a validation check, for a deposit as for any transaction (below).
 A Mega System Transaction is a legacy transaction until it passes its own chain-id, nonce and EIP-3607 checks, so failing one of those is a rejection; once it passes them it runs as a deposit, and a check it fails after that includes it as a failed deposit.
 A failed deposit, one that fails a check, or whose execution halts, reports its whole gas limit as regular gas, and no state gas and no history gas on any ledger, the transaction's or the block's: the caller account it creates for a sender that did not exist carries no state gas, unlike the one a deposit that runs to a success or a revert creates (see [The Revert-Class Stop](#11-the-revert-class-stop)).
+Its body and calldata MUST still be reported as history bytes, including on a failure before body admission.
 That created account still counts as one of state growth, on the transaction's reported usage and on the block counter (see [Resource Limits](#10-resource-limits)).
 
 A transaction MUST be skipped for the current block, and MAY be included in a later one, when:
@@ -1450,7 +1516,7 @@ The witness is defined by what the block's execution returns and exports, and a 
   - the hash of every block `BLOCKHASH` read, which the block's execution exports;
   - the capacity of every SALT bucket the block's execution exports;
   - the oracle service's answer to every oracle read the block's included transactions recorded, in block order.
-    A transaction loads every account and slot its execution reads from the state: in its validation (the registry's account and system-address slot every transaction reads included), in its fee settlement, and in any of its frames, a frame that reverted or halted included, and a frame of a deposit that failed.
+    A transaction loads every account and slot its execution reads from the state: in its validation, in its fee settlement, and in any of its frames, a frame that reverted or halted included, and a frame of a deposit that failed.
     A failed frame's writes are taken back, not its reads; a failed deposit takes back everything but its sender's nonce bump and mint, not its reads; and a validator re-executing the transaction makes the same reads in the same frames.
     The one exception is the L1 block info the transaction is priced against and the footprint gas scalar it is held to, which are read outside its journal and which the block reports with the first transaction that read them (see the L1 block info, below).
     A read that gas or a limit skipped loads nothing (see the reads a validator makes again, below), except an authority account the authorization preflight consulted: that account is loaded whether or not the list is applied (see [Resource Limits](#10-resource-limits)).
@@ -1460,8 +1526,8 @@ The witness is defined by what the block's execution returns and exports, and a 
     A slot of an account the chain does not hold before the block is not recorded: such an account has no storage, and a validator MUST answer every slot of it with zero without looking it up.
     The code in particular is not the code a returned state carries: a transaction that replaces an account's code — an EIP-7702 authority delegated anew — is admitted against the code the chain held, and its returned state carries the code it wrote.
 - **What the block reads, and where it lands.**
-  A transaction's loads are in its returned state: its sender, its recipient or created address, every account and every slot any of its frames loads, the fee recipients, the registry's account and system-address slot every transaction reads, every authority account the authorization preflight consulted, and a keyless deployment's signer and deploy address; the state names an account whether or not the load brought its code.
-  The pre-block phase's reads land in the states it commits, one per step, in order: the two EIP calls' states, in Satin's activation block each predeploy's read-only entry, the registry's pending slots the due-change decision read, and the `applyPendingChanges()` call's state.
+  A transaction's loads are in its returned state: its sender, its recipient or created address, every account and every slot any of its frames loads, the fee recipients, every authority account the authorization preflight consulted, and a keyless deployment's signer and deploy address; the state names an account whether or not the load brought its code.
+  The pre-block phase's reads land in the states it commits, one per step, in order: the two EIP calls' states, in Satin's activation block the factory's read-only entry, each system contract's deployment — the account it installed or rewrote, or the read-only entry of one it left as it was —, the registry's account and pending slots the due-change decision read, the `applyPendingChanges()` call's state when the call is made, the registry's deployment, and last the registry's account and `_currentSystemAddress` slot the resolution of the live system address read.
   Each state is committed whole, read-only entries included, and a node MUST collect the states as they are committed: what a commit keeps of a state is only what it changed, which holds none of the read-only entries.
   `BLOCKHASH` reads the chain's history outside the journal and its reads are exported; a SALT bucket's capacity and the oracle service's answer are read outside the database and are exported or recorded.
   The header, the chain configuration — the schedule — the parent hash, the parent beacon block root, the extra data and the parent block's timestamp are inputs a validator is given beside the witness.
@@ -1481,7 +1547,7 @@ The witness is defined by what the block's execution returns and exports, and a 
   A failed read is reported as [Transaction and Block Refusals](#21-transaction-and-block-refusals) classifies it: the fee computation's as a read of the transaction's own execution, the footprint scalar's as a read block execution makes for the transaction outside its execution, always an internal error.
   The reads change nothing: the entries are not written.
 - **The reads a validator makes again.**
-  A read that gas or a limit skipped is skipped again on replay, so the witness need not carry it: a cold `SLOAD` or account load with less gas than the cold surcharge, other than an Oracle read, which is made before its cold access is charged (see [Oracle Storage Reads and Hints](#16-oracle-storage-reads-and-hints)), a `BLOCKHASH` of the current block or outside the last 256 blocks, a read a frame whose volatile-data access is off is refused, a keyless deployment's reads after a rule refused it, and the bucket of a charge a system-originated transaction or a system call makes.
+  A read that gas or a limit skipped is skipped again on replay, so the witness need not carry it: a cold `SLOAD` or account load with less whole regular gas than the cold surcharge, other than an Oracle read, which is made before its cold access is charged (see [Oracle Storage Reads and Hints](#16-oracle-storage-reads-and-hints)), a `BLOCKHASH` of the current block or outside the last 256 blocks, a read a frame whose volatile-data access is off is refused (a call's completed read of its target's account and code is no refused read: it stays in the witness when the call's EIP-7702 delegate is then refused, and when the target's cold surcharge is then gas detention's crossing), a keyless deployment's reads after a rule refused it, and the bucket of a charge a system-originated transaction or a system call makes.
 - **The SALT buckets.**
   Block execution exports the set of SALT buckets the SALT environment answered with a valid capacity during the block, emptied when the block starts and accumulated over everything executed for the block.
   A bucket is in the set once it was answered with a valid capacity, whether or not the transaction that asked is in the block: a candidate the builder executed and dropped leaves its buckets in the set, which a validator does not need.
@@ -1538,6 +1604,7 @@ A destruction that moves no balance creates no beneficiary.
 EIP-8037 leaves that state gas charged, and Rex6 refunded none of the storage gas and took none of those records back.
 A transaction that reads volatile data is still held to its compute at the read plus the cap (20,000,000), but until a regular charge needs gas past that limit, `GAS`, call forwarding and state or history charges see its whole gas, and the stop is a revert of the frame that makes that charge.
 `VolatileDataAccessDisabled` can carry the value 12 (`SLOTNUM`), which a Solidity handler must decode as a `uint8`.
+A call refused, with access off, at a target that delegates to the beneficiary now pays that target's access (3,000 cold, 100 warm) and its memory expansion, where Rex6 charged nothing (see [Volatile-Data Access Control](#13-volatile-data-access-control-and-remainingcomputegas)).
 
 Every movement of value to another account now emits a `Transfer` log from `0xff…fe`, which indexers see in receipts beside the contracts' own logs; a `CALLCODE`, a call to oneself, a deposit's mint and a self-destruct to oneself emit none.
 
@@ -1571,7 +1638,8 @@ A node, a stateless validator and a replay tool must agree on everything below, 
   Whether a recipient, a created account or an authority is new is the state's to say: EIP-2780 charges it when the transaction runs, and a gas limit that cannot pay it runs out of gas rather than being refused.
   The history of the write records a transaction's start makes is charged when it runs too: one record for the recipient of its value (none for a recipient the transaction has changed already: the sender itself, or an authority it applied) or the account it creates, and one for each authority that applies other than the sender.
   So the least gas limit validation admits is not what a transaction needs: at that gas limit a transfer of value to another account runs out of gas on its recipient's record, and one to a new account needs that account's state gas as well.
-  A deposit and a Mega System Transaction pay no history gas; a pool that recognizes the latter, and refuses a transaction from the live system address without the system shape, needs the live system address from the state.
+  Deposits and Mega System Transactions MUST cover their body's history gas in the intrinsic check; a deposit that fails it MUST be included as a failed deposit.
+  A pool that recognizes a Mega System Transaction, and refuses a transaction from the live system address without the system shape, needs the live system address from the state.
   That address changes only in a block's pre-block step and then holds for the whole block, so a pool reads it again for every block, from the state after that block's pre-block changes.
   An address read from another state treats the old system address's transactions as the protocol's and the new one's as a user's, or the reverse.
   A deposit is never refused for failing validation: one that fails validation is included as a failed deposit, which bumps its sender's nonce and uses its whole gas limit.
@@ -1583,28 +1651,32 @@ A node, a stateless validator and a replay tool must agree on everything below, 
   A block admits only deposits when a MegaETH fork, Satin itself, or an Optimism fork at or after Jovian in the Optimism fork order, is active at the block's timestamp and not at the parent's (see [Base Layer](#1-base-layer-optimism-karst-ethereum-osaka)); a user transaction in such a block is refused before it runs.
   A block builder and a validator MUST give block execution the MegaETH schedule, since a node that knows only the Optimism schedule cannot tell that Satin activates, and a stateless validator is given the parent block's timestamp beside the witness.
   Both are decided once, when the block starts.
-  A block with no parent, such as a genesis block, is executed with an explicit absence of the parent timestamp: block execution applies neither rule to it.
-  It accepts the absence only where no parent could change that, which is where every fork the schedule activates is active from genesis, or none is active at the block yet.
-  Where a fork the schedule activates after genesis is active at the block, whether it activates in the block depends on the parent's timestamp, and block execution refuses the block with an error that names the missing timestamp instead of running it as one that admits non-deposit transactions.
+  The genesis block, number zero, has no parent, and block execution applies neither rule to it: a fork active at its timestamp is active from genesis, so a chain on which Satin is active from genesis has no Satin activation block.
+  Any other block executed with an explicit absence of the parent timestamp is accepted only where no parent could change the rules, which is where every fork the schedule activates is active from timestamp zero, or none is active at the block yet.
+  Where a fork the schedule activates after timestamp zero is active at the block, whether it activates in the block depends on the parent's timestamp, and block execution refuses the block with an error that names the missing timestamp instead of running it as one that admits non-deposit transactions.
   An implementation MUST therefore supply the parent timestamp for every block that has a parent, the block right after genesis included, since that block can be the activation block.
-  Satin's activation block is told apart from the other deposit-only blocks, since an Optimism fork's activation block admits only deposits too: only Satin's makes the pre-block step check the predeploys (see [System Calls and Pre-Block Calls](#18-system-calls-and-pre-block-calls)).
-  A block that is not Satin's activation block checks no predeploy, and runs on a state that may lack them.
+  Satin's activation block is told apart from the other deposit-only blocks, since an Optimism fork's activation block admits only deposits too: only Satin's makes the pre-block step check the EIP-7997 factory (see [System Calls and Pre-Block Calls](#18-system-calls-and-pre-block-calls)).
+  A block that is not Satin's activation block does not check the factory.
 - **The L1 block information.**
   Block execution reads the L1 block contract at the block's first non-deposit transaction other than a Mega System Transaction, after the block's L1 attributes deposit wrote it, unless the node handed it the information for this block beforehand, which it then prices with, the footprint gas scalar aside; a node that hands it over must hand over what that deposit writes, so that the block's transactions are priced as [Base Layer](#1-base-layer-optimism-karst-ethereum-osaka) requires.
   What it reports of the contract with the first transaction that read it is what a node that handed nothing over reads, whether or not this node handed the information over, since a validator re-executing the block reads it (see [The Stateless Witness](#22-the-stateless-witness)).
   The first transaction is the first the block commits, whichever executor executed it and in whatever order the builder executed its candidates: an outcome carries what it read of the contract beside its returned state, and the executor that commits it reports what that executor has not reported yet, and nothing it has.
 - **The witness.**
   A node builds a block's witness from the states the block commits, in order: each pre-block step's state, committed on its own, read-only entries included, then each included transaction's returned state (see [The Stateless Witness](#22-the-stateless-witness)).
-  The reference implementation commits them through the database's commit, so a hook on that commit — revm's `State::set_state_hook` — receives each state whole; the block's transitions and bundle keep only what a state changed, and a witness taken from them misses the activation block's predeploys, the registry's pending slots and the L1 block info.
+  The reference implementation commits them through the database's commit, so a hook on that commit — revm's `State::set_state_hook` — receives each state whole; the block's transitions and bundle keep only what a state changed, and a witness taken from them misses the activation block's factory, the system contracts every deployment left as they were, the registry's pending slots, the resolution's read and the L1 block info.
   Block execution hands the pre-block states to nothing else.
 - **An account the state does not hold.**
   The destruction table gives an account's leaf back only when no account stood at the address at the transaction's start (see [The destruction table](#the-destruction-table)), and the node's state says which.
   An address the state holds no account for must be answered as no account — `None` from revm's `Database::basic` in the reference implementation — never as an empty account, which is a leaf the state holds.
   A state that answers an empty account for an address it does not hold gives that leaf back to no destruction, and executes a different chain.
 - **The predeploys.**
-  Satin runs on a chain that ran the legacy forks: Rex5 deployed the SequencerRegistry and upgraded the Oracle to 2.0.0, and Rex6 upgraded the SequencerRegistry to 2.0.0, so the chain holds the six system contracts at the versions Satin runs, and OP's genesis tooling gave it the EIP-7997 factory.
-  Satin's activation block checks that they are there and is invalid otherwise (see [System Calls and Pre-Block Calls](#18-system-calls-and-pre-block-calls)); it deploys, upgrades and seeds nothing, so a chain must have run a Rex6 block before `satinTime`.
-  The registry's roles are what it holds: the legacy forks' own configuration keys (`rex5InitialSequencer`, `rex5InitialAdmin`, `rex6MinRotationDelay`) seeded it, and Satin reads none of those keys.
+  Every Satin block deploys the six system contracts (see [System Calls and Pre-Block Calls](#18-system-calls-and-pre-block-calls)): on a chain that ran Rex6 each is already there at the version Satin runs and is only read, and a chain that lacks one, or holds an older version, gets it in its first Satin block, the `SequencerRegistry` seeded from the configuration's bootstrap values or migrated from version 1.0.0.
+  OP's genesis tooling gives the chain the EIP-7997 factory, which Satin's activation block checks and nothing deploys.
+  The registry's roles are what it holds once it is deployed: the bootstrap values seed only a registry the state does not hold.
+- **The live system address outside block execution.**
+  An EVM a node builds outside block execution — for a call, a gas estimate or a trace — classifies its transactions against the live system address the registry holds in the state it runs on.
+  The reference implementation reads it once, when the EVM is built (`MegaContext` reads it off its database with `system::live_system_address`), directly and outside every transaction, so the read is neither warmed nor charged and an estimate is what the transaction costs in a block; a node that already knows the address builds the EVM given it (`MegaContext::new_with_system_address`), which then reads nothing for it, and block execution hands in the one it resolved after the block's pre-block steps.
+  A read the database cannot serve when the EVM is built is made again by the next transaction, which fails with the database's error if it fails again.
 - **Committing a delayed outcome.**
   A builder that executes a transaction and commits it after other commits MUST commit through the checked commit (`commit_transaction_outcome`), which refuses an outcome whose sender's nonce or balance another commit moved (see [Block Limits](#20-block-limits)).
   The refusal is an internal error of the node (`MegaBlockExecutionError::StaleOutcome`), not a verdict on the block or the transaction: the builder executes the transaction again.
@@ -1619,15 +1691,20 @@ A node, a stateless validator and a replay tool must agree on everything below, 
   A node must read that report, and must not infer a stop from the output alone.
   A stop a caller caught produced no result of the transaction's own frame: the transaction reports none, and it can succeed, so a node maps an RPC error or a builder's handling of a stopped transaction from that report alone (`LimitStop::from_result`, or `MegaTransactionOutcome::limit_stop`), never from the output bytes.
 - **The chain configuration.**
-  A genesis file's `config` object carries Satin as one key beside the other forks'.
+  A genesis file's `config` object schedules Satin by one key beside the other forks', and a configuration that schedules Satin MUST also carry the `SequencerRegistry`'s bootstrap values under the keys the Rex era introduced.
 
-  | Key         | Value                                |
-  | ----------- | ------------------------------------ |
-  | `satinTime` | The activation timestamp, an integer |
+  | Key                    | Value                                                              |
+  | ---------------------- | ------------------------------------------------------------------ |
+  | `satinTime`            | The activation timestamp, an integer                               |
+  | `rex5InitialSequencer` | The sequencer a new registry is seeded with, a non-zero address    |
+  | `rex5InitialAdmin`     | The admin a new registry is seeded with, a non-zero address        |
+  | `rex6MinRotationDelay` | The registry's minimum rotation delay, a non-zero number of blocks |
 
-  Satin carries no parameter.
+  A node MUST refuse a configuration that schedules Satin and lacks one of the three bootstrap keys or gives one as zero; the reference parser names the key.
+  An address is a JSON string of forty hexadecimal digits after `0x`, and the delay a JSON number.
+  The bootstrap values are read only by the registry's deployment (see [System Calls and Pre-Block Calls](#18-system-calls-and-pre-block-calls)); a configuration that does not schedule Satin needs none of them.
+  Satin carries no parameter of its own.
   No key names a limit: the limits are the spec's (see [Resource Limits](#10-resource-limits)).
-  No key names the `SequencerRegistry`'s roles either: the registry is the one the legacy forks left (see [System Calls and Pre-Block Calls](#18-system-calls-and-pre-block-calls)).
   A key that starts with `satin`, in any ASCII letter case, and is not `satinTime` exactly is refused, so a file written against an earlier version of the format, which named the registry's roles (`satinInitialSystemAddress`, `satinInitialSequencer`, `satinInitialAdmin`, `satinMinRotationDelay`), `satinInitialFromBlock` or the limits, does not load, whether or not it carries `satinTime`.
   A key given twice is read as its last copy by every reader, whether it is handed the object's text or first parses the file into a JSON value, as the reference CLI and a node do, which keeps the last copy alone.
   `satinTime` is a JSON number up to 2^64 − 1.
@@ -1645,7 +1722,9 @@ A node, a stateless validator and a replay tool must agree on everything below, 
 Satin changes nothing about blocks under earlier specs: a node replaying history resolves each block's spec from its timestamp and applies that spec's rules.
 Satin is a restatement rather than a delta, so a Rex6 rule this page does not carry over (the compute-gas limit, the storage-gas formulas, the sandbox, the cold first touch of preload-warm addresses) does not apply to Satin blocks.
 
-The six system contracts keep their Rex6 bytecode and ABI, but for the four errors `IKeylessDeploy` no longer declares; Satin deploys and upgrades none of them, and its activation block refuses a chain that does not hold them, and the EIP-7997 factory, at the versions Rex6 left.
+The six system contracts keep their Rex6 bytecode and ABI, but for the four errors `IKeylessDeploy` no longer declares; every Satin block deploys them as Rex6 does, so a chain that ran Rex6 finds each already there, and its activation block refuses a chain that does not hold the EIP-7997 factory.
+A chain that skipped Rex6's deployments gets the missing contracts, and the Oracle at 2.0.0, in its first Satin block: such a block's post-state differs from one that only reads them.
+As in Rex6, the live system address is resolved once per block and no transaction finds the `SequencerRegistry` warm for its classification: a transaction that accesses the registry pays for it cold on its first access, the Oracle's check of a Mega System Transaction's caller included.
 A transaction from the live system address without the system shape is refused, as in Rex6, now as an invalid transaction: a deposit from the system address, which Rex6 refused with an error that left its block unexecutable, is a failed deposit, so the engine no longer depends on the L1 portal refusing deposits from each system address a rotation installs.
 
 The per-transaction and block limits and the detention caps are protocol values fixed by the spec, not chain configuration, so every node executing any chain holds its Satin blocks to the same ones: data size at 13,107,200 bytes, KV updates at 500,000, state growth at 1,000, and the detention caps at 20,000,000 each.

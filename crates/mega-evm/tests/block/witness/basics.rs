@@ -40,9 +40,9 @@ pub(crate) fn write_gas() -> u64 {
 }
 
 /// A block whose transactions write two fresh slots: the replay reads only the record and
-/// produces the same block, and the exported buckets are the two slots'. The block is not Satin's
-/// activation block, so its pre-block phase reads no predeploy and the record holds none that no
-/// transaction reached.
+/// produces the same block, and the exported buckets are the two slots'. The block's deployment of
+/// the system contracts reads the Oracle's account, which holds the Oracle's code, by its code
+/// hash: the record holds the account and not its code, which no load asked for.
 #[test]
 fn test_a_block_of_writes_replays_from_its_witness() {
     let mut db = common::database();
@@ -57,11 +57,10 @@ fn test_a_block_of_writes_replays_from_its_witness() {
     if !common::state_is_free() {
         assert_eq!(run.bucket_ids.len(), 2, "one bucket per fresh slot");
     }
-    assert_eq!(
-        run.record.accounts.get(&mega_evm::system::ORACLE_CONTRACT_ADDRESS),
-        None,
-        "nothing asked about the Oracle's account"
-    );
+    let oracle = run.record.accounts.get(&mega_evm::system::ORACLE_CONTRACT_ADDRESS);
+    let oracle = oracle.expect("the deployment read the Oracle").as_ref().expect("it is there");
+    assert_eq!(oracle.code_hash, mega_evm::system::ORACLE_CONTRACT_CODE_HASH);
+    assert!(!run.record.codes.contains_key(&oracle.code_hash), "nothing loaded its code");
     assert!(run.record.codes.values().all(|code| !code.is_empty()), "code travels by hash");
     assert_eq!(
         replay.replayed.record, run.record,
@@ -269,8 +268,9 @@ fn test_the_reads_of_a_deposit_that_failed_are_in_the_witness() {
     assert_eq!(tx.gas.gas_used, gas_limit, "a failed deposit uses its whole gas limit");
     assert_eq!(
         (tx.gas.regular, tx.gas.state, tx.gas.history, tx.gas.history_bytes),
-        (gas_limit, 0, 0, 0),
+        (gas_limit, 0, 0, mega_evm::TX_BODY_SIZE),
         "all of it regular gas: the account it created carries no state gas"
     );
     assert_eq!((run.gas.state, run.gas.history), (0, 0), "nor does the block count any");
+    assert_eq!(run.gas.history_bytes, mega_evm::TX_BODY_SIZE, "the block keeps the body's bytes");
 }

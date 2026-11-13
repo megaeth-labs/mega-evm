@@ -17,12 +17,8 @@
 //! absorbed. Later changes (the
 //! limits) add their own.
 //!
-//! Every Satin transaction also reads the live system address when it is validated, which leaves
-//! the `SequencerRegistry`'s account and its system-address slot in its returned state as a
-//! read-only entry that op-revm's has no counterpart for. A commit skips an account nothing
-//! touched, so the entry changes no committed state; each comparison of the two states takes it
-//! out first ([`take_system_address_read`]), which fails when the entry is missing or is more than
-//! the read, so the difference is pinned on every case rather than absorbed.
+//! No Satin transaction reads the `SequencerRegistry` for its classification: the live system
+//! address is resolved outside every transaction, so the two returned states compare whole.
 //!
 //! SALT pricing multiplies a state gas charge by the capacity of the bucket it lands in, and
 //! op-revm has no SALT to read. Every baseline case runs without a SALT environment, where every
@@ -38,8 +34,8 @@ use mega_evm::{
     },
     satin_gas_params,
     test_utils::{
-        note_price_guard, op_transaction, take_system_address_read, transfer_log,
-        zero_fee_l1_block_info, BytecodeBuilder, MemoryDatabase,
+        note_price_guard, op_transaction, transfer_log, zero_fee_l1_block_info, BytecodeBuilder,
+        MemoryDatabase,
     },
     MegaContext, MegaEvm, MegaSpecId, MegaTransactionOutcome, TX_BODY_SIZE, WRITE_RECORD_SIZE,
 };
@@ -133,10 +129,11 @@ fn both_evms(
 /// against the EIP-7623 floor, so a floor that binds op-revm's receipt need not bind Satin's;
 /// the whole `ResultGas` is still compared, with the two fields history moves rebuilt.
 ///
-/// The state is compared with the read of the live system address taken out, which holds because
-/// these transactions carry no gas price: a priced transaction pays the extra gas out of the
-/// sender's balance ([`test_fees_match_op_revm`]).
-fn assert_same_but_history(mega: &MegaTransactionOutcome, op: &Settled) {
+/// The state is compared whole, which holds because these transactions carry no gas price: a
+/// priced transaction pays the extra gas out of the sender's balance ([`test_fees_match_op_revm`]).
+/// No Satin transaction reads the live system address, so the state carries no entry op-revm's
+/// lacks.
+pub(super) fn assert_same_but_history(mega: &MegaTransactionOutcome, op: &Settled) {
     let history = mega.gas.history;
     assert!(history >= body_history(0), "every Satin transaction pays for its own body");
     let (m, o) = (mega.result.gas(), op.result.gas());
@@ -158,14 +155,7 @@ fn assert_same_but_history(mega: &MegaTransactionOutcome, op: &Settled) {
     assert_eq!(mega.result.logs(), op.result.logs(), "logs");
     assert_eq!(mega.result.output(), op.result.output(), "output");
     assert_eq!(mega.result.is_success(), op.result.is_success(), "success");
-    assert_eq!(but_the_system_address_read(&mega.state), op.state, "state");
-}
-
-/// `state` with the read of the live system address every Satin transaction makes taken out.
-fn but_the_system_address_read(state: &EvmState) -> EvmState {
-    let mut state = state.clone();
-    take_system_address_read(&mut state);
-    state
+    assert_eq!(mega.state, op.state, "state");
 }
 
 /// Asserts the two outcomes agree field by field, then as a whole so a field added later is
@@ -591,8 +581,8 @@ fn test_an_intercepted_call_diverges_from_op_revm() {
 
 /// A legacy transaction from the system address is a fee-free deposit on Satin, where op-revm
 /// sees an ordinary transaction and refuses it for want of a balance to pay with. Satin knows
-/// the address from the `SequencerRegistry`, which the transaction's validation reads: its state
-/// carries the read, which op-revm has no reason to make.
+/// the address from the `SequencerRegistry`, which the EVM read when it was built, outside the
+/// transaction: the transaction's state carries no read of the registry.
 #[test]
 fn test_a_system_address_transaction_diverges_from_op_revm() {
     use mega_evm::system::{
@@ -626,8 +616,8 @@ fn test_a_system_address_transaction_diverges_from_op_revm() {
         "the sender pays no fee and needed no balance",
     );
     assert!(
-        mega_outcome.state.get(&SEQUENCER_REGISTRY_ADDRESS).is_some_and(|a| !a.is_touched()),
-        "the read of the live system address is a read-only entry of the transaction's state",
+        !mega_outcome.state.contains_key(&SEQUENCER_REGISTRY_ADDRESS),
+        "the transaction does not read the live system address",
     );
 
     let error = op.transact(op_transaction(tx)).expect_err("op-revm wants a fee");
@@ -656,7 +646,7 @@ fn test_the_created_deposit_caller_diverges_from_op_revm() {
     let (mut mega, mut op, cfg) = both_evms(MemoryDatabase::default(), block());
     assert_satin_cfg(&cfg);
 
-    let mega_outcome = mega.transact(OpTx(deposit(tx.clone()))).unwrap();
+    let mega_outcome = mega.execute_transaction(OpTx(deposit(tx.clone()))).unwrap();
     let op_outcome = op.transact(deposit(tx)).unwrap();
 
     assert!(mega_outcome.result.is_success() && op_outcome.result.is_success());
@@ -669,6 +659,12 @@ fn test_the_created_deposit_caller_diverges_from_op_revm() {
         op_outcome.result.gas().state_gas_spent_final(),
         0,
         "op-revm charges nothing for it",
+    );
+    assert_eq!(mega_outcome.gas.history, body_history(0));
+    assert_eq!(mega_outcome.gas.history_bytes, TX_BODY_SIZE);
+    assert_eq!(
+        mega_outcome.result.gas().total_gas_spent(),
+        op_outcome.result.gas().total_gas_spent() + account_state_gas() + body_history(0)
     );
 }
 
@@ -843,7 +839,7 @@ fn test_a_crowded_salt_bucket_is_where_satin_leaves_op_revm() {
     // moves the gas ledgers and nothing else.
     assert_eq!(mega.result.logs(), op.result.logs(), "logs");
     assert_eq!(mega.result.output(), op.result.output(), "output");
-    assert_eq!(but_the_system_address_read(&mega.state), op.state, "state");
+    assert_eq!(mega.state, op.state, "state");
 }
 
 /// A contract whose constructor destroys the account it is creating: Satin's destruction table
@@ -868,7 +864,7 @@ fn test_a_creation_that_destroys_itself_diverges_from_op_revm() {
     let (mega, op, cfg) = run_both(db, tx);
     assert_satin_cfg(&cfg);
     assert!(mega.result.is_success() && op.result.is_success(), "{:?}", mega.result);
-    assert!(but_the_system_address_read(&mega.state)[&CALLEE.create(0)].is_selfdestructed());
+    assert!(mega.state[&CALLEE.create(0)].is_selfdestructed());
 
     // The one difference, and its exact size.
     let (m, o) = (mega.result.gas(), op.result.gas());
@@ -884,7 +880,7 @@ fn test_a_creation_that_destroys_itself_diverges_from_op_revm() {
     assert_eq!(mega.gas.history, body_history(0) + history(WRITE_RECORD_SIZE));
     assert_eq!(mega.result.logs(), op.result.logs(), "logs");
     assert_eq!(mega.result.output(), op.result.output(), "output");
-    assert_eq!(but_the_system_address_read(&mega.state), op.state, "state");
+    assert_eq!(mega.state, op.state, "state");
 }
 
 /// A transaction that runs out of gas in the runtime gas phase, before its first frame — here on
@@ -940,7 +936,7 @@ fn test_an_out_of_gas_before_the_first_frame_matches_op_revm() {
     assert_eq!(mega.gas.state, 0, "the account was not created");
     // With no gas price the fee is nothing, so the two states are the same: the sender's nonce
     // moved and nothing else.
-    assert_eq!(but_the_system_address_read(&mega.state), op.state, "state");
+    assert_eq!(mega.state, op.state, "state");
     assert_eq!(mega.state[&CALLER].info.nonce, 1);
 }
 

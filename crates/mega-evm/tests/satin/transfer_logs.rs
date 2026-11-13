@@ -1127,7 +1127,7 @@ fn test_a_creation_onto_an_occupied_address_fails_on_the_collision() {
 
 /// A deposit's value moves in its first frame and is logged there, from the depositor to the
 /// recipient; its mint is credited before any frame and is logged nowhere. The log is counted in
-/// the data size like any other, though a deposit pays no history, and a user's deposit is held
+/// the data size like any other, but is exempt from history, and a user's deposit is held
 /// to the data-size limit at it.
 #[test]
 fn test_a_deposits_value_is_logged_and_its_mint_is_not() {
@@ -1152,7 +1152,14 @@ fn test_a_deposits_value_is_logged_and_its_mint_is_not() {
         },
         "the recipient's record and the log; the deposit creates its depositor",
     );
-    assert_eq!((outcome.gas.history, outcome.gas.history_bytes), (0, 0), "a deposit pays none");
+    assert_eq!(
+        (outcome.gas.history, outcome.gas.history_bytes),
+        (
+            crate::common::history(body) + crate::common::history(WRITE_RECORD_SIZE),
+            body + WRITE_RECORD_SIZE
+        ),
+        "the body and recipient record pay history; the transfer log does not"
+    );
 
     let minted = execute_under(
         db(),

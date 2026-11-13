@@ -469,10 +469,10 @@ fn test_the_body_carries_the_writes_every_transaction_makes() {
     assert_eq!(paid.usage.write_records, 0, "and none of them is recorded again");
 }
 
-/// A deposit credits no fee recipient at all, and is exempt from history besides: it pays for
-/// neither the body nor anything the body carries.
+/// A deposit pays for the fixed body, including its bound on fee writes, even though it credits
+/// no fee recipient.
 #[test]
-fn test_a_deposit_pays_for_none_of_the_bodys_writes() {
+fn test_a_deposit_pays_for_the_bodys_fixed_writes() {
     if runs_at_measurement_prices() {
         return;
     }
@@ -481,7 +481,7 @@ fn test_a_deposit_pays_for_none_of_the_bodys_writes() {
     let outcome = execute(funded().account_code(CALLEE, Bytes::new()), tx);
 
     assert!(outcome.result.is_success(), "{:?}", outcome.result);
-    assert_eq!(outcome.gas.history, 0);
+    assert_eq!(outcome.gas.history, TX_BODY_SIZE * COST_PER_HISTORY_BYTE);
     assert_eq!(outcome.usage.write_records, 0);
 }
 

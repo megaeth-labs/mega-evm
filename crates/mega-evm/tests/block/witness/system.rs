@@ -67,7 +67,11 @@ fn test_a_rotation_and_a_system_transaction_replay() {
     let run = &replay.recorded;
     assert!(applies_pending_changes(&run.pre_block), "the change was applied");
     assert!(run.tx(0).result.is_success(), "{:?}", run.tx(0).result);
-    assert_eq!(run.tx(0).gas.history, 0, "the protocol's own transaction pays no history");
+    assert_eq!(
+        run.tx(0).gas.history,
+        common::body_history(36),
+        "the Oracle read pays body history"
+    );
     assert!(run.refusal(1).contains("lack of funds"), "{}", run.refusal(1));
     assert_eq!(run.receipts.len(), 1);
     assert!(run.bucket_ids.is_empty(), "a system transaction prices at the minimum bucket");
@@ -84,12 +88,13 @@ fn test_a_rotation_and_a_system_transaction_replay() {
     );
 }
 
-/// A system transaction in a block with nothing due reads the live address out of the witness:
-/// the registry's account and its one slot are in the record and in the transaction's own state,
-/// and the registry's code is not among the block's reads: the slot is read without it, so no
-/// load the block made asked for it. That is what execution loads, not what a witness holds: a
-/// witness holds the code the chain held for every account the block loads, the registry's
-/// included, and this test asserts only the loads.
+/// A system transaction in a block with nothing due is classified against the live address the
+/// block resolved: the registry's account and its one slot are in the record, read by the
+/// resolution, the last pre-block state, and not in the transaction's own state, and the
+/// registry's code is not among the block's reads: the slot is read without it, so no load the
+/// block made asked for it. That is what execution loads, not what a witness holds: a witness holds
+/// the code the chain held for every account the block loads, the registry's included, and this
+/// test asserts only the loads.
 ///
 /// Rule [S17.4]. Expected values `independent`: the registry's code hash is computed here from the
 /// bytecode the test put in the chain.
@@ -101,10 +106,15 @@ fn test_a_system_transaction_reads_the_live_address_from_the_witness() {
     let run = &replay.recorded;
     assert!(run.tx(0).result.is_success(), "{:?}", run.tx(0).result);
     assert!(run.record.storage.contains_key(&(SEQUENCER_REGISTRY_ADDRESS, CURRENT_SYSTEM_ADDRESS)));
-    let registry = run.tx(0).state.get(&SEQUENCER_REGISTRY_ADDRESS).expect("the registry is read");
+    assert!(
+        !run.tx(0).state.contains_key(&SEQUENCER_REGISTRY_ADDRESS),
+        "the transaction does not read the registry"
+    );
+    let resolution = run.pre_block.last().expect("the pre-block states");
+    let registry = resolution.get(&SEQUENCER_REGISTRY_ADDRESS).expect("the resolution");
     assert!(
         registry.storage.contains_key(&CURRENT_SYSTEM_ADDRESS),
-        "the slot is in the transaction's state"
+        "the slot is in the resolution's state"
     );
     assert!(
         !run.record.codes.contains_key(&keccak256(SEQUENCER_REGISTRY_CODE)),

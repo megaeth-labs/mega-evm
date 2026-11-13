@@ -106,6 +106,17 @@ pub struct WitnessKeys {
 }
 
 impl WitnessKeys {
+    /// Adds the keys of the read of the live system address an EVM built outside block execution
+    /// makes off its database when it is built: the `SequencerRegistry`'s account and its
+    /// `_currentSystemAddress` slot. A transaction run on its own reports the read in no state,
+    /// as a block reports it in its resolution's pre-block state, so a witness built for it from
+    /// its returned state alone carries the read through these keys.
+    pub fn add_system_address_read(&mut self) {
+        use crate::system::{storage_slots::CURRENT_SYSTEM_ADDRESS, SEQUENCER_REGISTRY_ADDRESS};
+        self.accounts.insert(SEQUENCER_REGISTRY_ADDRESS);
+        self.slots.insert((SEQUENCER_REGISTRY_ADDRESS, CURRENT_SYSTEM_ADDRESS));
+    }
+
     /// Adds every account and slot `state` names.
     pub fn add_state(&mut self, state: &EvmState) {
         for (address, account) in state {

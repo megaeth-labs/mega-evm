@@ -48,7 +48,10 @@ use alloy_primitives::{
 use alloy_sol_types::SolCall;
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use mega_evm::{
-    system::{IOracle, MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS, SEQUENCER_REGISTRY_ADDRESS},
+    system::{
+        flat_system_contract_specs, IOracle, MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS,
+        SEQUENCER_REGISTRY_ADDRESS,
+    },
     test_utils::{BytecodeBuilder, CommittedStates, MemoryDatabase},
     BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutor, MegaEvmFactory, MegaHardforkConfig,
     MegaSpecId, MegaTransactionOutcome, MegaTxEnvelope,
@@ -289,8 +292,10 @@ fn steady_database() -> MemoryDatabase {
 }
 
 /// Asserts that the pre-block changes of the bench's block on `db` are a steady block's: the two
-/// calls, which write their contracts, then the read of the registry's pending changes, and no
-/// read of a predeploy, which only Satin's activation block makes. Each step names one account.
+/// calls, which write their contracts, then the deployment of the five flat system contracts, the
+/// read of the registry's pending changes, the registry's deployment and the resolution of the
+/// live system address, and no read of the EIP-7997 factory, which only Satin's activation block
+/// makes. Each step names one account.
 fn assert_steady_pre_block(db: &MemoryDatabase) {
     let states = pre_block_states(db.clone(), BLOCK_NUMBER);
     let named: Vec<_> = states
@@ -300,11 +305,10 @@ fn assert_steady_pre_block(db: &MemoryDatabase) {
             *state.keys().next().expect("one account")
         })
         .collect();
-    assert_eq!(
-        named,
-        [HISTORY_STORAGE_ADDRESS, BEACON_ROOTS_ADDRESS, SEQUENCER_REGISTRY_ADDRESS],
-        "a steady block reads no predeploy"
-    );
+    let mut expected = vec![HISTORY_STORAGE_ADDRESS, BEACON_ROOTS_ADDRESS];
+    expected.extend(flat_system_contract_specs().map(|spec| spec.address));
+    expected.extend([SEQUENCER_REGISTRY_ADDRESS; 3]);
+    assert_eq!(named, expected, "a steady block deploys the system contracts and reads no factory");
     // Outside every measured section: both calls wrote the contract the bench seeded.
     for (call, address) in states.iter().zip([HISTORY_STORAGE_ADDRESS, BEACON_ROOTS_ADDRESS]) {
         let writes = call[&address].storage.values().filter(|slot| slot.is_changed()).count();

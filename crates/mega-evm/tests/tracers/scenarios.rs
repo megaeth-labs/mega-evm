@@ -912,16 +912,16 @@ fn test_precompile_child_frame() {
 }
 
 /// A deposit that mints and carries value to a contract which stops. The value is logged; the
-/// mint is not. A deposit pays no history gas.
+/// mint is not. Its body and recipient record pay history.
 #[test]
 fn test_deposit_transaction() {
     let mint = 1_000_u128;
     let value = U256::from(7);
-    // A deposit pays its intrinsic gas and what it ran, here nothing, and no history.
+    // A deposit pays its intrinsic gas, its body and the recipient record.
     let expected = Ledgers {
         regular: gas::call_intrinsic(&[], true),
         state: 0,
-        history: 0,
+        history: gas::history(TX_BODY_SIZE) + gas::history(WRITE_RECORD_SIZE),
         floor: gas::call_floor(&[], true),
     };
     let mut tx = op_transaction(TxEnv {
@@ -940,7 +940,7 @@ fn test_deposit_transaction() {
     );
     assert!(traced.outcome.result.is_success(), "{:?}", traced.outcome.result);
     let history = (traced.outcome.gas.history, traced.outcome.gas.history_bytes);
-    assert_eq!(history, (0, 0), "a deposit pays no history");
+    assert_eq!(history, (expected.history, TX_BODY_SIZE + WRITE_RECORD_SIZE));
     let root = traced.call_frame(true);
     assert_logs(&root.logs, &[transfer_log(CALLER, CONTRACT, value)]);
     assert_log_index_counts_discarded(&traced, &[0]);

@@ -123,7 +123,12 @@ pub(crate) struct Traced {
 }
 
 impl Traced {
-    /// Runs `tx` on a fresh Satin EVM over `db`, recording every read the database serves.
+    /// Runs `tx` on a fresh Satin EVM over `db`, recording every read the database serves the
+    /// transaction.
+    ///
+    /// The EVM reads the live system address off the database when it is built, outside every
+    /// transaction, as block execution resolves it in the pre-block phase: the record is emptied
+    /// of that read, and holds what the transaction read.
     pub(crate) fn run(db: MemoryDatabase, tx: MegaTransaction, limits: EvmTxRuntimeLimits) -> Self {
         let pre_db = db.clone();
         let record = Rc::new(RefCell::new(WitnessRecord::default()));
@@ -131,6 +136,7 @@ impl Traced {
         let inspector = TracingInspector::new(TracingInspectorConfig::all());
         let mut evm = MegaEvm::new(context(recording).with_tx_runtime_limits(limits))
             .with_inspector(inspector);
+        *record.borrow_mut() = WitnessRecord::default();
         let outcome = evm.execute_transaction(tx.clone()).expect("the transaction is valid");
         let inspector = evm.inspector().clone();
         drop(evm);
@@ -571,9 +577,8 @@ pub(crate) fn assert_root_gas_used_is_the_receipt(traced: &Traced) {
 /// the state of the first transaction of the block that read them. The excuse is those keys, read
 /// or not, and nothing else.
 ///
-/// An account the engine read without its code — the `SequencerRegistry`'s, which every
-/// transaction's validation reads by its code hash — is named with the code the pre-state holds,
-/// which the prestate tracer reads itself, as a witness carries it.
+/// An account the engine read without its code is named with the code the pre-state holds, which
+/// the prestate tracer reads itself, as a witness carries it.
 pub(crate) fn assert_prestate_covers_reads(traced: &Traced) {
     let PreStateFrame::Default(PreStateMode(prestate)) = traced.prestate(false) else {
         panic!("the default prestate mode");
