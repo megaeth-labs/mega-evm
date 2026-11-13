@@ -29,7 +29,7 @@ use mega_evm::{
     LimitUsage, MegaTransactionOutcome, TX_BODY_SIZE, WRITE_RECORD_SIZE,
 };
 use revm::bytecode::opcode::{
-    CALL, CREATE, GAS, INVALID, MSTORE, POP, PUSH0, PUSH1, RETURN, REVERT, STOP,
+    CALL, CREATE, GAS, INVALID, LOG0, MSTORE, POP, PUSH0, PUSH1, RETURN, REVERT, STOP,
 };
 
 use crate::{
@@ -218,6 +218,42 @@ fn test_a_reverting_child_gives_its_records_back_to_the_reservoir() {
         RESERVOIR - BODY,
         "the transfer's records cost the reservoir nothing in the end",
     );
+}
+
+/// Below the cap, a frame writes a slot that already held a value, which makes its record and
+/// nothing else, calls a child that logs and reverts, catches the revert, and reverts itself. The
+/// child's revert gives its log's history back into the child's reservoir, which returns to the
+/// frame as its reservoir, and the frame's own revert gives its record's history back on top of
+/// that: neither give-back goes into regular gas, so the transaction ends holding both.
+#[test]
+fn test_a_frame_that_reverts_after_catching_a_reverted_log_holds_both_give_backs() {
+    if runs_at_measurement_prices() {
+        return;
+    }
+    let frame = BytecodeBuilder::default()
+        .sstore(U256::from(1), U256::from(2))
+        .call(CONTRACT, U256::ZERO)
+        .append(POP)
+        .revert()
+        .build();
+    let child = BytecodeBuilder::default().append_many([PUSH0, PUSH0, LOG0]).revert().build();
+    let db = funded()
+        .account_code(CALLEE, frame)
+        .account_storage(CALLEE, U256::from(1), U256::from(1))
+        .account_code(CONTRACT, child);
+    let outcome = execute(db, call(CALLER, CALLEE, U256::ZERO, BELOW_CAP));
+
+    assert!(!outcome.result.is_success(), "the frame reverts: {:?}", outcome.result);
+    let log = 32 * CPHB;
+    assert_eq!(log, 2_816, "an empty LOG0's history");
+    assert_eq!(RECORD, 3_520, "a record's history");
+    assert_eq!(outcome.gas.history, BODY, "neither the log nor the record is kept");
+    assert_eq!(
+        outcome.gas.reservoir_remaining,
+        log + RECORD,
+        "the child's give-back returned as reservoir, and the frame's own on top of it",
+    );
+    assert_eq!(outcome.gas.reservoir_remaining, 6_336);
 }
 
 /// A child that halts keeps none of the records its caller paid for either, as one that reverts:

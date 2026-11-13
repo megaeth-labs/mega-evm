@@ -1073,6 +1073,73 @@ fn test_the_transactions_own_value_transfer_that_halts_gives_its_record_back_as_
     }
 }
 
+/// A creation transaction whose init code halts keeps neither the created account nor its write
+/// record, and both were charged before its frame: the account's state gas and the record's
+/// history. They come back only for the part the reservoir paid, and the part regular gas paid is
+/// burned with the rest of the regular gas. So whatever the reservoir held after the body — enough
+/// for half the record, for the record and half the account, or for both — the sender gets back
+/// exactly that reservoir, and below the execution cap, with no reservoir, nothing.
+#[test]
+fn test_a_halting_creation_transaction_returns_its_pre_frame_charges_only_where_the_reservoir_paid()
+{
+    let init_code = Bytes::from_static(&[revm::bytecode::opcode::INVALID]);
+    let body = body_history(init_code.len() as u64);
+    let record = mega_evm::write_record_history_gas(1).expect("a record has a price");
+    let account = crate::common::account_state_gas();
+    let after_the_body = [0, record / 2, record + account / 2, record + account + 1_000];
+    for left in after_the_body {
+        let (gas_limit, expected) =
+            if left == 0 { (BELOW, 0) } else { (TX_GAS_LIMIT_CAP + body + left, left) };
+        let db = MemoryDatabase::default().account_balance(CALLER, U256::from(10u64.pow(18)));
+        let outcome = MegaEvm::new(context(db))
+            .execute_transaction(create(CALLER, init_code.clone(), gas_limit))
+            .expect("the transaction is valid");
+        assert!(
+            matches!(outcome.result, ExecutionResult::Halt { .. }),
+            "{left}: {:?}",
+            outcome.result
+        );
+        assert_eq!(outcome.gas.reservoir_remaining, expected, "{left} left after the body");
+        assert_eq!(outcome.gas.gas_used + outcome.gas.reservoir_remaining, gas_limit, "{left}");
+    }
+}
+
+/// The transaction's own value transfer to a contract that halts, carrying an EIP-7702
+/// authorization: the authority's charges, which the halt does not take back, draw the reservoir
+/// before the recipient's write record, so the record is paid by what the reservoir has left, half
+/// of it here, and regular gas pays the rest. The halt gives back only the part the reservoir paid,
+/// so the sender gets back the same reservoir as from the same transaction without value, which
+/// makes no record.
+#[test]
+fn test_a_halting_value_transfer_after_an_authorization_returns_only_the_reservoir_paid_record() {
+    const AUTHORITY: Address = address!("0000000000000000000000000000000000500010");
+    let record = mega_evm::write_record_history_gas(1).expect("a record has a price");
+    let run = |value: u64, gas_limit: u64| {
+        let db = MemoryDatabase::default()
+            .account_balance(CALLER, U256::from(10u64.pow(18)))
+            .account_balance(AUTHORITY, U256::from(1))
+            .account_code(A, Bytes::from_static(&[revm::bytecode::opcode::INVALID]));
+        let tx = crate::common::authorizing_call(
+            CALLER,
+            A,
+            U256::from(value),
+            gas_limit,
+            B,
+            &[(AUTHORITY, 0)],
+        );
+        let outcome = MegaEvm::new(context(db)).execute_transaction(tx).expect("valid");
+        assert!(matches!(outcome.result, ExecutionResult::Halt { .. }), "{:?}", outcome.result);
+        assert_eq!(outcome.gas.gas_used + outcome.gas.reservoir_remaining, gas_limit);
+        outcome.gas.reservoir_remaining
+    };
+    // What the body and the authority took of a large reservoir.
+    let large = TX_GAS_LIMIT_CAP + 100_000_000;
+    let before_the_frame = 100_000_000 - run(0, large);
+    let gas_limit = TX_GAS_LIMIT_CAP + before_the_frame + record / 2;
+    assert_eq!(run(0, gas_limit), record / 2, "the authority's charges stand");
+    assert_eq!(run(1, gas_limit), record / 2, "the record's reservoir-paid half comes back alone");
+}
+
 /* ---------- the legacy engine's rows ---------- */
 
 // The legacy engine halted a transaction a limit stopped, and gave back what detention withheld

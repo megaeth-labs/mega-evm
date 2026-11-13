@@ -198,6 +198,11 @@ pub(crate) fn state_is_free() -> bool {
     true
 }
 
+/// The state gas one fresh storage slot costs at the byte prices in effect, in the minimum bucket.
+pub(crate) fn slot_state_gas() -> u64 {
+    mega_evm::satin_gas_params().get(revm::context_interface::cfg::GasId::sstore_set_state_gas())
+}
+
 /// The state gas one new account costs at the byte prices in effect, in the minimum bucket.
 pub(crate) fn account_state_gas() -> u64 {
     mega_evm::satin_gas_params().get(revm::context_interface::cfg::GasId::new_account_state_gas())

@@ -130,6 +130,70 @@ fn test_keyless_deploy_execution_reverted() {
     }
 }
 
+/// What the creation of a keyless deployment returned into its call: its regular gas and its
+/// reservoir once revm's settlement of the result, which runs after the inspector sees the
+/// creation end, rolled a failure's state and history gas back.
+#[derive(Default)]
+struct CreationReturn(Option<(u64, u64)>);
+
+impl<DB: Database> revm::Inspector<MegaContext<DB>, revm::interpreter::interpreter::EthInterpreter>
+    for CreationReturn
+{
+    fn create_end(
+        &mut self,
+        _: &mut MegaContext<DB>,
+        _: &revm::interpreter::CreateInputs,
+        outcome: &mut revm::interpreter::CreateOutcome,
+    ) {
+        let mut gas = outcome.result.gas;
+        revm::handler::handle_reservoir_remaining_gas(
+            outcome.result.result,
+            &mut revm::context_interface::cfg::gas::GasTracker::default(),
+            gas.tracker_mut(),
+        );
+        self.0 = Some((gas.remaining(), gas.reservoir()));
+    }
+}
+
+/// Runs a deployment of `init_code` signed for and forwarded `forward`, below the execution cap,
+/// where the call holds no reservoir to share with its creation: returns the outcome and what the
+/// creation returned, its regular gas and its reservoir.
+fn deploy_forwarding(init_code: Bytes, forward: u64) -> (MegaTransactionOutcome, (u64, u64)) {
+    let deployment = Deployment::signed(0, forward, U256::ZERO, init_code);
+    let mut evm =
+        MegaEvm::new(context(system_db()).with_tx_runtime_limits(EvmTxRuntimeLimits::no_limits()))
+            .with_inspector(CreationReturn::default());
+    let mut tx = call_tx(KEYLESS_DEPLOY_ADDRESS, deployment.call_data(forward), U256::ZERO);
+    tx.0.base.gas_limit = GAS_LIMITS[0];
+    let outcome = evm.execute_transaction(tx).expect("the transaction is valid");
+    let returned = evm.inspector().0.expect("the creation ran");
+    (outcome, returned)
+}
+
+/// A constructor that writes a fresh slot and reverts, run on 500,000 of forward and no
+/// reservoir: regular gas paid the slot's state gas and its record's history, and the revert gives
+/// both back into the creation's reservoir, so the creation returns its unspent regular gas and a
+/// reservoir of exactly those two. `gasUsed` nets both pools: the regular gas spent less the
+/// reservoir it returned, which is the constructor's regular charges alone — 12,109, at any byte
+/// price.
+#[test]
+fn test_a_reverting_constructor_returns_its_slot_as_reservoir_and_reports_its_regular_charges() {
+    const FORWARD: u64 = 500_000;
+    let init_code = Bytes::from_static(&[0x60, 0x01, PUSH0, SSTORE, PUSH0, PUSH0, REVERT]);
+    let (outcome, (regular, reservoir)) = deploy_forwarding(init_code, FORWARD);
+    let KeylessDeployError::ExecutionReverted { gas_used, .. } = failure(&outcome) else {
+        panic!("expected ExecutionReverted: {:?}", outcome.result);
+    };
+    let given_back = crate::common::slot_state_gas() +
+        mega_evm::write_record_history_gas(1).expect("a record has a price");
+    assert_eq!(gas_used, 12_109, "the constructor's regular charges");
+    assert_eq!(reservoir, given_back, "the slot and its record come back as reservoir");
+    assert_eq!(regular, FORWARD - gas_used - given_back, "regular gas paid the slot");
+    if mega_evm::active_satin_prices().is_constants() {
+        assert_eq!((regular, reservoir), (386_451, 101_440));
+    }
+}
+
 /// Init code that hits an invalid opcode: `ExecutionHalted`, and the halt spends the whole
 /// forward.
 #[test]
@@ -325,6 +389,29 @@ fn test_keyless_deploy_init_code_selfdestructs() {
             Some(U256::from(1_000)),
         );
         assert_eq!(nonce(&outcome, deployment.signer), 1);
+    }
+}
+
+/// A constructor that destroys its own account on 500,000 of forward, no reservoir and no
+/// balance: the destruction gives the account the call created for it back — its state gas and its
+/// record's history — into the creation's reservoir. The creation returns all its regular gas but
+/// the constructor's 5,002 and a reservoir of exactly that give-back, and `gasUsed` adds the
+/// give-back of the call's own charge back to the creation's net spend, reporting the 5,002.
+#[test]
+fn test_a_constructor_that_destroys_itself_returns_its_account_as_reservoir() {
+    const FORWARD: u64 = 500_000;
+    let (outcome, (regular, reservoir)) =
+        deploy_forwarding(Bytes::from_static(&[ORIGIN, SELFDESTRUCT]), FORWARD);
+    let KeylessDeployError::EmptyCodeDeployed { gas_used } = failure(&outcome) else {
+        panic!("expected EmptyCodeDeployed: {:?}", outcome.result);
+    };
+    let given_back = crate::common::account_state_gas() +
+        mega_evm::write_record_history_gas(1).expect("a record has a price");
+    assert_eq!(gas_used, 5_002, "ORIGIN and SELFDESTRUCT to a warm account");
+    assert_eq!(regular, FORWARD - gas_used, "the constructor's regular charges alone");
+    assert_eq!(reservoir, given_back, "the destroyed account comes back as reservoir");
+    if mega_evm::active_satin_prices().is_constants() {
+        assert_eq!((regular, reservoir), (494_998, 187_120));
     }
 }
 
