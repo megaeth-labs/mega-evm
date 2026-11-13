@@ -1473,32 +1473,50 @@ fn run_detained_child(child: &Bytes, pushes: u64, spendable: u64, warm: bool) ->
     (run, at_the_call)
 }
 
-/// Gas detention applies to the access a refusal at a delegate pays as to any account opcode's: the
-/// warm access first, then the cold surcharge, each a regular charge of the spendable part. A
-/// `STATICCALL` of a delegator of the beneficiary, from a frame holding 5,200 of which it may spend
-/// a part, is stopped at its static gas when it may spend 99, having read nothing, and hands back
-/// all 5,200. With a cold delegator, the frame that may spend from 100 to 2,999 reaches the
-/// delegate, its target read, and is stopped at the cold surcharge with `MegaLimitExceeded(2,
-/// limit)`, handing back 5,100; one that may spend 3,000 is refused, paying the cold access, and
-/// hands back 2,200. With a delegator the access list warms, one that may spend 100 is refused,
-/// paying the warm access, and hands back 5,100.
+/// Gas detention applies to what a refusal at a delegate pays as to the same charges with access
+/// on: the warm access, the memory, then the cold surcharge, each a regular charge of the
+/// spendable part. A `STATICCALL` of a delegator of the beneficiary, from a frame holding 5,200 of
+/// which it may spend a part, is stopped at its static gas when it may spend 99, having read
+/// nothing, and hands back all 5,200. With a cold delegator, the frame that may spend from 100 to
+/// 2,999 reaches the delegate, its target read, and is stopped at the cold surcharge with
+/// `MegaLimitExceeded(2, limit)`, handing back 5,100; one that may spend 3,000 is refused, paying
+/// the cold access, and hands back 2,200. With a delegator the access list warms, one that may
+/// spend 100 is refused, paying the warm access, and hands back 5,100.
+///
+/// With an output range of 32 words, whose memory costs 98, the memory is charged before the
+/// surcharge, so a stop at the surcharge keeps it: a frame that may spend 197 is stopped at the
+/// memory, its target not read, handing back 5,100; one that may spend 1,000 or 3,097 is stopped at
+/// the surcharge, handing back 5,002; one that may spend 3,098 is refused, handing back 2,102.
 #[test]
 fn test_a_refusal_at_the_delegate_pays_the_targets_access_within_the_compute_limit() {
     let warm = entry(GasId::warm_storage_read_cost());
-    let (child, pushes) = call_of(STATICCALL, DELEGATOR, 0, 0);
-    // (whether the access list warms the delegator, what the child may spend, whether it is
-    // refused rather than stopped, what it hands back, whether it reads the delegator)
-    for (listed, spendable, is_refused, returned, reads) in [
-        (false, warm - 1, false, 5_200, false),
-        (false, warm, false, 5_200 - warm, true),
-        (false, 2 * warm, false, 5_200 - warm, true),
-        (false, cold_access() - 1, false, 5_200 - warm, true),
-        (false, cold_access(), true, 5_200 - cold_access(), true),
-        (true, warm - 1, false, 5_200, false),
-        (true, warm, true, 5_200 - warm, true),
+    let (plain, plain_pushes) = call_of(STATICCALL, DELEGATOR, 0, 0);
+    let words = 32;
+    let memory = memory_cost(words);
+    let ranged =
+        call_with_ranges(BytecodeBuilder::default(), DELEGATOR, (0, 0), (0, words as u32 * 32));
+    // Four pushes of a number, the address's and a `PUSH0`.
+    let ranged_pushes = 4 * 3 + 3 + 2;
+    // (whether the call has the output range, whether the access list warms the delegator, what
+    // the child may spend, whether it is refused rather than stopped, what it hands back, whether
+    // it reads the delegator)
+    for (with_memory, listed, spendable, is_refused, returned, reads) in [
+        (false, false, warm - 1, false, 5_200, false),
+        (false, false, warm, false, 5_200 - warm, true),
+        (false, false, 2 * warm, false, 5_200 - warm, true),
+        (false, false, cold_access() - 1, false, 5_200 - warm, true),
+        (false, false, cold_access(), true, 5_200 - cold_access(), true),
+        (false, true, warm - 1, false, 5_200, false),
+        (false, true, warm, true, 5_200 - warm, true),
+        (true, false, warm + memory - 1, false, 5_200 - warm, false),
+        (true, false, 1_000, false, 5_200 - warm - memory, true),
+        (true, false, cold_access() + memory - 1, false, 5_200 - warm - memory, true),
+        (true, false, cold_access() + memory, true, 5_200 - cold_access() - memory, true),
     ] {
-        let case = format!("listed {listed}, spendable {spendable}");
-        let (run, at_the_call) = run_detained_child(&child, pushes, spendable, listed);
+        let case = format!("memory {with_memory}, listed {listed}, spendable {spendable}");
+        let (child, pushes) =
+            if with_memory { (&ranged, ranged_pushes) } else { (&plain, plain_pushes) };
+        let (run, at_the_call) = run_detained_child(child, pushes, spendable, listed);
         let limit = run.limit.expect("the timestamp detains");
         let ending = if is_refused {
             refused(VolatileDataAccess::BENEFICIARY_BALANCE)
