@@ -207,7 +207,7 @@ mutant = "replace <impl From<MegaSpecId> for EthSpecId>::from -> Self with Defau
 justification = "Equivalent: revm's SpecId::OSAKA carries #[default], and Satin's sole rung (SATIN) maps to EthSpecId::OSAKA, so Default::default() returns the same value on every current input. test_all_specs_map_to_karst_and_osaka pins the mapping; if the upstream default moves, that test kills this mutant and the entry becomes a no-op."
 reviewer = "RealiCZ"
 
-# --- MegaContext::prepare's deposit test (equivalent: the two classes behave alike) --------
+# --- MegaContext::prepare's deposit test (equivalent: the two classes behave alike) ---------
 # `prepare` classes an execution that is neither the protocol's own nor neutral as
 # `TxClass::Deposit` when the transaction is a deposit and as `TxClass::Ordinary` otherwise.
 # The two classes are read in exactly two places, `AdditionalLimit::is_exempt` (both false) and
@@ -218,7 +218,7 @@ reviewer = "RealiCZ"
 kind = "line"
 category = "equivalent"
 file = "crates/mega-evm/src/evm/context.rs"
-mutant = "replace == with != in MegaContext::prepare"
+mutant = "replace == with != in MegaContext<DB, ExtEnvs>::prepare"
 justification = "Equivalent: the comparison only chooses between TxClass::Deposit and TxClass::Ordinary for an execution that is neither the protocol's own nor neutral, and every reader of the class treats the two alike (is_exempt false, prices_history true). Swapping them changes no limit, exemption, detention or history charge."
 reviewer = "unreviewed: proposed by the implementer, for the owner's sign-off"
 
