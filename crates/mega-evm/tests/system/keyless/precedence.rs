@@ -360,7 +360,7 @@ fn test_the_creations_charges_can_refuse_a_call_no_rule_refuses() {
 /// call's gas used is its whole gas limit too. Neither creation started, so the signer's nonce is
 /// unspent.
 ///
-/// Rules [S15.8], [S15.22]. Expected values `independent`: the gas limit is the transaction's own,
+/// Expected values `independent`: the gas limit is the transaction's own,
 /// and the empty ledgers are zero; the body's history is the schedule's price of its bytes
 /// (`constants`).
 #[test]

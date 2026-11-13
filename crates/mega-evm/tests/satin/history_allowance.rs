@@ -252,7 +252,7 @@ fn the_allowance_outweighs_a_record() -> bool {
 /// exactly the cost it completes. An allowance that entered the frame's gas, or that computation
 /// could fall back on, would carry the short hook through.
 ///
-/// Rule [S8.4]. Expected values `independent`: the hook's cost is summed by hand from the opcode
+/// Expected values `independent`: the hook's cost is summed by hand from the opcode
 /// prices, which no byte price moves, and the exact run is the control that the sum is the hook's
 /// whole cost; the allowance and a record's history are the spec's 160 and 40 bytes at the cost
 /// per history byte in effect (`constants`), and at the spec's prices 14,080 and 3,520, written
@@ -350,7 +350,7 @@ fn writes_slot_zero() -> Bytes {
 /// The slot is not fresh, so the write charges no state gas: the record's history is the only
 /// charge past the regular gas, and the only one the allowance could have paid.
 ///
-/// Rule [S8.3]. Expected values `independent`: the write's regular gas is the schedule's table by
+/// Expected values `independent`: the write's regular gas is the schedule's table by
 /// hand — `PUSH1` 3, `PUSH0` 2, and an `SSTORE` that resets a cold slot, 100 static, 10,000 for
 /// the reset and 2,000 for the cold load — which no byte price moves; the record's history is 40
 /// bytes at the cost per history byte in effect (`constants`), 3,520 at 88 gas a byte, written
@@ -391,7 +391,7 @@ fn test_the_allowance_cannot_be_spent_on_a_write_record() {
 /// byte — the short hook would run out on the record whether or not the allowance paid its state
 /// gas, and the test returns early with a note.
 ///
-/// Rule [S8.5]. Expected values `independent`: the write's regular gas is the schedule's table by
+/// Expected values `independent`: the write's regular gas is the schedule's table by
 /// hand — `PUSH1` 3, `PUSH0` 2, and an `SSTORE` that fills a cold fresh slot, 100 static, 10,000
 /// for the fresh slot and 2,000 for the cold load — which no byte price moves; the slot's state
 /// gas at the minimum bucket is the schedule's entry and the record's history 40 bytes at the cost

@@ -169,7 +169,7 @@ fn test_the_satin_counterfactual_of_recorded_blocks() {
     }
 }
 
-/// [S18] A block fetched over RPC replays as the chain did, is written to the block cache with
+/// A block fetched over RPC replays as the chain did, is written to the block cache with
 /// what its replay read beyond the trace, and then replays offline from the cache. The mock
 /// serves the recorded responses, and the trace is the recorded pre-state as one transaction's
 /// sighting. The Satin replay, a counterfactual and so no activation block, reads nothing the
@@ -414,7 +414,7 @@ fn assert_refused_as_activation_block(block: &mega_evme::block::CachedBlock, rec
     assert_eq!(blocks_of(records)[0]["refused"], txs.len() - deposits);
 }
 
-/// [S1.8] [S21.12] [S1] A replayed block is told whether it admits only deposits as a node is:
+/// A replayed block is told whether it admits only deposits as a node is:
 /// from its schedule and its parent's timestamp, which the block cache keeps beside the block.
 /// Under a genesis file that activates Satin at the recorded block's own timestamp, the block
 /// whose parent came a second earlier is Satin's activation block: its deposits run and every
@@ -571,7 +571,7 @@ async fn recorded_chain(number: u64, parent: Parent) -> wiremock::MockServer {
     server
 }
 
-/// [S1.8] [S1] A block fetched over RPC is fetched with its parent's timestamp, and the cache
+/// A block fetched over RPC is fetched with its parent's timestamp, and the cache
 /// keeps it: under a genesis file that activates Satin at the block's timestamp, with the parent
 /// a second earlier, the replay refuses the block's user transactions online, writes the
 /// parent's timestamp to the cache, and refuses them again offline. A cached entry that lacks the
@@ -624,7 +624,7 @@ async fn parent_requests(server: &wiremock::MockServer, number: u64) -> usize {
         .count()
 }
 
-/// [S1] A cached block asks for its parent's header only when the activation-block rule needs
+/// A cached block asks for its parent's header only when the activation-block rule needs
 /// the parent's timestamp. With the recorded entries, written before the cache kept it, and an
 /// endpoint that does not have the parent, the legacy replay matches the chain and the Satin
 /// counterfactual, whose schedule activates every fork at genesis, runs, refusing a transaction

@@ -410,7 +410,7 @@ mod tests {
     /// either: the 301st pair is refused by the bound alone. One stray byte past the bound would
     /// prove nothing, since a length that is not a whole number of pairs fails whatever the bound.
     ///
-    /// Rule [S2.4]. Expected values `independent`: 57,600 bytes and 300 × 192 by hand, and the
+    /// Expected values `independent`: 57,600 bytes and 300 × 192 by hand, and the
     /// EIP-1108 price of 300 pairs, 45,000 + 300 × 34,000.
     #[test]
     fn test_bn254_pairing_is_bounded_at_the_karst_size() {
@@ -436,7 +436,7 @@ mod tests {
     /// bytes, up to past the BN254 pairing's size limit — check that each price function answers
     /// them rather than failing on one.
     ///
-    /// Rule [S12.47]. Expected values `independent`: a price is present, whatever the input.
+    /// Expected values `independent`: a price is present, whatever the input.
     #[test]
     fn test_every_satin_entry_is_priced() {
         let lengths =

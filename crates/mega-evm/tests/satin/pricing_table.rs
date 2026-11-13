@@ -334,8 +334,8 @@ fn test_the_table_shows_where_satin_differs_from_amsterdam() {
 }
 
 /// The SALT scaling section says what it claims: on each probe the regular ledger and the
-/// history ledger are the same at every multiplier [S6.5] — history gas is not scaled by SALT
-/// [S7.2] — and the state ledger is the minimum bucket's times the multiplier. Read off the
+/// history ledger are the same at every multiplier — history gas is not scaled by SALT
+/// — and the state ledger is the minimum bucket's times the multiplier. Read off the
 /// rendered table rather than the engine, so the table cannot drift from the claim above it
 /// (`constants`: the relation across `m` is the spec's; the `m` = 1 row is the table's own).
 #[test]

@@ -742,7 +742,7 @@ fn test_keyless_deploy_not_intercepted_for_inner_calls() {
 /// A call answered without the bytecode — refused by an interceptor, or run as a deployment that
 /// fails — could fail the same way, but not with the four bytes of `NotIntercepted()`.
 ///
-/// Rule [S15.3]. Expected values `independent`: the error's selector is computed here from its
+/// Expected values `independent`: the error's selector is computed here from its
 /// signature, `NotIntercepted()`, not taken from the contract's binding.
 #[test]
 fn test_keyless_deploy_nested_inside_a_keyless_deployment_is_not_intercepted() {

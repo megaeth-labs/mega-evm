@@ -65,7 +65,7 @@ fn test_a_deployment_through_the_factory_replays() {
 /// An ordinary block over the same chain reads the six system contracts too, every block deploying
 /// them, and not the factory: no check state, and no record of its account.
 ///
-/// Rule [S22.4]. Expected values `independent`: the code is the bytecode the test put in the chain,
+/// Expected values `independent`: the code is the bytecode the test put in the chain,
 /// and its hash is computed here.
 #[test]
 fn test_an_activation_block_replays() {

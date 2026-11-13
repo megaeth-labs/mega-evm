@@ -302,7 +302,7 @@ fn test_the_execution_cap_bounds_the_calldata_a_transaction_may_carry() {
 /// A floor above the transaction's own gas limit is rejected too, below the cap: the floor is
 /// measured against whichever of the two is smaller. The rejection leaves the sender as it was.
 ///
-/// Rules: [S4.26], [S21.1], [S21.2]. Independence: independent — the base, the floor's rate and the
+/// Independence: independent — the base, the floor's rate and the
 /// sender's funding are written out.
 #[test]
 fn test_a_floor_above_the_gas_limit_is_rejected() {
@@ -385,7 +385,7 @@ fn test_a_creation_that_cannot_pay_its_account_runs_out_of_gas() {
 /// Whether the error should name one figure in both cases is undecided, so a change to it is not
 /// a change of the rules this test holds: the rejection, and a sender left untouched.
 ///
-/// Rules: [S4.25], [S21.1]. Independence: independent — the intrinsic charge and the sender's
+/// Independence: independent — the intrinsic charge and the sender's
 /// funding are written out.
 #[test]
 fn test_a_gas_limit_below_the_intrinsic_charge_is_rejected() {
@@ -419,7 +419,7 @@ fn test_a_valid_call_still_passes() {
 /// is undecided, so a change to it is not a change of the rules this test holds: the rejection, a
 /// sender left untouched, and a gas limit of the whole minimum admitted.
 ///
-/// Rules: [S4.25], [S7.17], [S21.1]. Independence: independent for the intrinsic charge and the
+/// Independence: independent for the intrinsic charge and the
 /// sender's funding, which are written out; the body's history is priced by the production
 /// helper.
 #[test]

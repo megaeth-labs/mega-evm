@@ -287,6 +287,7 @@ Regular-gas entries that EIP-8038 or EIP-8037 reprice, and the other entries tha
 | ---------------------------------------------------- | ------ | ------- |
 | Warm storage read                                    | 100    | 100     |
 | Cold account access, additional                      | 2,500  | 2,900   |
+| Cold `SELFDESTRUCT` beneficiary, the whole access    | 2,600  | 3,000   |
 | Cold storage access of an `SLOAD`, additional        | 2,000  | 2,000   |
 | Cold storage access of an `SSTORE`                   | 2,100  | 2,000   |
 | Value transfer of a call, with its 2,300 stipend     | 9,000  | 11,300  |
@@ -321,6 +322,10 @@ Regular-gas entries that EIP-8038 or EIP-8037 reprice, and the other entries tha
 
 The warm read, the `SLOAD` cold surcharge and the `SSTORE` static cost are EIP-8038's own values and Osaka's alike.
 EIP-8038 folds the warm base into a cold slot's access, so a cold `SSTORE` pays 2,100 for it with its static cost, as a cold `SLOAD` does.
+The static 100 MUST be a charge of its own, made before the slot is loaded.
+The 2,000 cold rest MUST be charged after the load, in one charge with the cost of the write, so gas detention holds the two charges to the spendable part one after the other.
+An opcode whose static gas is the warm read pays the additional cold account access for an account that is not warm.
+`SELFDESTRUCT`'s static gas holds no warm read, so a beneficiary that is not warm costs it the whole 3,000 (2,900 plus 100), as EIP-2929 charges it.
 
 Under EIP-2780 the floor's base is not the 12,000 entry: it MUST be the transaction's own decomposed base (below) without its calldata, access-list, authorization and initcode costs, which is 12,000 for a transfer to the sender itself, 15,000 for a call to another account without value, 21,000 for one with value, and 24,000 for a creation.
 The floor is that base plus 64 gas per calldata byte, zero or non-zero, a creation's initcode included, and 64 gas per access-list byte, 20 bytes for an address and 32 for a storage key.
@@ -745,6 +750,7 @@ EIP-6780 does not delete that account.
 From the first effective destruction until the end of the transaction, while the mark stands, the account adds nothing further to state growth and keeps no further state gas.
 An `SSTORE` of one of its slots in that span does not rise, does not fall, and neither charges nor refills fresh-slot state gas.
 The `SSTORE`'s regular gas is unchanged.
+The mark MUST NOT change what such an `SSTORE` does to the EIP-3529 refund counter: a store that clears the slot or restores its original value moves the counter by the inherited `SSTORE` rules, on the slot's original, present and new values, as it would without the mark.
 A slot the table already refilled therefore cannot be charged or refilled again.
 Code on the absent, absent, deleted row was not deposited when the account was destroyed: a constructor can destroy the account before its code is deposited.
 That later deposit's state gas MUST NOT be charged.
@@ -993,6 +999,7 @@ A contract can revert with the same bytes, and so can a caller that re-raises th
   So compute exceeds the transaction's regular ledger by the stipends of its value calls, gas no pool of the transaction paid.
   What a halting frame burns — the regular gas it had left when it halted — MUST NOT count as compute, whatever it could not pay: a dynamic charge, an opcode's static gas, a cold access, or state or history gas its regular gas had to pay.
   A precompile that runs out of gas counts nothing of its forward as compute: it burns the forward, a value call's stipend included, as a halting frame burns what it had left, unless it is the crossing (see Precompiles, below), and then the forward returns to its caller.
+  A precompile that halts on a check it makes after its gas charge, a ModExp input over EIP-7823's bound among them, burns its whole forward the same way, its charged price and a value call's stipend included, and none of it is compute.
 - **The limit.**
   A read MUST set `limit = compute_at_read + cap`, with `cap` = `BLOCK_ENV_ACCESS_COMPUTE_GAS` = 20,000,000 for the block environment and the beneficiary and `ORACLE_ACCESS_COMPUTE_GAS` = 20,000,000 for the Oracle; the limit only goes down, so the most restrictive read binds.
   The caps are protocol values fixed per spec with the other limits (see [Resource Limits](#10-resource-limits)).
@@ -1019,7 +1026,10 @@ A contract can revert with the same bytes, and so can a caller that re-raises th
 - **Precompiles.**
   The call's own regular charges come first, as any opcode's: one that crosses MUST stop the calling frame before the price is consulted (see Order at one site in [Resource Limits](#10-resource-limits)).
   A call to a precompile forwarded more regular gas than the frame's allowance MUST be decided from the precompile's price before it runs: priced within the allowance, it runs on its whole forward; priced past the allowance but within the forward, it MUST NOT run and is the crossing; priced past its whole forward, it runs on the forward and fails, as without the read.
+  The forward the price is held against is the child's whole regular gas, a value call's 2,300 stipend included.
   The value has not moved when the price is consulted, so the call MUST be held to the price alone: the crossing is the stop, kind 2, whatever records its value transfer would have made (see [Resource Limits](#10-resource-limits)).
+  A value call to a precompile whose account the state does not hold, or holds empty under EIP-161, pays that account's new-account state gas in the opcode, before its forward is computed and before the price is consulted.
+  When the call is the crossing, the account is not created, and that charge, its legacy share included, MUST be given back into the caller's reservoir when the stop returns.
   Every precompile of the Satin set has a price for every input: an input over an Optimism pairing or MSM size limit is priced at zero, since it is refused before any gas check, and a ModExp input is priced by its Osaka formula whatever its lengths, one over EIP-7823's bound included, since ModExp charges that price before it checks the bound.
   An input priced between the allowance and the forward that would fail a check the precompile makes after its gas check — a ModExp input over EIP-7823's bound among them — is the crossing too.
   A call refused on its caller's account runs no precompile and is answered as without the read.

@@ -268,7 +268,7 @@ fn test_the_sstore_sentry_reads_the_whole_regular_gas() {
 /// The sender pays what the receipt reports at the gas price, and the beneficiary is credited it;
 /// the same transaction without the read settles the same way.
 ///
-/// Rules: [S12.34], [S12.42], [S12]. Independence: independent — every charge is the opcode's
+/// Independence: independent — every charge is the opcode's
 /// price, the refund and its cap are EIP-3529's, the intrinsic gas is EIP-2780's, and the body's
 /// history is `TX_BODY_SIZE` at the cost per history byte in effect.
 #[test]
@@ -623,7 +623,7 @@ const CALL_INTRINSIC: u64 = 12_000 + 3_000;
 /// charge of 5,000 fails with 4,999 left. Each burns those, and the caller completes under a cap of
 /// 200,000 as without the read: counted as compute, the fifty burns would pass the cap.
 ///
-/// Rules: [S12.18], [S12]. Independence: independent — every charge is the opcode's price, the
+/// Independence: independent — every charge is the opcode's price, the
 /// burns are the forward less the `PUSH20`, and the intrinsic gas is EIP-2780's.
 #[test]
 fn test_a_halt_on_a_static_charge_burns_what_its_frame_had() {
@@ -700,7 +700,7 @@ struct StaticHalts {
 /// Each case runs below the execution cap and above it, completes as without the read, and is
 /// billed its compute and its burns.
 ///
-/// Rules: [S12.18], [S12.24], [S12.38], [S11], [S12]. Independence: independent — every charge is
+/// Independence: independent — every charge is
 /// the opcode's price, the limit is the read's compute plus the cap, and the intrinsic gas is
 /// EIP-2780's.
 #[test]

@@ -96,7 +96,7 @@ fn test_a_rotation_and_a_system_transaction_replay() {
 /// the code the chain held for every account the block loads, the registry's included, and this
 /// test asserts only the loads.
 ///
-/// Rule [S17.4]. Expected values `independent`: the registry's code hash is computed here from the
+/// Expected values `independent`: the registry's code hash is computed here from the
 /// bytecode the test put in the chain.
 #[test]
 fn test_a_system_transaction_reads_the_live_address_from_the_witness() {
