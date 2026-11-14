@@ -11,9 +11,6 @@ name: Mutation Testing
 on:
   workflow_dispatch:
   pull_request:
-  # TEMPORARY (fork validation only): run the full cargo-mutants job and the bench on a push.
-  push:
-    branches: [cz/ci/mutation-incremental, cz/ci/mutation-incremental-shards]
   schedule:
     # Nightly: full-crate cargo-mutants re-verify (the diff gate never mutates
     # #[cfg(test)] code, so the in-repo killing tests are only re-checked here),
@@ -224,72 +221,6 @@ jobs:
             mutation-report.md
           if-no-files-found: ignore
 
-  # ── TEMPORARY (fork validation only): per-mutant build/test times ─────────
-  # The same 52 mutants, built without and with incremental compilation (and
-  # with mold as a separate leg), to compare per-mutant times and outcomes.
-  mutation-bench:
-    name: bench (${{ matrix.leg }})
-    if: github.event_name == 'push' && github.ref_name == 'cz/ci/mutation-incremental'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 150
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - leg: non-incremental
-            incremental: "0"
-            mold: false
-          - leg: incremental
-            incremental: "1"
-            mold: false
-          - leg: incremental-mold
-            incremental: "1"
-            mold: true
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-      - name: Install Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-      - name: Install Foundry
-        uses: foundry-rs/foundry-toolchain@v1
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@nextest
-      - name: Install cargo-mutants
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-mutants@27.1.0
-      - name: Install mold
-        if: matrix.mold
-        uses: rui314/setup-mold@v1
-      - name: Use mold
-        if: matrix.mold
-        run: echo "RUSTFLAGS=$RUSTFLAGS -C link-arg=-fuse-ld=mold" >> "$GITHUB_ENV"
-      - name: Mutate the bench files
-        env:
-          CARGO_INCREMENTAL: ${{ matrix.incremental }}
-        run: |
-          echo "RUSTFLAGS=$RUSTFLAGS CARGO_INCREMENTAL=$CARGO_INCREMENTAL nproc=$(nproc)"
-          scripts/mutation_test.sh full \
-            -f crates/mega-evm/src/block/eips.rs \
-            -f crates/mega-evm/src/limit/mod.rs \
-            -f crates/mega-evm/src/block/helpers.rs \
-            -f crates/mega-evm/src/system/limit_control.rs
-      - name: Per-mutant times
-        if: always()
-        run: python3 scripts/mutation_bench_summary.py target/mutants/mutants.out "${{ matrix.leg }}" | tee -a "$GITHUB_STEP_SUMMARY"
-      - name: Upload bench results
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: bench-${{ matrix.leg }}
-          path: |
-            target/mutants/mutants.out/*.txt
-            target/mutants/mutants.out/*.json
-            target/mutants/mutants.out/debug.log
-            target/mutants/status
-          if-no-files-found: ignore
-
   # ── spec-gate: diff-scoped blocking gate on PRs ────────────────────────────
   # Only files+lines the PR changed are mutated, so most PRs generate zero
   # spec-gate mutants and this is near-instant.
@@ -378,7 +309,7 @@ jobs:
   # survivors but does not fail the workflow — triage into suppressions or tests.
   spec-gate-sweep:
     name: spec-gate sweep (${{ matrix.subsystem }})
-    if: github.event_name != 'pull_request' && github.event_name != 'push'
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 330
     strategy:
@@ -446,7 +377,7 @@ jobs:
     needs: changes
     # Always on nightly/dispatch; on PRs only when a relevant path changed.
     if: |
-      always() && github.event_name != 'push' &&
+      always() &&
       (github.event_name != 'pull_request' || needs.changes.outputs.hygiene == 'true')
     runs-on: ubuntu-24.04
     timeout-minutes: 30
