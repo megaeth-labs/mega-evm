@@ -50,7 +50,8 @@ MUTANTS-STATUS status=<complete|partial|not-started|baseline-failed|error> expec
 
 The nightly full-crate run does not fit in one job, so CI splits it into four fresh shards (`scripts/mutation_test.sh full --shard k/4`, consecutive slices of the mutant list).
 The `cargo-mutants-full` job lists the full inventory (`cargo mutants --list` with the same excludes), combines the shards with `mutation_gate.py merge`, and scores the result.
-A shard that failed, was cancelled, or stopped on its budget leaves its remaining mutants without an outcome, so the combined status is `partial` and the gate fails.
+A shard that failed, timed out, or stopped on its budget leaves its remaining mutants without an outcome, so the combined status is `partial` and the gate fails.
+A cancelled run is not scored.
 
 ## The gate
 
