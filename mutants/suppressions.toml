@@ -427,3 +427,95 @@ file = "crates/mega-evm/src/evm/instructions.rs"
 mutant = "replace - with + in volatile_data_ext::recreate_unreached_call_load"
 justification = "Equivalent: the recreation runs only below the 100-gas static charge (budget <= 99) and drained <= min(cost, 23,000); cost - drained and cost + drained can straddle the budget only for 0 < cost <= 23,099, but new-account storage gas is 0 or at least 25,000 on every spec (25,000 x (multiplier - 1) for REX, 2,000,000 x multiplier for MINI_REX), so both forms subtract 0 at cost 0 and both underflow otherwise. Full suite green with the mutant applied."
 reviewer = "RealiCZ (cz)"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Equivalent survivors of the full-crate run (the rest of that run's survivors are
+# killed by tests).
+
+# --- state.rs: merge_account_status, `|` -> `^` in the per-transaction flag mask (equivalent) ---
+#
+# `other -= AccountStatus::Cold | AccountStatus::CreatedLocal | AccountStatus::SelfDestructedLocal`
+# builds a mask of three disjoint single-bit flags (revm-state 12.0.1: `Cold = 0b0001_0000`,
+# `SelfDestructedLocal = 0b0100_0000`, `CreatedLocal = 0b1000_0000`). For disjoint bits `a ^ b`
+# equals `a | b`, and `^` binds tighter than `|`, so turning either `|` into `^` builds the same
+# mask. This one entry covers both mutants (columns 34 and 64), which share the same text; the
+# function's `*this |= other` is a different mutation text and stays gated.
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/evm/state.rs"
+mutant = "replace | with ^ in merge_account_status"
+justification = "Equivalent: Cold (0b0001_0000), SelfDestructedLocal (0b0100_0000) and CreatedLocal (0b1000_0000) are disjoint single-bit AccountStatus flags, and for disjoint bits a ^ b == a | b; ^ binds tighter than |, so replacing either | of the mask with ^ builds the same mask and other -= removes the same bits."
+reviewer = "RealiCZ (cz)"
+
+# --- salt.rs: EmptyExternalEnv bucket ids -> Default::default() (equivalent) ---
+#
+# `BucketId` is `u32`, so `Default::default()` is `0`, the value both functions already return
+# (`0 as BucketId`).
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/external/salt.rs"
+mutant = "replace <impl SaltEnv for EmptyExternalEnv>::bucket_id_for_account -> BucketId with Default::default()"
+justification = "Equivalent: BucketId is a u32 alias, so Default::default() is 0, exactly the value the function returns (0 as BucketId); the mutant returns the same bucket id for every account."
+reviewer = "RealiCZ (cz)"
+
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/external/salt.rs"
+mutant = "replace <impl SaltEnv for EmptyExternalEnv>::bucket_id_for_slot -> BucketId with Default::default()"
+justification = "Equivalent: BucketId is a u32 alias, so Default::default() is 0, exactly the value the function returns (0 as BucketId); the mutant returns the same bucket id for every storage slot."
+reviewer = "RealiCZ (cz)"
+
+# --- sandbox/execution.rs: explicit zero fields of the sandbox TxEnv (equivalent) ---
+#
+# Both sandbox `TxEnv` literals end in `..Default::default()`, and `TxEnv::default()` is
+# `TxEnvBuilder::new().build()`, whose `gas_price` and `nonce` are `0` (revm-context 18.0.3
+# `tx.rs`). Deleting an explicit `nonce: 0` or `gas_price: 0` therefore builds the same `TxEnv`.
+# The fields stay written out because the sandbox's fee-free and Nick's-method semantics depend
+# on them.
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/sandbox/execution.rs"
+mutant = "delete field nonce from struct TxEnv expression in execute_keyless_deploy_call"
+justification = "Equivalent: the pre-REX5 sandbox TxEnv literal ends in ..Default::default(), and TxEnv::default() (TxEnvBuilder::new().build(), revm-context 18.0.3) has nonce 0, so deleting the explicit nonce: 0 builds an identical TxEnv."
+reviewer = "RealiCZ (cz)"
+
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/sandbox/execution.rs"
+mutant = "delete field gas_price from struct TxEnv expression in build_fee_free_sandbox_deposit_tx"
+justification = "Equivalent: the deposit-style sandbox TxEnv literal ends in ..Default::default(), and TxEnv::default() (TxEnvBuilder::new().build(), revm-context 18.0.3) has gas_price 0, so deleting the explicit gas_price: 0 builds an identical TxEnv."
+reviewer = "RealiCZ (cz)"
+
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/sandbox/execution.rs"
+mutant = "delete field nonce from struct TxEnv expression in build_fee_free_sandbox_deposit_tx"
+justification = "Equivalent: the deposit-style sandbox TxEnv literal ends in ..Default::default(), and TxEnv::default() (TxEnvBuilder::new().build(), revm-context 18.0.3) has nonce 0, so deleting the explicit nonce: 0 builds an identical TxEnv."
+reviewer = "RealiCZ (cz)"
+
+# --- sandbox/state_merge.rs: same-hash code copy, `&&` -> `||` (equivalent) ---
+#
+# When the sandbox and the parent agree on an account's code hash, the merge copies the sandbox's
+# bytecode into the parent only if the parent's hash is non-empty and its cached code is missing
+# or empty (a stale cache). With `||` it also copies in two more cases, neither of which changes
+# what any reader sees:
+#   * non-empty hash, parent code already present: the copy has the same hash, so the same bytes;
+#   * empty hash (`KECCAK_EMPTY`): the copied bytecode hashes to `KECCAK_EMPTY`, so it is empty,
+#     and the parent's `None` or empty code becomes `Some(empty)`. revm itself stores
+#     `Some(Bytecode::default())` without a database read whenever it loads the code of an
+#     empty-hash account (revm-context-interface 19.0.3 `load_code_preserve_error`), so every
+#     reader already treats `None` and `Some(empty)` alike.
+# Gas, results, the journal and the committed state are unchanged.
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/sandbox/state_merge.rs"
+mutant = "replace && with || in apply_sandbox_state_journaled_inner"
+justification = "Equivalent: on equal code hashes, || adds only two copies: a parent that already has code receives the same-hash (identical) bytecode, and an empty-hash parent has None or empty code replaced by the sandbox's empty bytecode, the Some(Bytecode::default()) revm stores itself on any code load of an empty-hash account, so no read, gas cost, result or committed state changes."
+reviewer = "RealiCZ (cz)"
