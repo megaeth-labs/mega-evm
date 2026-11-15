@@ -1002,18 +1002,14 @@ mod tests {
     fn test_ensure_sandbox_create_can_merge_refuses_a_nonce_or_code_alone() {
         let code_hash = revm::primitives::keccak256([0x60, 0x00]);
         assert!(ensure_sandbox_create_can_merge(0, KECCAK_EMPTY).is_ok(), "empty parent merges");
-        assert!(
-            matches!(
-                ensure_sandbox_create_can_merge(1, KECCAK_EMPTY),
-                Err(KeylessDeployError::InternalError)
-            ),
+        assert_eq!(
+            ensure_sandbox_create_can_merge(1, KECCAK_EMPTY),
+            Err(KeylessDeployError::InternalError),
             "a parent with a nonce but no code is refused"
         );
-        assert!(
-            matches!(
-                ensure_sandbox_create_can_merge(0, code_hash),
-                Err(KeylessDeployError::InternalError)
-            ),
+        assert_eq!(
+            ensure_sandbox_create_can_merge(0, code_hash),
+            Err(KeylessDeployError::InternalError),
             "a parent with code but nonce 0 is refused"
         );
     }
