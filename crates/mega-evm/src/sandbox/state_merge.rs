@@ -939,4 +939,82 @@ mod tests {
             .expect_err("merge must reject selfdestruct without created marker");
         assert!(matches!(error, KeylessDeployError::InternalError), "unexpected error: {error:?}");
     }
+
+    /// A nonce increment is journaled as one `NonceChange` per increment, counted from the
+    /// parent's nonce, as revm journals its own nonce bumps. A signer that already deployed once
+    /// (parent nonce 1) and is bumped to 2 by the sandbox records exactly one entry, and a revert
+    /// restores nonce 1.
+    #[test]
+    fn test_rex5_apply_sandbox_state_journals_one_nonce_change_per_increment() {
+        let signer = address!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0001");
+
+        let mut ctx = MegaContext::<_, EmptyExternalEnv>::new(EmptyDB::default(), MegaSpecId::REX5);
+        let journal = ctx.journal_mut();
+        journal.inner.state.insert(signer, {
+            let mut acc = Account::from(AccountInfo {
+                balance: U256::ZERO,
+                nonce: 1,
+                code_hash: KECCAK_EMPTY,
+                code: None,
+                account_id: None,
+            });
+            acc.mark_touch();
+            acc
+        });
+        let checkpoint = JournalTr::checkpoint(journal);
+        let journal_len_before = journal.inner.journal.len();
+
+        let mut sandbox_state = EvmState::default();
+        sandbox_state.insert(signer, {
+            let mut acc = Account::from(AccountInfo {
+                balance: U256::ZERO,
+                nonce: 2,
+                code_hash: KECCAK_EMPTY,
+                code: None,
+                account_id: None,
+            });
+            acc.mark_touch();
+            acc
+        });
+
+        apply_sandbox_state(&mut ctx, sandbox_state, signer).expect("apply should succeed");
+        let journal = ctx.journal_mut();
+        let nonce_changes = journal.inner.journal[journal_len_before..]
+            .iter()
+            .filter(|entry| {
+                matches!(entry, JournalEntry::NonceChange { address, .. } if *address == signer)
+            })
+            .count();
+        assert_eq!(nonce_changes, 1, "a 1 -> 2 increment journals exactly one NonceChange");
+        assert_eq!(journal.inner.state.get(&signer).unwrap().info.nonce, 2);
+
+        JournalTr::checkpoint_revert(journal, checkpoint);
+        assert_eq!(
+            journal.inner.state.get(&signer).unwrap().info.nonce,
+            1,
+            "a revert restores the parent nonce"
+        );
+    }
+
+    /// A sandbox CREATE merges only over an empty parent account: a parent nonce or a parent
+    /// code hash alone is enough to refuse it.
+    #[test]
+    fn test_ensure_sandbox_create_can_merge_refuses_a_nonce_or_code_alone() {
+        let code_hash = revm::primitives::keccak256([0x60, 0x00]);
+        assert!(ensure_sandbox_create_can_merge(0, KECCAK_EMPTY).is_ok(), "empty parent merges");
+        assert!(
+            matches!(
+                ensure_sandbox_create_can_merge(1, KECCAK_EMPTY),
+                Err(KeylessDeployError::InternalError)
+            ),
+            "a parent with a nonce but no code is refused"
+        );
+        assert!(
+            matches!(
+                ensure_sandbox_create_can_merge(0, code_hash),
+                Err(KeylessDeployError::InternalError)
+            ),
+            "a parent with code but nonce 0 is refused"
+        );
+    }
 }
