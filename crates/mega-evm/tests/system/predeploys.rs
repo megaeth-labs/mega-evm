@@ -1,5 +1,6 @@
-//! The predeploys and the check Satin's activation block makes of them: the list, a matching
-//! account read as it is, and every other account refused with one error.
+//! The predeploys and the check of an account against one of them, which Satin's activation block
+//! makes of the EIP-7997 factory: the list, a matching account read as it is, and every other
+//! account refused with one error.
 
 use alloy_primitives::{keccak256, Address, Bytes, B256, U256};
 use mega_evm::{

@@ -58,8 +58,11 @@ pub fn rex6_predeploys(
 /// [`rex6_predeploys`] or [`MemoryDatabase::sequencer_registry`].
 ///
 /// Test and tool support, not a chain parameter: the legacy forks deploy the registry (Rex5) and
-/// upgrade it to v2.0.0 (Rex6), and Satin neither creates nor seeds it, so a state Satin runs a
-/// block on must already hold it.
+/// upgrade it to v2.0.0 (Rex6). Every Satin block deploys it too: it reads a registry at v2.0.0,
+/// migrates one at 1.0.0 in place, and seeds one where its address holds no code, naming
+/// `MEGA_SYSTEM_ADDRESS` its system address and taking its sequencer, admin and minimum rotation
+/// delay from the schedule's bootstrap values. A state that holds the registry with these roles is
+/// one a chain that ran Rex6 left, which a Satin block only reads.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SequencerRegistryRoles {
     /// The live system address, and the initial one.

@@ -28,7 +28,7 @@ use revm::{
 };
 
 use crate::common::{
-    account_state_gas, block, context, state_is_free, system_db, CALLER, GAS_LIMIT,
+    account_state_gas, block, body_history, context, state_is_free, system_db, CALLER, GAS_LIMIT,
 };
 
 /// The chain the tests run on.
@@ -42,6 +42,10 @@ const FUNDS: u64 = 1_000_000_000_000_000;
 
 /// The Oracle's slot the system transactions write.
 const ORACLE_SLOT: U256 = U256::ZERO;
+
+/// The intrinsic regular gas of a call carrying no value, no calldata and no access list:
+/// EIP-2780's base of 12,000 and 3,000 for the recipient. It is the call's floor too.
+const BARE_CALL_INTRINSIC_GAS: u64 = 12_000 + 3_000;
 
 /// A database with the system contracts in place and the registry naming
 /// [`MEGA_SYSTEM_ADDRESS`] the current system address: that is what makes a legacy call from it
@@ -665,6 +669,64 @@ fn test_a_system_transaction_pays_history_gas() {
     );
 }
 
+/// A system transaction from an existing system address to the Oracle carrying no calldata, on
+/// `gas_limit`. Its intrinsic regular gas is [`BARE_CALL_INTRINSIC_GAS`], and its body is
+/// `TX_BODY_SIZE` bytes.
+fn bare_system_tx(gas_limit: u64) -> MegaTransaction {
+    let mut tx =
+        legacy_tx(MEGA_SYSTEM_ADDRESS, TxKind::Call(ORACLE_CONTRACT_ADDRESS), Bytes::new(), 0);
+    tx.0.base.gas_limit = gas_limit;
+    tx
+}
+
+/// A system transaction whose gas limit is one short of its intrinsic regular gas plus its body's
+/// history passes its own checks and is promoted to a deposit, whose intrinsic check it then
+/// fails: it is included as a failed deposit, not refused, and starts no frame, so the Oracle's
+/// code, which would revert on the empty input, does not run. It bumps the system address's nonce
+/// and changes nothing else, reports its whole gas limit as regular gas, on its own ledgers and on
+/// the block's, and no history gas, and keeps its body's bytes. At the gas limit that covers both,
+/// it is admitted and runs: a recipient that stops at once succeeds, paying its intrinsic regular
+/// gas and its body's history.
+///
+/// Independence: constants — the intrinsic regular gas is EIP-2780's for a bare call, the body's
+/// history its `TX_BODY_SIZE` bytes at the price in effect, by hand.
+#[test]
+fn test_a_system_transaction_short_of_its_body_history_is_a_failed_deposit() {
+    let least = BARE_CALL_INTRINSIC_GAS + body_history(0);
+    let existing = || chain_db().account_balance(MEGA_SYSTEM_ADDRESS, U256::from(FUNDS));
+
+    let mut evm = MegaEvm::new(chain_context(existing())).with_inspector(GasInspector::new());
+    let outcome = evm.execute_transaction(bare_system_tx(least - 1)).expect("it is included");
+    assert!(
+        matches!(
+            outcome.result,
+            ExecutionResult::Halt { reason: MegaHaltReason::FailedDeposit, .. }
+        ),
+        "{:?} is not a failed deposit",
+        outcome.result,
+    );
+    assert!(evm.inspector().trace.is_none(), "the transaction starts no frame");
+    let gas = &outcome.gas;
+    assert_eq!((gas.regular, gas.state, gas.history), (least - 1, 0, 0));
+    assert_eq!(gas.history_bytes, mega_evm::TX_BODY_SIZE, "the body's bytes stay");
+    assert_eq!((gas.gas_used, gas.block_execution_gas()), (least - 1, least - 1));
+    let touched: Vec<Address> =
+        outcome.state.iter().filter(|(_, account)| account.is_touched()).map(|(a, _)| *a).collect();
+    assert_eq!(touched, [MEGA_SYSTEM_ADDRESS], "the failed deposit changes its sender alone");
+    let sender = &outcome.state[&MEGA_SYSTEM_ADDRESS].info;
+    assert_eq!((sender.nonce, sender.balance), (1, U256::from(FUNDS)));
+
+    let stops = existing().account_code(ORACLE_CONTRACT_ADDRESS, Bytes::from_static(&[STOP]));
+    let outcome = run_outcome(stops, bare_system_tx(least));
+    assert!(outcome.result.is_success(), "{:?}", outcome.result);
+    let gas = &outcome.gas;
+    assert_eq!(
+        (gas.regular, gas.state, gas.history),
+        (BARE_CALL_INTRINSIC_GAS, 0, body_history(0))
+    );
+    assert_eq!(gas.gas_used, least);
+}
+
 /// A deposit-like transaction whose caller does not exist yet creates that account, and pays
 /// the account-creation charge for it exactly once: the same charge a value transfer to a
 /// fresh account pays.
@@ -737,11 +799,10 @@ fn test_a_deposit_that_creates_two_accounts_pays_for_both() {
 /// A deposit from `sender`, an account that does not exist, to the Oracle, whose gas limit is one
 /// short of its intrinsic gas and the account it creates for its caller, at the byte prices in
 /// effect. It carries no value and no calldata, so its intrinsic gas, which is its floor too, is
-/// EIP-2780's base of 12,000 and 3,000 for the recipient.
+/// [`BARE_CALL_INTRINSIC_GAS`].
 fn deposit_one_short_of_its_caller(sender: Address) -> MegaTransaction {
-    const INTRINSIC: u64 = 12_000 + 3_000;
     let mut tx = deposit_tx(sender, TxKind::Call(ORACLE_CONTRACT_ADDRESS), U256::ZERO, 0);
-    tx.0.base.gas_limit = INTRINSIC + account_state_gas() - 1;
+    tx.0.base.gas_limit = BARE_CALL_INTRINSIC_GAS + account_state_gas() - 1;
     tx
 }
 

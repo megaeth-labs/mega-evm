@@ -4,8 +4,8 @@
 //! Every block runs as a node runs one:
 //!
 //! - on a state that holds the seven predeploys as a chain that ran Rex6 holds them, with what the
-//!   previous block's pre-block changes left: no block but Satin's activation block reads the
-//!   predeploys, and none deploys them;
+//!   previous block's pre-block changes left: every block deploys the system contracts, which on
+//!   that state only reads them, and only Satin's activation block reads the EIP-7997 factory;
 //! - with the EIP-2935 and EIP-4788 contracts' own code, so the pre-block calls record the parent
 //!   hash and the beacon root;
 //! - under the spec's limits, `ProtocolLimits::for_spec`: the production data-size limits and gas

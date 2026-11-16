@@ -1503,7 +1503,8 @@ A node that meets the failure cannot execute the block past that transaction: it
 A block MUST be invalid when:
 
 - a pre-block call does not succeed (see [System Calls and Pre-Block Calls](#18-system-calls-and-pre-block-calls));
-- it is the block in which Satin activates, and a system-contract address or the factory's does not hold the code Satin expects (see [System Calls and Pre-Block Calls](#18-system-calls-and-pre-block-calls));
+- it is the block in which Satin activates, and the EIP-7997 factory's address does not hold the code Satin expects: every block installs the system contracts themselves, so only the factory is checked (see [System Calls and Pre-Block Calls](#18-system-calls-and-pre-block-calls));
+- its `SequencerRegistry` holds code its deployment cannot migrate, or the resolution of the live system address finds the registry absent, holding other code or naming no system address (see [System Calls and Pre-Block Calls](#18-system-calls-and-pre-block-calls));
 - it contains a transaction the rules above skip.
 
 ### 22. The Stateless Witness

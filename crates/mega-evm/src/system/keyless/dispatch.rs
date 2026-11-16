@@ -117,8 +117,8 @@ pub(crate) fn is_dispatched<DB: Database, ExtEnvs: ExternalEnvTypes>(
 /// Any other call is built as a call to the contract, whose code it never runs: its actions are
 /// made by hand, its first by [`start`]. The dispatch is by address, selector and decoded
 /// arguments, whatever the address holds, so where the state holds no contract code the frame is
-/// built on the contract's own. A chain Satin runs on holds it, as Rex2 deployed it, and Satin's
-/// activation block checks it.
+/// built on the contract's own. A block Satin runs holds it: every block deploys it before its
+/// transactions, where it is missing or holds other code.
 #[inline(never)]
 pub(crate) fn ready<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
