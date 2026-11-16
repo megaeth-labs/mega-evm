@@ -508,7 +508,13 @@ fn oracle_sload<DB: Database, ExtEnvs: ExternalEnvTypes>(
 mod tests {
     use super::*;
     use crate::{test_utils::MemoryDatabase, EmptyExternalEnv};
-    use revm::bytecode::opcode::{CLZ, DUPN, EXCHANGE, SLOTNUM, SWAPN};
+    use revm::{
+        bytecode::opcode::{
+            ADD, ADDRESS, CALLER, CHAINID, CLZ, CREATE, CREATE2, DUPN, EXCHANGE, GASPRICE, ORIGIN,
+            SLOAD, SLOTNUM, STOP, SWAPN,
+        },
+        primitives::{Address, U256},
+    };
 
     /// The table charges the Satin static gas of every opcode but the ones the read wrappers run,
     /// which charge it themselves: the whole table, with their entries, is revm's Amsterdam one.
@@ -529,5 +535,125 @@ mod tests {
         for (opcode, gas) in [(DUPN, 3), (SWAPN, 3), (EXCHANGE, 3), (SLOTNUM, 2), (CLZ, 5)] {
             assert_eq!(charged[opcode as usize], gas, "opcode {opcode:#04x}");
         }
+    }
+
+    const BENEFICIARY: Address = Address::repeat_byte(0xbe);
+    const OTHER: Address = Address::repeat_byte(0x07);
+
+    /// What `refused_read::<OPCODE>` decides for a frame running as `own`, with `operands` on the
+    /// stack (the first the top), the block's beneficiary being `BENEFICIARY`.
+    fn decision<const OPCODE: u8>(
+        own: Address,
+        operands: &[Address],
+    ) -> Option<VolatileDataAccess> {
+        let mut host = MegaContext::new(MemoryDatabase::default(), crate::MegaSpecId::SATIN);
+        host.inner.block.beneficiary = BENEFICIARY;
+        let mut interpreter = Interpreter::default_ext();
+        interpreter.input.target_address = own;
+        for operand in operands.iter().rev() {
+            assert!(interpreter.stack.push(U256::from_be_slice(operand.as_slice())));
+        }
+        refused_read::<OPCODE, _, _>(&interpreter, &host)
+    }
+
+    /// The refusal decision, opcode by opcode, with volatile-data access off: each
+    /// block-environment opcode names its own field whatever its operands, an account opcode is
+    /// refused only for the beneficiary and only with every operand on the stack, the calls
+    /// only for a beneficiary target operand, and an opcode the wrappers do not handle is never
+    /// refused.
+    #[test]
+    fn test_the_refusal_decision_truth_table() {
+        use VolatileDataAccess as Access;
+
+        // The block-environment opcodes: refused with an empty stack, a full one, and in any frame.
+        let nothing: &[Address] = &[];
+        let some: &[Address] = &[OTHER, BENEFICIARY];
+        for (own, operands) in [(OTHER, nothing), (BENEFICIARY, some)] {
+            assert_eq!(decision::<NUMBER>(own, operands), Some(Access::BLOCK_NUMBER));
+            assert_eq!(decision::<TIMESTAMP>(own, operands), Some(Access::TIMESTAMP));
+            assert_eq!(decision::<COINBASE>(own, operands), Some(Access::COINBASE));
+            assert_eq!(decision::<DIFFICULTY>(own, operands), Some(Access::PREV_RANDAO));
+            assert_eq!(decision::<GASLIMIT>(own, operands), Some(Access::GAS_LIMIT));
+            assert_eq!(decision::<BASEFEE>(own, operands), Some(Access::BASE_FEE));
+            assert_eq!(decision::<BLOBBASEFEE>(own, operands), Some(Access::BLOB_BASE_FEE));
+            assert_eq!(decision::<SLOTNUM>(own, operands), Some(Access::SLOT_NUM));
+            assert_eq!(decision::<BLOCKHASH>(own, operands), Some(Access::BLOCK_HASH));
+        }
+
+        let beneficiary = Some(Access::BENEFICIARY_BALANCE);
+        // `SELFBALANCE` follows the frame alone, not the stack.
+        assert_eq!(decision::<SELFBALANCE>(BENEFICIARY, nothing), beneficiary);
+        assert_eq!(decision::<SELFBALANCE>(OTHER, &[BENEFICIARY]), None);
+
+        // The one-operand account opcodes follow their target operand.
+        assert_eq!(decision::<BALANCE>(OTHER, &[BENEFICIARY]), beneficiary);
+        assert_eq!(decision::<EXTCODESIZE>(OTHER, &[BENEFICIARY]), beneficiary);
+        assert_eq!(decision::<EXTCODEHASH>(OTHER, &[BENEFICIARY]), beneficiary);
+        assert_eq!(decision::<BALANCE>(BENEFICIARY, &[OTHER]), None);
+        assert_eq!(decision::<EXTCODESIZE>(BENEFICIARY, &[OTHER]), None);
+        assert_eq!(decision::<EXTCODEHASH>(BENEFICIARY, &[OTHER]), None);
+        assert_eq!(decision::<BALANCE>(OTHER, nothing), None, "no operand");
+        assert_eq!(decision::<EXTCODESIZE>(OTHER, nothing), None, "no operand");
+        assert_eq!(decision::<EXTCODEHASH>(OTHER, nothing), None, "no operand");
+
+        // `EXTCODECOPY` takes four operands.
+        let four = |target| [target, OTHER, OTHER, OTHER];
+        assert_eq!(decision::<EXTCODECOPY>(OTHER, &four(BENEFICIARY)), beneficiary);
+        assert_eq!(decision::<EXTCODECOPY>(OTHER, &four(OTHER)), None);
+        assert_eq!(decision::<EXTCODECOPY>(OTHER, &four(BENEFICIARY)[..3]), None, "three operands");
+
+        // `SELFDESTRUCT`: a beneficiary target, or a frame running as the beneficiary.
+        assert_eq!(decision::<SELFDESTRUCT>(OTHER, &[BENEFICIARY]), beneficiary);
+        assert_eq!(decision::<SELFDESTRUCT>(BENEFICIARY, &[OTHER]), beneficiary);
+        assert_eq!(decision::<SELFDESTRUCT>(OTHER, &[OTHER]), None);
+        assert_eq!(decision::<SELFDESTRUCT>(BENEFICIARY, nothing), None, "no operand");
+
+        // The calls: the target is the second operand, after the gas; seven operands for `CALL`
+        // and `CALLCODE`, six for the others.
+        let call = |operands: usize, target| {
+            let mut stack = vec![OTHER; operands];
+            stack[1] = target;
+            stack
+        };
+        assert_eq!(decision::<CALL>(OTHER, &call(7, BENEFICIARY)), beneficiary);
+        assert_eq!(decision::<CALLCODE>(OTHER, &call(7, BENEFICIARY)), beneficiary);
+        assert_eq!(decision::<DELEGATECALL>(OTHER, &call(6, BENEFICIARY)), beneficiary);
+        assert_eq!(decision::<STATICCALL>(OTHER, &call(6, BENEFICIARY)), beneficiary);
+        assert_eq!(decision::<CALL>(OTHER, &call(7, OTHER)), None);
+        assert_eq!(decision::<CALLCODE>(OTHER, &call(7, OTHER)), None);
+        assert_eq!(decision::<DELEGATECALL>(OTHER, &call(6, OTHER)), None);
+        assert_eq!(decision::<STATICCALL>(OTHER, &call(6, OTHER)), None);
+        // The beneficiary as the gas operand, the first, is no target.
+        let gas_is_beneficiary = |operands: usize| {
+            let mut stack = vec![OTHER; operands];
+            stack[0] = BENEFICIARY;
+            stack
+        };
+        assert_eq!(decision::<CALL>(OTHER, &gas_is_beneficiary(7)), None);
+        assert_eq!(decision::<STATICCALL>(OTHER, &gas_is_beneficiary(6)), None);
+        // A frame running as the beneficiary reads nothing by calling.
+        assert_eq!(decision::<CALL>(BENEFICIARY, &call(7, OTHER)), None);
+        // One operand short.
+        assert_eq!(decision::<CALL>(OTHER, &call(6, BENEFICIARY)), None, "CALL, six operands");
+        assert_eq!(decision::<CALLCODE>(OTHER, &call(6, BENEFICIARY)), None, "CALLCODE, six");
+        assert_eq!(
+            decision::<DELEGATECALL>(OTHER, &call(5, BENEFICIARY)),
+            None,
+            "DELEGATECALL, five"
+        );
+        assert_eq!(decision::<STATICCALL>(OTHER, &call(5, BENEFICIARY)), None, "STATICCALL, five");
+
+        // Opcodes the wrappers do not handle read nothing, whatever the stack and the frame.
+        let all = [BENEFICIARY; 8];
+        assert_eq!(decision::<ADD>(BENEFICIARY, &all), None);
+        assert_eq!(decision::<ADDRESS>(BENEFICIARY, &all), None);
+        assert_eq!(decision::<CALLER>(BENEFICIARY, &all), None);
+        assert_eq!(decision::<ORIGIN>(BENEFICIARY, &all), None);
+        assert_eq!(decision::<SLOAD>(BENEFICIARY, &all), None);
+        assert_eq!(decision::<CREATE>(BENEFICIARY, &all), None);
+        assert_eq!(decision::<CREATE2>(BENEFICIARY, &all), None);
+        assert_eq!(decision::<CHAINID>(BENEFICIARY, &all), None);
+        assert_eq!(decision::<GASPRICE>(BENEFICIARY, &all), None);
+        assert_eq!(decision::<STOP>(BENEFICIARY, &all), None);
     }
 }
