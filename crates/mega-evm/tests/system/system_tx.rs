@@ -318,6 +318,42 @@ fn test_no_transaction_reads_the_registry() {
     }
 }
 
+/// A registry read that failed while building the context can succeed before the next
+/// transaction. The recovered address classifies that transaction and is cached for later ones.
+#[test]
+fn test_a_failed_initial_registry_read_recovers_and_caches_the_system_address() {
+    let mut db = ErrorInjectingDatabase::new(chain_db());
+    db.fail_on_account = Some(SEQUENCER_REGISTRY_ADDRESS);
+    let mut evm = MegaEvm::new(chain_context(db));
+    assert_eq!(evm.ctx().system_address(), None, "the initial read failed");
+    evm.db_mut().fail_on_account = None;
+
+    let first = evm
+        .execute_transaction(legacy_tx(
+            MEGA_SYSTEM_ADDRESS,
+            TxKind::Call(ORACLE_CONTRACT_ADDRESS),
+            get_slot(),
+            0,
+        ))
+        .expect("the registry can now be read");
+    assert!(first.result.is_success(), "{:?}", first.result);
+    assert!(evm.ctx().is_system_originated());
+    assert!(!first.state.contains_key(&SEQUENCER_REGISTRY_ADDRESS));
+
+    evm.db_mut().fail_on_account = Some(SEQUENCER_REGISTRY_ADDRESS);
+    let second = evm
+        .execute_transaction(legacy_tx(
+            MEGA_SYSTEM_ADDRESS,
+            TxKind::Call(ORACLE_CONTRACT_ADDRESS),
+            get_slot(),
+            0,
+        ))
+        .expect("the recovered address is cached");
+    assert!(second.result.is_success(), "{:?}", second.result);
+    assert!(evm.ctx().is_system_originated());
+    assert!(!second.state.contains_key(&SEQUENCER_REGISTRY_ADDRESS));
+}
+
 /// A context built without an address reads the live system address off its database when it is
 /// built — the registry's account and its system-address slot, before any transaction — and a
 /// Mega System Transaction run on it is then classified against it and reads nothing more of the

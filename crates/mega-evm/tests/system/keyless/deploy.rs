@@ -562,6 +562,48 @@ fn test_keyless_deploy_creates_child_contract() {
     }
 }
 
+/// A child's destruction gives back the child's leaf alone: the keyless deployment still
+/// reports the code its own constructor kept.
+#[test]
+fn test_a_keyless_constructor_keeps_its_code_when_its_child_selfdestructs() {
+    for gas_limit in GAS_LIMITS {
+        let child_init = Bytes::from_static(&[ORIGIN, SELFDESTRUCT]);
+        let prefix = BytecodeBuilder::default()
+            .mstore(0, &child_init)
+            .push_number(child_init.len() as u64)
+            .push_number(0_u64)
+            .push_number(0_u64)
+            .append(CREATE)
+            .append(POP);
+        let init_code = running(prefix);
+        let init_len = init_code.len();
+        let deployment = Deployment::new(init_code);
+
+        let outcome = deploy(system_db(), &deployment, gas_limit);
+
+        let answer = returned(&outcome);
+        let [total, ..] =
+            beyond(&outcome, &reference(deployment.call_data(LARGE_OVERRIDE), gas_limit));
+        assert_eq!(
+            total,
+            KEYLESS_DEPLOY_OVERHEAD_GAS +
+                create_regular(init_len) +
+                entry(GasId::new_account_state_gas()) +
+                entry(GasId::create_state_gas()) +
+                2 * record() +
+                answer.gasUsed,
+            "the child's give-back belongs to the constructor at {gas_limit}"
+        );
+        assert_eq!(answer.deployedAddress, deployment.address, "at {gas_limit}");
+        assert!(answer.errorData.is_empty(), "{:?}", answer.errorData);
+        assert_eq!(code_hash(&outcome, deployment.address), Some(keccak(&[0x00])));
+        assert_eq!(nonce(&outcome, deployment.address), 2);
+        let child = &outcome.state[&deployment.address.create(1)];
+        assert!(child.is_selfdestructed());
+        assert!(child.info.code.as_ref().is_none_or(|code| code.is_empty()));
+    }
+}
+
 /// A constructor that reads another contract, and keeps what it read in its own storage.
 #[test]
 fn test_keyless_deploy_reads_existing_contract() {

@@ -449,6 +449,11 @@ fn test_a_registry_to_seed_or_migrate_without_bootstrap_values_is_an_internal_er
         let (_, started) = start_on(&mut state, unlimited_ctx(), without_bootstrap.clone());
         let error = started.expect_err("the registry cannot be deployed");
         assert_eq!(internal(&error), MegaBlockExecutionError::UnusableRegistryBootstrap, "{case}");
+        assert_eq!(
+            internal(&error).to_string(),
+            "the SequencerRegistry must be seeded or migrated, and the chain configuration carries no usable bootstrap values for it",
+            "{case}"
+        );
     }
     let (_, started) = start_on(&mut common::state(), unlimited_ctx(), without_bootstrap);
     started.expect("version 2.0.0 needs no bootstrap values");
@@ -678,4 +683,36 @@ fn test_a_create2_round_trip_through_the_factory() {
         }
         other => panic!("the factory call should succeed, got {other:?}"),
     }
+}
+
+/// A migration's storage read failure remains a database error, with no verdict on the block.
+#[test]
+fn test_a_registry_migration_storage_failure_is_an_internal_database_error() {
+    use mega_system_contracts::sequencer_registry::V1_0_0_CODE;
+    let mut db = ErrorInjectingDatabase::new(
+        common::database().account_code(SEQUENCER_REGISTRY_ADDRESS, V1_0_0_CODE),
+    );
+    db.fail_on_storage = Some((SEQUENCER_REGISTRY_ADDRESS, MIN_ROTATION_DELAY));
+    let mut state = State::builder().with_database(db).build();
+    let evm = alloy_evm::EvmFactory::create_evm(
+        &mega_evm::MegaEvmFactory::new(),
+        &mut state,
+        common::evm_env(),
+    );
+    let error = mega_evm::MegaBlockExecutor::new(
+        evm,
+        after_activation_ctx(),
+        activation_spec(),
+        alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder::default(),
+    )
+    .apply_pre_execution_changes()
+    .expect_err("the migration cannot read the original delay");
+
+    assert!(matches!(error, BlockExecutionError::Internal(_)), "{error:?}");
+    assert!(error.to_string().contains("injected storage() error"), "{error}");
+    assert_eq!(
+        state.basic(SEQUENCER_REGISTRY_ADDRESS).unwrap().unwrap().code_hash,
+        keccak256(V1_0_0_CODE),
+        "a failed migration commits no new code"
+    );
 }
