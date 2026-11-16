@@ -1021,4 +1021,27 @@ mod tests {
             Err(SequencerRegistryError::Database(_))
         ));
     }
+    /// An unusable registry's diagnostic distinguishes absence from foreign code and names
+    /// the address and hashes the caller needs to repair its state.
+    #[test]
+    fn test_resolution_errors_describe_the_absent_or_foreign_registry() {
+        let absent = resolve_system_address(&mut InMemoryDB::default()).unwrap_err();
+        assert_eq!(
+            absent.to_string(),
+            format!(
+                "the SequencerRegistry at {SEQUENCER_REGISTRY_ADDRESS} has no account when the block resolves its live system address"
+            )
+        );
+
+        let found = alloy_primitives::keccak256([0x00]);
+        let foreign =
+            resolve_system_address(&mut registry_holding(Bytes::from_static(&[0x00]), None))
+                .unwrap_err();
+        assert_eq!(
+            foreign.to_string(),
+            format!(
+                "the SequencerRegistry at {SEQUENCER_REGISTRY_ADDRESS} must hold code hash {SEQUENCER_REGISTRY_CODE_HASH} when the block resolves its live system address; it holds code hash {found}"
+            )
+        );
+    }
 }

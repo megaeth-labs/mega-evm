@@ -107,6 +107,18 @@ mod tests {
     use crate::{MegaHardforks, MegaSpecId};
 
     #[test]
+    fn test_an_unscheduled_chain_needs_no_registry_bootstrap() {
+        let activation =
+            ChainActivation { chain_id: 123, satin: None, sequencer_registry_bootstrap: None };
+
+        let schedule = activation.hardforks();
+
+        assert_eq!(schedule.sequencer_registry_bootstrap(), None);
+        assert_eq!(schedule.spec_id(u64::MAX), None);
+        assert_eq!(schedule.validate_schedule(), Ok(()));
+    }
+
+    #[test]
     fn test_known_chains_have_satin_unscheduled() {
         assert_eq!(MAINNET_CHAIN_ID, 4326);
         assert_eq!(TESTNET_CHAIN_ID, 6343);
