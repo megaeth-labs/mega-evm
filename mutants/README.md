@@ -73,16 +73,18 @@ Two granularities:
 
 - `kind = "function"` — a regex `pattern` matched against the mutant name; excluded before generation.
   For whole equivalent/dead functions.
-- `kind = "line"` — the exact `mutant` text; filtered from results.
+- `kind = "line"` — one mutant, named by its location (`file`, `line`, `column`) and its exact `mutant` text (without the `file:line:col: ` prefix); filtered from results.
   For a single survivor inside an otherwise-tested function.
+  The anchor keeps the entry to the reviewed mutant: the same mutation text elsewhere in the function, such as a newly added `&&`, stays gated.
+  When code above it moves the mutant, the entry stops matching and the mutant is gated again (fail closed); the hygiene job reports the entry as stale, with the location its text moved to, and it is re-anchored once its justification is checked against the new code.
 
 Inline `#[mutants::skip]` on a function is also honored natively by cargo-mutants; prefer `suppressions.toml` when the decision needs a record.
 
 Adding a suppression is a reviewed decision — scrutinize it like disabling a test.
 
-A suppression that stops matching any mutant (its function was renamed/deleted, or its line text changed) silently becomes a permanent blind spot.
+A suppression that stops matching any mutant (its function was renamed or deleted, its line moved, or its text changed) silently becomes a permanent blind spot, or, for a moved line, gates the reviewed mutant again.
 The **Suppression Hygiene** job (the `orphan-suppressions` job in `.github/workflows/mutation.yml`) guards against this: it assembles the full mutant universe from both engines (`scripts/mutation_test.sh list --all` and `umutate.py plan`) and runs `mutation_gate.py orphans`, failing if any suppression matches nothing.
-It runs on PRs that touch `suppressions.toml` or `src/`, and weekly.
+It runs on PRs that touch `suppressions.toml`, `src/` or the mutation tooling, and nightly.
 For dead code, prefer deleting it or `#[mutants::skip]` over a permanent `kind = "function"` exclude.
 
 ## Timed-out mutants
@@ -168,5 +170,5 @@ python3 scripts/umutate.py run --packs spec-gate --diff origin/main --output tar
 
 ## Suppressions and CI
 
-Spec-gate equivalents (e.g. a gate guarding a state no test exercises — expect a meaningful rate) go in the **same** `suppressions.toml`, as `kind = "line"` entries matching the mutant text, prefixed with the pack name.
+Spec-gate equivalents (e.g. a gate guarding a state no test exercises — expect a meaningful rate) go in the **same** `suppressions.toml`, as `kind = "line"` entries anchored like any other (spec-gate mutants sit at column 1 of their line), whose text starts with the pack name.
 The PR gate runs diff-scoped (instant on PRs that touch no gate lines); the full crate sweep runs on a nightly schedule (the `spec-gate-sweep` job in `.github/workflows/mutation.yml`).

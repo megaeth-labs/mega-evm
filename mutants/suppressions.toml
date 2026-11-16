@@ -13,11 +13,20 @@
 #   kind = "function"  -> matched as an --exclude-re against the mutant NAME.
 #                         Use for whole functions that are entirely equivalent or
 #                         dead (stable across line moves). `pattern` is a regex.
-#   kind = "line"      -> matched against the exact mutant description line from
-#                         missed.txt OR timeout.txt. Use for a single surviving
-#                         mutant inside an otherwise-tested function, or to accept
-#                         a genuinely non-terminating/equivalent timed-out mutant.
-#                         `mutant` is the literal text (without "file:line:col: ").
+#   kind = "line"      -> matched against one mutant line of missed.txt OR
+#                         timeout.txt (`file:line:col: text`): `file`, `line` and
+#                         `column` must name its location and `mutant` must be its
+#                         exact text (without the "file:line:col: " prefix). Use for
+#                         a single surviving mutant inside an otherwise-tested
+#                         function, or to accept a genuinely non-terminating or
+#                         equivalent timed-out mutant. The anchor keeps the entry
+#                         to the one reviewed mutant: the same mutation text
+#                         elsewhere in the function (a new `&&`, say) stays gated.
+#                         When the code above it moves, the entry stops matching
+#                         (fail closed: the mutant is gated again) and the
+#                         suppression-hygiene job reports it as stale, with the
+#                         location the text has moved to; re-anchor it after
+#                         checking the justification still holds.
 #
 # Every entry also carries:
 #   category = "equivalent" | "dead"
@@ -36,7 +45,7 @@
 # a caller, its mutants silently stop being generated and no gap is reported.
 # `kind = "line"` is safer — the mutant is still generated and run every time, so
 # if the code changes such that a test now kills it, it simply shows up as caught
-# and the suppression becomes a harmless no-op. Prefer "line" unless the whole
+# and the suppression becomes a harmless no-op; if it moves, it is gated again. Prefer "line" unless the whole
 # function is genuinely, permanently dead, and re-audit the "function" entries
 # (and every "dead" justification) whenever their surrounding code changes. The
 # nightly full-crate run (.github/workflows/mutation.yml) re-checks "line"
@@ -100,6 +109,8 @@ reviewer = "improve-mutation-score (William Aaron Cheung)"
 kind = "line"
 category = "equivalent"
 file = "crates/mega-evm/src/limit/storage_call_stipend.rs"
+line = 189
+column = 20
 mutant = "replace > with >= in StorageCallStipendTracker::effective_remaining_for_rescue"
 justification = "Equivalent: the > vs >= boundary only differs when stipend == 0, where the then-branch reduces to gas.remaining().min(gas.limit()) == gas.remaining() (the else-branch) because remaining <= limit is invariant. No reachable input observes the difference."
 reviewer = "improve-mutation-score (William Aaron Cheung)"
@@ -119,6 +130,8 @@ reviewer = "improve-mutation-score (William Aaron Cheung)"
 kind = "line"
 category = "equivalent"
 file = "crates/mega-evm/src/limit/limit.rs"
+line = 809
+column = 56
 mutant = "replace && with || in AdditionalLimit::before_frame_return_result"
 justification = "Equivalent: at every <true> (last_frame_result) call has_active_frame() is already false (the frame was popped by the preceding <false> frame_return_result pass), so LAST_FRAME && !has_active == LAST_FRAME || !has_active == true; at <false> calls LAST_FRAME is false in both. Full suite (incl. all multi-frame exceed tests) green with the mutant."
 reviewer = "improve-mutation-score (William Aaron Cheung)"
@@ -132,6 +145,8 @@ reviewer = "improve-mutation-score (William Aaron Cheung)"
 kind = "line"
 category = "equivalent"
 file = "crates/mega-evm/src/external/mod.rs"
+line = 94
+column = 9
 mutant = "replace <impl ExternalEnvFactory for EmptyExternalEnv>::external_envs -> ExternalEnvs<Self::EnvTypes> with ExternalEnvs::from(Default::default())"
 justification = "EmptyExternalEnv is a unit struct; real body builds ExternalEnvs{salt_env:EmptyExternalEnv, oracle_env:EmptyExternalEnv}; from(Default::default()) resolves to Default for ExternalEnvs<EmptyExternalEnv> producing identical fields. Value-identical, no observable behavioral difference."
 reviewer = "improve-mutation-score (William Aaron Cheung)"
@@ -146,16 +161,29 @@ reviewer = "improve-mutation-score (William Aaron Cheung)"
 # by the u64->u128 widening + 64-bit shift, independent of the bytes hashed, so no reachable
 # input distinguishes `|` from `^` here. (Pinning a specific bucket id, e.g. for "hello",
 # cannot kill it: the combined value — and thus the hash and bucket id — is identical under
-# the mutant.) The sibling line-120 `|` combine over `front`/`back<<64` is the same shape but
-# is already pinned by `ahash_bucket_id_mid_input_is_pinned`; line 125 is the small-input
-# branch and is the equivalent one.
+# the mutant.) The sibling line-120 `|` combine over `front`/`back<<64` has the same shape and
+# is equivalent for the same reason: `ahash_bucket_id_mid_input_is_pinned` pins its bucket id,
+# but the mutant leaves that id unchanged, and the full-crate run reports it as surviving. It
+# has its own entry below.
 [[suppress]]
 kind = "line"
 category = "equivalent"
 file = "crates/mega-evm/src/external/hasher/fallback.rs"
+line = 125
+column = 47
 mutant = "replace | with ^ in <impl core::hash::Hasher for DeterministicHasher>::write"
 justification = "Equivalent: `(value[0] as u128) | ((value[1] as u128) << 64)` ORs a u64-widened low half (bits 0..63 only) with a u64-widened high half shifted into bits 64..127 only. The operands have disjoint set bits by construction for every input, so | == ^ identically; no reachable input distinguishes them."
 reviewer = "improve-mutation-score (William Aaron Cheung)"
+
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/external/hasher/fallback.rs"
+line = 120
+column = 48
+mutant = "replace | with ^ in <impl core::hash::Hasher for DeterministicHasher>::write"
+justification = "Equivalent: in `(front as u128) | ((back as u128) << 64)` front and back are u64 (read_u64 / read_last_u64), so the left operand occupies bits 0..63 only and the shifted right operand bits 64..127 only. The operands have disjoint set bits for every input, so | == ^ identically; no input distinguishes them."
+reviewer = "RealiCZ (cz)"
 
 # --- DeterministicHasher typed write_uN / update mutants (dead: unreachable from public API) -------
 # `AHashBucketHasher` — the crate's ONLY public hasher — computes bucket ids via
@@ -182,6 +210,8 @@ reviewer = "improve-mutation-score (William Aaron Cheung)"
 kind = "line"
 category = "dead"
 file = "crates/mega-evm/src/external/hasher/fallback.rs"
+line = 58
+column = 48
 mutant = "replace ^ with | in DeterministicHasher::update"
 justification = "Dead/unreachable from the public API: AHashBucketHasher::bucket_id drives only the slice write() -> large_update; update() is reached solely via the typed write_uN methods, which are unreachable (pub(crate) DeterministicHasher/RandomState are not re-exported, no integration test can construct them, and zero non-test callers exist crate-wide). The ^->| mutant changes no observable bucket_id output."
 reviewer = "improve-mutation-score (William Aaron Cheung)"
@@ -190,6 +220,8 @@ reviewer = "improve-mutation-score (William Aaron Cheung)"
 kind = "line"
 category = "dead"
 file = "crates/mega-evm/src/external/hasher/fallback.rs"
+line = 58
+column = 48
 mutant = "replace ^ with & in DeterministicHasher::update"
 justification = "Dead/unreachable from the public API: see the ^->| entry for update — update() is only reached via the unreachable typed write_uN methods. The ^->& mutant changes no observable bucket_id output."
 reviewer = "improve-mutation-score (William Aaron Cheung)"
@@ -198,6 +230,8 @@ reviewer = "improve-mutation-score (William Aaron Cheung)"
 kind = "line"
 category = "dead"
 file = "crates/mega-evm/src/external/hasher/fallback.rs"
+line = 73
+column = 9
 mutant = "replace <impl core::hash::Hasher for DeterministicHasher>::write_u8 with ()"
 justification = "Dead/unreachable from the public API: bucket_id uses only the slice write() -> large_update; write_u8 is reached only via core::hash::Hasher trait dispatch on the pub(crate), non-re-exported DeterministicHasher, which no integration test (or any non-test crate caller) can invoke. Stubbing it to () changes no observable bucket_id output."
 reviewer = "improve-mutation-score (William Aaron Cheung)"
@@ -206,6 +240,8 @@ reviewer = "improve-mutation-score (William Aaron Cheung)"
 kind = "line"
 category = "dead"
 file = "crates/mega-evm/src/external/hasher/fallback.rs"
+line = 78
+column = 9
 mutant = "replace <impl core::hash::Hasher for DeterministicHasher>::write_u16 with ()"
 justification = "Dead/unreachable from the public API: same as write_u8 — write_u16 is reached only via trait dispatch on the non-re-exported pub(crate) hasher; never on any bucket_id path. Stubbing it to () changes no observable output."
 reviewer = "improve-mutation-score (William Aaron Cheung)"
@@ -214,6 +250,8 @@ reviewer = "improve-mutation-score (William Aaron Cheung)"
 kind = "line"
 category = "dead"
 file = "crates/mega-evm/src/external/hasher/fallback.rs"
+line = 83
+column = 9
 mutant = "replace <impl core::hash::Hasher for DeterministicHasher>::write_u32 with ()"
 justification = "Dead/unreachable from the public API: same as write_u8 — write_u32 is reached only via trait dispatch on the non-re-exported pub(crate) hasher; never on any bucket_id path. Stubbing it to () changes no observable output."
 reviewer = "improve-mutation-score (William Aaron Cheung)"
@@ -222,6 +260,8 @@ reviewer = "improve-mutation-score (William Aaron Cheung)"
 kind = "line"
 category = "dead"
 file = "crates/mega-evm/src/external/hasher/fallback.rs"
+line = 88
+column = 9
 mutant = "replace <impl core::hash::Hasher for DeterministicHasher>::write_u64 with ()"
 justification = "Dead/unreachable from the public API: same as write_u8 — write_u64 (and write_usize, which delegates to it) is reached only via trait dispatch on the non-re-exported pub(crate) hasher; never on any bucket_id path. Stubbing it to () changes no observable output."
 reviewer = "improve-mutation-score (William Aaron Cheung)"
@@ -230,6 +270,8 @@ reviewer = "improve-mutation-score (William Aaron Cheung)"
 kind = "line"
 category = "dead"
 file = "crates/mega-evm/src/external/hasher/fallback.rs"
+line = 93
+column = 9
 mutant = "replace <impl core::hash::Hasher for DeterministicHasher>::write_u128 with ()"
 justification = "Dead/unreachable from the public API: bucket_id's slice write() never delegates to write_u128 (it calls large_update directly); write_u128 is reached only via trait dispatch on the non-re-exported pub(crate) hasher, which no non-test caller invokes. Stubbing it to () changes no observable output."
 reviewer = "improve-mutation-score (William Aaron Cheung)"
@@ -254,6 +296,8 @@ reviewer = "improve-mutation-score (William Aaron Cheung)"
 kind = "line"
 category = "equivalent"
 file = "crates/mega-evm/src/external/hasher/fallback.rs"
+line = 109
+column = 27
 mutant = "replace > with >= in <impl core::hash::Hasher for DeterministicHasher>::write"
 justification = "Equivalent (line 109 `> 16`): the > vs >= boundary only differs at len == 16, where both the mid branch (front | (back<<64)) and the large branch (read_last_u128, with no loop pass since 16 is not > 16) feed the identical le_u128(bytes[0..16]) to a single large_update. Same buffer, same bucket id; no input distinguishes them. The line-108 and line-112 mutants sharing this text are non-equivalent and are caught by the len-8 / len-32 tests."
 reviewer = "improve-mutation-score (William Aaron Cheung)"
@@ -263,14 +307,17 @@ reviewer = "improve-mutation-score (William Aaron Cheung)"
 #
 # Equivalent mutants of backward-compat spec gates in src/limit/. The one real
 # survivor (limit.rs:203) is closed behaviorally by
-# `test_intrinsic_check_for_tx_requires_rex5_spec`. The state_growth entries use
-# the full `file:line:col:` form because three sites share identical source text.
+# `test_intrinsic_check_for_tx_requires_rex5_spec`. Several sites share identical
+# source text (the three state_growth gates, and the `rex4_enabled`/`rex5_enabled`
+# fields of several trackers), so each entry is anchored to the site it reviews.
 
 # --- data_size.rs:173 defensive invariant guard (equivalent) -----------------
 [[suppress]]
 kind = "line"
 category = "equivalent"
 file = "crates/mega-evm/src/limit/data_size.rs"
+line = 74
+column = 1
 mutant = "spec-gate rex5_enabled: spec.is_enabled(MegaSpecId::REX5), -> rex5_enabled: spec.is_enabled(MegaSpecId::REX4),"
 justification = "Equivalent: rex5_enabled only feeds the debug_assert! at data_size.rs:173, which executes only inside the `used > limit` branch with an active frame — a TX-level data-size exceed while a frame is live. Pre-REX5 that state is unreachable in valid execution (before_tx_start, the only mid-execution tx_entry writer, runs before any frame; an exceed there halts before a frame is pushed). Relaxing the guard to REX4 cannot change behavior on any reachable input."
 reviewer = "improve-mutation-score (William Aaron Cheung)"
@@ -280,6 +327,8 @@ reviewer = "improve-mutation-score (William Aaron Cheung)"
 kind = "line"
 category = "equivalent"
 file = "crates/mega-evm/src/limit/frame_limit.rs"
+line = 119
+column = 1
 mutant = "spec-gate rex4_enabled: spec.is_enabled(MegaSpecId::REX4), -> rex4_enabled: spec.is_enabled(MegaSpecId::REX3),"
 justification = "Equivalent (coupled gates): frame_limit rex4_enabled gates only per-frame limit DERIVATION (push_call_frame_info, line 339). ENFORCEMENT (exceeds_current_frame_limit) is gated separately on each dimension's own REX4 check. Shifting derivation to REX3 sets per-frame limits that no dimension checks at REX3 — their checks stay TX-level — so net_usage and every limit outcome are unchanged."
 reviewer = "improve-mutation-score (William Aaron Cheung)"
@@ -289,7 +338,9 @@ reviewer = "improve-mutation-score (William Aaron Cheung)"
 kind = "line"
 category = "equivalent"
 file = "crates/mega-evm/src/limit/state_growth.rs"
-mutant = "crates/mega-evm/src/limit/state_growth.rs:121:1: spec-gate if self.spec.is_enabled(MegaSpecId::REX4) { -> if self.spec.is_enabled(MegaSpecId::REX3) {"
+line = 121
+column = 1
+mutant = "spec-gate if self.spec.is_enabled(MegaSpecId::REX4) { -> if self.spec.is_enabled(MegaSpecId::REX3) {"
 justification = "Equivalent (coupled): push_frame shifted to REX3 derives per-frame state-growth limits at REX3, but check_limit (line 206, unmutated) skips the per-frame check pre-REX4 and uses TX-level net_usage only. The derived frame limits are never read, so no observable change."
 reviewer = "improve-mutation-score (William Aaron Cheung)"
 
@@ -297,7 +348,9 @@ reviewer = "improve-mutation-score (William Aaron Cheung)"
 kind = "line"
 category = "equivalent"
 file = "crates/mega-evm/src/limit/state_growth.rs"
-mutant = "crates/mega-evm/src/limit/state_growth.rs:206:1: spec-gate if self.spec.is_enabled(MegaSpecId::REX4) { -> if self.spec.is_enabled(MegaSpecId::REX3) {"
+line = 206
+column = 1
+mutant = "spec-gate if self.spec.is_enabled(MegaSpecId::REX4) { -> if self.spec.is_enabled(MegaSpecId::REX3) {"
 justification = "Equivalent (coupled): check_limit shifted to REX3 runs the per-frame check at REX3, but push_frame (line 121, unmutated) pushes frames with u64::MAX limit pre-REX4, so exceeds_current_frame_limit never fires and control falls through to the identical TX-level check."
 reviewer = "improve-mutation-score (William Aaron Cheung)"
 
@@ -305,7 +358,9 @@ reviewer = "improve-mutation-score (William Aaron Cheung)"
 kind = "line"
 category = "equivalent"
 file = "crates/mega-evm/src/limit/state_growth.rs"
-mutant = "crates/mega-evm/src/limit/state_growth.rs:169:1: spec-gate if self.spec.is_enabled(MegaSpecId::REX4) { -> if self.spec.is_enabled(MegaSpecId::REX3) {"
+line = 169
+column = 1
+mutant = "spec-gate if self.spec.is_enabled(MegaSpecId::REX4) { -> if self.spec.is_enabled(MegaSpecId::REX3) {"
 justification = "Equivalent: current_call_remaining is only read when building a child sandbox budget (sandbox/execution.rs:1037, KeylessDeploy, REX5+); it is never called at REX3/REX4. And at REX3 frames carry u64::MAX limits (push_frame, line 121), so frame_remaining.min(tx_remaining) == tx_remaining regardless."
 reviewer = "improve-mutation-score (William Aaron Cheung)"
 
@@ -313,7 +368,9 @@ reviewer = "improve-mutation-score (William Aaron Cheung)"
 kind = "line"
 category = "equivalent"
 file = "crates/mega-evm/src/limit/state_growth.rs"
-mutant = "crates/mega-evm/src/limit/state_growth.rs:169:1: spec-gate if self.spec.is_enabled(MegaSpecId::REX4) { -> if self.spec.is_enabled(MegaSpecId::REX5) {"
+line = 169
+column = 1
+mutant = "spec-gate if self.spec.is_enabled(MegaSpecId::REX4) { -> if self.spec.is_enabled(MegaSpecId::REX5) {"
 justification = "Equivalent: current_call_remaining is only read by the REX5+ KeylessDeploy sandbox (sandbox/execution.rs:1037). The REX4->REX5 shift differs only at exactly REX4, where the function is never called — no observable change."
 reviewer = "improve-mutation-score (William Aaron Cheung)"
 
@@ -340,7 +397,9 @@ reviewer = "improve-mutation-score (William Aaron Cheung)"
 kind = "line"
 category = "equivalent"
 file = "crates/mega-evm/src/evm/precompiles.rs"
-mutant = "crates/mega-evm/src/evm/precompiles.rs:136:49: replace || with && in modexp::run_osaka_legacy"
+line = 136
+column = 49
+mutant = "replace || with && in modexp::run_osaka_legacy"
 justification = "Equivalent: weakening the first || only skips the early halt when exactly one of base_len/mod_len exceeds the EIP-7823 limit while exp_len does not. The zero-base/zero-modulus short-circuit cannot fire there (the offending length is non-zero), so control reaches upstream osaka_run, whose identical EIP-7823 check returns Err(ModexpEip7823LimitSize); the wrapper maps it to the same PrecompileOutput::halt(ModexpEip7823LimitSize, reservoir) the unmutated line returns. Full suite green with the mutant applied."
 reviewer = "RealiCZ (cz)"
 
@@ -356,6 +415,8 @@ reviewer = "RealiCZ (cz)"
 kind = "line"
 category = "equivalent"
 file = "crates/mega-evm/src/evm/host.rs"
+line = 442
+column = 1
 mutant = "spec-gate self.spec.is_enabled(MegaSpecId::MINI_REX) && address == ORACLE_CONTRACT_ADDRESS, -> self.spec.is_enabled(MegaSpecId::EQUIVALENCE) && address == ORACLE_CONTRACT_ADDRESS,"
 justification = "Equivalent: the mutated conjunct lives in the debug_assert! at the top of oracle_sload, which restates the sole caller's guard (sload_skip_cold_load, host.rs:181-182). is_enabled(EQUIVALENCE) is vacuously true, so the mutant only weakens an assertion that never fires on guarded code, and debug_assert! is compiled out of release builds. The guard's own spec-gate mutants are killed."
 reviewer = "RealiCZ (cz)"
@@ -376,6 +437,8 @@ reviewer = "RealiCZ (cz)"
 kind = "line"
 category = "equivalent"
 file = "crates/mega-evm/src/evm/host.rs"
+line = 386
+column = 13
 mutant = "delete match arm Err(LoadError::DBError) in MegaContext<DB, ExtEnvs>::read_declined_slot"
 justification = "Equivalent: revm's Context stashes the database error before returning DBError, and revm takes it when the halted frame returns (EthFrame::return_result) or the transaction result is built (Handler::execution_result), so reporting ColdLoadSkipped (an OutOfGas halt) instead of DBError (a FatalExternalError halt) fails the transaction with the same database error. The declined-SLOAD database-error test passes with the mutant applied."
 reviewer = "RealiCZ (cz)"
@@ -384,6 +447,8 @@ reviewer = "RealiCZ (cz)"
 kind = "line"
 category = "equivalent"
 file = "crates/mega-evm/src/evm/host.rs"
+line = 398
+column = 13
 mutant = "delete match arm Err(LoadError::DBError) in MegaContext<DB, ExtEnvs>::read_declined_account"
 justification = "Equivalent: revm's Context stashes the database error before returning DBError, and revm takes it when the halted frame returns (EthFrame::return_result) or the transaction result is built (Handler::execution_result), so reporting ColdLoadSkipped (an OutOfGas halt) instead of DBError (a FatalExternalError halt) fails the transaction with the same database error. The declined-SELFDESTRUCT database-error test passes with the mutant applied."
 reviewer = "RealiCZ (cz)"
@@ -406,6 +471,8 @@ reviewer = "RealiCZ (cz)"
 kind = "line"
 category = "equivalent"
 file = "crates/mega-evm/src/evm/host.rs"
+line = 730
+column = 31
 mutant = "replace match guard !journal.state.contains_key(&delegate) with true in <impl HostExt for MegaContext<DB, ExtEnvs>>::recreate_reverted_account_read"
 justification = "Equivalent: re-loading a delegate that is already resident happens in a halting frame, whose revert undoes the journaled warm-up; revm's unjournaled cold-load effects are no-ops for such an entry (current info equals original info while cold, the created-locally flag was cleared by the same revert that cooled it, and no entry survives from an earlier transaction), and the entry stays resident either way, so gas, state, result and the returned state keys are unchanged. Full suite green with the mutant applied."
 reviewer = "RealiCZ (cz)"
@@ -424,6 +491,8 @@ reviewer = "RealiCZ (cz)"
 kind = "line"
 category = "equivalent"
 file = "crates/mega-evm/src/evm/instructions.rs"
+line = 1400
+column = 73
 mutant = "replace - with + in volatile_data_ext::recreate_unreached_call_load"
 justification = "Equivalent: the recreation runs only below the 100-gas static charge (budget <= 99) and drained <= min(cost, 23,000); cost - drained and cost + drained can straddle the budget only for 0 < cost <= 23,099, but new-account storage gas is 0 or at least 25,000 on every spec (25,000 x (multiplier - 1) for REX, 2,000,000 x multiplier for MINI_REX), so both forms subtract 0 at cost 0 and both underflow otherwise. Full suite green with the mutant applied."
 reviewer = "RealiCZ (cz)"
@@ -438,12 +507,24 @@ reviewer = "RealiCZ (cz)"
 # builds a mask of three disjoint single-bit flags (revm-state 12.0.1: `Cold = 0b0001_0000`,
 # `SelfDestructedLocal = 0b0100_0000`, `CreatedLocal = 0b1000_0000`). For disjoint bits `a ^ b`
 # equals `a | b`, and `^` binds tighter than `|`, so turning either `|` into `^` builds the same
-# mask. This one entry covers both mutants (columns 34 and 64), which share the same text; the
+# mask. The two mutants (columns 34 and 64) share the same text and have one entry each; the
 # function's `*this |= other` is a different mutation text and stays gated.
 [[suppress]]
 kind = "line"
 category = "equivalent"
 file = "crates/mega-evm/src/evm/state.rs"
+line = 155
+column = 34
+mutant = "replace | with ^ in merge_account_status"
+justification = "Equivalent: Cold (0b0001_0000), SelfDestructedLocal (0b0100_0000) and CreatedLocal (0b1000_0000) are disjoint single-bit AccountStatus flags, and for disjoint bits a ^ b == a | b; ^ binds tighter than |, so replacing either | of the mask with ^ builds the same mask and other -= removes the same bits."
+reviewer = "RealiCZ (cz)"
+
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/evm/state.rs"
+line = 155
+column = 64
 mutant = "replace | with ^ in merge_account_status"
 justification = "Equivalent: Cold (0b0001_0000), SelfDestructedLocal (0b0100_0000) and CreatedLocal (0b1000_0000) are disjoint single-bit AccountStatus flags, and for disjoint bits a ^ b == a | b; ^ binds tighter than |, so replacing either | of the mask with ^ builds the same mask and other -= removes the same bits."
 reviewer = "RealiCZ (cz)"
@@ -456,6 +537,8 @@ reviewer = "RealiCZ (cz)"
 kind = "line"
 category = "equivalent"
 file = "crates/mega-evm/src/external/salt.rs"
+line = 105
+column = 9
 mutant = "replace <impl SaltEnv for EmptyExternalEnv>::bucket_id_for_account -> BucketId with Default::default()"
 justification = "Equivalent: BucketId is a u32 alias, so Default::default() is 0, exactly the value the function returns (0 as BucketId); the mutant returns the same bucket id for every account."
 reviewer = "RealiCZ (cz)"
@@ -464,6 +547,8 @@ reviewer = "RealiCZ (cz)"
 kind = "line"
 category = "equivalent"
 file = "crates/mega-evm/src/external/salt.rs"
+line = 109
+column = 9
 mutant = "replace <impl SaltEnv for EmptyExternalEnv>::bucket_id_for_slot -> BucketId with Default::default()"
 justification = "Equivalent: BucketId is a u32 alias, so Default::default() is 0, exactly the value the function returns (0 as BucketId); the mutant returns the same bucket id for every storage slot."
 reviewer = "RealiCZ (cz)"
@@ -479,6 +564,8 @@ reviewer = "RealiCZ (cz)"
 kind = "line"
 category = "equivalent"
 file = "crates/mega-evm/src/sandbox/execution.rs"
+line = 356
+column = 13
 mutant = "delete field nonce from struct TxEnv expression in execute_keyless_deploy_call"
 justification = "Equivalent: the pre-REX5 sandbox TxEnv literal ends in ..Default::default(), and TxEnv::default() (TxEnvBuilder::new().build(), revm-context 18.0.3) has nonce 0, so deleting the explicit nonce: 0 builds an identical TxEnv."
 reviewer = "RealiCZ (cz)"
@@ -487,6 +574,8 @@ reviewer = "RealiCZ (cz)"
 kind = "line"
 category = "equivalent"
 file = "crates/mega-evm/src/sandbox/execution.rs"
+line = 531
+column = 9
 mutant = "delete field gas_price from struct TxEnv expression in build_fee_free_sandbox_deposit_tx"
 justification = "Equivalent: the deposit-style sandbox TxEnv literal ends in ..Default::default(), and TxEnv::default() (TxEnvBuilder::new().build(), revm-context 18.0.3) has gas_price 0, so deleting the explicit gas_price: 0 builds an identical TxEnv."
 reviewer = "RealiCZ (cz)"
@@ -495,6 +584,8 @@ reviewer = "RealiCZ (cz)"
 kind = "line"
 category = "equivalent"
 file = "crates/mega-evm/src/sandbox/execution.rs"
+line = 532
+column = 9
 mutant = "delete field nonce from struct TxEnv expression in build_fee_free_sandbox_deposit_tx"
 justification = "Equivalent: the deposit-style sandbox TxEnv literal ends in ..Default::default(), and TxEnv::default() (TxEnvBuilder::new().build(), revm-context 18.0.3) has nonce 0, so deleting the explicit nonce: 0 builds an identical TxEnv."
 reviewer = "RealiCZ (cz)"
@@ -516,6 +607,8 @@ reviewer = "RealiCZ (cz)"
 kind = "line"
 category = "equivalent"
 file = "crates/mega-evm/src/sandbox/state_merge.rs"
+line = 173
+column = 49
 mutant = "replace && with || in apply_sandbox_state_journaled_inner"
 justification = "Equivalent: on equal code hashes, || adds only two copies: a parent that already has code receives the same-hash (identical) bytecode, and an empty-hash parent has None or empty code replaced by the sandbox's empty bytecode, the Some(Bytecode::default()) revm stores itself on any code load of an empty-hash account, so no read, gas cost, result or committed state changes."
 reviewer = "RealiCZ (cz)"

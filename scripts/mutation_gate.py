@@ -29,7 +29,8 @@ Subcommands:
 
   report      --results <mutants.out dir> [--suppressions <toml>]
               [--status <file>] [--comment <path>] [--summary <path>]
-        Read the run outcomes, apply line-scoped suppressions, compute the
+        Read the run outcomes, apply line-scoped suppressions (each anchored to
+        one mutant's file:line:col and text), compute the
         mutation score, write a Markdown report, and exit non-zero if any
         unsuppressed survivor remains (the "no new survivors" gate). With
         --status (the driver's MUTANTS-STATUS line), a run that did not test
@@ -54,14 +55,61 @@ from pathlib import Path
 MAX_SURVIVORS_SHOWN = 20
 
 
+# A mutant line as both engines write it: `file:line:col: text`.
+LOCATOR = re.compile(r"^(?P<file>[^:]+):(?P<line>\d+):(?P<col>\d+): (?P<text>.+)$")
+
+Anchor = tuple[str, int, int, str]
+
+
+class SuppressionError(Exception):
+    """suppressions.toml has an entry the gate cannot apply safely."""
+
+
+def mutant_anchor(line: str) -> Anchor | None:
+    """(file, line, column, text) of a mutant line; None if it has no locator."""
+    m = LOCATOR.match(line)
+    return (m["file"], int(m["line"]), int(m["col"]), m["text"]) if m else None
+
+
+def entry_anchor(e: dict) -> Anchor:
+    return (e["file"], e["line"], e["column"], e["mutant"].strip())
+
+
+def check_line_entry(e: dict) -> str | None:
+    """Why a line suppression cannot be applied, or None if it is well formed.
+
+    A line entry names one mutant: its file, line and column, and its exact text.
+    Matching on the text alone would also cover the same mutation anywhere else in
+    the function, including code added after the review."""
+    def positive(v: object) -> bool:
+        return isinstance(v, int) and not isinstance(v, bool) and v > 0
+    text = e.get("mutant")
+    if not isinstance(text, str) or not text.strip():
+        return "no `mutant` text"
+    if LOCATOR.match(text.strip()):
+        return "`mutant` carries a `file:line:col:` prefix; put the location in `line` and `column`"
+    if not isinstance(e.get("file"), str) or not e["file"]:
+        return "no `file`"
+    if not (positive(e.get("line")) and positive(e.get("column"))):
+        return "no `line` and `column` (positive integers) anchoring it to one mutant"
+    return None
+
+
 def load_suppressions(path: Path) -> tuple[list[dict], list[dict]]:
-    """Return (function_scoped, line_scoped) suppression entries."""
+    """Return (function_scoped, line_scoped) suppression entries.
+
+    Raises SuppressionError if a line entry is not anchored to one mutant."""
     if not path or not path.exists():
         return [], []
     data = tomllib.loads(path.read_text())
     entries = data.get("suppress", [])
     func = [e for e in entries if e.get("kind") == "function"]
     line = [e for e in entries if e.get("kind") == "line"]
+    bad = [f'{e.get("file", "?")}: "{str(e.get("mutant", ""))[:90]}": {why}'
+           for e in line if (why := check_line_entry(e))]
+    if bad:
+        raise SuppressionError(f"{len(bad)} line suppression(s) in {path} cannot be applied:\n"
+                               + "\n".join(f"  - {b}" for b in bad))
     return func, line
 
 
@@ -310,15 +358,15 @@ def cmd_report(args: argparse.Namespace) -> int:
         return 1
 
     _, line_supp = load_suppressions(Path(args.suppressions)) if args.suppressions else ([], [])
-    # A line suppression matches either the bare mutation text (`mutant` written
-    # without a locator) or the full `file:line:col: text` line. The latter lets
-    # two mutants that share identical source text be suppressed independently.
-    supp = {e["mutant"].strip() for e in line_supp if "mutant" in e}
+    # A line suppression matches one mutant: the same file, line, column and text.
+    # The same text anywhere else (another `&&` in the function, or the reviewed
+    # one after the code above it moved) stays gated.
+    supp = {entry_anchor(e) for e in line_supp}
 
     def partition(items: list[str]) -> tuple[list[str], list[str]]:
         sup, real = [], []
         for m in items:
-            (sup if (m in supp or mutant_body(m) in supp) else real).append(m)
+            (sup if mutant_anchor(m) in supp else real).append(m)
         return sup, real
 
     suppressed, real_survivors = partition(missed)
@@ -404,9 +452,10 @@ def cmd_orphans(args: argparse.Namespace) -> int:
     `--universe` is a file of mutant lines (`file:line:col: text`) covering the
     whole crate, assembled from BOTH engines (cargo-mutants `--list` and
     `umutate.py plan`). A function suppression's regex `pattern` must match at
-    least one mutant name; a line suppression's `mutant` must match one mutant
-    (bare body or full locator line). Otherwise the suppression is an orphan and
-    should be removed or updated."""
+    least one mutant name; a line suppression must match the mutant at its
+    anchor (file, line, column and text). Otherwise the suppression is stale and
+    should be removed or re-anchored; for a line entry whose text now sits
+    elsewhere in its file, the new locations are listed."""
     func, line = load_suppressions(Path(args.suppressions))
     # Strip ANSI color codes defensively: `cargo mutants --list` colorizes its
     # output when CARGO_TERM_COLOR=always (as CI sets), which would otherwise make
@@ -417,7 +466,7 @@ def cmd_orphans(args: argparse.Namespace) -> int:
         print(f"ERROR: empty mutant universe at {args.universe}", file=sys.stderr)
         return 2
     bodies = {mutant_body(m) for m in universe}
-    full = set(universe)
+    anchors = {a for a in map(mutant_anchor, universe) if a}
 
     orphans: list[str] = []
     for e in func:
@@ -432,15 +481,19 @@ def cmd_orphans(args: argparse.Namespace) -> int:
         if not any(rx.search(b) for b in bodies):
             orphans.append(f'[function] {e.get("file", "?")}: pattern "{pat}"')
     for e in line:
-        m = e.get("mutant", "").strip()
-        if m and m not in bodies and m not in full:
-            orphans.append(f'[line] {e.get("file", "?")}: "{m[:90]}"')
+        anchor = entry_anchor(e)
+        if anchor in anchors:
+            continue
+        file, ln, col, text = anchor
+        moved = sorted((a[1], a[2]) for a in anchors if a[0] == file and a[3] == text)
+        hint = f" — the text is now at {', '.join(f'{l}:{c}' for l, c in moved)}" if moved else ""
+        orphans.append(f'[line] {file}:{ln}:{col}: "{text[:90]}"{hint}')
 
     total = len(func) + len(line)
     if orphans:
         print(f"❌ {len(orphans)}/{total} suppressions are stale (no live mutant matches).")
-        print("Remove or update these — a suppression that matches nothing is a "
-              "silent blind spot:")
+        print("Remove or re-anchor these — a suppression that matches nothing is a "
+              "silent blind spot, and a moved one no longer suppresses its mutant:")
         for o in orphans:
             print(f"  - {o}")
         return 1
@@ -483,7 +536,11 @@ def main() -> int:
     po.set_defaults(func=cmd_orphans)
 
     args = p.parse_args()
-    return args.func(args)
+    try:
+        return args.func(args)
+    except SuppressionError as err:
+        print(f"ERROR: {err}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

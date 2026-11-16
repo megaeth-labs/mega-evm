@@ -23,6 +23,18 @@ def gate(*args: str) -> subprocess.CompletedProcess:
     return subprocess.run([sys.executable, str(GATE), *args], capture_output=True, text=True)
 
 
+def line_entry(file: str, line: int | None, column: int | None, mutant: str) -> str:
+    """One `kind = "line"` suppression; None leaves the anchor field out."""
+    out = f'[[suppress]]\nkind = "line"\nfile = "{file}"\n'
+    out += f"line = {line}\n" if line is not None else ""
+    out += f"column = {column}\n" if column is not None else ""
+    return out + f'mutant = "{mutant}"\n'
+
+
+A_RS = "crates/mega-evm/src/a.rs"
+MISSED_TEXT = "replace g -> bool with false"
+
+
 class GateTest(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
@@ -72,11 +84,60 @@ class GateTest(unittest.TestCase):
         self.write_run(2, caught=[CAUGHT], missed=[MISSED])
         self.assertEqual(self.report().returncode, 1)
 
+    def suppressions(self, *entries: str) -> str:
+        supp = self.tmp / "suppressions.toml"
+        supp.write_text("\n".join(entries))
+        return str(supp)
+
     def test_suppressed_survivor_passes(self) -> None:
         self.write_run(2, caught=[CAUGHT], missed=[MISSED])
-        supp = self.tmp / "suppressions.toml"
-        supp.write_text(f'[[suppress]]\nkind = "line"\nmutant = "{MISSED}"\n')
-        self.assertEqual(self.report("--suppressions", str(supp)).returncode, 0)
+        supp = self.suppressions(line_entry(A_RS, 2, 1, MISSED_TEXT))
+        out = self.report("--suppressions", supp)
+        self.assertEqual(out.returncode, 0, out.stdout)
+        self.assertIn("suppressed (equivalent/dead-code): 1", out.stdout)
+
+    # ---- line suppressions are anchored to file:line:col and text ----
+
+    def test_anchored_suppression_leaves_the_same_text_elsewhere_gated(self) -> None:
+        # A new `&&` added to a function with a suppressed `&&` mutant: same text,
+        # another column. Only the reviewed mutant is suppressed.
+        added = f"{A_RS}:7:30: {MISSED_TEXT}"
+        self.write_run(3, caught=[CAUGHT], missed=[MISSED, added])
+        out = self.report("--suppressions", self.suppressions(line_entry(A_RS, 2, 1, MISSED_TEXT)))
+        self.assertEqual(out.returncode, 1, out.stdout)
+        self.assertIn("survived (real gaps): **1**", out.stdout)
+        self.assertIn(f"`{added}`", out.stdout)
+        self.assertNotIn(f"`{MISSED}`", out.stdout)
+
+    def test_moved_line_is_gated_again(self) -> None:
+        # The code above the reviewed mutant moved it to line 3: fail closed.
+        moved = f"{A_RS}:3:1: {MISSED_TEXT}"
+        self.write_run(2, caught=[CAUGHT], missed=[moved])
+        out = self.report("--suppressions", self.suppressions(line_entry(A_RS, 2, 1, MISSED_TEXT)))
+        self.assertEqual(out.returncode, 1, out.stdout)
+        self.assertIn(f"`{moved}`", out.stdout)
+
+    def test_anchor_needs_the_same_text_and_file(self) -> None:
+        self.write_run(2, caught=[CAUGHT], missed=[MISSED])
+        for entry in (line_entry(A_RS, 2, 1, "replace g -> bool with true"),
+                      line_entry("crates/mega-evm/src/b.rs", 2, 1, MISSED_TEXT)):
+            out = self.report("--suppressions", self.suppressions(entry))
+            self.assertEqual(out.returncode, 1, (entry, out.stdout))
+
+    def test_anchored_timeout_is_suppressed(self) -> None:
+        self.write_run(2, caught=[CAUGHT], timeout=[MISSED])
+        out = self.report("--suppressions", self.suppressions(line_entry(A_RS, 2, 1, MISSED_TEXT)))
+        self.assertEqual(out.returncode, 0, out.stdout)
+
+    def test_unanchored_line_suppressions_are_refused(self) -> None:
+        self.write_run(2, caught=[CAUGHT], missed=[MISSED])
+        for entry, why in ((line_entry(A_RS, None, None, MISSED_TEXT), "`line` and `column`"),
+                           (line_entry(A_RS, 2, None, MISSED_TEXT), "`line` and `column`"),
+                           (line_entry(A_RS, 0, 1, MISSED_TEXT), "`line` and `column`"),
+                           (line_entry(A_RS, 2, 1, MISSED), "`file:line:col:` prefix")):
+            out = self.report("--suppressions", self.suppressions(entry))
+            self.assertEqual(out.returncode, 2, (entry, out.stdout))
+            self.assertIn(why, out.stderr)
 
     # ---- report with --status ----
 
@@ -280,11 +341,37 @@ class GateTest(unittest.TestCase):
     # ---- exclude-re ----
 
     def test_exclude_re_emits_one_pair_per_function_suppression(self) -> None:
-        supp = self.tmp / "suppressions.toml"
-        supp.write_text('[[suppress]]\nkind = "function"\npattern = "foo"\n'
-                        '[[suppress]]\nkind = "line"\nmutant = "x"\n')
-        out = gate("exclude-re", "--suppressions", str(supp))
+        supp = self.suppressions('[[suppress]]\nkind = "function"\npattern = "foo"\n',
+                                 line_entry(A_RS, 2, 1, "x"))
+        out = gate("exclude-re", "--suppressions", supp)
         self.assertEqual(out.stdout.splitlines(), ["--exclude-re", "foo"])
+
+    # ---- orphans (suppression hygiene) ----
+
+    def orphans(self, *entries: str) -> subprocess.CompletedProcess:
+        universe = self.tmp / "universe.txt"
+        universe.write_text(f"{CAUGHT}\n{A_RS}:3:1: {MISSED_TEXT}\n{UNVIABLE}\n")
+        return gate("orphans", "--suppressions", self.suppressions(*entries),
+                    "--universe", str(universe))
+
+    def test_orphans_accepts_an_entry_at_its_anchor(self) -> None:
+        out = self.orphans(line_entry(A_RS, 3, 1, MISSED_TEXT))
+        self.assertEqual(out.returncode, 0, out.stdout)
+
+    def test_orphans_reports_a_moved_entry_and_where_its_text_went(self) -> None:
+        out = self.orphans(line_entry(A_RS, 2, 1, MISSED_TEXT))
+        self.assertEqual(out.returncode, 1, out.stdout)
+        self.assertIn(f"{A_RS}:2:1", out.stdout)
+        self.assertIn("the text is now at 3:1", out.stdout)
+
+    def test_orphans_reports_an_anchor_whose_text_changed(self) -> None:
+        out = self.orphans(line_entry(A_RS, 3, 1, "replace g -> bool with true"))
+        self.assertEqual(out.returncode, 1, out.stdout)
+        self.assertNotIn("now at", out.stdout)
+
+    def test_orphans_refuses_an_unanchored_entry(self) -> None:
+        out = self.orphans(line_entry(A_RS, None, None, MISSED_TEXT))
+        self.assertEqual(out.returncode, 2, out.stdout)
 
 
 if __name__ == "__main__":
