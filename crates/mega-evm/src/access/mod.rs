@@ -89,8 +89,11 @@
 //! - **a frame's start and every resume**: a frame that starts, and a caller a child returned into,
 //!   is held to what the limit leaves then. A child's read holds its callers as they resume, and
 //!   the gas a child hands back cannot be computed with past the limit;
-//! - **a storage write restored to its original value**: it refills state and history gas that
-//!   spilled onto regular gas, possibly before the read, onto the spendable part.
+//! - **a storage write restored to its original value**: under EIP-8037's own give-backs, which
+//!   only the neutral configuration keeps, it refills state and history gas that spilled onto
+//!   regular gas, possibly before the read, onto the spendable part. Under Satin's a give-back
+//!   credits the reservoir alone, so regular gas never rises from it and the hold finds nothing
+//!   grown.
 //!
 //! So a transaction that read volatile data runs exactly as it would without the read until a
 //! regular charge needs the withheld part. That charge fails as it would with nothing withheld,
