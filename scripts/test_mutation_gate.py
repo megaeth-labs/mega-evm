@@ -157,7 +157,8 @@ class GateTest(unittest.TestCase):
         self.assertEqual(out.returncode, 0, out.stderr)
         merged = self.tmp / "merged"
         self.assertEqual((merged / "status").read_text().strip(),
-                         "MUTANTS-STATUS status=complete expected=3 outcomes=3")
+                         "MUTANTS-STATUS status=complete expected=3 outcomes=3 "
+                         "unplanned=0 duplicated=0")
         self.assertEqual((merged / "mutants.out" / "caught.txt").read_text().splitlines(),
                          [CAUGHT, MISSED])
         self.assertEqual(self.merged_report().returncode, 0)
@@ -167,7 +168,7 @@ class GateTest(unittest.TestCase):
                              caught=[CAUGHT], unviable=[UNVIABLE])
         self.merge(a)
         status = (self.tmp / "merged" / "status").read_text().strip()
-        self.assertEqual(status, "MUTANTS-STATUS status=partial expected=3 outcomes=2")
+        self.assertIn("status=partial expected=3 outcomes=2 ", status)
         out = self.merged_report()
         self.assertEqual(out.returncode, 1, out.stdout)
         self.assertIn("2 of 3", out.stdout)
@@ -178,13 +179,40 @@ class GateTest(unittest.TestCase):
                       (self.tmp / "merged" / "status").read_text())
         self.assertEqual(self.merged_report().returncode, 1)
 
-    def test_merge_ignores_duplicates_and_unplanned_mutants(self) -> None:
-        a = self.write_shard("a", "status=complete expected=1 outcomes=1", caught=[CAUGHT])
+    def test_merge_reports_an_unplanned_survivor(self) -> None:
+        unplanned = "crates/mega-evm/src/z.rs:9:9: replace z -> bool with true"
+        a = self.write_shard("a", "status=complete expected=2 outcomes=2",
+                             caught=[CAUGHT], unviable=[UNVIABLE])
         b = self.write_shard("b", "status=complete expected=2 outcomes=2",
-                             caught=[CAUGHT, "crates/mega-evm/src/z.rs:9:9: not planned"])
+                             caught=[MISSED], missed=[unplanned])
+        out = self.merge(a, b)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn(unplanned, out.stdout)
+        merged = self.tmp / "merged"
+        self.assertIn("status=mismatch expected=3 outcomes=3 unplanned=1 duplicated=0",
+                      (merged / "status").read_text())
+        # The unplanned survivor is kept, listed, and fails the report.
+        self.assertEqual((merged / "mutants.out" / "missed.txt").read_text(), f"{unplanned}\n")
+        self.assertEqual((merged / "unplanned.txt").read_text(), f"{unplanned}\n")
+        report = self.merged_report()
+        self.assertEqual(report.returncode, 1, report.stdout)
+        self.assertIn("1 shard outcome(s) are for mutants the inventory does not list",
+                      report.stdout)
+        self.assertIn(f"`{unplanned}`", report.stdout)
+
+    def test_merge_keeps_both_outcomes_of_a_mutant_tested_twice(self) -> None:
+        a = self.write_shard("a", "status=complete expected=2 outcomes=2",
+                             caught=[CAUGHT, MISSED])
+        b = self.write_shard("b", "status=complete expected=2 outcomes=2",
+                             missed=[MISSED], unviable=[UNVIABLE])
         self.merge(a, b)
-        self.assertIn("status=partial expected=3 outcomes=1",
-                      (self.tmp / "merged" / "status").read_text())
+        merged = self.tmp / "merged"
+        self.assertIn("status=mismatch expected=3 outcomes=3 unplanned=0 duplicated=1",
+                      (merged / "status").read_text())
+        self.assertEqual((merged / "mutants.out" / "missed.txt").read_text(), f"{MISSED}\n")
+        report = self.merged_report()
+        self.assertEqual(report.returncode, 1, report.stdout)
+        self.assertIn("1 mutant(s) have more than one outcome", report.stdout)
 
     def test_merge_refuses_an_empty_inventory(self) -> None:
         (self.tmp / "inventory.txt").write_text("")

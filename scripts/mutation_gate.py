@@ -19,6 +19,9 @@ Subcommands:
         (`cargo mutants --list` of the whole run). Each <shard dir> holds one
         shard's mutants.out/ and status. A shard that is missing or stopped
         early leaves inventory mutants without an outcome: status partial.
+        Every shard outcome is kept. An outcome the inventory does not plan,
+        or a second outcome for one mutant, means the shards and the inventory
+        disagree on the mutant set: status mismatch, which never passes.
 
   report      --results <mutants.out dir> [--suppressions <toml>]
               [--status <file>] [--comment <path>] [--summary <path>]
@@ -39,6 +42,7 @@ import json
 import re
 import sys
 import tomllib
+from collections import Counter
 from pathlib import Path
 
 # Cap how many survivors are rendered inline in the PR comment (GitHub caps a
@@ -120,6 +124,18 @@ def incomplete_note(status: dict[str, str]) -> str:
     if state == "not-started":
         return ("**Incomplete run** — the time budget ran out before any mutant was tested "
                 f"({expected} planned). Nothing below is a result, and an incomplete run never passes.")
+    if state == "mismatch":
+        why = []
+        if status.get("unplanned", "0") != "0":
+            why.append(f"{status['unplanned']} shard outcome(s) are for mutants the inventory "
+                       f"does not list")
+        if status.get("duplicated", "0") != "0":
+            why.append(f"{status['duplicated']} mutant(s) have more than one outcome")
+        return (f"**Shards and inventory disagree** — the inventory lists {expected} mutants, "
+                f"{outcomes} of them have an outcome, and {'; '.join(why)}. The shards did not "
+                f"test the inventory's mutant set, so this run never passes. Every shard outcome "
+                f"is still reported below; `unplanned.txt` in the run artifacts lists the "
+                f"outcomes that do not fit the inventory.")
     return (f"**Run did not complete** (status `{state}`, {outcomes} of {expected} mutants tested); "
             f"see the run log.")
 
@@ -130,9 +146,11 @@ def cmd_merge(args: argparse.Namespace) -> int:
     if not inventory:
         print(f"ERROR: empty mutant inventory at {args.inventory}", file=sys.stderr)
         return 2
-    planned = set(inventory)
+    planned = Counter(inventory)
+    # Every shard outcome goes into the merged lists, planned or not: a survivor
+    # must never be dropped on the way to the report.
     merged: dict[str, list[str]] = {name: [] for name in OUTCOME_FILES}
-    seen: set[str] = set()
+    seen: Counter[str] = Counter()
     print("| shard | status |")
     print("|---|---|")
     for shard in args.shards:
@@ -142,20 +160,36 @@ def cmd_merge(args: argparse.Namespace) -> int:
         print(f"| `{shard}` | {line} |")
         for name in OUTCOME_FILES:
             for m in read_lines(shard / "mutants.out" / name):
-                if m in planned and m not in seen:
-                    seen.add(m)
-                    merged[name].append(m)
+                merged[name].append(m)
+                seen[m] += 1
+    # The shards and the inventory must describe the same mutant set. An outcome
+    # for a mutant the inventory does not plan, or more outcomes for a mutant than
+    # the inventory plans, shows they do not: completeness is measured against the
+    # inventory, so it proves nothing then, and the run cannot pass.
+    unplanned = [m for m in seen if m not in planned]
+    duplicated = [m for m in seen if m in planned and seen[m] > planned[m]]
     out = Path(args.out)
     results = out / "mutants.out"
     results.mkdir(parents=True, exist_ok=True)
     (results / "mutants.json").write_text(json.dumps([{"name": m} for m in inventory]))
     for name, items in merged.items():
         (results / name).write_text("".join(f"{m}\n" for m in items))
-    expected, outcomes = len(inventory), len(seen)
-    state = "complete" if outcomes == expected else "partial" if outcomes else "not-started"
-    line = f"MUTANTS-STATUS status={state} expected={expected} outcomes={outcomes}"
+    (out / "unplanned.txt").write_text("".join(f"{m}\n" for m in unplanned + duplicated))
+    expected = len(inventory)
+    outcomes = sum(min(n, planned[m]) for m, n in seen.items() if m in planned)
+    if unplanned or duplicated:
+        state = "mismatch"
+    else:
+        state = "complete" if outcomes == expected else "partial" if outcomes else "not-started"
+    line = (f"MUTANTS-STATUS status={state} expected={expected} outcomes={outcomes} "
+            f"unplanned={len(unplanned)} duplicated={len(duplicated)}")
     (out / "status").write_text(line + "\n")
-    print(f"\n{len(args.shards)} shard result(s) found.\n\n{line}")
+    print(f"\n{len(args.shards)} shard result(s) found.\n")
+    for title, items in (("Not in the inventory", unplanned), ("More than one outcome", duplicated)):
+        if items:
+            print(f"{title} ({len(items)}):\n")
+            print("".join(f"- `{m}`\n" for m in items[:MAX_SURVIVORS_SHOWN]))
+    print(line)
     return 0
 
 

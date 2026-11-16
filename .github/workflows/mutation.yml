@@ -217,6 +217,7 @@ jobs:
           path: |
             target/mutants/mutants.out
             target/mutants/status
+            target/mutants/unplanned.txt
             inventory.txt
             mutation-report.md
           if-no-files-found: ignore
