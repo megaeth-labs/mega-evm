@@ -128,13 +128,15 @@ class GateTest(unittest.TestCase):
 
     # ---- merge (sharded full runs) ----
 
-    def write_shard(self, name: str, status: str, **lists: list[str]) -> Path:
+    def write_shard(self, name: str, status: str | None, **lists: list[str]) -> Path:
+        """Lay out one shard's artifact; `status=None` leaves no status file."""
         shard = self.tmp / name
         (shard / "mutants.out").mkdir(parents=True)
         for kind in ("caught", "missed", "timeout", "unviable"):
             lines = lists.get(kind, [])
             (shard / "mutants.out" / f"{kind}.txt").write_text("".join(f"{m}\n" for m in lines))
-        (shard / "status").write_text(f"MUTANTS-STATUS {status}\n")
+        if status is not None:
+            (shard / "status").write_text(f"MUTANTS-STATUS {status}\n")
         return shard
 
     def merge(self, *shards: Path) -> subprocess.CompletedProcess:
@@ -158,26 +160,68 @@ class GateTest(unittest.TestCase):
         merged = self.tmp / "merged"
         self.assertEqual((merged / "status").read_text().strip(),
                          "MUTANTS-STATUS status=complete expected=3 outcomes=3 "
-                         "unplanned=0 duplicated=0")
+                         "unplanned=0 duplicated=0 shards-planned=3 shards=complete,complete")
         self.assertEqual((merged / "mutants.out" / "caught.txt").read_text().splitlines(),
                          [CAUGHT, MISSED])
         self.assertEqual(self.merged_report().returncode, 0)
 
-    def test_missing_shard_shows_as_missing(self) -> None:
+    def test_shard_without_artifact_is_named(self) -> None:
         a = self.write_shard("a", "status=complete expected=2 outcomes=2",
                              caught=[CAUGHT], unviable=[UNVIABLE])
-        self.merge(a)
+        self.merge(a, self.tmp / "never-uploaded")
         status = (self.tmp / "merged" / "status").read_text().strip()
-        self.assertIn("status=partial expected=3 outcomes=2 ", status)
+        self.assertIn("status=error expected=3 outcomes=2 ", status)
+        self.assertIn("shards=complete,no-artifact", status)
         out = self.merged_report()
         self.assertEqual(out.returncode, 1, out.stdout)
         self.assertIn("2 of 3", out.stdout)
+        self.assertIn("shard 1: `no-artifact` — it uploaded no results", out.stdout)
+        self.assertNotIn("time budget", out.stdout)
+
+    def test_baseline_failed_shard_is_named_not_blamed_on_the_budget(self) -> None:
+        a = self.write_shard("a", "status=complete expected=2 outcomes=2",
+                             caught=[CAUGHT], unviable=[UNVIABLE])
+        b = self.write_shard("b", "status=baseline-failed expected=unknown outcomes=0")
+        self.merge(a, b)
+        status = (self.tmp / "merged" / "status").read_text()
+        self.assertIn("status=baseline-failed expected=3 outcomes=2 ", status)
+        out = self.merged_report()
+        self.assertEqual(out.returncode, 1, out.stdout)
+        self.assertIn("shard 1: `baseline-failed` — the unmutated tree failed", out.stdout)
+        self.assertNotIn("time budget", out.stdout)
+
+    def test_shard_failures_outrank_a_budget_stop(self) -> None:
+        a = self.write_shard("a", "status=error expected=2 outcomes=1", caught=[CAUGHT])
+        b = self.write_shard("b", "status=partial expected=1 outcomes=0")
+        c = self.write_shard("c", None)
+        self.merge(a, b, c)
+        status = (self.tmp / "merged" / "status").read_text()
+        self.assertIn("status=error ", status)
+        self.assertIn("shards=error,partial,no-status", status)
+        out = self.merged_report()
+        self.assertIn("shard 0: `error` — the run itself failed", out.stdout)
+        self.assertIn("shard 1: `partial` — its time budget ran out", out.stdout)
+        self.assertIn("shard 2: `no-status` — it ended without a status line", out.stdout)
+
+    def test_budget_stopped_shard_still_blames_the_budget(self) -> None:
+        a = self.write_shard("a", "status=complete expected=2 outcomes=2",
+                             caught=[CAUGHT], unviable=[UNVIABLE])
+        b = self.write_shard("b", "status=not-started expected=1 outcomes=0")
+        self.merge(a, b)
+        self.assertIn("status=partial expected=3 outcomes=2 ",
+                      (self.tmp / "merged" / "status").read_text())
+        out = self.merged_report()
+        self.assertEqual(out.returncode, 1, out.stdout)
+        self.assertIn("the time budget ran out after 2 of 3", out.stdout)
+        self.assertIn("shard 1: `not-started`", out.stdout)
 
     def test_merge_of_no_shards_is_not_started(self) -> None:
         self.merge()
         self.assertIn("status=not-started expected=3 outcomes=0",
                       (self.tmp / "merged" / "status").read_text())
-        self.assertEqual(self.merged_report().returncode, 1)
+        out = self.merged_report()
+        self.assertEqual(out.returncode, 1)
+        self.assertIn("no shard results were found", out.stdout)
 
     def test_merge_reports_an_unplanned_survivor(self) -> None:
         unplanned = "crates/mega-evm/src/z.rs:9:9: replace z -> bool with true"
@@ -213,6 +257,19 @@ class GateTest(unittest.TestCase):
         report = self.merged_report()
         self.assertEqual(report.returncode, 1, report.stdout)
         self.assertIn("1 mutant(s) have more than one outcome", report.stdout)
+
+    def test_merge_flags_shard_plans_that_miss_inventory_mutants(self) -> None:
+        # Both shards finished their own plans, but those plans left out a mutant
+        # the inventory lists: the run is not partial for lack of time.
+        a = self.write_shard("a", "status=complete expected=1 outcomes=1", caught=[CAUGHT])
+        b = self.write_shard("b", "status=complete expected=1 outcomes=1", missed=[MISSED])
+        self.merge(a, b)
+        self.assertIn("status=mismatch expected=3 outcomes=2 unplanned=0 duplicated=0 "
+                      "shards-planned=2", (self.tmp / "merged" / "status").read_text())
+        report = self.merged_report()
+        self.assertEqual(report.returncode, 1, report.stdout)
+        self.assertIn("the shards planned 2 mutants", report.stdout)
+        self.assertNotIn("time budget", report.stdout)
 
     def test_merge_refuses_an_empty_inventory(self) -> None:
         (self.tmp / "inventory.txt").write_text("")

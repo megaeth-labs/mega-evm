@@ -17,11 +17,15 @@ Subcommands:
         Combine the results of a run split into shards (cargo mutants --shard)
         into <dir>/mutants.out and <dir>/status, counted against <inventory>
         (`cargo mutants --list` of the whole run). Each <shard dir> holds one
-        shard's mutants.out/ and status. A shard that is missing or stopped
-        early leaves inventory mutants without an outcome: status partial.
-        Every shard outcome is kept. An outcome the inventory does not plan,
-        or a second outcome for one mutant, means the shards and the inventory
-        disagree on the mutant set: status mismatch, which never passes.
+        shard's mutants.out/ and status; pass one per shard, including shards
+        that may have uploaded nothing. Every shard's own status is folded into
+        the merged status and named in the report: a shard whose budget ran out
+        makes the run partial, one that failed its baseline makes it
+        baseline-failed, and one that errored, left no status or uploaded
+        nothing makes it error. Every shard outcome is kept. An outcome the
+        inventory does not plan, a second outcome for one mutant, or shard plans
+        that do not add up to the inventory mean the shards and the inventory
+        disagree on the mutant set: status mismatch. Only complete passes.
 
   report      --results <mutants.out dir> [--suppressions <toml>]
               [--status <file>] [--comment <path>] [--summary <path>]
@@ -114,16 +118,33 @@ def read_status(path: Path) -> dict[str, str] | None:
     return None
 
 
+# Why a shard (or a single run) did not test all of its mutants, by status.
+# `no-status` and `no-artifact` are recorded by `merge` for a shard that left no
+# status line or no directory at all.
+SHARD_CAUSES = {
+    "partial": "its time budget ran out",
+    "not-started": "its time budget ran out before it tested any mutant",
+    "baseline-failed": "the unmutated tree failed to build or to pass its tests",
+    "error": "the run itself failed",
+    "no-status": "it ended without a status line (cancelled, killed by the job timeout, "
+                 "or crashed)",
+    "no-artifact": "it uploaded no results",
+}
+BUDGET_STATES = ("partial", "not-started")
+
+
 def incomplete_note(status: dict[str, str]) -> str:
     """Describe a run that did not test every planned mutant."""
     state, expected, outcomes = status.get("status"), status.get("expected"), status.get("outcomes")
-    if state == "partial":
-        return (f"**Incomplete run** — the time budget ran out after {outcomes} of {expected} "
-                f"planned mutants; the rest were not tested. The results below cover only "
-                f"the tested mutants, and an incomplete run never passes.")
-    if state == "not-started":
-        return ("**Incomplete run** — the time budget ran out before any mutant was tested "
-                f"({expected} planned). Nothing below is a result, and an incomplete run never passes.")
+    tail = " The results below cover only the tested mutants, and an incomplete run never passes."
+    # A merged run names each shard that did not complete.
+    merged = "shards" in status
+    shard_states = [s for s in status.get("shards", "").split(",") if s]
+    problems = [(i, s) for i, s in enumerate(shard_states) if s != "complete"]
+    listed = "".join(f"\n- shard {i}: `{s}` — {SHARD_CAUSES.get(s, 'see its log')}"
+                     for i, s in problems)
+    if merged and not shard_states:
+        return f"**Incomplete run** — no shard results were found ({expected} planned).{tail}"
     if state == "mismatch":
         why = []
         if status.get("unplanned", "0") != "0":
@@ -131,13 +152,28 @@ def incomplete_note(status: dict[str, str]) -> str:
                        f"does not list")
         if status.get("duplicated", "0") != "0":
             why.append(f"{status['duplicated']} mutant(s) have more than one outcome")
+        planned = status.get("shards-planned", "unknown")
+        if planned not in ("unknown", expected):
+            why.append(f"the shards planned {planned} mutants")
         return (f"**Shards and inventory disagree** — the inventory lists {expected} mutants, "
                 f"{outcomes} of them have an outcome, and {'; '.join(why)}. The shards did not "
                 f"test the inventory's mutant set, so this run never passes. Every shard outcome "
                 f"is still reported below; `unplanned.txt` in the run artifacts lists the "
-                f"outcomes that do not fit the inventory.")
-    return (f"**Run did not complete** (status `{state}`, {outcomes} of {expected} mutants tested); "
-            f"see the run log.")
+                f"outcomes that do not fit the inventory.{listed}")
+    budget_only = all(s in BUDGET_STATES for _, s in problems)
+    if state == "partial" and budget_only:
+        return (f"**Incomplete run** — the time budget ran out after {outcomes} of {expected} "
+                f"planned mutants; the rest were not tested.{tail}{listed}")
+    if state == "not-started" and budget_only:
+        return ("**Incomplete run** — the time budget ran out before any mutant was tested "
+                f"({expected} planned). Nothing below is a result, and an incomplete run "
+                f"never passes.{listed}")
+    if problems:
+        return (f"**Incomplete run** — {outcomes} of {expected} planned mutants were tested; "
+                f"these shards did not complete:{listed}\n\n{tail.strip()}")
+    cause = SHARD_CAUSES.get(state or "", "see the run log")
+    return (f"**Run did not complete** (status `{state}`: {cause}; {outcomes} of {expected} "
+            f"mutants tested).{tail}")
 
 
 def cmd_merge(args: argparse.Namespace) -> int:
@@ -151,23 +187,36 @@ def cmd_merge(args: argparse.Namespace) -> int:
     # must never be dropped on the way to the report.
     merged: dict[str, list[str]] = {name: [] for name in OUTCOME_FILES}
     seen: Counter[str] = Counter()
+    # Each shard's state, and its own plan (`expected`); the plans must add up to
+    # the inventory.
+    shard_states: list[str] = []
+    shard_plans: list[int | None] = []
     print("| shard | status |")
     print("|---|---|")
     for shard in args.shards:
         shard = Path(shard)
         status = read_status(shard / "status")
-        line = " ".join(f"{k}={v}" for k, v in status.items()) if status else "no status"
+        if not shard.is_dir():
+            shard_states.append("no-artifact")
+        else:
+            shard_states.append((status or {}).get("status", "no-status"))
+        line = " ".join(f"{k}={v}" for k, v in status.items()) if status else shard_states[-1]
         print(f"| `{shard}` | {line} |")
+        plan = (status or {}).get("expected", "")
+        shard_plans.append(int(plan) if plan.isdigit() else None)
         for name in OUTCOME_FILES:
             for m in read_lines(shard / "mutants.out" / name):
                 merged[name].append(m)
                 seen[m] += 1
     # The shards and the inventory must describe the same mutant set. An outcome
-    # for a mutant the inventory does not plan, or more outcomes for a mutant than
-    # the inventory plans, shows they do not: completeness is measured against the
-    # inventory, so it proves nothing then, and the run cannot pass.
+    # for a mutant the inventory does not plan, more outcomes for a mutant than the
+    # inventory plans, or shard plans that do not add up to the inventory show they
+    # do not: completeness is measured against the inventory, so it proves nothing
+    # then, and the run cannot pass.
     unplanned = [m for m in seen if m not in planned]
     duplicated = [m for m in seen if m in planned and seen[m] > planned[m]]
+    plans_known = bool(shard_plans) and None not in shard_plans
+    shards_planned = sum(p for p in shard_plans if p is not None) if plans_known else None
     out = Path(args.out)
     results = out / "mutants.out"
     results.mkdir(parents=True, exist_ok=True)
@@ -177,14 +226,24 @@ def cmd_merge(args: argparse.Namespace) -> int:
     (out / "unplanned.txt").write_text("".join(f"{m}\n" for m in unplanned + duplicated))
     expected = len(inventory)
     outcomes = sum(min(n, planned[m]) for m, n in seen.items() if m in planned)
-    if unplanned or duplicated:
+    # The most specific cause wins: a mismatch, then a failed baseline, then any
+    # other shard failure. A shortfall that only budget-stopped shards explain is
+    # partial or not-started, as for a single run.
+    if unplanned or duplicated or (plans_known and shards_planned != expected):
         state = "mismatch"
+    elif "baseline-failed" in shard_states:
+        state = "baseline-failed"
+    elif any(s not in ("complete", *BUDGET_STATES) for s in shard_states):
+        state = "error"
     else:
         state = "complete" if outcomes == expected else "partial" if outcomes else "not-started"
     line = (f"MUTANTS-STATUS status={state} expected={expected} outcomes={outcomes} "
-            f"unplanned={len(unplanned)} duplicated={len(duplicated)}")
+            f"unplanned={len(unplanned)} duplicated={len(duplicated)} "
+            f"shards-planned={'unknown' if shards_planned is None else shards_planned} "
+            f"shards={','.join(shard_states)}")
     (out / "status").write_text(line + "\n")
-    print(f"\n{len(args.shards)} shard result(s) found.\n")
+    found = sum(s != "no-artifact" for s in shard_states)
+    print(f"\n{len(args.shards)} shard(s), {found} with results.\n")
     for title, items in (("Not in the inventory", unplanned), ("More than one outcome", duplicated)):
         if items:
             print(f"{title} ({len(items)}):\n")

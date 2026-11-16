@@ -163,7 +163,8 @@ jobs:
   cargo-mutants-full:
     name: cargo-mutants full run
     needs: cargo-mutants
-    # Also after a failed or timed-out shard: its mutants then count as untested.
+    # Also after a failed or timed-out shard: the report names it, and its
+    # mutants count as untested.
     if: ${{ !cancelled() && github.event_name != 'pull_request' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -198,8 +199,9 @@ jobs:
 
       - name: Merge, score and gate
         run: |
-          shopt -s nullglob
-          shards=(shards/*)
+          # One directory per shard of the cargo-mutants matrix (by job index), so
+          # that a shard which uploaded nothing is named in the report.
+          shards=(shards/mutation-results-shard-{0..3})
           python3 scripts/mutation_gate.py merge --inventory inventory.txt \
             --out target/mutants "${shards[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
           python3 scripts/mutation_gate.py report \
