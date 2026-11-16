@@ -220,7 +220,7 @@ category = "equivalent"
 file = "crates/mega-evm/src/evm/context.rs"
 mutant = "replace == with != in MegaContext<DB, ExtEnvs>::prepare"
 justification = "Equivalent: the comparison only chooses between TxClass::Deposit and TxClass::Ordinary for an execution that is neither the protocol's own nor neutral, and every reader of the class treats the two alike (is_exempt false, prices_history true). Swapping them changes no limit, exemption, detention or history charge."
-reviewer = "unreviewed: proposed by the implementer, for the owner's sign-off"
+reviewer = "RealiCZ"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # crates/mega-evm/src/block/ survivors.
@@ -240,7 +240,7 @@ category = "equivalent"
 file = "crates/mega-evm/src/block/genesis.rs"
 mutant = "replace || with && in Entry::address"
 justification = "Equivalent: every string the mutated check lets through (40 bytes not all hexadecimal, or all-hexadecimal of another length) is refused by Address::from_str (alloy's FixedBytes::from_hex: exact 40 hex digits after an optional 0x), and the refusal maps to the same invalid() error, so the result is identical for every input."
-reviewer = "unreviewed: proposed by the implementer, for the owner's sign-off"
+reviewer = "RealiCZ"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Infrastructure scope (.cargo/mutants-infra.toml) survivors.
