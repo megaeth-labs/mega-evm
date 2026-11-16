@@ -35,6 +35,8 @@ Every mutant rebuilds `mega-evm` and all of its test binaries, so the run's cost
 The driver first builds the unmutated tests into `./target`, which `copy_target` copies into each scratch build directory.
 With incremental compilation, each mutant build then reuses everything the mutation did not touch.
 Cargo builds the dev profile incrementally by default, but `actions-rust-lang/setup-rust-toolchain` exports `CARGO_INCREMENTAL=0`, so the workflow sets `CARGO_INCREMENTAL=1` on the mutation step.
+A PR that changes no mutatable source has nothing to mutate, and the driver exits before its warm build.
+The workflow asks the driver first (`scripts/mutation_test.sh changed <base>`) and then neither restores nor saves the Rust cache, so a target with nothing compiled in it is never cached.
 
 `MUTANTS_BUDGET=<seconds>` bounds a run, counted from the driver's start and covering the warm build and cargo-mutants.
 When it runs out, the driver interrupts cargo-mutants, which stops its in-flight mutants and keeps every outcome already recorded, and exits 0 so that what was tested can still be scored and uploaded.

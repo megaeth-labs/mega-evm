@@ -52,8 +52,24 @@ jobs:
       - name: Test the scorer
         run: python3 scripts/test_mutation_gate.py
 
+      - name: Decide whether the run builds
+        # A PR that changes no mutatable source has nothing to mutate, and the
+        # driver exits before its warm build. The Rust cache is then neither
+        # restored (nothing would use it) nor saved: the save would store a target
+        # with nothing compiled in it, and a later run of this PR that hit that
+        # entry would rebuild every dependency without ever saving a better one.
+        id: scope
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            scripts/mutation_test.sh changed "${{ github.event.pull_request.base.sha }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "mutate=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: ${{ steps.scope.outputs.mutate }}
 
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1

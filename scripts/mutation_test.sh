@@ -13,6 +13,10 @@
 #                      Extra arguments go to cargo-mutants, as for `full`. With
 #                      --all, include the mutants of function-scoped suppressions,
 #                      which the runs exclude.
+#   changed <base-ref> Print mutate=true if `diff <base-ref>` would run (and so
+#                      build), mutate=false if it would find no mutatable change
+#                      and exit before building. CI uses it to decide whether to
+#                      restore and save the build cache.
 #
 # Every run first builds the unmutated tests into ./target, which cargo-mutants'
 # `copy_target` copies into each scratch build directory, then runs cargo-mutants.
@@ -51,6 +55,22 @@ cd "$ROOT_DIR"
 
 cmd="${1:-}"
 shift || true
+
+# Source paths a mutant can live in. `diff` and `changed` scope the diff to them,
+# so a PR that touches only tests/, Cargo.toml, etc. has nothing to mutate.
+MUTATABLE=('crates/mega-evm/src/**')
+mutatable_diff() {
+    git diff --no-color "$1"...HEAD -- "${MUTATABLE[@]}"
+}
+
+if [[ "$cmd" == changed ]]; then
+    base="${1:?usage: mutation_test.sh changed <base-ref>}"
+    # Read the diff into a variable: piping it into `grep -q` would fail the
+    # pipeline under pipefail when grep exits early.
+    changes="$(mutatable_diff "$base")"
+    if [[ -n "$changes" ]]; then echo "mutate=true"; else echo "mutate=false"; fi
+    exit 0
+fi
 
 require_cargo_mutants() {
     if ! cargo mutants --version >/dev/null 2>&1; then
@@ -220,9 +240,7 @@ case "$cmd" in
         base="${1:?usage: mutation_test.sh diff <base-ref>}"
         diff_file="$OUT_DIR.diff"
         mkdir -p "$(dirname "$diff_file")"
-        # Only src/ is mutatable; scoping the diff there avoids a non-empty diff
-        # (and a wasted run) when a PR touches only tests/, Cargo.toml, etc.
-        git diff --no-color "$base"...HEAD -- 'crates/mega-evm/src/**' > "$diff_file"
+        mutatable_diff "$base" > "$diff_file"
         if [[ ! -s "$diff_file" ]]; then
             echo "No changes under crates/mega-evm vs $base; nothing to mutate." >&2
             RESULT=empty
@@ -238,7 +256,7 @@ case "$cmd" in
         run_mutants -f "$glob"
         ;;
     *)
-        echo "usage: mutation_test.sh {diff <base-ref>|full [args...]|file <glob>|list [--all] [args...]}" >&2
+        echo "usage: mutation_test.sh {diff <base-ref>|full [args...]|file <glob>|list [--all] [args...]|changed <base-ref>}" >&2
         exit 2
         ;;
 esac
