@@ -55,17 +55,20 @@
 //!
 //! # The witness is what the block commits
 //!
-//! Each pre-block step — the EIP-2935 call, the EIP-4788 call, the activation block's read of each
-//! predeploy, the read of the `SequencerRegistry`'s pending changes and the `applyPendingChanges()`
-//! call — produces an [`EvmState`], and this executor commits each one on its own, in that order,
-//! before the first transaction; every committed transaction's returned state follows. A read is a
-//! read-only entry of its step's state: an account neither touched nor created, its slots
-//! unchanged. The sequence of committed states, with the exported block hashes and buckets, is the
-//! witness a stateless client needs. A node takes it with a commit hook on revm's `State`
-//! (`State::set_state_hook`), which `commit` hands every state whole, before the cache drops the
-//! accounts the state did not touch. The block's transitions and bundle keep only what a state
-//! changed, so a witness taken from them would miss the read-only entries — the activation block's
-//! predeploys, the registry's pending slots, the L1 block info.
+//! Each pre-block step — the EIP-2935 call, the EIP-4788 call, the activation block's check of the
+//! EIP-7997 factory, the deployment of each of the five flat system contracts, the read of the
+//! `SequencerRegistry`'s pending changes and the `applyPendingChanges()` call, the registry's
+//! deployment and the resolution of the block's live system address — produces an [`EvmState`],
+//! and this executor commits each one on its own, in that order, before the first transaction;
+//! every committed transaction's returned state follows. A read is a read-only entry of its step's
+//! state: an account neither touched nor created, its slots unchanged. The sequence of committed
+//! states, with the exported block hashes and buckets, is the witness a stateless client needs. A
+//! node takes it with a commit hook on revm's `State` (`State::set_state_hook`), which `commit`
+//! hands every state whole, before the cache drops the accounts the state did not touch. The
+//! block's transitions and bundle keep only what a state changed, so a witness taken from them
+//! would miss the read-only entries — a system contract that already holds its code, the activation
+//! block's factory, the registry's pending slots and the slot the resolution reads, the L1 block
+//! info.
 //!
 //! The L1 block info is read outside every transaction's journal: op-revm prices the block's first
 //! non-deposit transaction other than a Mega System Transaction against the L1 block contract's
@@ -89,21 +92,25 @@
 //! # The pre-block system calls
 //!
 //! [`apply_pre_execution_changes`](BlockExecutor::apply_pre_execution_changes) makes the EIP-2935
-//! and EIP-4788 calls, in the block in which Satin activates checks that the system contracts and
-//! the EIP-7997 factory hold the code Satin expects, then applies a role change the
-//! `SequencerRegistry` has due in this block. Every call is a system call
-//! on the pre-block budget
+//! and EIP-4788 calls; in the block in which Satin activates, and in no other, checks that the
+//! EIP-7997 factory holds the code Satin expects; deploys the five flat system contracts, each
+//! installed where missing and given Satin's code where it holds other code; applies a role change
+//! the `SequencerRegistry` has due in this block; deploys the registry — kept at version 2.0.0,
+//! migrated in place from 1.0.0, seeded from the schedule's bootstrap values where its address
+//! holds no code, and the block refused over any other code — and last resolves the block's live
+//! system address from it, once. Every call is a system call on the pre-block budget
 //! ([`PRE_BLOCK_CALL_GAS_LIMIT`](crate::constants::PRE_BLOCK_CALL_GAS_LIMIT)), and one that does
 //! not succeed refuses the block.
 //!
-//! The pre-block step does not read the live system address, but it is what leaves the registry
-//! naming this block's address. The executor reads the address off the block's state before every
-//! non-deposit transaction, to decide before the transaction runs whether it is a Mega System
-//! Transaction: one pays no L1 fee, so the fee computation does not price it and it reports the
-//! footprint read alone, and a delayed commit checks the system address's account as its sender's.
-//! The packing budgets and the builder's policy hold it as any other non-deposit transaction.
-//! Every transaction, a deposit included, then reads the same slot into its own journal when it is
-//! validated.
+//! The resolution is the block's one read of the live system address: the executor hands the
+//! address to the EVM, and every transaction of the block is classified against it. The executor
+//! uses the same address before every non-deposit transaction, to decide before the transaction
+//! runs whether it is a Mega System Transaction: one pays no L1 fee, so the fee computation does
+//! not price it and it reports the footprint read alone, and a delayed commit checks the system
+//! address's account as its sender's. The packing budgets and the builder's policy hold it as any
+//! other non-deposit transaction. No transaction reads the registry for its classification, so
+//! none finds the registry's account or slot warm, or carries them in its returned state, for that
+//! reason.
 
 #[cfg(not(feature = "std"))]
 use alloc as std;
@@ -1171,10 +1178,10 @@ where
         );
         let gas_limit = inner.gas_limit();
 
-        // A Mega System Transaction is decided before it runs, from the registry's live system
-        // address as the block's state holds it: the engine reads the same slot when it validates
-        // the transaction, and a transaction of another shape from that address is no system
-        // transaction here but refused there.
+        // A Mega System Transaction is decided before it runs, from the live system address the
+        // block resolved after its pre-block steps: the engine validates the transaction against
+        // the same address, which the EVM holds, and a transaction of another shape from that
+        // address is no system transaction here but refused there.
         let is_system_transaction = !is_deposit && self.is_system_transaction(&tx_env)?;
 
         self.limiter.pre_execution_check(tx_hash, gas_limit, tx_size, da_size, is_deposit)?;

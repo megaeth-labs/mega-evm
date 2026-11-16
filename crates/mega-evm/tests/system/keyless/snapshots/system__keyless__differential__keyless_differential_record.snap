@@ -4,7 +4,7 @@ expression: "serde_json::json!({\n    \"summary\":\n    {\n        \"cases\": ca
 ---
 {
   "cases": [
-    "rule: value @ 50000000 | keccak256=0xef15b199c90d2f14c16d0b91f625f537ad5c3e3782252f4dad26fcb9f89277ef",
+    "rule: value @ 50000000 | keccak256=0x0b03bcdca2a2c572395ea8703c1d840fce31f7e38ae2a3e56f92982c2e324e35",
     "rule: value, arguments that do not decode @ 50000000 | keccak256=0xba607024c2803d8c65fb57bea6f6dd1df8b6b2d0996fb363382083936bd9060d",
     "rule: arguments that do not decode @ 50000000 | keccak256=0xf5887e762597e4e154eb78f978729f243f948d632a90e98bcf79d24d6f737940",
     "rule: malformed transaction @ 50000000 | keccak256=0x43b5851716bcb77384699f05cecd29ad1148970f4934844d8329cc8465101024",
@@ -69,7 +69,7 @@ expression: "serde_json::json!({\n    \"summary\":\n    {\n        \"cases\": ca
     "not dispatched: a STATICCALL from a contract @ 50000000 | keccak256=0x0c8ee23f410f276e70aedeea54791fa0eeaf7d54a07a42474dce0f0dc8b8ab96",
     "no contract code @ 50000000 | keccak256=0xc6cfe86e2fdd140177611023f019e3f26110c91edfca5bbd49c2ae6d81e7657f",
     "a system call @ 50000000 | keccak256=0x19781f56400c365420cfef14d3053ac669b0c692055d51dfcb97d6b238351579",
-    "rule: value @ 400000000 | keccak256=0x7e5f9c693f1df70d684c3cd2ca4fd76d1fe825e2b4a48d71af3c86355e24f572",
+    "rule: value @ 400000000 | keccak256=0x78bfa72388d32a3444d8054b5a041ff357f5f15501aab79d8330b37c9605654c",
     "rule: value, arguments that do not decode @ 400000000 | keccak256=0xf57a72f33c4a4420f5bee21f1bbba9e98d265406086121536b3cb29b4be4d71e",
     "rule: arguments that do not decode @ 400000000 | keccak256=0x2e187280d923f25b619ce46270a7e3d9d99be13e05e7a54f198af09833f9d71f",
     "rule: malformed transaction @ 400000000 | keccak256=0xb78a6a15517606850c24342c9c3d3e504bc5f0683d82bf2d1d67d5fd7f625a9f",
@@ -145,7 +145,7 @@ expression: "serde_json::json!({\n    \"summary\":\n    {\n        \"cases\": ca
     "rule: init code over the limit @ 2000000000 | keccak256=0xf7c394f5669d50ca00bcdb9af25ee29a091f2089f096a29fde596409945b9c3a"
   ],
   "summary": {
-    "bytes": 2339597,
+    "bytes": 2339591,
     "cases": 139,
     "lines": 10402,
     "runs": 556

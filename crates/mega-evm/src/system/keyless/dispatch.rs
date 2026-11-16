@@ -133,12 +133,12 @@ pub(crate) fn ready<DB: Database, ExtEnvs: ExternalEnvTypes>(
         }
         return Ok(None);
     }
-    let mut gas = untouched_call_gas(inputs);
+    let mut gas = untouched_call_gas(ctx.cfg(), inputs);
     ctx.detention.hold(gas.tracker_mut());
     let Err(refusal) = prepare(ctx, inputs, call, &mut gas)? else {
         unreachable!("a call carrying value is refused at rule 2")
     };
-    Ok(Some(refusal.answer(inputs, gas)))
+    Ok(Some(refusal.answer(ctx.cfg(), inputs, gas)))
 }
 
 /// The first action of a `keylessDeploy` call's frame, which runs no instruction: charges its gas
@@ -288,11 +288,11 @@ impl Refusal {
         }
     }
 
-    /// The answer to the call `inputs` start, carrying `gas`: the call's gas as the refusal left
-    /// it, with the reservoir it inherited.
-    fn answer(self, inputs: &CallInputs, mut gas: Gas) -> FrameResult {
+    /// The answer to the call `inputs` start under `cfg`, carrying `gas`: the call's gas as the
+    /// refusal left it, with the reservoir it inherited and the configuration's give-back mode.
+    fn answer(self, cfg: &impl Cfg, inputs: &CallInputs, mut gas: Gas) -> FrameResult {
         let (result, output) = self.result(&mut gas);
-        let mut answer = synthetic_call_result(inputs, result, output);
+        let mut answer = synthetic_call_result(cfg, inputs, result, output);
         *answer.gas_mut() = gas;
         answer
     }

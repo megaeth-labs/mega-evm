@@ -15,6 +15,7 @@ use alloy_evm::Database;
 use alloy_primitives::{address, Address};
 use alloy_sol_types::SolCall;
 use revm::{
+    context::ContextTr,
     handler::FrameResult,
     interpreter::{CallInputs, InstructionResult},
 };
@@ -94,7 +95,7 @@ pub(crate) fn intercept<DB: Database, ExtEnvs: ExternalEnvTypes>(
     let check = ctx.additional_limit.admit_hint(payload.len() as u64);
     if check.exceeded_limit() {
         let output = ctx.additional_limit.note_frame_stop(&check);
-        return Some(synthetic_call_result(inputs, InstructionResult::Revert, output));
+        return Some(synthetic_call_result(ctx.cfg(), inputs, InstructionResult::Revert, output));
     }
     // Trailing bytes after a valid envelope are dropped by the decoder and a malformed envelope
     // is refused; either way the payload is paid for above.

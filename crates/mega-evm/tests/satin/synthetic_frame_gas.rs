@@ -1,5 +1,6 @@
 //! Frame results `MegaETH` builds without running a frame carry the reservoir the frame
-//! inherited and settle like revm's own.
+//! inherited and the give-back mode of the configuration the execution runs under, and settle like
+//! revm's own.
 //!
 //! The matrix at the end runs every method a system contract interceptor answers at a gas limit
 //! under the execution cap, where a transaction has no reservoir, and at one far above it, where
@@ -22,10 +23,11 @@ use mega_evm::{
         ACCESS_CONTROL_CODE, LIMIT_CONTROL_ADDRESS, LIMIT_CONTROL_CODE, ORACLE_CONTRACT_ADDRESS,
         ORACLE_CONTRACT_CODE,
     },
-    test_utils::MemoryDatabase,
-    EvmTxRuntimeLimits, LimitUsage, MegaEvm,
+    test_utils::{neutral_cfg, neutralize_evm, BytecodeBuilder, MemoryDatabase},
+    EthSpecId, EvmTxRuntimeLimits, LimitUsage, MegaEvm,
 };
 use revm::{
+    bytecode::opcode::{CALL, GAS, POP, PUSH0},
     context::{result::ExecutionResult, ContextTr, JournalTr},
     handler::{EvmTr, FrameResult, ItemOrResult},
     inspector::InspectorEvmTr,
@@ -538,4 +540,333 @@ fn test_a_keyless_call_below_the_overhead_runs_out_of_gas() {
     assert_eq!(after.remaining(), before.remaining(), "a halt hands none of its gas back");
     assert_eq!(after.reservoir(), RESERVOIR, "and the inherited reservoir comes back whole");
     assert_eq!(after.state_gas_spent(), before.state_gas_spent());
+}
+
+/// The configuration an execution runs under: Satin's own, whose give-backs credit the reservoir
+/// alone, or the neutral one the execution-spec gate runs Ethereum's fixtures under, which credits
+/// them as EIP-8037 does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Configuration {
+    Satin,
+    Neutral,
+}
+
+impl Configuration {
+    const BOTH: [Self; 2] = [Self::Satin, Self::Neutral];
+
+    /// The fork whose pricing the neutral configuration takes: Amsterdam, whose EIP-8037 has a
+    /// reservoir to give back into.
+    const NEUTRAL_FORK: EthSpecId = EthSpecId::AMSTERDAM;
+
+    /// Whether every give-back of the configuration credits the reservoir alone: the mode every
+    /// tracker built under it must carry.
+    const fn reservoir_only_give_backs(self) -> bool {
+        matches!(self, Self::Satin)
+    }
+
+    /// An EVM over `db` under this configuration, held to `limits`, inspected by `inspector`.
+    fn evm<INSP>(
+        self,
+        db: MemoryDatabase,
+        limits: EvmTxRuntimeLimits,
+        inspector: INSP,
+    ) -> MegaEvm<MemoryDatabase, INSP> {
+        let mut ctx = context(db).with_tx_runtime_limits(limits);
+        if self == Self::Neutral {
+            ctx = ctx.with_neutral_cfg(neutral_cfg(Self::NEUTRAL_FORK).expect("a neutral fork"));
+        }
+        let mut evm = MegaEvm::new(ctx).with_inspector(inspector);
+        if self == Self::Neutral {
+            neutralize_evm(&mut evm, Self::NEUTRAL_FORK).expect("a neutral fork");
+        }
+        evm
+    }
+}
+
+/// Keeps, for every call that ends, its target, how it ended and the give-back mode of the gas
+/// its result carries, as an inspector sees the result in `call_end`.
+#[derive(Default)]
+struct SeesGiveBackModes {
+    ends: Vec<(Address, InstructionResult, bool)>,
+}
+
+impl<CTX: ContextTr, INTR: InterpreterTypes> Inspector<CTX, INTR> for SeesGiveBackModes {
+    fn call_end(&mut self, _: &mut CTX, inputs: &CallInputs, outcome: &mut CallOutcome) {
+        let mode = outcome.result.gas.reservoir_only_give_backs();
+        self.ends.push((inputs.target_address, outcome.result.result, mode));
+    }
+}
+
+/// Runs `tx` over `db` under `configuration` and `limits`, and returns what the transaction's own
+/// frame ended as and the give-back mode its result carried when the inspector saw it.
+fn own_frame_end(
+    configuration: Configuration,
+    db: MemoryDatabase,
+    limits: EvmTxRuntimeLimits,
+    tx: mega_evm::MegaTransaction,
+) -> (Bytes, InstructionResult, bool) {
+    let to = tx.0.base.kind.to().copied().expect("a call");
+    let mut evm = configuration.evm(db, limits, SeesGiveBackModes::default());
+    let outcome = evm.execute_transaction(tx).expect("the transaction is valid");
+    let output = outcome.result.output().cloned().unwrap_or_default();
+    let ends = &evm.inspector().ends;
+    let [(target, result, mode)] = ends.as_slice() else {
+        panic!("{configuration:?}: the transaction's own frame alone ends: {ends:?}")
+    };
+    assert_eq!(*target, to, "{configuration:?}");
+    (output, *result, *mode)
+}
+
+/// The answer a system contract interceptor or the keyless dispatch gives a call carries the give-
+/// back mode of the configuration the execution runs under when an inspector sees it, as the gas
+/// of every frame revm builds does: give-backs to the reservoir alone under Satin's, EIP-8037's
+/// own under the neutral one. An inspector that charges and gives back on the answer's gas
+/// credits it where the configuration says, whoever built the result.
+///
+/// Every row is an answer the engine builds without running the contract's code, which the output
+/// tells apart from a fall-through into the code, whose frame revm builds with the mode anyway:
+/// the methods the two control contracts answer, the refusal of a value they take none of, a
+/// `keylessDeploy` call carrying value, and a hint the Oracle answers with the stop because its
+/// payload would cross the transaction's data-size limit.
+#[test]
+fn test_an_interceptor_answer_carries_the_configured_give_back_mode() {
+    let selector = |selector: [u8; 4]| Bytes::copy_from_slice(&selector);
+    let hint = Bytes::from(
+        IOracle::sendHintCall { topic: B256::ZERO, data: Bytes::from_static(b"a hint") }
+            .abi_encode(),
+    );
+    let no_room_for_a_hint = EvmTxRuntimeLimits::no_limits()
+        .with_tx_data_size_limit(mega_evm::TX_BODY_SIZE + hint.len() as u64);
+    let rows = [
+        (
+            LIMIT_CONTROL_ADDRESS,
+            selector(IMegaLimitControl::remainingComputeGasCall::SELECTOR),
+            U256::ZERO,
+            EvmTxRuntimeLimits::no_limits(),
+            InstructionResult::Return,
+            None,
+        ),
+        (
+            ACCESS_CONTROL_ADDRESS,
+            selector(IMegaAccessControl::isVolatileDataAccessDisabledCall::SELECTOR),
+            U256::ZERO,
+            EvmTxRuntimeLimits::no_limits(),
+            InstructionResult::Return,
+            Some(Bytes::from(
+                IMegaAccessControl::isVolatileDataAccessDisabledCall::abi_encode_returns(&false),
+            )),
+        ),
+        (
+            ACCESS_CONTROL_ADDRESS,
+            selector(IMegaAccessControl::disableVolatileDataAccessCall::SELECTOR),
+            U256::ZERO,
+            EvmTxRuntimeLimits::no_limits(),
+            InstructionResult::Return,
+            Some(Bytes::new()),
+        ),
+        (
+            LIMIT_CONTROL_ADDRESS,
+            selector(IMegaLimitControl::remainingComputeGasCall::SELECTOR),
+            U256::from(1),
+            EvmTxRuntimeLimits::no_limits(),
+            InstructionResult::Revert,
+            Some(Bytes::from_static(&IMegaAccessControl::NonZeroTransfer::SELECTOR)),
+        ),
+        (
+            KEYLESS_DEPLOY_ADDRESS,
+            keyless_deploy_call(),
+            U256::from(1),
+            EvmTxRuntimeLimits::no_limits(),
+            InstructionResult::Revert,
+            Some(Bytes::from_static(&IKeylessDeploy::NoEtherTransfer::SELECTOR)),
+        ),
+        (
+            ORACLE_CONTRACT_ADDRESS,
+            hint,
+            U256::ZERO,
+            no_room_for_a_hint,
+            InstructionResult::Revert,
+            None,
+        ),
+    ];
+    for configuration in Configuration::BOTH {
+        for (to, data, value, limits, expected, expected_output) in rows.clone() {
+            let case = format!("{configuration:?}, {to}, {:?}", &data[..4]);
+            let mut tx = crate::common::call_with_data(CALLER, to, data, NARROW);
+            tx.0.base.value = value;
+            let (output, result, mode) = own_frame_end(configuration, system_db(), limits, tx);
+            assert_eq!(result, expected, "{case}: {output}");
+            match (to, expected_output) {
+                (_, Some(expected_output)) => assert_eq!(output, expected_output, "{case}"),
+                // The answer is the caller's forward: no word the bytecode returns.
+                (LIMIT_CONTROL_ADDRESS, None) => assert_eq!(output.len(), 32, "{case}"),
+                // The stop: `MegaLimitExceeded` of the data size.
+                (_, None) => assert_eq!(
+                    mega_evm::decode_mega_limit_exceeded(&output).map(|(kind, _)| kind),
+                    Some(mega_evm::LimitKind::DataSize),
+                    "{case}: {output}"
+                ),
+            }
+            assert_eq!(mode, configuration.reservoir_only_give_backs(), "{case}");
+        }
+    }
+}
+
+/// The stops the engine answers a frame with in place of what revm or the frame would have made
+/// carry the configured give-back mode when an inspector sees them: a call revm answered with a
+/// success whose start crossed a limit, rebuilt into the stop on the gas its caller forwarded, and
+/// the transaction's own frame stopped before it runs because its authorization list was skipped
+/// for a limit.
+#[test]
+fn test_an_engine_stop_carries_the_configured_give_back_mode() {
+    let authority = address!("0000000000000000000000000000000000300077");
+    for configuration in Configuration::BOTH {
+        // The transfer's record and log cross a data-size limit the body alone fits: revm
+        // answers the call to an account without code with a success, which gives way to the
+        // stop.
+        let db = MemoryDatabase::default().account_balance(CALLER, U256::from(1_000));
+        let body_only =
+            EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(mega_evm::TX_BODY_SIZE);
+        let tx = call(CALLER, TARGET, U256::from(1), NARROW);
+        let (output, result, mode) = own_frame_end(configuration, db, body_only, tx);
+        assert_eq!(result, InstructionResult::Revert, "{configuration:?}: the answer's stop");
+        assert!(mega_evm::decode_mega_limit_exceeded(&output).is_some(), "{configuration:?}");
+        assert_eq!(mode, configuration.reservoir_only_give_backs(), "{configuration:?}");
+
+        // An authorization that would create its authority, under a state-growth limit of
+        // nothing: the list is skipped and the first frame answered with the stop.
+        let db = MemoryDatabase::default().account_balance(CALLER, U256::from(1_000));
+        let no_growth = EvmTxRuntimeLimits::no_limits().with_tx_state_growth_limit(0);
+        let tx = crate::common::authorizing_call(
+            CALLER,
+            TARGET,
+            U256::ZERO,
+            NARROW,
+            TARGET,
+            &[(authority, 0)],
+        );
+        let (output, result, mode) = own_frame_end(configuration, db, no_growth, tx);
+        assert_eq!(result, InstructionResult::Revert, "{configuration:?}: the list's stop");
+        assert!(mega_evm::decode_mega_limit_exceeded(&output).is_some(), "{configuration:?}");
+        assert_eq!(mode, configuration.reservoir_only_give_backs(), "{configuration:?}");
+    }
+}
+
+/// A synthetic frame result — here the depth guard's `CallTooDeep`, to a call and to a creation —
+/// carries the configured give-back mode, beside the forwarded gas untouched and the inherited
+/// reservoir.
+#[test]
+fn test_a_synthetic_frame_result_carries_the_configured_give_back_mode() {
+    let past = CALL_STACK_LIMIT as usize + 1;
+    let creation = || FrameInit {
+        depth: past,
+        memory: SharedMemory::new(),
+        frame_input: FrameInput::Create(Box::new(CreateInputs::new(
+            CALLER,
+            CreateScheme::Create,
+            U256::ZERO,
+            Bytes::new(),
+            GAS_LIMIT,
+            RESERVOIR,
+        ))),
+    };
+    for configuration in Configuration::BOTH {
+        for init in [call_frame_init(past), creation()] {
+            let what = format!("{configuration:?}, {:?}", init.frame_input);
+            let mut evm = configuration.evm(
+                MemoryDatabase::default(),
+                EvmTxRuntimeLimits::no_limits(),
+                SeesGiveBackModes::default(),
+            );
+            let result = EvmTr::frame_init(&mut evm, init).expect("frame_init does not fail");
+            let ItemOrResult::Result(result) = result else { panic!("{what}: answered") };
+            assert_eq!(result.instruction_result(), InstructionResult::CallTooDeep, "{what}");
+            let gas = result.gas();
+            assert_eq!((gas.remaining(), gas.reservoir()), (GAS_LIMIT, RESERVOIR), "{what}");
+            assert_eq!(gas.reservoir_only_give_backs(), configuration.reservoir_only_give_backs());
+        }
+    }
+}
+
+/// The forward of the call [`queries_remaining_compute_gas`] makes.
+const QUERY_FORWARD: u64 = 20_000;
+
+/// What [`ChargesAndGivesBack`] charges the answer's gas, and gives back at once.
+const INSPECTOR_CHARGE: u64 = 1_000;
+
+/// Code that calls `MegaLimitControl.remainingComputeGas()`, forwarding [`QUERY_FORWARD`], and
+/// returns what `GAS` reads once the call returned.
+fn queries_remaining_compute_gas() -> Bytes {
+    BytecodeBuilder::default()
+        .mstore(0, IMegaLimitControl::remainingComputeGasCall::SELECTOR)
+        .append_many([PUSH0, PUSH0])
+        .push_number(4_u8)
+        .append_many([PUSH0, PUSH0])
+        .push_address(LIMIT_CONTROL_ADDRESS)
+        .push_number(QUERY_FORWARD)
+        .append_many([CALL, POP, GAS])
+        .return_top()
+        .build()
+}
+
+/// Charges [`INSPECTOR_CHARGE`] of history on the gas of the answer to every call to
+/// `MegaLimitControl` once the call ended, through the tracker's own methods, and gives it back
+/// at once; it keeps the answer's regular gas and reservoir afterwards. It neither replaces the
+/// tracker nor sets its give-back mode.
+#[derive(Default)]
+struct ChargesAndGivesBack {
+    after: Option<(u64, u64)>,
+}
+
+impl<CTX: ContextTr, INTR: InterpreterTypes> Inspector<CTX, INTR> for ChargesAndGivesBack {
+    fn call_end(&mut self, _: &mut CTX, inputs: &CallInputs, outcome: &mut CallOutcome) {
+        if inputs.target_address != LIMIT_CONTROL_ADDRESS {
+            return;
+        }
+        let gas = &mut outcome.result.gas;
+        assert!(gas.record_history_cost(INSPECTOR_CHARGE), "the answer holds its forward");
+        gas.refill_history(INSPECTOR_CHARGE);
+        self.after = Some((gas.remaining(), gas.reservoir()));
+    }
+}
+
+/// An inspector that charges history on an interceptor's answer and gives it back credits the
+/// give-back where the configuration says, as on the gas of a frame revm built. Under Satin's
+/// give-backs to the reservoir alone the charge, which regular gas paid, comes back into the
+/// answer's reservoir: the caller resumes with that much less regular gas, which `GAS` reads, and
+/// that much more reservoir, which goes back to the sender, so the receipt is the same. Under the
+/// neutral configuration it comes back into regular gas, as EIP-8037 has it, and the caller reads
+/// what it reads without the inspector.
+#[test]
+fn test_an_inspectors_give_back_on_an_interceptor_answer_follows_the_configuration() {
+    const GAS_LIMIT: u64 = 1_000_000;
+    let db = || system_db().account_code(TARGET, queries_remaining_compute_gas());
+    let tx = || crate::common::call(CALLER, TARGET, U256::ZERO, GAS_LIMIT);
+    let read_gas = |outcome: &mega_evm::MegaTransactionOutcome| {
+        assert!(outcome.result.is_success(), "{:?}", outcome.result);
+        let output = outcome.result.output().cloned().unwrap_or_default();
+        U256::from_be_slice(&output).to::<u64>()
+    };
+    for configuration in Configuration::BOTH {
+        let limits = EvmTxRuntimeLimits::no_limits();
+        let mut plain = configuration.evm(db(), limits, SeesGiveBackModes::default());
+        let without = plain.execute_transaction(tx()).expect("the transaction is valid");
+        let mut evm = configuration.evm(db(), limits, ChargesAndGivesBack::default());
+        let with = evm.execute_transaction(tx()).expect("the transaction is valid");
+
+        let after = evm.inspector().after.expect("the inspector saw the answer");
+        let gas_read = read_gas(&with);
+        if configuration.reservoir_only_give_backs() {
+            assert_eq!(after, (QUERY_FORWARD - INSPECTOR_CHARGE, INSPECTOR_CHARGE), "Satin");
+            assert_eq!(gas_read, read_gas(&without) - INSPECTOR_CHARGE, "Satin");
+        } else {
+            assert_eq!(after, (QUERY_FORWARD, 0), "neutral");
+            assert_eq!(gas_read, read_gas(&without), "neutral");
+        }
+        assert_eq!(
+            with.result.gas().tx_gas_used(),
+            without.result.gas().tx_gas_used(),
+            "{configuration:?}: the receipt is the same",
+        );
+    }
 }

@@ -341,9 +341,13 @@ where
 /// - version 1.0.0: migrated in place: its code replaced by version 2.0.0 and slot 13
 ///   (`_minRotationDelay`) written with the bootstrap's minimum rotation delay, every other slot —
 ///   the roles, the pending changes, the histories — its nonce and its balance kept;
-/// - no account, or an account without code: version 2.0.0 deployed new, an existing account's
-///   nonce and balance kept and its storage cleared (the account is marked created), and seeded
-///   with [`SequencerRegistryBootstrap::seed`] at `block_number`.
+/// - no account: version 2.0.0 deployed new (the account is marked created, with nothing to clear)
+///   and seeded with [`SequencerRegistryBootstrap::seed`] at `block_number`;
+/// - an account without code: version 2.0.0 installed in it and seeded the same way, its nonce, its
+///   balance and every storage slot kept, the seeded slots written over what they held (each with
+///   the value the database holds as its original). The account is not marked created, which would
+///   clear the storage in the step's state but not in what a node persists of it: the rule of every
+///   other system contract's deployment, and of the migration from version 1.0.0.
 ///
 /// # Errors
 ///
@@ -373,6 +377,7 @@ pub fn deploy_sequencer_registry<DB: revm::Database>(
         .filter(|bootstrap| bootstrap.validate().is_ok())
         .ok_or(SequencerRegistryError::UnusableBootstrap)?;
 
+    let created = existing.is_none();
     let mut info = existing.unwrap_or_default();
     info.code_hash = SEQUENCER_REGISTRY_CODE_HASH;
     info.code = Some(Bytecode::new_raw(SEQUENCER_REGISTRY_CODE));
@@ -390,11 +395,22 @@ pub fn deploy_sequencer_registry<DB: revm::Database>(
             EvmStorageSlot::new_changed(original, delay, TransactionId::ZERO),
         );
     } else {
-        registry.mark_created();
+        // Where no account stood there is no storage to keep, and nothing to read. Over an
+        // existing account without code every slot is kept, and a seeded slot is written over the
+        // value the database holds.
+        if created {
+            registry.mark_created();
+        }
         for (slot, value) in bootstrap.seed(block_number) {
+            let original = if created {
+                U256::ZERO
+            } else {
+                db.storage(SEQUENCER_REGISTRY_ADDRESS, slot)
+                    .map_err(SequencerRegistryError::Database)?
+            };
             registry
                 .storage
-                .insert(slot, EvmStorageSlot::new_changed(U256::ZERO, value, TransactionId::ZERO));
+                .insert(slot, EvmStorageSlot::new_changed(original, value, TransactionId::ZERO));
         }
     }
     Ok(EvmState::from_iter([(SEQUENCER_REGISTRY_ADDRESS, registry)]))
@@ -747,8 +763,10 @@ mod tests {
     /// Where the address has no account, the deployment installs version 2.0.0 as a new contract
     /// seeded with the seven flat slots: the system address both current and initial, the
     /// bootstrap's sequencer both current and initial, its admin, the block number and its
-    /// minimum rotation delay. Where it holds an account without code, the account's nonce and
-    /// balance are kept and its storage goes: the account is marked created.
+    /// minimum rotation delay. Where it holds an account without code, version 2.0.0 is installed
+    /// in it and seeded the same way, and the account keeps its nonce, its balance and every slot:
+    /// it is not marked created, a slot the seed does not write keeps its value, and a seeded slot
+    /// that held a value has it as its original and the seed as its present value.
     #[test]
     fn test_the_deployment_seeds_a_new_registry() {
         let expected_storage = [
@@ -768,28 +786,41 @@ mod tests {
         funded
             .insert_account_storage(SEQUENCER_REGISTRY_ADDRESS, U256::from(42), U256::ONE)
             .unwrap();
-        for (mut db, nonce, balance) in
-            [(InMemoryDB::default(), 0, U256::ZERO), (funded, 3, U256::from(9))]
-        {
+        funded.insert_account_storage(SEQUENCER_REGISTRY_ADDRESS, ADMIN, U256::from(77)).unwrap();
+        for (case, mut db, nonce, balance) in [
+            ("no account", InMemoryDB::default(), 0, U256::ZERO),
+            ("an account without code", funded, 3, U256::from(9)),
+        ] {
+            let existed = nonce != 0;
             let registry = deployed(&mut db, Some(BOOTSTRAP)).expect("the registry is seeded");
-            assert!(registry.is_touched() && registry.is_created(), "a new contract");
-            assert_eq!((registry.info.nonce, registry.info.balance), (nonce, balance));
-            assert_eq!(registry.info.code_hash, SEQUENCER_REGISTRY_CODE_HASH);
-            let seeded: Vec<_> = registry
+            assert!(registry.is_touched(), "{case}");
+            assert_eq!(registry.is_created(), !existed, "{case}: created only where none stood");
+            assert_eq!((registry.info.nonce, registry.info.balance), (nonce, balance), "{case}");
+            assert_eq!(registry.info.code_hash, SEQUENCER_REGISTRY_CODE_HASH, "{case}");
+            let mut seeded: Vec<_> = registry
                 .storage
                 .iter()
                 .map(|(slot, value)| (*slot, value.original_value(), value.present_value()))
                 .collect();
-            let mut expected: Vec<_> =
-                expected_storage.iter().map(|&(slot, value)| (slot, U256::ZERO, value)).collect();
-            expected.sort();
-            let mut seeded = seeded;
             seeded.sort();
-            assert_eq!(seeded, expected);
+            let mut expected: Vec<_> = expected_storage
+                .iter()
+                .map(|&(slot, value)| {
+                    let original =
+                        if existed && slot == ADMIN { U256::from(77) } else { U256::ZERO };
+                    (slot, original, value)
+                })
+                .collect();
+            expected.sort();
+            assert_eq!(seeded, expected, "{case}");
 
             db.commit(EvmState::from_iter([(SEQUENCER_REGISTRY_ADDRESS, registry)]));
-            assert_eq!(db.storage(SEQUENCER_REGISTRY_ADDRESS, U256::from(42)).unwrap(), U256::ZERO);
-            assert_eq!(live_system_address(&mut db).unwrap(), Some(MEGA_SYSTEM_ADDRESS));
+            let kept = if existed { U256::ONE } else { U256::ZERO };
+            let slot_42 = db.storage(SEQUENCER_REGISTRY_ADDRESS, U256::from(42)).unwrap();
+            assert_eq!(slot_42, kept, "{case}: a slot the seed does not write is kept");
+            let admin = db.storage(SEQUENCER_REGISTRY_ADDRESS, ADMIN).unwrap();
+            assert_eq!(admin, word(CURRENT_SEQUENCER_ADDRESS), "{case}: the seed wins");
+            assert_eq!(live_system_address(&mut db).unwrap(), Some(MEGA_SYSTEM_ADDRESS), "{case}");
         }
     }
 
@@ -932,6 +963,34 @@ mod tests {
         assert_eq!(live_system_address(&mut db).unwrap(), Some(NEXT_SYSTEM_ADDRESS));
         let wrapped = revm::database_interface::WrapDatabaseRef(&db);
         assert_eq!(live_system_address(wrapped).unwrap(), Some(NEXT_SYSTEM_ADDRESS));
+    }
+
+    /// Each registry error says what went wrong: a zero bootstrap value names its key, a database
+    /// failure is the database's error, which it also hands on as its source, an unusable bootstrap
+    /// says the configuration carries no usable values, and a refusal says what the registry holds;
+    /// only a database failure has a source.
+    #[test]
+    fn test_the_registry_errors_name_their_cause() {
+        use core::error::Error as _;
+        let zero = ZeroBootstrapValue { key: crate::REX6_MIN_ROTATION_DELAY_KEY };
+        assert_eq!(
+            zero.to_string(),
+            "the SequencerRegistry's bootstrap value `rex6MinRotationDelay` is zero"
+        );
+
+        let database = SequencerRegistryError::Database(fmt::Error);
+        assert_eq!(database.to_string(), fmt::Error.to_string());
+        let source = database.source().map(|source| source.to_string());
+        assert_eq!(source, Some(fmt::Error.to_string()), "the database's error is the source");
+
+        let unusable = SequencerRegistryError::<fmt::Error>::UnusableBootstrap;
+        assert!(unusable.to_string().contains("no usable bootstrap values"), "{unusable}");
+        assert!(unusable.source().is_none());
+
+        let refusal = SequencerRegistryRefusal::NoSystemAddress;
+        let refused = SequencerRegistryError::<fmt::Error>::Refused(refusal.clone());
+        assert_eq!(refused.to_string(), refusal.to_string());
+        assert!(refused.source().is_none());
     }
 
     /// A read the database cannot serve is the database's error, in the resolution, the

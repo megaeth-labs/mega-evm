@@ -166,15 +166,18 @@ A replay on another chain than the file's is refused for its chain, before any e
 
 Override the auto-detected spec.
 Useful when you want to test how the transaction would behave under a different spec, or when replaying against a chain that isn't recognized.
-`--override.spec Satin` replays the transaction as it would run on Satin: a counterfactual, on the same forked state, under the chain's schedule with Satin active from genesis, so no block of it is Satin's activation block and it checks no predeploy.
+`--override.spec Satin` replays the transaction as it would run on Satin: a counterfactual, on the same forked state, under the chain's schedule with Satin active from genesis, so no block of it is Satin's activation block and it does not check the EIP-7997 factory.
 
 ```
 mega-evme replay --override.spec Rex2 <TX_HASH>
 mega-evme replay --override.spec Satin <TX_HASH>
 ```
 
-A Satin replay needs a state whose system contracts are at the versions Satin runs, which MegaETH mainnet and testnet reach at `Rex6`: Satin deploys and upgrades none of them, and the `SequencerRegistry` it reads before every transaction must be at version 2.0.0, which Rex6 left.
-Replayed at its activation block, under a genesis file, Satin checks them and refuses a block whose state does not hold them, with an error naming the contract; a counterfactual checks nothing, so on an older block a transaction runs on whatever the state holds there.
+A Satin replay makes the block's pre-block changes before its transactions, as a node does, so the transaction runs on the system contracts Satin runs whatever version the forked state holds.
+Every block deploys them: the Oracle, the High-Precision Timestamp, KeylessDeploy, MegaAccessControl and MegaLimitControl are installed where missing and given Satin's code where they hold other code; the `SequencerRegistry` is kept at version 2.0.0, migrated in place from 1.0.0, and seeded where its address holds no code.
+The block's live system address is then resolved from the registry, once, before the block's first transaction; no transaction reads the registry to be classified.
+On MegaETH mainnet and testnet, which ran `Rex6`, every system contract already holds its code, so the deployment only reads them.
+A block whose registry address holds other code, or whose registry names no system address, fails with an error naming the registry; under a genesis file, Satin's activation block also checks the EIP-7997 factory and fails over any other code there.
 
 ### `--override.limits <JSON|FILE>`
 
@@ -255,7 +258,7 @@ The exit code is 0, 1 when a block could not be replayed, or 2 when `--verify` i
 `--override.spec Satin` runs every block as it would run on Satin: every transaction as signed, on the state its parent block left, under Satin's protocol limits, or those `--override.limits` gives, with no building policy of a block builder applied.
 A transaction the Satin engine refuses (it cannot pay for its gas, or a block budget is full) is reported `refused` and left out, and the block goes on.
 A transaction signed with a gas limit sized for legacy costs can run out of gas on Satin: that is the counterfactual's answer, not a tool fault.
-`--override.spec Satin` runs no block as Satin's activation block, so it checks no predeploy, and it reads the L1 block contract as the legacy replay does, when a transaction is priced against it or held to its footprint; what it reads beyond the legacy replay is only what a transaction's Satin run reads on a path the chain's run did not take.
+`--override.spec Satin` runs no block as Satin's activation block, so it does not check the EIP-7997 factory; it deploys the system contracts and resolves the live system address in every block, as `Rex6` does, and it reads the L1 block contract as the legacy replay does, when a transaction is priced against it or held to its footprint; on a block the chain ran on `Rex6`, what it reads beyond the legacy replay is only what a transaction's Satin run reads on a path the chain's run did not take.
 
 ## Transaction Overrides
 

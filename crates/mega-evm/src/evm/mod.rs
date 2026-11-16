@@ -35,7 +35,11 @@
 //!   revm's inspected run returns an action set before it runs without a `step`, and hands a frame
 //!   built with one to no `initialize_interp`, so the inspector sees the call start, its creation,
 //!   and the call end. A frame a child returned into over a limit returns the stop the same way,
-//!   with no `step` after the child's end.
+//!   with no `step` after the child's end. A result the engine builds in place of a frame — an
+//!   interceptor's or the keyless dispatch's answer, the depth guard's, a stop it answers a frame
+//!   or an answer with — carries on its gas the give-back mode of the execution's configuration, as
+//!   the gas of every frame revm builds does, so a charge an inspector makes on it and gives back
+//!   is credited where the configuration says: into the reservoir alone under Satin's.
 //! - **Where an inspector runs.** Every transaction, the system-address transaction included. A
 //!   pre-block call runs on the handler's plain system-call path, with no callback; a tool runs a
 //!   system call through revm's `InspectSystemCallEvm` to watch it. The end of a block runs no

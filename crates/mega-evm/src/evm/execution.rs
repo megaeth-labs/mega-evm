@@ -23,7 +23,7 @@ use revm::{
     context::{
         result::{FromStringError, InvalidTransaction, ResultGas},
         transaction::TransactionType,
-        ContextError, ContextTr, FrameStack, Journal, JournalTr, Transaction,
+        Cfg, ContextError, ContextTr, FrameStack, Journal, JournalTr, Transaction,
     },
     context_interface::{
         cfg::{gas::GasTracker, GasId, StateGasCharge, StateGasSite},
@@ -40,7 +40,7 @@ use revm::{
     inspector::{InspectorEvmTr, InspectorHandler, JournalExt},
     interpreter::{
         interpreter::EthInterpreter, interpreter_action::FrameInit, interpreter_types::LoopControl,
-        CallScheme, CallValue, FrameInput, Gas, InitialAndFloorGas, InstructionResult,
+        CallScheme, CallValue, FrameInput, InitialAndFloorGas, InstructionResult,
         InterpreterAction, InterpreterResult,
     },
     primitives::{Address, Bytes, TxKind, CALL_STACK_LIMIT},
@@ -49,7 +49,9 @@ use revm::{
 
 use crate::{
     access::ComputeStop,
-    charge_write_records_history, history_gas,
+    charge_write_records_history,
+    evm::frame::frame_gas,
+    history_gas,
     limit::{CreatorBefore, StartBefore},
     synthetic_frame_result,
     system::{keyless, Answer},
@@ -629,7 +631,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
         if self.inner.frame_stack.index().is_some() {
             suspend(&mut self.inner.ctx, self.inner.frame_stack.get(), &frame_init);
         }
-        if let Some(result) = call_too_deep(&frame_init) {
+        if let Some(result) = call_too_deep(self.inner.ctx.cfg(), &frame_init) {
             return Ok(ItemOrResult::Result(result));
         }
         if frame_init.depth == 0 {
@@ -664,7 +666,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
             // revm never decides the start, so nothing moved and nothing is counted: the answer is
             // held to the price alone, which its settlement turns into the stop. A creation is
             // never a precompile's.
-            let mut result = crossing_answer(&frame_init.frame_input);
+            let mut result = crossing_answer(ctx.cfg(), &frame_init.frame_input);
             settle_answer(ctx, depth, gas_limit, &mut result);
             return Ok(ItemOrResult::Result(result));
         }
@@ -1103,12 +1105,13 @@ fn hold_detained_precompile<DB: Database, ExtEnvs: ExternalEnvTypes>(
 }
 
 /// The answer to the precompile call `input` starts when its price crosses gas detention's limit
-/// ([`PrecompileHold::Crossing`]): out of gas without running, the forward untouched, and marked
-/// as the crossing ([`Detention::cross_at_price`]).
+/// ([`PrecompileHold::Crossing`]), built under `cfg`: out of gas without running, the forward
+/// untouched, and marked as the crossing ([`Detention::cross_at_price`]).
 #[cold]
 #[inline(never)]
-fn crossing_answer(input: &FrameInput) -> FrameResult {
-    let mut answer = synthetic_frame_result(input, InstructionResult::PrecompileOOG, Bytes::new());
+fn crossing_answer(cfg: &impl Cfg, input: &FrameInput) -> FrameResult {
+    let mut answer =
+        synthetic_frame_result(cfg, input, InstructionResult::PrecompileOOG, Bytes::new());
     Detention::cross_at_price(answer.interpreter_result_mut());
     answer
 }
@@ -1382,23 +1385,23 @@ fn stop_the_answer_at<DB: Database, ExtEnvs: ExternalEnvTypes>(
 ) {
     if verdict.exceeded_limit() {
         let output = ctx.additional_limit.note_frame_stop(&verdict);
-        stop_the_answer(answer, start, output);
+        stop_the_answer(ctx.cfg(), answer, start, output);
         ctx.additional_limit.ledger_mut().rebuild_on_shares();
     }
 }
 
 /// Rewrites `answer`, to the call `start` began, into the stop `output`: a revert on the gas the
-/// call's caller forwarded, untouched, with the reservoir the call inherited, and no precompile
-/// output, as [`synthetic_frame_result`] answers a frame that never started. Its budgets go back
-/// to the shares the call started with on the start ledger
-/// (`StartLedger::rebuild_on_shares`).
+/// call's caller forwarded, untouched, with the reservoir the call inherited and the give-back
+/// mode of `cfg`, the execution's configuration, and no precompile output, as
+/// [`synthetic_frame_result`] answers a frame that never started. Its budgets go back to the
+/// shares the call started with on the start ledger (`StartLedger::rebuild_on_shares`).
 #[cold]
 #[inline(never)]
-fn stop_the_answer(answer: &mut FrameResult, start: &FrameStart, output: Bytes) {
+fn stop_the_answer(cfg: &impl Cfg, answer: &mut FrameResult, start: &FrameStart, output: Bytes) {
     let FrameResult::Call(outcome) = answer else {
         unreachable!("only a call is held to the limits once revm answered it")
     };
-    let gas = Gas::new_with_regular_gas_and_reservoir(start.gas_limit, start.reservoir);
+    let gas = frame_gas(cfg, start.gas_limit, start.reservoir);
     outcome.result = InterpreterResult::new(InstructionResult::Revert, output, gas);
     outcome.was_precompile_called = false;
     outcome.precompile_call_logs.clear();
@@ -1414,7 +1417,12 @@ fn stop_before_the_first_frame<DB: Database, ExtEnvs: ExternalEnvTypes>(
 ) -> Option<FrameResult> {
     let stop = ctx.additional_limit.take_pre_frame_stop()?;
     let output = ctx.additional_limit.note_frame_stop(&stop);
-    Some(synthetic_frame_result(&frame_init.frame_input, InstructionResult::Revert, output))
+    Some(synthetic_frame_result(
+        ctx.cfg(),
+        &frame_init.frame_input,
+        InstructionResult::Revert,
+        output,
+    ))
 }
 
 /// Decides the transaction's EIP-7702 authorization list before it is applied, as the spec has
@@ -1515,7 +1523,8 @@ fn simulate_authorization_list<DB: Database, ExtEnvs: ExternalEnvTypes>(
 }
 
 /// The depth guard: a frame past the call-stack limit, of any call scheme or a creation, answered
-/// with `CallTooDeep`, its gas untouched and its reservoir carried — the answer revm gives it.
+/// with `CallTooDeep`, its gas untouched, its reservoir carried and the give-back mode of `cfg`,
+/// the execution's configuration — the answer revm gives it.
 ///
 /// revm checks the depth first when it builds a frame, before it moves value or bumps a creator's
 /// nonce. The guard gives the same answer before anything else sees the frame: an interceptor or an
@@ -1527,9 +1536,10 @@ fn simulate_authorization_list<DB: Database, ExtEnvs: ExternalEnvTypes>(
 /// No transaction reaches the limit: regular gas is capped by the execution cap and every call
 /// forwards at most 98/100 of what its caller has left, so a frame at depth 1,024 has less than a
 /// gas.
-fn call_too_deep(frame_init: &FrameInit) -> Option<FrameResult> {
+fn call_too_deep(cfg: &impl Cfg, frame_init: &FrameInit) -> Option<FrameResult> {
     (frame_init.depth > CALL_STACK_LIMIT as usize).then(|| {
         synthetic_frame_result(
+            cfg,
             &frame_init.frame_input,
             InstructionResult::CallTooDeep,
             Bytes::new(),
@@ -1688,15 +1698,17 @@ mod tests {
     use super::*;
     use crate::{
         limit::{PoolAmounts, PoolId},
+        spec_cfg,
         test_utils::MemoryDatabase,
         MegaSpecId,
     };
     use alloy_primitives::{address, U256};
     use revm::{
+        context::CfgEnv,
         context_interface::journaled_state::account::JournaledAccountTr,
         interpreter::{
             gas::WithheldCrossing, CallInput, CallInputs, CallValue, CreateInputs, CreateScheme,
-            SharedMemory,
+            Gas, SharedMemory,
         },
     };
     use std::boxed::Box;
@@ -1897,14 +1909,17 @@ mod tests {
     }
 
     /// The answer to a call whose price crosses the limit is out of gas without running, with its
-    /// forward untouched and the crossing recorded with the forward.
+    /// forward untouched, the crossing recorded with the forward, and the give-back mode of the
+    /// configuration it is built under.
     #[test]
     fn test_a_crossing_answer_is_marked_with_its_forward() {
+        let ctx = MegaContext::new(MemoryDatabase::default(), MegaSpecId::SATIN);
         for forward in [1, 100_000, 3_000_000] {
             let input = static_call(crate::kzg_point_evaluation::ADDRESS, &[0; 32], forward);
-            let FrameResult::Call(answer) = crossing_answer(&input.frame_input) else {
+            let FrameResult::Call(answer) = crossing_answer(ctx.cfg(), &input.frame_input) else {
                 panic!("a call's answer")
             };
+            assert!(answer.result.gas.reservoir_only_give_backs(), "Satin's give-backs");
             assert!(!answer.was_precompile_called, "answered without running");
             assert_eq!(answer.result.result, InstructionResult::PrecompileOOG);
             assert_eq!(answer.result.gas.limit(), forward);
@@ -1957,10 +1972,11 @@ mod tests {
     fn test_an_answer_switches_access_off_only_when_it_does_not_cross() {
         use crate::{constants::BLOCK_ENV_ACCESS_COMPUTE_GAS, system::Answer};
         const FORWARD: u64 = 90_000_000;
+        let cfg = spec_cfg(CfgEnv::new_with_spec(MegaSpecId::SATIN));
         let answer = |spent: u64, disables_access_from| {
             let input = static_call(TARGET, &[], FORWARD).frame_input;
             let mut result =
-                synthetic_frame_result(&input, InstructionResult::Return, Bytes::new());
+                synthetic_frame_result(&cfg, &input, InstructionResult::Return, Bytes::new());
             assert!(result.gas_mut().record_regular_cost(spent));
             Answer { result, disables_access_from }
         };
@@ -2007,7 +2023,7 @@ mod tests {
             let start = mark(ctx.journal_mut());
             // What the answer wrote: a bump of the recipient's nonce.
             let _ = ctx.journal_mut().load_account_mut(TARGET).unwrap().data.bump_nonce();
-            let answer = synthetic_frame_result(&value_call(), result, Bytes::new());
+            let answer = synthetic_frame_result(ctx.cfg(), &value_call(), result, Bytes::new());
             take_back_a_stopped_answer(&mut ctx, start, succeeded, &answer);
             let nonce = ctx.journal_ref().state.get(&TARGET).map_or(0, |a| a.info.nonce);
             assert_eq!(nonce, u64::from(!taken_back), "{case}");

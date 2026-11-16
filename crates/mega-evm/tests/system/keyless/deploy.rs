@@ -159,10 +159,18 @@ impl<DB: Database> revm::Inspector<MegaContext<DB>, revm::interpreter::interpret
 /// where the call holds no reservoir to share with its creation: returns the outcome and what the
 /// creation returned, its regular gas and its reservoir.
 fn deploy_forwarding(init_code: Bytes, forward: u64) -> (MegaTransactionOutcome, (u64, u64)) {
+    deploy_forwarding_on(system_db(), init_code, forward)
+}
+
+/// [`deploy_forwarding`] over `db`.
+fn deploy_forwarding_on(
+    db: MemoryDatabase,
+    init_code: Bytes,
+    forward: u64,
+) -> (MegaTransactionOutcome, (u64, u64)) {
     let deployment = Deployment::signed(0, forward, U256::ZERO, init_code);
-    let mut evm =
-        MegaEvm::new(context(system_db()).with_tx_runtime_limits(EvmTxRuntimeLimits::no_limits()))
-            .with_inspector(CreationReturn::default());
+    let mut evm = MegaEvm::new(context(db).with_tx_runtime_limits(EvmTxRuntimeLimits::no_limits()))
+        .with_inspector(CreationReturn::default());
     let mut tx = call_tx(KEYLESS_DEPLOY_ADDRESS, deployment.call_data(forward), U256::ZERO);
     tx.0.base.gas_limit = GAS_LIMITS[0];
     let outcome = evm.execute_transaction(tx).expect("the transaction is valid");
@@ -414,6 +422,37 @@ fn test_a_constructor_that_destroys_itself_returns_its_account_as_reservoir() {
     if mega_evm::active_satin_prices().is_constants() {
         assert_eq!((regular, reservoir), (494_998, 187_120));
     }
+}
+
+/// A constructor whose own account is destroyed in a frame that then reverts, and which returns
+/// its code afterwards: the revert takes the destruction back, with what the destruction table
+/// gave back, so the account stands and the deployment succeeds. `gasUsed` is what the creation
+/// spent from its two pools taken together, on no reservoir its regular gas spent less the
+/// reservoir it returned, with nothing added for the call's own charge for the account, which the
+/// destruction gave back only while it stood.
+#[test]
+fn test_a_destruction_a_revert_took_back_adds_nothing_to_gas_used() {
+    const FORWARD: u64 = 500_000;
+    const DESTROYER: Address = address!("0x0000000000000000000000000000000000500001");
+    // `HELPER`, run through a `DELEGATECALL`, has the creation's account destroyed by
+    // `DESTROYER`, run the same way, then reverts.
+    let helper = calling(BytecodeBuilder::default(), DESTROYER, DELEGATECALL)
+        .append_many([PUSH0, PUSH0, REVERT])
+        .build();
+    let db = system_db()
+        .account_code(HELPER, helper)
+        .account_code(DESTROYER, Bytes::from_static(&[PUSH0, SELFDESTRUCT]));
+    let init_code = running(calling(BytecodeBuilder::default(), HELPER, DELEGATECALL));
+    let address = Deployment::signed(0, FORWARD, U256::ZERO, init_code.clone()).address;
+    let (outcome, (regular, reservoir)) = deploy_forwarding_on(db, init_code, FORWARD);
+    let ret = returned(&outcome);
+    assert_eq!(ret.deployedAddress, address, "the destruction was taken back: the account stands");
+    assert_eq!(code_hash(&outcome, address), Some(keccak(&runtime(1))));
+    assert_eq!(
+        ret.gasUsed + regular + reservoir,
+        FORWARD,
+        "the creation's spend from both pools, and nothing added"
+    );
 }
 
 /// A constructor that has its own account destroyed through a `DELEGATECALL` and then returns

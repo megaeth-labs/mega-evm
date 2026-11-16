@@ -20,6 +20,7 @@ use mega_evm::{
 };
 use revm::{
     bytecode::opcode::{BALANCE, CALL, JUMP, JUMPDEST, LOG0, POP, PUSH0, PUSH20, TIMESTAMP},
+    context::ContextTr,
     interpreter::{
         instructions::gas_table_spec, interpreter::EthInterpreter, interpreter_types::LoopControl,
         CallInputs, CallOutcome, Gas, InstructionResult, Interpreter, InterpreterAction,
@@ -341,13 +342,17 @@ struct AnswersB {
 }
 
 impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for AnswersB {
-    fn call(&mut self, _: &mut MegaContext<DB>, inputs: &mut CallInputs) -> Option<CallOutcome> {
+    fn call(
+        &mut self,
+        context: &mut MegaContext<DB>,
+        inputs: &mut CallInputs,
+    ) -> Option<CallOutcome> {
         (inputs.target_address == B).then(|| {
             let gas = match self.gas {
-                AnswerGas::Untouched => untouched_call_gas(inputs),
+                AnswerGas::Untouched => untouched_call_gas(context.cfg(), inputs),
                 AnswerGas::Fresh => Gas::new(inputs.gas_limit),
                 AnswerGas::Charged => {
-                    let mut charged = untouched_call_gas(inputs);
+                    let mut charged = untouched_call_gas(context.cfg(), inputs);
                     assert!(
                         charged.record_state_cost(40_000) && charged.record_history_cost(3_000)
                     );

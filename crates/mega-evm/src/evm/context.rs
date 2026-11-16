@@ -1382,6 +1382,33 @@ mod tests {
         assert_cfg_is(&ctx, &cfg);
     }
 
+    /// Switching a context to the neutral configuration after an execution was prepared makes
+    /// that execution pay no history, and changes nothing else it was decided to be: the
+    /// protocol's own work stays exempt from every per-transaction limit and undetained, and a
+    /// user's transaction stays held to them.
+    #[test]
+    fn test_switching_to_the_neutral_configuration_keeps_what_the_execution_is() {
+        for (case, own) in [
+            ("a call from the system address", true),
+            ("a system call", true),
+            ("a user's transaction", false),
+        ] {
+            let mut ctx = MegaContext::new(EmptyDB::default(), MegaSpecId::SATIN);
+            match case {
+                "a system call" => ctx.on_new_system_call(),
+                _ => {
+                    let caller = if own { SYSTEM_ADDRESS } else { Address::repeat_byte(0x11) };
+                    ctx.set_tx(call_from(caller));
+                    ctx.on_new_tx(false);
+                }
+            }
+            let ctx = ctx.with_neutral_cfg(osaka_cfg());
+            assert!(!ctx.prices_history(), "{case}: the neutral configuration prices none");
+            assert_eq!(ctx.is_system_originated(), own, "{case}");
+            assert_eq!(ctx.additional_limit.is_exempt(), own, "{case}");
+        }
+    }
+
     /// [`MegaContext::with_cfg`] returns a neutral context to the spec's configuration, and its
     /// transactions pay history again.
     #[test]

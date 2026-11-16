@@ -141,7 +141,7 @@ pub(crate) fn activation_spec() -> MegaHardforkConfig {
 
 /// The context of the block [`evm_env`] describes as Satin's activation block under
 /// [`activation_spec`]: its parent came one second before the activation, so the block admits
-/// only deposits and checks the predeploys.
+/// only deposits and checks the EIP-7997 factory.
 pub(crate) fn activation_ctx() -> MegaBlockExecutionCtx {
     MegaBlockExecutionCtx::new(
         B256::ZERO,
@@ -154,7 +154,8 @@ pub(crate) fn activation_ctx() -> MegaBlockExecutionCtx {
 
 /// The context of a block that follows the activation block under [`activation_spec`]: its parent
 /// is at [`BLOCK_TIMESTAMP`], where Satin is already active, so the block is an ordinary one that
-/// admits user transactions and checks no predeploy.
+/// admits user transactions and does not check the EIP-7997 factory; it deploys the system
+/// contracts, as every block does.
 pub(crate) fn after_activation_ctx() -> MegaBlockExecutionCtx {
     MegaBlockExecutionCtx::new(
         B256::ZERO,
@@ -276,9 +277,10 @@ fn build(
 }
 
 /// The one account each of `states` names, in commit order: what each pre-block step committed
-/// is about. A pre-block call names its target, the activation block's check the predeploy it
-/// read, the read of the registry's pending changes and the call that applies them the registry,
-/// and the read of the L1 block info the L1 block contract.
+/// is about. A pre-block call names its target, the activation block's check the factory it
+/// read, a system contract's deployment that contract, the read of the registry's pending changes,
+/// the call that applies them, the registry's deployment and the resolution of the live system
+/// address the registry. No pre-block step reads the L1 block contract.
 ///
 /// # Panics
 ///

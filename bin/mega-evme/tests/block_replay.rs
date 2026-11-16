@@ -96,13 +96,14 @@ fn test_the_legacy_leg_replays_recorded_blocks_as_the_chain_did() {
 }
 
 /// A Satin replay of a recorded block reads what the recording lacks only in Satin's activation
-/// block. A counterfactual block is not Satin's activation block, so it reads no predeploy, and it
-/// reads the L1 block contract as the legacy engine does, when a transaction is priced against it
-/// or held to its footprint: the L1 fee overhead, which the recording lacks, is not read beside
-/// the fee scalars the recording holds set, so every recorded block replays offline. Satin's
-/// activation block — under a genesis file that activates Satin at the block, whose parent came a
-/// second earlier — checks the predeploys first: offline, it fails, names the EIP-7997 factory it
-/// met, and the exit code is 1.
+/// block. A counterfactual block is not Satin's activation block, so it does not check the
+/// EIP-7997 factory; the system contracts it deploys in every block are read as the legacy engine
+/// read them in the recorded block, and it reads the L1 block contract as the legacy engine does,
+/// when a transaction is priced against it or held to its footprint: the L1 fee overhead, which
+/// the recording lacks, is not read beside the fee scalars the recording holds set, so every
+/// recorded block replays offline. Satin's activation block — under a genesis file that activates
+/// Satin at the block, whose parent came a second earlier — checks the EIP-7997 factory before it
+/// deploys the system contracts: offline, it fails, names the factory, and the exit code is 1.
 #[test]
 fn test_a_satin_replay_reads_beyond_the_recording_only_in_its_activation_block() {
     let refusal = |dir: &Path, args: &[&str]| {
@@ -173,8 +174,9 @@ fn test_the_satin_counterfactual_of_recorded_blocks() {
 /// what its replay read beyond the trace, and then replays offline from the cache. The mock
 /// serves the recorded responses, and the trace is the recorded pre-state as one transaction's
 /// sighting. The Satin replay, a counterfactual and so no activation block, reads nothing the
-/// trace lacks: no predeploy, so the cache holds no EIP-7997 factory, and no L1 fee overhead,
-/// which no transaction of the block is priced with, so the cache holds none.
+/// legacy replay did not: no EIP-7997 factory, which only the activation block checks, so the
+/// cache holds none, and no L1 fee overhead, which no transaction of the block is priced with, so
+/// the cache holds none.
 ///
 /// Expected values: independent (the chain's own receipts, and the trace's reads).
 #[tokio::test(flavor = "multi_thread")]
@@ -202,7 +204,7 @@ async fn test_a_block_fetched_over_rpc_is_cached_and_replays_offline() {
     assert_eq!(run.code, 0, "{}", run.stderr);
     assert_eq!(blocks_of(&run.records())[0]["rpc_reads"], 0);
     let cached = read_block(cache.path(), number).prestate;
-    assert!(!cached.accounts.contains_key(&FACTORY), "no predeploy was read");
+    assert!(!cached.accounts.contains_key(&FACTORY), "the factory was not read");
     assert_eq!(cached.accounts[&L1_BLOCK].storage.get(&overhead_slot()), None, "nor the overhead");
 }
 

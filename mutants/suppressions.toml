@@ -207,6 +207,41 @@ mutant = "replace <impl From<MegaSpecId> for EthSpecId>::from -> Self with Defau
 justification = "Equivalent: revm's SpecId::OSAKA carries #[default], and Satin's sole rung (SATIN) maps to EthSpecId::OSAKA, so Default::default() returns the same value on every current input. test_all_specs_map_to_karst_and_osaka pins the mapping; if the upstream default moves, that test kills this mutant and the entry becomes a no-op."
 reviewer = "RealiCZ"
 
+# --- MegaContext::prepare's deposit test (equivalent: the two classes behave alike) ---------
+# `prepare` classes an execution that is neither the protocol's own nor neutral as
+# `TxClass::Deposit` when the transaction is a deposit and as `TxClass::Ordinary` otherwise.
+# The two classes are read in exactly two places, `AdditionalLimit::is_exempt` (both false) and
+# `MegaContext::prices_history` (both true), so `==` -> `!=`, which swaps the two labels, changes
+# nothing a transaction is held to or pays. A line entry keeps the mutant generated: once the two
+# classes part on a rule, a test of that rule kills it and the entry becomes a no-op.
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/evm/context.rs"
+mutant = "replace == with != in MegaContext<DB, ExtEnvs>::prepare"
+justification = "Equivalent: the comparison only chooses between TxClass::Deposit and TxClass::Ordinary for an execution that is neither the protocol's own nor neutral, and every reader of the class treats the two alike (is_exempt false, prices_history true). Swapping them changes no limit, exemption, detention or history charge."
+reviewer = "RealiCZ"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# crates/mega-evm/src/block/ survivors.
+
+# --- Entry::address's format check (equivalent: the parser enforces the same) -------------
+# `Entry::address` refuses a value unless it is `0x` and then 40 hexadecimal digits, and then
+# parses the digits with `Address::from_str`, which is alloy's `FixedBytes::from_hex`: it strips
+# an optional `0x` prefix, refuses an odd length, a length other than 40 digits and any
+# non-hexadecimal byte. `||` -> `&&` lets through only digits that fail one test and pass the
+# other — 40 bytes that are not all hexadecimal, or an all-hexadecimal string of another
+# length — and the parser refuses every one of them, with the same `invalid()` error the check
+# returns. A line entry keeps the mutant generated: if alloy's parser ever accepts such a string,
+# the format tests of `genesis.rs` kill it.
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/block/genesis.rs"
+mutant = "replace || with && in Entry::address"
+justification = "Equivalent: every string the mutated check lets through (40 bytes not all hexadecimal, or all-hexadecimal of another length) is refused by Address::from_str (alloy's FixedBytes::from_hex: exact 40 hex digits after an optional 0x), and the refusal maps to the same invalid() error, so the result is identical for every input."
+reviewer = "RealiCZ"
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Infrastructure scope (.cargo/mutants-infra.toml) survivors.
 
