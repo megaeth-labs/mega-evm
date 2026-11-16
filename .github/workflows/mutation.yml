@@ -188,13 +188,9 @@ jobs:
           path: shards
 
       - name: List the full inventory
-        # The driver's `full` mutant set: --package mega-evm, minus the
-        # function-scoped suppressions. --colors never: CI forces colour output.
+        # The mutants the shards' `full` runs test, from the driver itself.
         run: |
-          exclude="$(python3 scripts/mutation_gate.py exclude-re --suppressions mutants/suppressions.toml)"
-          exclude_args=()
-          if [ -n "$exclude" ]; then mapfile -t exclude_args <<< "$exclude"; fi
-          cargo mutants --list --package mega-evm --colors never "${exclude_args[@]}" > inventory.txt
+          scripts/mutation_test.sh list > inventory.txt
           echo "inventory: $(wc -l < inventory.txt) mutants"
 
       - name: Merge, score and gate
@@ -359,7 +355,8 @@ jobs:
 
   # ── suppression hygiene: gate on relevant PR changes, plus nightly ─────────
   # `changes` scopes the hygiene job to PRs that could orphan a suppression
-  # (suppressions, operators, or src edits); nightly/dispatch always run it.
+  # (suppressions, operators, src edits, or the tools that list and match the
+  # mutants); nightly/dispatch always run it.
   changes:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
@@ -374,6 +371,10 @@ jobs:
               - 'mutants/suppressions.toml'
               - 'mutants/operators/**'
               - 'crates/mega-evm/src/**'
+              - '.cargo/mutants.toml'
+              - 'scripts/mutation_test.sh'
+              - 'scripts/mutation_gate.py'
+              - 'scripts/umutate.py'
 
   orphan-suppressions:
     name: suppression hygiene
@@ -407,15 +408,9 @@ jobs:
           comby -version
       - name: Build the full mutant universe (both engines)
         run: |
-          # --package mega-evm: match the driver's scope (otherwise --list also
-          #   covers the CLI bins in the virtual workspace's default-members, so a
-          #   stale mega-evm suppression could be kept alive by a same-named mutant
-          #   in another crate).
-          # No --exclude-re here, so function-suppressed mutants are included —
-          #   giving the complete universe to validate suppressions against.
-          # --colors never: CI forces CARGO_TERM_COLOR=always, which would otherwise
-          #   embed ANSI codes and break exact suppression matching.
-          cargo mutants --list --package mega-evm --colors never > universe.txt
+          # The driver's mutant set, with --all so that it keeps the mutants of
+          # function-scoped suppressions: the universe to check suppressions against.
+          scripts/mutation_test.sh list --all > universe.txt
           python3 scripts/umutate.py plan --packs spec-gate \
             | grep -oE 'crates/mega-evm/[^:]+:[0-9]+:[0-9]+: spec-gate .*' >> universe.txt
           echo "universe: $(wc -l < universe.txt) mutants"

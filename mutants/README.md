@@ -12,7 +12,7 @@ Target: **`crates/mega-evm`**.
 |------|---------|
 | `.cargo/mutants.toml` | Canonical `cargo-mutants` config (scope, nextest, excludes, timeouts). |
 | `mutants/suppressions.toml` | Reviewed equivalent / dead-code mutants excluded from gating. |
-| `scripts/mutation_test.sh` | Driver: `diff <base>`, `full`, `file <glob>`. |
+| `scripts/mutation_test.sh` | Driver: `diff <base>`, `full`, `file <glob>`; `list` prints the mutant set the runs use. |
 | `scripts/mutation_gate.py` | Scores a run, applies suppressions, gates the PR. |
 | `scripts/test_mutation_gate.py` | Tests for the scorer (`python3 scripts/test_mutation_gate.py`). |
 | `.github/workflows/mutation.yml` | Diff-scoped PR gate + result comment; sharded nightly full run. |
@@ -49,7 +49,7 @@ MUTANTS-STATUS status=<complete|partial|not-started|baseline-failed|error> expec
 `mutation_gate.py report --status target/mutants/status` fails the gate unless the status is `complete`, while still reporting what was tested.
 
 The nightly full-crate run does not fit in one job, so CI splits it into four fresh shards (`scripts/mutation_test.sh full --shard k/4`, consecutive slices of the mutant list).
-The `cargo-mutants-full` job lists the full inventory (`cargo mutants --list` with the same excludes), combines the shards with `mutation_gate.py merge`, and scores the result.
+The `cargo-mutants-full` job lists the full inventory with the driver's own mutant set (`scripts/mutation_test.sh list`), combines the shards with `mutation_gate.py merge`, and scores the result.
 Each shard's own status is folded into the combined status, and the report names every shard that did not complete and why.
 A shard whose budget ran out makes the combined status `partial` (or `not-started`), one whose baseline failed makes it `baseline-failed`, and one that errored, ended without a status line (cancelled or killed by the job timeout) or uploaded nothing makes it `error`.
 Every shard outcome is kept.
@@ -79,7 +79,7 @@ Inline `#[mutants::skip]` on a function is also honored natively by cargo-mutant
 Adding a suppression is a reviewed decision — scrutinize it like disabling a test.
 
 A suppression that stops matching any mutant (its function was renamed/deleted, or its line text changed) silently becomes a permanent blind spot.
-The **Suppression Hygiene** job (the `orphan-suppressions` job in `.github/workflows/mutation.yml`) guards against this: it assembles the full mutant universe from both engines and runs `mutation_gate.py orphans`, failing if any suppression matches nothing.
+The **Suppression Hygiene** job (the `orphan-suppressions` job in `.github/workflows/mutation.yml`) guards against this: it assembles the full mutant universe from both engines (`scripts/mutation_test.sh list --all` and `umutate.py plan`) and runs `mutation_gate.py orphans`, failing if any suppression matches nothing.
 It runs on PRs that touch `suppressions.toml` or `src/`, and weekly.
 For dead code, prefer deleting it or `#[mutants::skip]` over a permanent `kind = "function"` exclude.
 

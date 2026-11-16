@@ -7,6 +7,12 @@
 #                      Extra arguments go to cargo-mutants (e.g. `-f <file>`,
 #                      `--shard k/n`).
 #   file  <glob>       Mutate files matching <glob> (local iteration).
+#   list  [--all] [args...]
+#                      Print the mutants `full` would test, one per line, without
+#                      building or testing anything (`cargo mutants --list`).
+#                      Extra arguments go to cargo-mutants, as for `full`. With
+#                      --all, include the mutants of function-scoped suppressions,
+#                      which the runs exclude.
 #
 # Every run first builds the unmutated tests into ./target, which cargo-mutants'
 # `copy_target` copies into each scratch build directory, then runs cargo-mutants.
@@ -42,6 +48,53 @@ BUDGET="${MUTANTS_BUDGET:-}"
 GRACE="${MUTANTS_GRACE:-120}"
 
 cd "$ROOT_DIR"
+
+cmd="${1:-}"
+shift || true
+
+require_cargo_mutants() {
+    if ! cargo mutants --version >/dev/null 2>&1; then
+        echo "cargo-mutants is required. Install with 'cargo install cargo-mutants --locked'." >&2
+        exit 1
+    fi
+}
+
+# The mutant set every run and `list` share: the package (only mega-evm, or
+# --list would also cover the CLI crates of the workspace's default members),
+# minus the functions of function-scoped suppressions (unless called with "all"),
+# which become --exclude-re so they are never generated. Line-scoped suppressions
+# are filtered later by the gate.
+MUTANT_SET=()
+load_mutant_set() {
+    local exclude_re_output arg
+    local exclude_args=()
+    if [[ "${1:-}" != all ]]; then
+        # Capture into a variable first: reading the helper's output through a
+        # process substitution would mask a non-zero exit (a malformed
+        # suppressions.toml), letting the run continue without the excludes.
+        if ! exclude_re_output="$(python3 "$ROOT_DIR/scripts/mutation_gate.py" exclude-re --suppressions "$SUPPRESS")"; then
+            echo "failed to read the suppressions in $SUPPRESS" >&2
+            return 1
+        fi
+        if [[ -n "$exclude_re_output" ]]; then
+            while IFS= read -r arg; do exclude_args+=("$arg"); done <<< "$exclude_re_output"
+        fi
+    fi
+    MUTANT_SET=(--package "$PKG" ${exclude_args[@]+"${exclude_args[@]}"})
+}
+
+if [[ "$cmd" == list ]]; then
+    scope=""
+    if [[ "${1:-}" == --all ]]; then
+        scope=all
+        shift
+    fi
+    require_cargo_mutants
+    load_mutant_set "$scope"
+    # --colors never: CI forces CARGO_TERM_COLOR=always, and colour codes in the
+    # list would break the exact matching against it.
+    exec cargo mutants --list --colors never "${MUTANT_SET[@]}" "$@"
+fi
 
 # How the run ended, classified into a status by `finish`:
 # empty (nothing to mutate), ran, stopped (by the budget), baseline-failed.
@@ -115,24 +168,8 @@ if [[ -n "$BUDGET" ]]; then
     fi
 fi
 
-if ! cargo mutants --version >/dev/null 2>&1; then
-    echo "cargo-mutants is required. Install with 'cargo install cargo-mutants --locked'." >&2
-    exit 1
-fi
-
-# Function-scoped suppressions become --exclude-re so they are never generated
-# (saves build/test time). Line-scoped suppressions are filtered later by the gate.
-# Capture into a variable first: reading the helper's output through a process
-# substitution would mask a non-zero exit (a malformed suppressions.toml),
-# letting the run continue without the function-scoped excludes.
-if ! exclude_re_output="$(python3 "$ROOT_DIR/scripts/mutation_gate.py" exclude-re --suppressions "$SUPPRESS")"; then
-    echo "failed to parse function suppressions from $SUPPRESS" >&2
-    exit 1
-fi
-EXCLUDE_ARGS=()
-if [[ -n "$exclude_re_output" ]]; then
-    while IFS= read -r arg; do EXCLUDE_ARGS+=("$arg"); done <<< "$exclude_re_output"
-fi
+require_cargo_mutants
+load_mutant_set
 
 # Clear the previous run's results up front, so a run stopped before cargo-mutants
 # starts cannot report them as its own.
@@ -157,12 +194,11 @@ run_mutants() {
     #   reproducible and comparable (recommended by https://mutants.rs/pr-diff.html).
     # -vV: verbose progress + version banner, for diagnosable CI logs.
     run_bounded cargo mutants \
-        --package "$PKG" \
+        "${MUTANT_SET[@]}" \
         --jobs "$JOBS" \
         --output "$OUT_DIR" \
         --no-shuffle \
         -vV \
-        ${EXCLUDE_ARGS[@]+"${EXCLUDE_ARGS[@]}"} \
         "$@" || rc=$?
 
     # cargo-mutants exit codes (https://mutants.rs/exit-codes.html): 0 = all caught,
@@ -179,8 +215,6 @@ run_mutants() {
     esac
 }
 
-cmd="${1:-}"
-shift || true
 case "$cmd" in
     diff)
         base="${1:?usage: mutation_test.sh diff <base-ref>}"
@@ -204,7 +238,7 @@ case "$cmd" in
         run_mutants -f "$glob"
         ;;
     *)
-        echo "usage: mutation_test.sh {diff <base-ref>|full [args...]|file <glob>}" >&2
+        echo "usage: mutation_test.sh {diff <base-ref>|full [args...]|file <glob>|list [--all] [args...]}" >&2
         exit 2
         ;;
 esac
