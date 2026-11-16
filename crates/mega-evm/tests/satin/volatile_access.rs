@@ -694,6 +694,39 @@ fn test_a_stack_underflow_is_not_a_refusal() {
     assert_eq!(refused_child(db).0, InstructionResult::StackUnderflow, "EXTCODECOPY");
 }
 
+/// A block-environment opcode in a frame whose access is off is refused before it charges or
+/// runs anything: the frame holding less than its static gas, or a full stack its push cannot
+/// grow, is refused rather than halted on the gas or the stack the opcode would have failed on.
+#[test]
+fn test_a_block_environment_opcode_is_refused_before_it_charges_or_runs() {
+    let opcodes = [
+        (NUMBER, VolatileDataAccess::BLOCK_NUMBER),
+        (TIMESTAMP, VolatileDataAccess::TIMESTAMP),
+        (COINBASE, VolatileDataAccess::COINBASE),
+        (DIFFICULTY, VolatileDataAccess::PREV_RANDAO),
+        (GASLIMIT, VolatileDataAccess::GAS_LIMIT),
+        (BASEFEE, VolatileDataAccess::BASE_FEE),
+        (BLOBBASEFEE, VolatileDataAccess::BLOB_BASE_FEE),
+        (SLOTNUM, VolatileDataAccess::SLOT_NUM),
+    ];
+    for (opcode, access) in opcodes {
+        // A full stack: the push would overflow it.
+        let full = BytecodeBuilder::default().append_many(vec![PUSH0; 1024]).append(opcode);
+        let db = MemoryDatabase::default().account_code(CHILD, full.stop().build());
+        assert_eq!(refused_child(db), refused(access), "opcode {opcode:#04x}, a full stack");
+
+        // Less gas than the opcode's static gas.
+        let db = MemoryDatabase::default()
+            .account_code(CONTRACT, calls_child(BytecodeBuilder::default(), Some(1)).stop().build())
+            .account_code(CHILD, BytecodeBuilder::default().append(opcode).stop().build());
+        let (run, result, output, spent) = run_child(db, tx(CALLER, CONTRACT, BELOW));
+        assert!(run.outcome.result.is_success(), "{:?}", run.outcome.result);
+        assert_eq!((result, output), refused(access), "opcode {opcode:#04x}, one gas");
+        assert_eq!(spent, 0, "opcode {opcode:#04x}: a refused read costs nothing");
+        assert_eq!(run.accessed, VolatileDataAccess::empty(), "opcode {opcode:#04x}");
+    }
+}
+
 /// A database failure on an account an opcode loads surfaces as an error of the transaction, with
 /// access switched off or not; a `CALL` short of operands still fails on its stack first, even
 /// when its target's code would fail to load.
