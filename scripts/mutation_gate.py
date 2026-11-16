@@ -64,7 +64,7 @@ def cmd_exclude_re(args: argparse.Namespace) -> int:
         if not pattern:
             print(f"suppression for {e.get('file', '?')} missing 'pattern'", file=sys.stderr)
             return 1
-        # Emitted as two lines so `mapfile` in the driver yields separate argv items.
+        # Two lines per pair: the driver reads one argument per line.
         print("--exclude-re")
         print(pattern)
     return 0
