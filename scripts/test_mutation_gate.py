@@ -148,6 +148,18 @@ class GateTest(unittest.TestCase):
         self.assertEqual(out.returncode, 0, out.stdout)
         self.assertNotIn("Incomplete", out.stdout)
 
+    def test_full_scope_report_is_titled_as_a_full_run(self) -> None:
+        self.write_run(2, caught=[CAUGHT], unviable=[UNVIABLE])
+        self.write_status("complete", "2", "2")
+        full = self.report("--status", str(self.status), "--scope", "full")
+        self.assertEqual(full.returncode, 0, full.stdout)
+        self.assertIn("## 🧬 Mutation testing (full run) — ✅ PASS", full.stdout)
+        self.assertIn("**Full-run mutation score: 100.0%** (1/1", full.stdout)
+        self.assertNotIn("Diff", full.stdout)
+        self.assertNotIn("this change", full.stdout)
+        diff = self.report("--status", str(self.status))
+        self.assertIn("**Diff mutation score: 100.0%**", diff.stdout)
+
     def test_complete_run_still_gates_survivors(self) -> None:
         self.write_run(2, caught=[CAUGHT], missed=[MISSED])
         self.write_status("complete", "2", "2")

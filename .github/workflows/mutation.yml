@@ -225,6 +225,7 @@ jobs:
           python3 scripts/mutation_gate.py report \
             --results target/mutants/mutants.out \
             --status target/mutants/status \
+            --scope full \
             --suppressions mutants/suppressions.toml \
             --comment mutation-report.md \
             --summary "$GITHUB_STEP_SUMMARY"
@@ -365,6 +366,7 @@ jobs:
         run: |
           python3 scripts/mutation_gate.py report \
             --results "target/umutate/${{ matrix.subsystem }}" \
+            --scope full \
             --suppressions mutants/suppressions.toml \
             --summary "$GITHUB_STEP_SUMMARY" || true
       - name: Upload artifacts

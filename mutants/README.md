@@ -51,7 +51,7 @@ MUTANTS-STATUS status=<complete|partial|not-started|baseline-failed|error> expec
 `mutation_gate.py report --status target/mutants/status` fails the gate unless the status is `complete`, while still reporting what was tested.
 
 The nightly full-crate run does not fit in one job, so CI splits it into four fresh shards (`scripts/mutation_test.sh full --shard k/4`, consecutive slices of the mutant list).
-The `cargo-mutants-full` job lists the full inventory with the driver's own mutant set (`scripts/mutation_test.sh list`), combines the shards with `mutation_gate.py merge`, and scores the result.
+The `cargo-mutants-full` job lists the full inventory with the driver's own mutant set (`scripts/mutation_test.sh list`), combines the shards with `mutation_gate.py merge`, and scores the result as a full run (`mutation_gate.py report --scope full`, which titles it a full-run score rather than a diff score).
 Each shard's own status is folded into the combined status, and the report names every shard that did not complete and why.
 A shard whose budget ran out makes the combined status `partial` (or `not-started`), one whose baseline failed makes it `baseline-failed`, and one that errored, ended without a status line (cancelled or killed by the job timeout) or uploaded nothing makes it `error`.
 Every shard outcome is kept.
