@@ -50,6 +50,9 @@ jobs:
           fetch-depth: 0 # need base history for the diff
 
       - name: Test the scorer
+        # The PR job scores its own run; the shards' runs are scored, and the
+        # scorer tested, once in cargo-mutants-full.
+        if: github.event_name == 'pull_request'
         run: python3 scripts/test_mutation_gate.py
 
       - name: Decide whether the run builds
@@ -186,6 +189,9 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+
+      - name: Test the scorer
+        run: python3 scripts/test_mutation_gate.py
 
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
