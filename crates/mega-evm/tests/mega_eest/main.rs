@@ -7,8 +7,8 @@
 //!
 //! It is ignored: it builds a second copy of mega-evm for the adapter and runs for a minute or
 //! more, and CI runs the script itself as the Mega EEST gate. The mutation gate runs it, with
-//! nextest's `--run-ignored only`, for each mutant the rest of the suite does not catch, so a mutant
-//! that only a Mega EEST case catches counts as caught.
+//! nextest's `--run-ignored only`, for each mutant the rest of the suite does not catch, so a
+//! mutant that only a Mega EEST case catches counts as caught.
 
 use std::{path::Path, process::Command};
 
