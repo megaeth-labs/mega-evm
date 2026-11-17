@@ -42,6 +42,9 @@ timeout_multiplier = 8.0
 
 # Seed each scratch build directory from ./target so mutant builds reuse the
 # already-compiled dependencies instead of recompiling them from scratch. Paired
-# with a warm ./target (a prebuild step + Swatinem/rust-cache in CI), this is what
-# lets the cache benefit the per-mutant builds, not just the dependency download.
+# with a warm ./target (the driver's warm build + Swatinem/rust-cache in CI), this
+# is what lets the cache benefit the per-mutant builds, not just the dependency
+# download. With incremental compilation on (CI must set CARGO_INCREMENTAL=1, as
+# the toolchain action turns it off), the copy also carries mega-evm's incremental
+# state, so each mutant build recompiles only what the mutation changed.
 copy_target = true

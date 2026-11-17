@@ -452,6 +452,35 @@ fn test_rex5_oversized_initcode_rejected_with_init_code_too_large() {
     assert!(!has_code(&mut db, deploy_address), "no deployment on InitCodeTooLarge");
 }
 
+/// REX5: the init code size limit is inclusive. Init code exactly as long as the configured
+/// `cfg().max_initcode_size()` deploys; only longer init code is rejected (see the test above).
+#[test]
+fn test_rex5_initcode_at_the_size_limit_deploys() {
+    let init_code = Bytes::from_static(STOP_RUNTIME_INIT_CODE);
+    let (keyless_tx_bytes, signer) = build_keyless_tx_with_init_code(init_code);
+    let deploy_address = calculate_keyless_deploy_address(signer);
+
+    let mut db = MemoryDatabase::default();
+    db.set_account_balance(RELAYER, U256::from(1_000_000_000u64));
+
+    let external_envs = TestExternalEnvs::<std::convert::Infallible>::new();
+    let result = run_keyless_outer_with(
+        MegaSpecId::REX5,
+        &mut db,
+        external_envs,
+        keyless_tx_bytes,
+        LARGE_GAS_LIMIT_OVERRIDE,
+        |ctx| {
+            ctx.modify_cfg(|cfg| {
+                cfg.limit_contract_initcode_size = Some(STOP_RUNTIME_INIT_CODE.len());
+            });
+        },
+    );
+
+    assert!(result.is_success(), "init code at the size limit must deploy; got {result:?}");
+    assert!(has_code(&mut db, deploy_address), "deploy address must have non-empty code");
+}
+
 /// Rex4 does not apply the Rex5 interceptor-level init-code-size rejection.
 #[test]
 fn test_rex4_oversized_initcode_uses_sandbox_validation_error() {
