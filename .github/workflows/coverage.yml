@@ -20,7 +20,10 @@ jobs:
   mega-evm-core:
     name: mega-evm core coverage
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    # The tests, then the Mega EEST cases through the suite's adapter, built against this tree with
+    # mega-evm instrumented (scripts/coverage_mega_evm.sh): a second build of mega-evm and its
+    # dependencies, and every case run plain and instrumented.
+    timeout-minutes: 60
     permissions:
       contents: read
       id-token: write # Codecov upload over OIDC; no token secret
@@ -40,6 +43,8 @@ jobs:
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
 
+      # The report merges the tests' coverage with the Mega EEST cases', so a line only a Mega EEST
+      # case runs counts as covered.
       - name: Generate coverage reports
         run: scripts/coverage_mega_evm.sh
 

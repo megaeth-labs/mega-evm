@@ -23,6 +23,17 @@
 # MUTANTS_SHARD=k/n runs only shard k (0-based) of n of whichever mutant set the
 # subcommand selects (cargo-mutants' own --shard), for a diff too large for one
 # job; give each shard its own OUT_DIR and gate each one. See REVIEW.md.
+#
+# In the production scope (diff, full, file), a mutant the tests missed — in
+# the run, or in the re-check of one that timed out — is run once more against
+# the Mega EEST conformance suite, into $OUT_DIR/mega-eest/mutants.out: the test
+# command is mega-evm's ignored `mega_eest` test alone, which runs
+# scripts/mega_eest.sh (plain mode) on the mutated tree, so a mutant that only a
+# Mega EEST case catches counts as caught. Pass that directory to the gate as
+# --mega-eest. The suite is fetched and its adapter built once, on the unmutated
+# tree, before the run; one that fails there has its exit recorded in those
+# results (run-failed.txt), which the gate refuses. MUTANTS_MEGA_EEST=0 skips
+# the pass, and the gate then counts those mutants as survivors.
 
 # Bash 5 or newer: the driver relies on mapfile and on expanding empty arrays
 # under `set -u`, which bash 3.2 (macOS's /bin/bash) does not have. Written in
@@ -95,7 +106,16 @@ run_outcome() {
     esac
 }
 
+# The arguments that scope the first run (an `--in-diff` file, a `-f` glob): the
+# re-check and the Mega EEST run take them too. cargo-mutants 27.1.0 adds a
+# struct-field-deletion mutant without matching it against `--re`, so a run
+# selected by `--re` alone would also test every such mutant of the crate; under
+# the first run's scope it tests at most the ones the first run tested, whose
+# outcomes there the gate does not read.
+SCOPE_ARGS=()
+
 run_mutants() {
+    SCOPE_ARGS=("$@")
     rm -rf "$OUT_DIR"
     mkdir -p "$(dirname "$OUT_DIR")" # cargo-mutants creates OUT_DIR itself but not its parents
     # --no-shuffle: test mutants in deterministic source order so runs are
@@ -123,6 +143,10 @@ run_mutants() {
     python3 "$ROOT_DIR/scripts/mutation_gate.py" note-empty \
         --log "$OUT_DIR.log" --results "$OUT_DIR/mutants.out"
     recheck_timeouts
+    # The infrastructure scope mutates the scenario runner, which the suite's adapter never runs.
+    if [[ ${#CONFIG_ARGS[@]} -eq 0 && "${MUTANTS_MEGA_EEST:-1}" != 0 ]]; then
+        run_missed_against_mega_eest
+    fi
 }
 
 # A mutant that timed out was tested beside $JOBS others, each running the whole
@@ -149,6 +173,7 @@ recheck_timeouts() {
         --output "$OUT_DIR/recheck" \
         --no-shuffle \
         -vV \
+        "${SCOPE_ARGS[@]}" \
         "${re_args[@]}" 2>&1 | tee "$OUT_DIR/recheck.log" || rc=$?
     # A re-check that fails as a run proves nothing by the files it left, which
     # can look like a finished run's. Its exit goes into its results, which the
@@ -158,6 +183,60 @@ recheck_timeouts() {
         echo "the re-check of the timed-out mutants failed (exit $rc); see $OUT_DIR/recheck.log" >&2
         mkdir -p "$OUT_DIR/recheck/mutants.out"
         echo "cargo-mutants exited $rc" > "$OUT_DIR/recheck/mutants.out/run-failed.txt"
+    fi
+}
+
+# A mutant the tests missed may still change an outcome a Mega EEST case pins. Run
+# each such mutant once more with mega-evm's ignored `mega_eest` test as the only
+# test (`--test mega_eest`, nextest's `--run-ignored only`); the gate takes that
+# outcome for it. The suite is fetched and its adapter built on the unmutated
+# tree first, which also proves the suite passes there; every build directory
+# then shares that checkout, read-only, and builds the adapter against its own
+# mutated mega-evm.
+run_missed_against_mega_eest() {
+    local re_output
+    if ! re_output="$(python3 "$ROOT_DIR/scripts/mutation_gate.py" missed-re \
+        --results "$OUT_DIR/mutants.out" --recheck "$OUT_DIR/recheck/mutants.out" \
+        --suppressions "$SUPPRESS")"; then
+        echo "failed to list the missed mutants in $OUT_DIR/mutants.out" >&2
+        return 1
+    fi
+    [[ -n "$re_output" ]] || return 0
+    local re_args=()
+    mapfile -t re_args <<< "$re_output"
+    local results="$OUT_DIR/mega-eest/mutants.out"
+    echo "Running $((${#re_args[@]} / 2)) mutant(s) the tests missed against Mega EEST" >&2
+    local rc=0
+    # MEGA_EEST_SCRIPT stands in for the script in the driver's own tests.
+    MEGA_EEST_MODES=plain "${MEGA_EEST_SCRIPT:-$ROOT_DIR/scripts/mega_eest.sh}" \
+        > "$OUT_DIR/mega-eest-warmup.log" 2>&1 || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        echo "Mega EEST does not pass on the unmutated tree (exit $rc); see $OUT_DIR/mega-eest-warmup.log" >&2
+        mkdir -p "$results"
+        echo "scripts/mega_eest.sh exited $rc on the unmutated tree" > "$results/run-failed.txt"
+        return 0
+    fi
+    # Every build directory reads the checkout the warm-up used, and writes its adapter workspace,
+    # logs and build in its own target directory: a work or target directory set for the warm-up
+    # would be shared by builds running at once.
+    env -u MEGA_EEST_WORK -u MEGA_EEST_TARGET_DIR \
+        MEGA_EEST_DIR="${MEGA_EEST_DIR:-${MEGA_EEST_WORK:-$ROOT_DIR/target/mega-eest}/src}" \
+        MEGA_EEST_MODES=plain cargo mutants \
+        "${PKG_ARGS[@]}" \
+        --jobs "$JOBS" \
+        --output "$OUT_DIR/mega-eest" \
+        --no-shuffle \
+        -vV \
+        --cargo-arg=--test \
+        --cargo-arg=mega_eest \
+        "${SCOPE_ARGS[@]}" \
+        "${re_args[@]}" \
+        -- --run-ignored only 2>&1 | tee "$OUT_DIR/mega-eest.log" || rc=$?
+    # As for the re-check: a run that fails as a run proves nothing by the files it left.
+    if ! run_outcome "$rc"; then
+        echo "the Mega EEST run of the missed mutants failed (exit $rc); see $OUT_DIR/mega-eest.log" >&2
+        mkdir -p "$results"
+        echo "cargo-mutants exited $rc" > "$results/run-failed.txt"
     fi
 }
 
@@ -197,4 +276,4 @@ esac
 
 echo
 echo "Mutation results written to $OUT_DIR/mutants.out/"
-echo "Score + gate with: python3 scripts/mutation_gate.py report --results $OUT_DIR/mutants.out --recheck $OUT_DIR/recheck/mutants.out"
+echo "Score + gate with: python3 scripts/mutation_gate.py report --results $OUT_DIR/mutants.out --recheck $OUT_DIR/recheck/mutants.out --mega-eest $OUT_DIR/mega-eest/mutants.out"

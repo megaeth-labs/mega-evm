@@ -1,0 +1,186 @@
+name: Mega EEST
+
+# Runs the Mega EEST conformance suite on this tree (scripts/mega_eest.sh): every gating case of
+# the suite at the commit scripts/mega_eest.env pins, through the suite's revm adapter built against
+# this checkout's mega-evm, with this checkout's root manifest's [patch] blocks and Cargo.lock, so a
+# pull request that moves the revm or op-revm fork is tested with its own fork. Each case is
+# consumed plain and instrumented; the gate passes when the cases consumed are exactly the slice's
+# index, every one passes in both modes with the same observations, and the suite's deliberately
+# wrong expectation fails where it records.
+#
+# A failing case pins a rule of the Satin specification. A pull request that changes that
+# behaviour on purpose, or the mega-evm API the adapter calls, changes Mega EEST first (the case or
+# the adapter) and moves the pin to that commit in the same pull request. An adapter that no longer
+# builds against this tree fails the gate with that instruction; nothing is skipped.
+#
+# The `Mega EEST gate` job always runs and reports: it passes when the run passed, or when a pull
+# request changes documentation alone (scripts/pull_request_needs_ci.sh) and the run was skipped.
+# It is the check a branch rule requires; a path filter on the pull request trigger would leave that
+# check pending on every pull request it filters out. A push to satin always runs, and saves the
+# build cache pull requests restore.
+#
+# Timing: on a 15-core laptop the whole run takes about a minute with a warm dependency cache (the
+# adapter build half a minute, each mode about fifteen seconds). On a GitHub runner, with four
+# cores, expect a few minutes once the cache is warm, and a cold dependency build on top of that.
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches: [satin]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  changes:
+    name: changes that need the run
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      run: ${{ steps.diff.outputs.run }}
+    steps:
+      - uses: actions/checkout@v4
+        if: github.event_name == 'pull_request'
+        with:
+          # The merge commit and its parents; the first parent is the base it merges into.
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Skip a pull request that changes documentation alone
+        id: diff
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" != pull_request ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! git rev-parse --verify -q 'HEAD^2' > /dev/null; then
+            echo "::warning::HEAD is not the pull request's merge commit; running"
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # The allowlist is in the script: only docs/ and Markdown outside crates/ and bin/ skip.
+          run=$(scripts/pull_request_needs_ci.sh HEAD^1 HEAD)
+          echo "runs: $run"
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+
+  mega-eest:
+    name: Mega EEST on this tree
+    needs: changes
+    if: needs.changes.outputs.run == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      CARGO_INCREMENTAL: "0"
+      # The tree's dev profile keeps full debug info; line tables are enough for a panic's
+      # backtrace and keep the cached build small. Debug assertions stay on.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Read the pin
+        id: pin
+        run: |
+          set -euo pipefail
+          rev=$(sed -n 's/^MEGA_EEST_REV=\(.*\)$/\1/p' scripts/mega_eest.env)
+          echo "Mega EEST at $rev"
+          echo "rev=$rev" >> "$GITHUB_OUTPUT"
+
+      # The job's cargo cache is the step below: setup-rust-toolchain's own cache handles the
+      # workspace's target directory, and this job builds into another.
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+
+      - uses: foundry-rs/foundry-toolchain@v1
+
+      # The dependencies of the adapter build, keyed on what decides them: the pin (the adapter and
+      # the format crate), this tree's lock and its toolchain. A pull request restores its base's
+      # cache, saved by the push to satin, and rebuilds mega-evm, which is a path dependency and so
+      # always rebuilt on a fresh checkout.
+      - name: Restore the build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/mega-eest/target
+          key: mega-eest-${{ runner.os }}-${{ steps.pin.outputs.rev }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: |
+            mega-eest-${{ runner.os }}-${{ steps.pin.outputs.rev }}-
+            mega-eest-${{ runner.os }}-
+
+      - name: Run Mega EEST, the gate
+        env:
+          REV: ${{ steps.pin.outputs.rev }}
+        run: |
+          set -uo pipefail
+          start=$SECONDS
+          status=0
+          scripts/mega_eest.sh > summary.txt || status=$?
+          cat summary.txt
+          {
+            echo "### Mega EEST"
+            echo
+            echo "Pin: \`$REV\`, in $((SECONDS - start)) s."
+            echo
+            echo '```'
+            cat summary.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$status" -ne 0 ]; then
+            echo "::error::Mega EEST failed on this tree; the failing cases are in the log above and in the uploaded reports"
+          fi
+          exit "$status"
+
+      - name: Upload the reports of a failing run
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mega-eest-reports
+          path: |
+            target/mega-eest/*.json
+            target/mega-eest/*.log
+            target/mega-eest/adapter-revm/Cargo.toml
+            target/mega-eest/adapter-revm/Cargo.lock
+          if-no-files-found: ignore
+          retention-days: 7
+
+  gate:
+    name: Mega EEST gate
+    needs: [changes, mega-eest]
+    # Always, a cancelled run included: a required check that is skipped counts as passed.
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Report the gate's outcome
+        env:
+          CHANGES: ${{ needs.changes.result }}
+          RUN: ${{ needs.changes.outputs.run }}
+          RESULT: ${{ needs.mega-eest.result }}
+        run: |
+          if [ "$CHANGES" != success ]; then
+            echo "::error::could not tell whether the run was needed: the changes job ended $CHANGES"
+            exit 1
+          fi
+          if [ "$RUN" != true ]; then
+            echo "only documentation changed; the run was skipped"
+            exit 0
+          fi
+          if [ "$RESULT" != success ]; then
+            echo "::error::the gate ended $RESULT"
+            exit 1
+          fi
+          echo "the gate passed"

@@ -99,7 +99,7 @@ Defer to the baseline for everything not listed here; the rules below take prece
 ## Test gates
 
 These checks guard every change to the Satin engine.
-`lint`, `test`, `no-std` and `require-label` are the required checks on `satin`; the rest inform the review, and the reviewer reads them.
+`lint`, `test`, `no-std`, `require-label` and `Mega EEST gate` are the required checks on `satin`; the rest inform the review, and the reviewer reads them.
 
 ### The op-revm baseline
 
@@ -142,6 +142,19 @@ These checks guard every change to the Satin engine.
   `.github/workflows/exec-spec-satin.yml` runs the fixture replay after the equivalence gate, on the same fixture releases: every Osaka and Amsterdam entry, in equivalence and in Satin mode; an entry that does not replay fails the job, and so `execution-spec gate on Satin`, and so does a run that prints no single well-formed summary, executes nothing or reports a failed entry.
   The step summary counts the entries replayed on both witnesses apart from the rejected ones.
 
+### Mega EEST
+
+- Mega EEST is the conformance suite both Satin implementations share: state-transition cases, each pinned to rules of the Satin specification, run on an implementation through an adapter.
+  `.github/workflows/mega-eest.yml` runs `scripts/mega_eest.sh`, which consumes every gating case of the suite at the commit `scripts/mega_eest.env` pins (`MEGA_EEST_REV`), plain and instrumented, through the suite's revm adapter built against the pull request's own mega-evm, `[patch]` blocks and `Cargo.lock` (AGENTS.md, Test Gates, has how).
+- The `Mega EEST gate` job always runs and is a required check; a pull request that changes documentation alone skips the run and passes it.
+  The step summary has the summary line (`MEGA-EEST rev=… cases=… plain=pass:…,fail:…,unsupported:…,error:… instrumented=… parity=… negative=… result=…`) and the run's time; a failing run uploads its reports.
+- A case that fails is a change of behaviour the specification pins.
+  A pull request that makes it on purpose, or that changes the mega-evm API the suite's adapter calls (the adapter then no longer builds, and the gate says so), changes Mega EEST first: the case, derived from the changed rule, or the adapter, in a pull request there.
+  It then moves `MEGA_EEST_REV` to that Mega EEST commit, in the same mega-evm pull request, so the gate runs the suite that pull request needs; until the Mega EEST change merges, the pin may name its branch's commit, which the fetch reaches by its hash, and it moves to the merged commit before the mega-evm pull request merges.
+  Locally, a Mega EEST checkout at that commit is used with `MEGA_EEST_DIR=<checkout> scripts/mega_eest.sh` once the pin names it.
+- Moving the pin is a one-line change and is reviewed as one: the suite's own history between the two commits says which cases and which adapter code moved.
+- The coverage report and the mutation gate count the suite too: `scripts/coverage_mega_evm.sh` merges its run into the report Codecov receives, and the cargo-mutants gate runs a mutant the tests miss against it (Mutation testing, below).
+
 ### Byte-price grid
 
 - `.github/workflows/price-grid.yml` runs the `mega-evm` suite at byte prices other than the constants, through `scripts/price_grid.sh`: a cost per state byte and a cost per history byte per point, each run with `--no-fail-fast`.
@@ -181,6 +194,9 @@ These checks guard every change to the Satin engine.
   Reference point, the pull request that brought the Satin skeleton: 115 mutants, 49 caught, 0 survived, 1 suppressed, 65 unviable, in 7m41s on CI and 4m12s on a 15-core laptop with `JOBS=8`.
   That population is the diff against `a8f8c7c9`, the last commit of the legacy core, and it is reproduced by `scripts/mutation_test.sh diff a8f8c7c9` followed by `python3 scripts/mutation_gate.py report --results target/mutants/mutants.out --recheck target/mutants/recheck/mutants.out --suppressions mutants/suppressions.toml`.
   Take the numbers from that pair, not from `cargo mutants` on its own: the driver turns the function-scoped suppressions into `--exclude-re` before generation, and the gate filters the line-scoped ones after the run, so the bare command reports a different population and a different survivor count.
+- A mutant the tests miss is run once more against the Mega EEST suite, with mega-evm's ignored `mega_eest` test as the only test, which runs `scripts/mega_eest.sh` (plain) on the mutated tree; one a Mega EEST case catches counts as caught, and the report says how many the suite decided.
+  The suite is fetched and its adapter built on the unmutated tree first, which must pass; a warm-up or a run that fails as a run is recorded in its results, which the gate refuses.
+  The pass costs nothing while the tests catch every mutant, and about one adapter build and one run of the suite per mutant they miss.
 - The job is bounded to 330 minutes.
   Shard a series whose diff lists more than 1,000 mutants (`cargo mutants --list --in-diff <diff> --package mega-evm`): at the reference rate that is about an hour, and the rate falls as the test suite grows.
   Run shard `k` of `n` with `MUTANTS_SHARD=k/n OUT_DIR=target/mutants-k scripts/mutation_test.sh diff <base>` and gate each shard with `scripts/mutation_gate.py report`; the pull request that first needs it adds a shard matrix to the job, and every shard must pass.

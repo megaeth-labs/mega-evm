@@ -32,7 +32,8 @@ It never reads `.cargo/mutants.toml`, and a change to `mutants/suppressions.toml
 # Mutate only what your branch changed (what CI runs on a PR):
 scripts/mutation_test.sh diff origin/main
 python3 scripts/mutation_gate.py report --results target/mutants/mutants.out \
-        --recheck target/mutants/recheck/mutants.out --suppressions mutants/suppressions.toml
+        --recheck target/mutants/recheck/mutants.out --mega-eest target/mutants/mega-eest/mutants.out \
+        --suppressions mutants/suppressions.toml
 
 # One subsystem while iterating:
 scripts/mutation_test.sh file 'crates/mega-evm/src/limit/**'
@@ -68,6 +69,13 @@ A run that tested nothing passes only on the producer's own word for it: cargo-m
 A mutant that **timed out** was tested beside the others the run tests at once, each running the whole suite on the same cores, so the driver re-runs every unsuppressed one once, alone (`--jobs 1`, into `recheck/mutants.out`), and the gate takes that outcome for it.
 One caught alone is caught, one that survives alone is a survivor, and one that times out again stays inconclusive and fails the gate.
 A re-check that exits abnormally proves nothing by the files it left, so the driver records its exit in its results (`run-failed.txt`), and the gate refuses to score them, saying why.
+
+A mutant the tests **missed** — in the run, or in the re-check of one that timed out — may still change an outcome a case of the Mega EEST conformance suite pins.
+In the production scope the driver runs each such unsuppressed mutant once more, into `mega-eest/mutants.out`, with mega-evm's ignored `mega_eest` test as the only test (`--test mega_eest`, nextest's `--run-ignored only`), which runs `scripts/mega_eest.sh` in plain mode on the mutated tree; pass that directory to the gate as `--mega-eest`.
+One the suite catches counts as caught, one it times out on stays inconclusive, and the rest stay survivors.
+The suite is fetched and its adapter built on the unmutated tree first, which must pass there; a warm-up that fails, or a run that exits abnormally, is recorded in those results as `run-failed.txt` and refused.
+`MUTANTS_MEGA_EEST=0` leaves the pass out, and the mutants it would have run stay survivors.
+The re-check and this run take the first run's own scope (its `--in-diff` file or `-f` glob) beside their `--re` selections, because cargo-mutants 27.1.0 adds struct-field-deletion mutants without matching them against `--re`; the gate reads their outcomes only for the mutants it asked about.
 
 ## Suppressions (hybrid)
 
