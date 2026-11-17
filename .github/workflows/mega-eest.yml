@@ -6,7 +6,17 @@ name: Mega EEST
 # pull request that moves the revm or op-revm fork is tested with its own fork. Each case is
 # consumed plain and instrumented; the gate passes when the cases consumed are exactly the slice's
 # index, every one passes in both modes with the same observations, and the suite's deliberately
-# wrong expectation fails where it records.
+# wrong expectation fails where it records. The script's exit says which: 0 pass, 1 cases failed,
+# 2 no verdict (a fetch, a build, a report), 3 the pin refused; the job also requires the summary
+# line of the full run (`run=full`) of a pin on Mega EEST's default branch.
+#
+# The pin is what holds every behaviour a deleted mega-evm test pinned and a Mega EEST case pins in
+# its place, so it is checked too: the pinned commit must be on Mega EEST's default branch (a pin on
+# the branch of a suite change still under review is a draft state, and the gate stays red until
+# the pin moves to the merged commit), and a pull request that moves the pin lists the case ids
+# removed, added and changed relative to its base's pin in the step summary, where any removal
+# fails the gate unless scripts/mega_eest.env's MEGA_EEST_REMOVED_CASES lists exactly the removed
+# ids, a line the reviewer reads in the diff.
 #
 # A failing case pins a rule of the Satin specification. A pull request that changes that
 # behaviour on purpose, or the mega-evm API the adapter calls, changes Mega EEST first (the case or
@@ -15,9 +25,10 @@ name: Mega EEST
 #
 # The `Mega EEST gate` job always runs and reports: it passes when the run passed, or when a pull
 # request changes documentation alone (scripts/pull_request_needs_ci.sh) and the run was skipped.
-# It is the check a branch rule requires; a path filter on the pull request trigger would leave that
-# check pending on every pull request it filters out. A push to satin always runs, and saves the
-# build cache pull requests restore.
+# It is the check a branch rule can require (it is required once an administrator adds it to the
+# satin branch rule); a path filter on the pull request trigger would leave that check pending on
+# every pull request it filters out. A push to satin always runs, and saves the build cache pull
+# requests restore.
 #
 # Timing: on a 15-core laptop the whole run takes about a minute with a warm dependency cache (the
 # adapter build half a minute, each mode about fifteen seconds). On a GitHub runner, with four
@@ -86,15 +97,33 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+          # On a pull request, the merge commit and its parents: the first parent is the base, whose
+          # pin the case set is compared with.
+          fetch-depth: 2
           persist-credentials: false
 
-      - name: Read the pin
+      - name: Read the pin, and the base's
         id: pin
+        env:
+          EVENT: ${{ github.event_name }}
         run: |
           set -euo pipefail
           rev=$(sed -n 's/^MEGA_EEST_REV=\(.*\)$/\1/p' scripts/mega_eest.env)
           echo "Mega EEST at $rev"
           echo "rev=$rev" >> "$GITHUB_OUTPUT"
+          base=""
+          if [ "$EVENT" = pull_request ]; then
+            if ! git rev-parse --verify -q 'HEAD^2' > /dev/null; then
+              echo "::error::HEAD is not the pull request's merge commit, so the base's pin is unknown"
+              exit 1
+            fi
+            # A base without the pin file (the pull request that adds the gate) has nothing to compare.
+            if git cat-file -e 'HEAD^1:scripts/mega_eest.env' 2> /dev/null; then
+              base=$(git show 'HEAD^1:scripts/mega_eest.env' | sed -n 's/^MEGA_EEST_REV=\(.*\)$/\1/p')
+            fi
+          fi
+          echo "the base's pin: ${base:-(none)}"
+          echo "base=$base" >> "$GITHUB_OUTPUT"
 
       # The job's cargo cache is the step below: setup-rust-toolchain's own cache handles the
       # workspace's target directory, and this job builds into another.
@@ -124,25 +153,42 @@ jobs:
       - name: Run Mega EEST, the gate
         env:
           REV: ${{ steps.pin.outputs.rev }}
+          MEGA_EEST_BASE_REV: ${{ steps.pin.outputs.base }}
         run: |
           set -uo pipefail
           start=$SECONDS
           status=0
           scripts/mega_eest.sh > summary.txt || status=$?
           cat summary.txt
+          line=$(grep '^MEGA-EEST ' summary.txt | tail -n 1 || true)
           {
             echo "### Mega EEST"
             echo
-            echo "Pin: \`$REV\`, in $((SECONDS - start)) s."
+            echo "Pin: \`$REV\`, in $((SECONDS - start)) s, exit $status."
             echo
             echo '```'
-            cat summary.txt
+            echo "$line"
             echo '```'
+            if [ -f target/mega-eest/case-diff.md ]; then
+              echo
+              cat target/mega-eest/case-diff.md
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
-          if [ "$status" -ne 0 ]; then
-            echo "::error::Mega EEST failed on this tree; the failing cases are in the log above and in the uploaded reports"
-          fi
-          exit "$status"
+          case "$status" in
+            0) ;;
+            1) echo "::error::Mega EEST cases failed on this tree; the failing cases are in the log above and in the uploaded reports" ;;
+            3) echo "::error::the cases passed, but the pin is refused: it is not on Mega EEST's default branch, or it removes cases scripts/mega_eest.env does not declare (see the log)" ;;
+            *) echo "::error::the Mega EEST run reached no verdict (exit $status): see the log for the step that failed" ;;
+          esac
+          [ "$status" -eq 0 ] || exit "$status"
+          # The gate is the full run, both modes, of a pin on the suite's default branch.
+          case "$line" in
+            "MEGA-EEST "*" run=full "*" provenance=default-branch "*" result=pass") echo "the gate passed" ;;
+            *)
+              echo "::error::the run passed, but its summary is not the gate's full run of a merged pin: $line"
+              exit 1
+              ;;
+          esac
 
       - name: Upload the reports of a failing run
         if: failure()
@@ -152,6 +198,7 @@ jobs:
           path: |
             target/mega-eest/*.json
             target/mega-eest/*.log
+            target/mega-eest/case-diff.md
             target/mega-eest/adapter-revm/Cargo.toml
             target/mega-eest/adapter-revm/Cargo.lock
           if-no-files-found: ignore

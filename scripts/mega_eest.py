@@ -28,14 +28,36 @@ Subcommands:
         version and from the same source, and there is exactly one revm. Packages only the adapter
         or the format crate links are listed when this checkout does not lock them.
 
+  executable  --name <target name>
+        Read the JSON messages of `cargo build --message-format=json…` on standard input and print
+        the path of the one executable the build reported for that target, which must exist: the
+        file this build produced, wherever the target directory or the build target put it.
+
+  case-diff   --base-rev <commit> --rev <commit> --base-index <index.json> --index <index.json>
+              --declared <case ids> --summary <file>
+        Compare the case sets of two pins' slice indexes: the case ids removed, added and changed
+        (same id, another file digest) are listed on stderr and as Markdown in <file>, and the word
+        printed on stdout says whether the removals are what scripts/mega_eest.env's
+        MEGA_EEST_REMOVED_CASES declares, exactly: `kept` (none removed, none declared), `declared`
+        (the removed ids and no other) or `undeclared` (anything else).
+
   check       --suite <Mega EEST checkout> --work <dir> --modes <"plain instrumented"> --rev <commit>
+              [--provenance <default-branch|unmerged|unchecked>]
+              [--caseset <unmoved|kept|declared|undeclared|unchecked>]
         Read the run reports `mega-fixture consume` wrote into <dir> (<mode>.json, and
-        negative.json for the suite's deliberately wrong expectation) and decide the gate: in every
-        mode, the cases consumed are exactly the slice's index, by case id and file digest, and
-        every one passed; with both modes, every case's observations are the same bytes plain and
-        instrumented; and the wrong expectation fails at the path the index records. Prints the
-        failures (case id, first differing path, both values, the rules the case pins) and one
-        summary line, `MEGA-EEST ...`, and exits 1 when the gate fails.
+        negative.json for the suite's deliberately wrong expectation) and decide: in every mode, the
+        cases consumed are exactly the slice's index, by case id and file digest, and every one
+        passed; with both modes, every case's observations are the same bytes plain and
+        instrumented; and the wrong expectation, which the index must list, fails at the path it
+        records. Prints the failures (case id, first differing path, both values, the rules the
+        case pins) and one summary line, `MEGA-EEST … result=<result>`, and exits with its code:
+        0 pass; 1 FAIL, a verdict (complete reports of exactly the index in every mode, the wrong
+        expectation caught, and a case failed or erred, or the modes' observations differ);
+        2 INCOMPLETE, no verdict (no mode, a report missing, cases that are not the index, a
+        consume exit its report does not explain, a case the adapter does not support, no wrong
+        expectation or one not caught, or the checker itself failing); 3 REFUSED, every case passed
+        but the pin's provenance is `unmerged` or its case set `undeclared`. `run=full` in the line
+        is both modes; `run=partial` one.
 """
 from __future__ import annotations
 
@@ -273,8 +295,11 @@ def cmd_adapter(args: argparse.Namespace) -> int:
 
     # Seed the lock from this checkout's, unless it was seeded from the same lock and manifest
     # before: cargo has resolved it since, and a fresh seed would only make it resolve again.
+    # The digest names the checkouts' paths by placeholders, so a copy of this tree (a mutation
+    # build directory, which carries the warm-up's resolved workspace) keeps the resolved lock.
     tree_lock = (tree / "Cargo.lock").read_bytes()
-    seed = hashlib.sha256(tree_lock + b"\0" + (header + text).encode()).hexdigest()
+    placed = text.replace(str(tree), "<mega-evm>").replace(str(suite), "<mega-eest>")
+    seed = hashlib.sha256(tree_lock + b"\0" + placed.encode()).hexdigest()
     marker = out / SEED_MARKER
     if not (out / "Cargo.lock").exists() or not marker.exists() or marker.read_text().strip() != seed:
         write_if_changed(out / "Cargo.lock", tree_lock)
@@ -361,29 +386,49 @@ def canonical(value) -> str:
     return "(absent)" if value is None else json.dumps(value, sort_keys=True, separators=(",", ":"))
 
 
+# The results of `check`, by the exit code each has.
+RESULT_EXIT = {"pass": 0, "FAIL": 1, "INCOMPLETE": 2, "REFUSED": 3}
+
+
 def cmd_check(args: argparse.Namespace) -> int:
+    """`check`; no failure of the checker itself can read as a verdict."""
+    try:
+        return check(args)
+    except Exception as err:  # noqa: BLE001 - any error here is no verdict, never a pass or a FAIL
+        print(f"mega-eest: error: the checker could not read the run: {err!r}", file=sys.stderr)
+        print(f"MEGA-EEST rev={args.rev} run=unknown stage=check result=INCOMPLETE")
+        return RESULT_EXIT["INCOMPLETE"]
+
+
+def check(args: argparse.Namespace) -> int:
     suite, work = Path(args.suite), Path(args.work)
-    modes = args.modes.split()
+    modes = list(dict.fromkeys(args.modes.split()))
     index = json.loads((suite / "slice" / "index.json").read_text())
     expected = Counter((c["caseId"], c["fileDigest"]) for c in index["cases"])
     total = sum(expected.values())
-    failed = False
-    summary = [f"rev={args.rev}", f"cases={total}"]
+    run = "full" if {"plain", "instrumented"} <= set(modes) else "partial"
+    summary = [f"rev={args.rev}", f"run={run}", f"cases={total}"]
+    # Why the run reached no verdict; and whether a case failed in a run that did.
+    incomplete: list[str] = []
+    cases_failed = False
     observations: dict[str, dict[str, str | None]] = {}
 
+    if not modes:
+        incomplete.append("no mode was run")
+    for mode in modes:
+        if mode not in ("plain", "instrumented"):
+            incomplete.append(f"no such mode as {mode!r}")
     if total == 0:
-        print("mega-eest: error: the slice's index lists no case", file=sys.stderr)
-        failed = True
+        incomplete.append("the slice's index lists no case")
 
     for mode in modes:
         report_path = work / f"{mode}.json"
         exit_path = work / f"{mode}.exit"
         code = exit_path.read_text().strip() if exit_path.exists() else "?"
         if not report_path.exists():
-            print(f"mega-eest: error: {mode}: `mega-fixture consume` wrote no report (exit {code}); "
-                  f"see {work / (mode + '.log')}", file=sys.stderr)
+            incomplete.append(f"{mode}: `mega-fixture consume` wrote no report (exit {code}); "
+                              f"see {work / (mode + '.log')}")
             summary.append(f"{mode}=no-report")
-            failed = True
             continue
         cases = json.loads(report_path.read_text())["cases"]
         statuses = Counter(c["status"] for c in cases)
@@ -405,13 +450,20 @@ def cmd_check(args: argparse.Namespace) -> int:
             print(f"mega-eest: {mode}: ... and {len(not_passed) - MAX_SHOWN} more, in {report_path}",
                   file=sys.stderr)
         if missing or extra:
-            print(f"mega-eest: error: {mode}: the cases consumed are not the slice's index: "
-                  f"{sum(missing.values())} missing, {sum(extra.values())} not in it"
-                  + (f", {next(iter(missing))[0]} among the missing" if missing else "")
-                  + (f", {next(iter(extra))[0]} among the others" if extra else ""), file=sys.stderr)
-            failed = True
-        if not_passed or code != "0":
-            failed = True
+            incomplete.append(
+                f"{mode}: the cases consumed are not the slice's index: "
+                f"{sum(missing.values())} missing, {sum(extra.values())} not in it"
+                + (f", {next(iter(missing))[0]} among the missing" if missing else "")
+                + (f", {next(iter(extra))[0]} among the others" if extra else ""))
+        # `consume` exits 0 when every case passed and 1 when one did not; any other exit, or one
+        # its report does not explain, is a run that did not finish as reported.
+        if code not in ("0", "1") or (code == "0") != (not not_passed):
+            incomplete.append(f"{mode}: `mega-fixture consume` exited {code} with "
+                              f"{len(not_passed)} case(s) not passing in its report")
+        if statuses.get("unsupported"):
+            incomplete.append(f"{mode}: {statuses['unsupported']} case(s) the adapter does not support")
+        if statuses.get("fail") or statuses.get("error"):
+            cases_failed = True
         summary.append(f"{mode}=" + ",".join(
             f"{s}:{statuses.get(s, 0)}" for s in ("pass", "fail", "unsupported", "error")))
 
@@ -423,29 +475,106 @@ def cmd_check(args: argparse.Namespace) -> int:
             print(f"mega-eest: parity: {case}: plain {plain.get(case)} instrumented {inst.get(case)}",
                   file=sys.stderr)
         summary.append(f"parity={'identical' if not differ else f'{len(differ)}-differ'}")
-        failed |= bool(differ)
+        cases_failed |= bool(differ)
 
+    # The wrong expectation is what shows the consumer and the adapter can fail at all: an index
+    # without one, or a run that did not fail it where recorded, says nothing about the cases.
     negative_path = work / "negative.json"
     wrong_at = {n["caseId"]: n["wrongAt"] for n in index.get("negative", [])}
-    if wrong_at:
+    if not wrong_at:
+        verdict = "none"
+        incomplete.append("the slice's index lists no wrong expectation, which shows the consumer can fail")
+    elif not negative_path.exists():
+        verdict = "no-report"
+        incomplete.append("`mega-fixture consume` wrote no report of the wrong expectation")
+    else:
         verdict = "fail-as-recorded"
-        if not negative_path.exists():
-            verdict = "no-report"
-        else:
-            cases = {c.get("caseId"): c for c in json.loads(negative_path.read_text())["cases"]}
-            for case_id, path in wrong_at.items():
-                c = cases.get(case_id)
-                if not c or c["status"] != "fail" or c.get("path") != path:
-                    print(f"mega-eest: error: the wrong expectation {case_id} did not fail at {path}: "
-                          f"{c['status'] + ' at ' + str(c.get('path')) if c else 'not consumed'}",
-                          file=sys.stderr)
-                    verdict = "not-caught"
-        summary.append(f"negative={verdict}")
-        failed |= verdict != "fail-as-recorded"
+        cases = {c.get("caseId"): c for c in json.loads(negative_path.read_text())["cases"]}
+        for case_id, path in wrong_at.items():
+            c = cases.get(case_id)
+            if not c or c["status"] != "fail" or c.get("path") != path:
+                incomplete.append(f"the wrong expectation {case_id} did not fail at {path}: "
+                                  f"{c['status'] + ' at ' + str(c.get('path')) if c else 'not consumed'}")
+                verdict = "not-caught"
+    summary.append(f"negative={verdict}")
+    summary.append(f"provenance={args.provenance}")
+    summary.append(f"caseset={args.caseset}")
 
-    summary.append(f"result={'FAIL' if failed else 'pass'}")
+    if incomplete:
+        result = "INCOMPLETE"
+    elif cases_failed:
+        result = "FAIL"
+    elif args.provenance == "unmerged" or args.caseset == "undeclared":
+        result = "REFUSED"
+    else:
+        result = "pass"
+    for reason in incomplete:
+        print(f"mega-eest: error: no verdict: {reason}", file=sys.stderr)
+    summary.append(f"result={result}")
     print("MEGA-EEST " + " ".join(summary))
-    return 1 if failed else 0
+    return RESULT_EXIT[result]
+
+
+# ---- executable, case-diff --------------------------------------------------------------------
+
+
+def cmd_executable(args: argparse.Namespace) -> int:
+    found = set()
+    for line in sys.stdin:
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            message = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if (message.get("reason") == "compiler-artifact"
+                and (message.get("target") or {}).get("name") == args.name
+                and message.get("executable")):
+            found.add(message["executable"])
+    if len(found) != 1:
+        raise GateError(f"the build reported {len(found)} executables named {args.name}, not one: "
+                        + (", ".join(sorted(found)) or "none"))
+    path = Path(next(iter(found)))
+    if not path.is_file():
+        raise GateError(f"the build reported {path} for {args.name}, and there is no such file")
+    print(path)
+    return 0
+
+
+def cmd_case_diff(args: argparse.Namespace) -> int:
+    def cases(path: str) -> dict[str, str]:
+        return {c["caseId"]: c["fileDigest"] for c in json.loads(Path(path).read_text())["cases"]}
+
+    base, head = cases(args.base_index), cases(args.index)
+    removed = sorted(base.keys() - head.keys())
+    added = sorted(head.keys() - base.keys())
+    changed = sorted(k for k in base.keys() & head.keys() if base[k] != head[k])
+    declared = sorted(set(args.declared.split()))
+    if removed == declared:
+        caseset = "declared" if removed else "kept"
+    else:
+        caseset = "undeclared"
+    print(f"mega-eest: the pin moves {args.base_rev} -> {args.rev}: {len(removed)} case(s) removed, "
+          f"{len(added)} added, {len(changed)} changed", file=sys.stderr)
+    for title, ids in (("removed", removed), ("added", added), ("changed", changed)):
+        for case_id in ids:
+            print(f"mega-eest:   {title} {case_id}", file=sys.stderr)
+    if caseset == "undeclared":
+        print("mega-eest: error: scripts/mega_eest.env's MEGA_EEST_REMOVED_CASES must list exactly the "
+              "case ids the pin removes: removed and not declared: "
+              f"{' '.join(sorted(set(removed) - set(declared))) or '(none)'}; declared and not removed: "
+              f"{' '.join(sorted(set(declared) - set(removed))) or '(none)'}", file=sys.stderr)
+    md = [f"### Mega EEST case set, {args.base_rev[:12]} → {args.rev[:12]}", "",
+          f"{len(removed)} removed, {len(added)} added, {len(changed)} changed; removals: **{caseset}**.", ""]
+    for title, ids in (("Removed", removed), ("Added", added), ("Changed", changed)):
+        if ids:
+            md += [f"<details><summary>{title} ({len(ids)})</summary>", ""]
+            md += [f"- `{case_id}`" for case_id in ids]
+            md += ["", "</details>", ""]
+    Path(args.summary).write_text("\n".join(md) + "\n")
+    print(caseset)
+    return 0
 
 
 def main() -> int:
@@ -470,7 +599,23 @@ def main() -> int:
     pc.add_argument("--work", required=True)
     pc.add_argument("--modes", required=True)
     pc.add_argument("--rev", required=True)
+    pc.add_argument("--provenance", default="unchecked", choices=["default-branch", "unmerged", "unchecked"])
+    pc.add_argument("--caseset", default="unchecked",
+                    choices=["unmoved", "kept", "declared", "undeclared", "unchecked"])
     pc.set_defaults(func=cmd_check)
+
+    pe = sub.add_parser("executable", help="the executable a cargo build reported, from its JSON messages")
+    pe.add_argument("--name", required=True)
+    pe.set_defaults(func=cmd_executable)
+
+    pd = sub.add_parser("case-diff", help="compare two pins' case sets")
+    pd.add_argument("--base-rev", required=True)
+    pd.add_argument("--rev", required=True)
+    pd.add_argument("--base-index", required=True)
+    pd.add_argument("--index", required=True)
+    pd.add_argument("--declared", default="")
+    pd.add_argument("--summary", required=True)
+    pd.set_defaults(func=cmd_case_diff)
 
     args = p.parse_args()
     try:
