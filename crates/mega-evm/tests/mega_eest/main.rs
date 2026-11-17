@@ -35,8 +35,7 @@ fn test_mega_eest_cases_pass_on_this_checkout() {
     print!("{stdout}");
     let summary = stdout
         .lines()
-        .filter(|line| line.starts_with("MEGA-EEST "))
-        .last()
+        .rfind(|line| line.starts_with("MEGA-EEST "))
         .unwrap_or("(no MEGA-EEST summary line)");
     match output.status.code() {
         Some(0) => assert!(
