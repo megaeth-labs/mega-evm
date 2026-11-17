@@ -57,6 +57,12 @@ cargo run --release -p state-test -- --mode satin --fork Osaka <main-fixtures>/s
 # Regenerate the rendered deviation registry after changing crates/mega-state-test/src/deviations.rs
 UPDATE_DEVIATIONS=1 cargo test -p mega-state-test --lib deviations
 
+# The Mega EEST gate (see Test Gates): the shared conformance suite at the commit scripts/mega_eest.env pins,
+# through its revm adapter built against this checkout, every case plain and instrumented (logs under target/mega-eest)
+scripts/mega_eest.sh
+MEGA_EEST_DIR=<a Mega EEST checkout at the pin> scripts/mega_eest.sh    # without the fetch
+cargo test -p mega-evm --test mega_eest -- --ignored                     # the same run, as the mutation gate starts it
+
 # Check compiler errors (preferred over clippy for quick checks)
 cargo check
 cargo check -p mega-evm
@@ -638,7 +644,7 @@ for s in $(seq 1 20); do MEGA_FUZZ_SEED=$s cargo test --release -p mega-evm --te
 
 ## Test Gates
 
-`REVIEW.md` lists the test gates a pull request meets ("Test gates"); three of them are this repository's own execution gates — the op-revm baseline, the execution-spec gate and the witness replay — and the byte-price grid holds the suite at other byte prices.
+`REVIEW.md` lists the test gates a pull request meets ("Test gates"); four of them are this repository's own execution gates — the op-revm baseline, the execution-spec gate, the witness replay and the Mega EEST gate — and the byte-price grid holds the suite at other byte prices.
 
 - **The op-revm baseline** (`tests/satin/equivalence.rs`): an ordinary transaction through `MegaEvm` against op-revm on the same configuration, which Satin differs from by its history ledger alone.
 - **The execution-spec gate** (`crates/mega-state-test`, `.github/workflows/exec-spec-satin.yml`): Ethereum's state-test fixtures through `MegaEvm`, on the fixture releases the fork's own runner (`.github/workflows/exec-spec.yml`) uses.
@@ -659,6 +665,15 @@ for s in $(seq 1 20); do MEGA_FUZZ_SEED=$s cargo test --release -p mega-evm --te
   A fixture entry the engine rejects has no returned state to build the channel witness from, and replays on the record alone.
   The block tests cover each mechanism that reads, in the `test` job; `exec-spec-satin.yml` replays every Osaka and Amsterdam entry of the fixture releases in both modes and fails on any entry that does not replay, counting the entries replayed on both witnesses apart from the rejected ones.
   The fixture test is always ignored by default: it runs only with `-- --ignored` (or `--include-ignored`) and `MEGA_STATE_TEST_FIXTURES` set to the fixtures, and setting the variable alone runs nothing.
+- **The Mega EEST gate** (`scripts/mega_eest.sh`, `.github/workflows/mega-eest.yml`): Mega EEST is the conformance suite both Satin implementations share, its state-transition cases each pinned to rules of the Satin specification, and this gate holds this tree to every gating case of it.
+  The commit it runs is the one line `MEGA_EEST_REV` of `scripts/mega_eest.env`; the script fetches it (or takes `MEGA_EEST_DIR`, which must be at the pin and unmodified), builds the suite's `mega-fixture` CLI and its revm adapter, and consumes every case of `slice/cases` plain and `--instrumented`.
+  The adapter is built against this checkout, not the mega-evm commit it pins: `scripts/mega_eest.py` writes it out as a workspace of its own (`target/mega-eest/adapter-revm`) whose mega-evm is a path dependency on `crates/mega-evm`, whose other crates take their sources from this tree's `[workspace.dependencies]`, and whose `[patch]` and `[profile]` tables are this tree's root manifest's, so a pull request that moves the revm or op-revm fork is tested with its own fork.
+  The adapter's `Cargo.lock`, resolved for the commit it pins, is not used: the workspace's lock is seeded with this tree's `Cargo.lock`, cargo resolves it once, every package mega-evm links must then be at the version and source this tree locks, with one revm, and the build runs `--locked`.
+  It passes when the cases consumed are exactly the slice's index, by case id and file digest, every one passes in both modes with the same observations, and the suite's deliberately wrong expectation fails where it records; a failure names the case, its first differing path, both values and the rules it pins, and the summary is one `MEGA-EEST` line.
+  The `Mega EEST gate` job always runs and is the required check: a pull request that changes documentation alone skips the run (`scripts/pull_request_needs_ci.sh`) and the job passes; every other pull request and every push to `satin` runs it.
+  When it fails: a case that fails pins behaviour of the specification, so the change is wrong, or it changes that behaviour on purpose, and then the case changes in Mega EEST first; an adapter that no longer builds against this tree means the change altered the mega-evm API the adapter calls (`MegaEvm::execute_transaction`, the `MegaContext` constructors, `system::live_system_address`, the error and result types), and the adapter changes in Mega EEST first.
+  Either way the same pull request then moves the pin to that Mega EEST commit; nothing is skipped or waived here.
+  The coverage report (`scripts/coverage_mega_evm.sh`) merges the suite's run, through the adapter built with mega-evm instrumented, with the tests', so a line only a Mega EEST case runs counts as covered; the mutation gate runs every mutant the tests miss against the suite (`scripts/mutation_test.sh`, through the ignored `mega_eest` test), so a mutant only a Mega EEST case catches counts as caught.
 - **The byte-price grid** (`scripts/price_grid.sh`, `.github/workflows/price-grid.yml`): the `mega-evm` suite with the `satin-price-override` feature at other costs per state and history byte, the whole grid, as four parallel shards, on every pull request that changes more than documentation and on dispatch (`--pr`, five points, is the quick local mode).
   The prices are provisional, so a test holds at any of them — a byte price of nothing, or one gas per byte up to the grid's dearest point: it sizes its gas from the schedule at the prices in effect, and a case whose scenario is state or history gas returns early where that byte costs nothing (`state_is_free`, `history_is_free`).
   Below one gas per byte the schedule's entries round to nothing one at a time, and no test is held there.
