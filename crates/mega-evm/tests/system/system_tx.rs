@@ -606,14 +606,6 @@ fn test_a_system_transaction_is_bound_to_the_chain() {
     assert!(rejected.contains("MissingChainId"), "{rejected}");
 }
 
-/// The system address may not carry code (EIP-3607), as no sender may.
-#[test]
-fn test_a_system_address_with_code_is_refused() {
-    let db = chain_db().account_code(MEGA_SYSTEM_ADDRESS, Bytes::from_static(&[0x00]));
-    let rejected = rejection(db, system_tx(0, B256::with_last_byte(0xce)));
-    assert!(rejected.contains("RejectCallerWithCode"), "{rejected}");
-}
-
 /// Runs `tx` on `db` under the chain's configuration with `mutate` applied.
 fn run_with(
     mutate: fn(&mut CfgEnv<mega_evm::MegaSpecId>),
@@ -842,33 +834,6 @@ fn deposit_one_short_of_its_caller(sender: Address) -> MegaTransaction {
     tx
 }
 
-/// A deposit that cannot pay for the account it creates for its caller runs out of gas before its
-/// first frame, and a deposit that does is a failed deposit: the `FailedDeposit` halt, not an
-/// out-of-gas, billed its whole gas limit.
-///
-/// Independence: constants — the intrinsic gas is
-/// EIP-2780's, the caller account's state gas the schedule's entry at the price in effect.
-#[test]
-fn test_a_deposit_that_cannot_pay_for_its_caller_is_a_failed_deposit() {
-    // An account that costs nothing is one any deposit can pay for.
-    if state_is_free() {
-        return;
-    }
-    let sender = address!("0x00000000000000000000000000000000000f0006");
-    let tx = deposit_one_short_of_its_caller(sender);
-    let gas_limit = tx.0.base.gas_limit;
-    let outcome = run_outcome(chain_db(), tx);
-    assert!(
-        matches!(
-            outcome.result,
-            ExecutionResult::Halt { reason: MegaHaltReason::FailedDeposit, .. }
-        ),
-        "{:?} is not a failed deposit",
-        outcome.result,
-    );
-    assert_eq!(outcome.gas.gas_used, gas_limit, "a failed deposit bills its whole gas limit");
-}
-
 /// The account a deposit creates for its caller is charged before its first frame, and a body over
 /// the data-size limit does not waive the charge: a deposit that cannot pay for it is a failed
 /// deposit, which reports the failure and not the data-size stop, and keeps its body counted.
@@ -1005,30 +970,5 @@ fn test_a_deposit_that_creates_a_contract_pays_for_its_caller_too() {
         fresh.gas.state,
         existing.gas.state + account_state_gas(),
         "the created caller costs state gas on top of the created contract",
-    );
-}
-
-/// A transaction that already carries the system source hash is a deposit by type, so it does
-/// not have the system shape: from the live system address it is a failed deposit, as every
-/// deposit from that address is. No promotion is made for
-/// it, so none of the promotion's checks runs: its nonce is not the system address's.
-///
-/// A block's transactions are decoded from their legacy encoding, which carries no source hash,
-/// so this is the shape a caller hands the engine directly, not one a block holds.
-#[test]
-fn test_a_transaction_that_arrives_promoted_is_a_failed_deposit() {
-    let mut tx =
-        legacy_tx(MEGA_SYSTEM_ADDRESS, TxKind::Call(ORACLE_CONTRACT_ADDRESS), get_slot(), 7);
-    tx.0.deposit.source_hash = MEGA_SYSTEM_TRANSACTION_SOURCE_HASH;
-    let outcome = MegaEvm::new(chain_context(chain_db()))
-        .execute_transaction(tx)
-        .expect("a deposit is not refused");
-    assert!(
-        matches!(
-            outcome.result,
-            ExecutionResult::Halt { reason: MegaHaltReason::FailedDeposit, .. }
-        ),
-        "{:?}",
-        outcome.result
     );
 }

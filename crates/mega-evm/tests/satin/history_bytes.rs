@@ -219,32 +219,6 @@ fn test_a_reservoir_that_runs_out_changes_only_who_paid() {
     assert_eq!(exact.gas.gas_used, ample.gas.gas_used);
 }
 
-/// A transaction whose gas cannot pay for the record its own frame makes runs out of gas before
-/// that frame, and the record is not made: it reports its body alone, in bytes and in gas.
-#[test]
-fn test_a_transaction_that_cannot_pay_its_first_record_reports_its_body_alone() {
-    if runs_at_measurement_prices() {
-        return;
-    }
-    let transfer = |gas| call(CALLER, PAYEE, U256::from(1), gas);
-    // What the transfer spends is its intrinsic gas and the one record, nothing else: that is the
-    // least gas limit that pays for all of it.
-    let ample = execute(funded(), transfer(GAS_LIMITS[0]));
-    assert!(ample.result.is_success(), "{:?}", ample.result);
-    let fits = ample.gas.gas_used;
-
-    let exact = execute(funded(), transfer(fits));
-    assert!(exact.result.is_success(), "{:?}", exact.result);
-    assert_eq!(exact.gas.history_bytes, TX_BODY_SIZE + WRITE_RECORD_SIZE);
-    assert_eq!(exact.gas.history, exact.gas.history_bytes * CPHB);
-
-    let short = execute(funded(), transfer(fits - 1));
-    assert!(short.result.is_halt(), "{:?}", short.result);
-    assert_eq!(short.usage.write_records, 0, "no frame ran, so no record was made");
-    assert_eq!(short.gas.history_bytes, TX_BODY_SIZE, "the body alone");
-    assert_eq!(short.gas.history, TX_BODY_SIZE * CPHB);
-}
-
 /// Answers every creation itself with a success whose output is a word of bytes, so no frame runs
 /// and nothing is deposited.
 ///

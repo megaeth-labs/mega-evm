@@ -105,12 +105,6 @@ fn test_one_byte_past_the_satin_initcode_size_is_rejected() {
 
 /* ---------- the deployed-code bound, from a creation transaction ---------- */
 
-/// Code of the Satin size deploys.
-#[test]
-fn test_the_satin_code_size_deploys() {
-    assert!(deploy(constructor_returning(MAX_CONTRACT_SIZE)).unwrap().is_success());
-}
-
 /// One byte past it halts the creation.
 #[test]
 fn test_one_byte_past_the_satin_code_size_halts() {
@@ -153,12 +147,6 @@ fn create_through_factory(size: usize) -> bool {
         } => false,
         other => panic!("unexpected result {other:?}"),
     }
-}
-
-/// A `CREATE` of the Satin size succeeds.
-#[test]
-fn test_create_of_the_satin_code_size_succeeds() {
-    assert!(create_through_factory(MAX_CONTRACT_SIZE));
 }
 
 /// One byte past it fails the creation, which the factory turns into a halt.

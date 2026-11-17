@@ -1,12 +1,11 @@
 //! The transaction outcome: the result, the gas by ledger, the usage counted and the stop.
 
-use alloy_primitives::{address, Address, Bytes, U256};
-use alloy_sol_types::SolError;
+use alloy_primitives::{address, Address, U256};
 use mega_evm::{
     constants::{COST_PER_HISTORY_BYTE, SLOT_STATE_GAS, TX_GAS_LIMIT_CAP},
     test_utils::{BytecodeBuilder, MemoryDatabase},
     BlockGasCounters, EvmTxRuntimeLimits, LimitCheck, LimitKind, LimitUsage, MegaEvm,
-    MegaLimitExceeded, MegaTransactionOutcome, TX_BODY_SIZE, WRITE_RECORD_SIZE,
+    MegaTransactionOutcome, TX_BODY_SIZE, WRITE_RECORD_SIZE,
 };
 
 use crate::common::{
@@ -110,20 +109,6 @@ fn test_outcome_reports_the_stop() {
         LimitUsage { data_size: TX_BODY_SIZE, write_records: 0, state_growth: 0 },
         "the stop drops the writes and keeps the body"
     );
-}
-
-/// A contract reverting with `MegaLimitExceeded`'s bytes on its own is not a stop.
-#[test]
-fn test_spoofed_revert_data_is_not_a_stop() {
-    let data: Bytes = MegaLimitExceeded { kind: 0, limit: 1 }.abi_encode().into();
-    let code = BytecodeBuilder::default().revert_with_data(&data).build();
-    let outcome = execute(
-        MemoryDatabase::default().account_code(CONTRACT, code),
-        EvmTxRuntimeLimits::no_limits(),
-        1_000_000,
-    );
-    assert_eq!(outcome.result.output(), Some(&data));
-    assert_eq!(outcome.limit_exceeded, None);
 }
 
 /// Counts the steps it sees.

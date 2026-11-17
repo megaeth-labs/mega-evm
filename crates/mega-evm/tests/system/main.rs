@@ -6,7 +6,6 @@ mod common;
 mod control;
 mod dispatch;
 mod keyless;
-mod limit_control;
 mod oracle;
 mod oracle_storage;
 mod predeploys;

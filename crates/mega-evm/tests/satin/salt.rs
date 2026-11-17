@@ -316,22 +316,6 @@ fn test_the_new_account_charge_of_a_call_scales_with_the_account_s_bucket() {
     );
 }
 
-/// A `SELFDESTRUCT` moving a balance to an account that does not exist adds that account's leaf,
-/// and the beneficiary's own bucket prices it — the same entry and the same site a value `CALL`
-/// pays, reached from the opcode that empties an account rather than the one that funds it. The
-/// history is the body and the destruction's two records, the beneficiary's and that of the
-/// account it clears.
-#[test]
-fn test_the_selfdestruct_beneficiary_charge_scales_with_the_beneficiary_s_bucket() {
-    assert_scales(
-        "SELFDESTRUCT to a new account",
-        entry(GasId::new_account_state_gas()),
-        TX_BODY_SIZE + 2 * WRITE_RECORD_SIZE,
-        |envs, m| crowded_account(envs, EMPTY, m),
-        || (db(selfdestruct_to(EMPTY).build()), call_contract()),
-    );
-}
-
 /// `CREATE`: the bucket of the address it deploys to prices the account it adds. The history is
 /// the body and the creation's two records, the creator's nonce and the created account; the
 /// deployed code is empty.

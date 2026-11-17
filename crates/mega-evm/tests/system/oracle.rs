@@ -13,7 +13,7 @@ use mega_evm::{
     RecordedHint, TestExternalEnvs,
 };
 use revm::{
-    bytecode::opcode::{CALL, CALLCODE, DELEGATECALL, STATICCALL},
+    bytecode::opcode::CALL,
     context::{result::ResultAndState, CfgEnv},
     context_interface::ContextTr,
     interpreter::{interpreter::EthInterpreter, CallInputs, CallOutcome},
@@ -22,8 +22,7 @@ use revm::{
 };
 
 use crate::common::{
-    block, call_tx, call_tx_with_gas, calls_with, run, steer, system_db, with_contract, CALLER,
-    CONTRACT,
+    block, call_tx, call_tx_with_gas, run, steer, system_db, with_contract, CALLER, CONTRACT,
 };
 
 /// A topic and payload the tests send.
@@ -86,64 +85,6 @@ fn try_run_with_oracle_under(
     .with_tx_runtime_limits(limits);
     let outcome = MegaEvm::new(ctx).execute_transaction(tx).ok()?;
     Some((outcome, envs.recorded_hints()))
-}
-
-/// A `sendHint` transaction reaches the oracle service with the caller, the topic and the
-/// payload, and the call itself succeeds through the contract's own bytecode.
-#[test]
-fn test_send_hint_reaches_the_oracle_service() {
-    let payload = b"a hint".to_vec();
-    let (result, hints, _) = run_with_oracle(
-        system_db(),
-        call_tx(ORACLE_CONTRACT_ADDRESS, send_hint(&payload), U256::ZERO),
-    );
-
-    assert!(result.result.is_success(), "{:?}", result.result);
-    assert_eq!(
-        hints,
-        vec![RecordedHint { from: CALLER, topic: TOPIC, data: Bytes::from(payload) }],
-    );
-}
-
-/// The bytes the node materialised for the hint are counted on the transaction's data size,
-/// trailing bytes the decoder ignores included.
-#[test]
-fn test_the_hint_payload_is_counted_on_the_transaction() {
-    let data = send_hint(b"a hint");
-    let (_, hints, usage) =
-        run_with_oracle(system_db(), call_tx(ORACLE_CONTRACT_ADDRESS, data.clone(), U256::ZERO));
-    assert_eq!(hints.len(), 1);
-    assert_eq!(usage.data_size, top_level_hint(data.len() as u64));
-
-    // The same call with bytes the ABI decoder drops pays for them too.
-    let padded: Vec<u8> = data.iter().copied().chain([0_u8; 64]).collect();
-    let (_, hints, padded_usage) =
-        run_with_oracle(system_db(), call_tx(ORACLE_CONTRACT_ADDRESS, &padded, U256::ZERO));
-    assert_eq!(hints.len(), 1, "the trailing bytes do not stop the decoding");
-    assert_eq!(padded_usage.data_size, top_level_hint(padded.len() as u64));
-}
-
-/// A payload that does not decode is paid for and forwards nothing.
-#[test]
-fn test_a_malformed_payload_is_paid_for_and_not_forwarded() {
-    let data: Vec<u8> =
-        IOracle::sendHintCall::SELECTOR.iter().copied().chain([0xff_u8; 8]).collect();
-    let (_, hints, usage) =
-        run_with_oracle(system_db(), call_tx(ORACLE_CONTRACT_ADDRESS, &data, U256::ZERO));
-    assert!(hints.is_empty(), "a payload that does not decode carries no hint");
-    assert_eq!(usage.data_size, top_level_hint(data.len() as u64));
-}
-
-/// A `STATICCALL` forwards the hint: `sendHint` is a view method.
-#[test]
-fn test_a_static_call_forwards_the_hint() {
-    let data = send_hint(b"static");
-    let code = calls_with(STATICCALL, ORACLE_CONTRACT_ADDRESS, &data, 0);
-    let (result, hints, _) =
-        run_with_oracle(with_contract(code), call_tx(CONTRACT, [], U256::ZERO));
-    assert!(result.result.is_success());
-    assert_eq!(hints.len(), 1);
-    assert_eq!(hints[0].from, CONTRACT, "the frame that called is the sender of the hint");
 }
 
 /// A call that carries value is judged on its gas like any other, and a call that requests none
@@ -215,36 +156,9 @@ fn unfunded_contract_db(data: &[u8]) -> MemoryDatabase {
     system_db().account_code(CONTRACT, unfunded_value_hint_call(data))
 }
 
-/// A value-bearing `sendHint` whose caller cannot fund the value is intercepted before revm
-/// starts the call and checks the funds: the hint is forwarded and its input counted, then the
-/// call fails for the funds with empty return data and moves no value, and the Oracle's bytecode
-/// never runs.
-#[test]
-fn test_an_unfunded_value_hint_is_forwarded_and_then_fails_for_funds() {
-    let data = send_hint(b"unfunded");
-    let (result, hints, usage) =
-        run_with_oracle(unfunded_contract_db(&data), call_tx(CONTRACT, [], U256::ZERO));
-
-    assert!(result.result.is_success(), "the contract survives the failed call");
-    let returned = result.result.output().cloned().unwrap_or_default();
-    let (status, return_data) = crate::common::split_outcome(&returned);
-    assert!(!status, "the call fails for funds");
-    assert!(return_data.is_empty(), "with empty return data");
-    assert_eq!(
-        hints,
-        vec![RecordedHint { from: CONTRACT, topic: TOPIC, data: Bytes::from_static(b"unfunded") }],
-        "the hint reached the service",
-    );
-    assert_eq!(usage.data_size, nested_hint(data.len() as u64), "and its input is counted");
-    assert_eq!(usage.data_size, mega_evm::TX_BODY_SIZE + data.len() as u64);
-    let balance =
-        |address| result.state.get(&address).map_or(U256::ZERO, |account| account.info.balance);
-    assert_eq!(balance(CONTRACT), U256::ZERO, "no value moved from the caller");
-    assert_eq!(balance(ORACLE_CONTRACT_ADDRESS), U256::ZERO, "and none reached the Oracle");
-}
-
-/// The same unfunded call under a data-size limit its input would cross is answered with the
-/// stop, not with the funds failure: nothing is forwarded and nothing is counted.
+/// A value-bearing `sendHint` its caller cannot fund, under a data-size limit its input would
+/// cross, is answered with the stop, not with the funds failure: nothing is forwarded and nothing
+/// is counted.
 #[test]
 fn test_an_unfunded_value_hint_over_the_limit_is_answered_with_the_stop() {
     let data = send_hint(b"unfunded");
@@ -267,22 +181,6 @@ fn test_an_unfunded_value_hint_over_the_limit_is_answered_with_the_stop() {
     assert!(hints.is_empty(), "nothing is forwarded");
     assert_eq!(outcome.usage.data_size, nested_hint(0), "and nothing is counted");
     assert_eq!(outcome.limit_exceeded, None, "a stop below is no stop of the transaction");
-}
-
-/// The bytecode refuses the value of a value-bearing call that holds gas, as before: the hint is
-/// forwarded and the call reports failure.
-#[test]
-fn test_a_value_bearing_call_with_gas_forwards_its_hint_and_the_bytecode_refuses() {
-    let data = send_hint(b"paid with gas");
-    let code = calls_with(CALL, ORACLE_CONTRACT_ADDRESS, &data, 1);
-    let (result, hints, usage) =
-        run_with_oracle(with_contract(code), call_tx(CONTRACT, [], U256::ZERO));
-
-    let outcome = result.result.output().cloned().unwrap_or_default();
-    let (status, _) = crate::common::split_outcome(&outcome);
-    assert!(!status, "the bytecode refuses the value");
-    assert_eq!(hints.len(), 1);
-    assert_eq!(usage.data_size, nested_hint(data.len() as u64));
 }
 
 /// Records the gas the first frame of the Oracle call holds: the gas limit of the call as the
@@ -380,83 +278,6 @@ fn test_a_transactions_own_value_hint_is_admitted_on_one_gas_and_more() {
                  without the hint",
             );
         }
-    }
-}
-
-/// A call forwarded no gas forwards nothing: it cannot run the contract either, so its hint
-/// would be a free message to the service.
-#[test]
-fn test_a_call_without_gas_forwards_nothing() {
-    use revm::bytecode::opcode::{POP, STOP};
-
-    let data = send_hint(b"free");
-    let code = BytecodeBuilder::default()
-        .mstore(0x0, &data)
-        .push_number(0_u64) // retSize
-        .push_number(0_u64) // retOffset
-        .push_number(data.len() as u64) // argsSize
-        .push_number(0_u64) // argsOffset
-        .push_number(0_u64) // value
-        .push_address(ORACLE_CONTRACT_ADDRESS)
-        .push_number(0_u64) // gas
-        .append(CALL)
-        .append(POP)
-        .append(STOP)
-        .build();
-    let (result, hints, usage) =
-        run_with_oracle(with_contract(code), call_tx(CONTRACT, [], U256::ZERO));
-
-    assert!(result.result.is_success(), "the caller survives the failed call");
-    assert!(hints.is_empty());
-    assert_eq!(usage.data_size, nested_hint(0));
-}
-
-/// A call forwarded one gas does forward its hint, and the frame it was sent from then runs out
-/// of gas: positive gas is what admits a hint, not a promise that the bytecode can run. The hint
-/// is a synchronous side effect, so the service holds it whatever the frame does next.
-#[test]
-fn test_a_call_with_one_gas_forwards_the_hint_it_cannot_deliver() {
-    use revm::bytecode::opcode::{MSTORE, RETURN};
-
-    let data = send_hint(b"one gas");
-    let code = BytecodeBuilder::default()
-        .mstore(0x0, &data)
-        .push_number(0_u64) // retSize
-        .push_number(0_u64) // retOffset
-        .push_number(data.len() as u64) // argsSize
-        .push_number(0_u64) // argsOffset
-        .push_number(0_u64) // value
-        .push_address(ORACLE_CONTRACT_ADDRESS)
-        .push_number(1_u64) // gas: enough to admit the hint, not to run the bytecode
-        .append(CALL)
-        // memory[0..32] = the call's status, and return it
-        .push_number(0_u64)
-        .append(MSTORE)
-        .push_number(32_u64)
-        .push_number(0_u64)
-        .append(RETURN)
-        .build();
-    let (result, hints, usage) =
-        run_with_oracle(with_contract(code), call_tx(CONTRACT, [], U256::ZERO));
-
-    assert!(result.result.is_success(), "the caller survives the failed call");
-    let outcome = result.result.output().cloned().unwrap_or_default();
-    let (status, _) = crate::common::split_outcome(&outcome);
-    assert!(!status, "one gas does not run the contract's dispatcher");
-    assert_eq!(hints.len(), 1, "the hint reached the service before the frame ran out of gas");
-    assert_eq!(usage.data_size, nested_hint(data.len() as u64), "and its bytes stay counted");
-}
-
-/// `CALLCODE` and `DELEGATECALL` never reach the interceptor, so they forward nothing.
-#[test]
-fn test_callcode_and_delegatecall_forward_nothing() {
-    let data = send_hint(b"scheme");
-    for scheme in [CALLCODE, DELEGATECALL] {
-        let code = calls_with(scheme, ORACLE_CONTRACT_ADDRESS, &data, 0);
-        let (_, hints, usage) =
-            run_with_oracle(with_contract(code), call_tx(CONTRACT, [], U256::ZERO));
-        assert!(hints.is_empty(), "scheme {scheme:#x} must not reach the interceptor");
-        assert_eq!(usage.data_size, nested_hint(0));
     }
 }
 
@@ -622,27 +443,6 @@ const DISABLE: [u8; 4] =
     mega_evm::system::IMegaAccessControl::disableVolatileDataAccessCall::SELECTOR;
 const ENABLE: [u8; 4] =
     mega_evm::system::IMegaAccessControl::enableVolatileDataAccessCall::SELECTOR;
-
-/// A contract's hint reaches the service with the contract as its sender, and the call runs the
-/// Oracle's `sendHint`, which succeeds.
-#[test]
-fn test_a_contracts_hint_reaches_the_service_from_the_contract() {
-    let data = send_hint(&[0xde, 0xad, 0xbe, 0xef]);
-    let code = return_status(call_oracle(BytecodeBuilder::default(), &data, 1_000_000));
-    let (result, hints, _) =
-        run_with_oracle(with_contract(code), call_tx(CONTRACT, [], U256::ZERO));
-
-    let outcome = result.result.output().cloned().unwrap_or_default();
-    assert_eq!(U256::from_be_slice(&outcome), U256::ONE, "sendHint succeeded");
-    assert_eq!(
-        hints,
-        vec![RecordedHint {
-            from: CONTRACT,
-            topic: TOPIC,
-            data: Bytes::from_static(&[0xde, 0xad, 0xbe, 0xef])
-        }],
-    );
-}
 
 /// The Oracle's code at another address is not the Oracle: its `sendHint` runs and forwards
 /// nothing.

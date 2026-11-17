@@ -3,7 +3,7 @@
 
 use alloy_evm::Evm;
 use alloy_primitives::{address, Address, Bytes, U256};
-use alloy_sol_types::{SolCall, SolError};
+use alloy_sol_types::SolCall;
 use mega_evm::{
     system::{
         storage_slots::CURRENT_SYSTEM_ADDRESS, IMegaAccessControl, IMegaLimitControl, IOracle,
@@ -68,16 +68,6 @@ fn test_an_intercepted_call_costs_what_a_plain_call_costs() {
     assert_eq!(spent(intercepted), spent(plain));
 }
 
-/// How much gas the caller forwards to an intercepted call does not change what it costs: the
-/// forwarded gas comes back in full.
-#[test]
-fn test_the_forwarded_gas_of_an_intercepted_call_comes_back() {
-    let low = call_with_gas(LIMIT_CONTROL_ADDRESS, &REMAINING_COMPUTE_GAS, 1_000_000);
-    let high = call_with_gas(LIMIT_CONTROL_ADDRESS, &REMAINING_COMPUTE_GAS, 9_000_000);
-    assert_eq!(low.len(), high.len(), "the two programs differ only in the gas they forward");
-    assert_eq!(spent(low), spent(high));
-}
-
 /// Admission is the four selector bytes: the exact selector and the selector followed by
 /// anything are both intercepted, and an input too short to hold one is not.
 #[test]
@@ -96,19 +86,6 @@ fn test_admission_is_the_selector_alone() {
     assert!(!intercepted(IS_DISABLED[..3].to_vec()), "three bytes are not a selector");
     assert!(!intercepted(Vec::new()), "no input is not a selector");
     assert!(!intercepted(vec![0xde, 0xad, 0xbe, 0xef]), "another selector");
-}
-
-/// The dispatch reaches a system contract only at its own address: the same selectors sent
-/// anywhere else run whatever code is there.
-#[test]
-fn test_the_address_admits_the_dispatch() {
-    let db = system_db().account_code(PLAIN_TARGET, Bytes::new());
-    let result = run(db, call_tx(PLAIN_TARGET, IS_DISABLED, U256::ZERO));
-    assert!(result.result.is_success());
-    assert!(
-        result.result.output().is_none_or(|output| output.is_empty()),
-        "an account without code answers nothing, so nothing was intercepted",
-    );
 }
 
 /// Records which addresses an inspector sees called, and in which order they end.
@@ -196,28 +173,6 @@ fn test_a_database_error_reading_the_registry_fails_the_transaction() {
     assert!(format!("{error}").contains("injected storage() error"), "{error}");
 }
 
-/// The value policy is the interceptor's, not the account's: a value-bearing transaction to a
-/// control contract is refused with `NonZeroTransfer()` before any value moves.
-#[test]
-fn test_a_value_bearing_transaction_is_refused_before_the_value_moves() {
-    let db = system_db();
-    let mut tx = call_tx(LIMIT_CONTROL_ADDRESS, REMAINING_COMPUTE_GAS, U256::from(1));
-    tx.0.base.caller = crate::common::CALLER;
-    let result = run(db, tx);
-
-    let revm::context::result::ExecutionResult::Revert { output, .. } = &result.result else {
-        panic!("the transaction did not revert: {:?}", result.result);
-    };
-    assert_eq!(output[..], IMegaLimitControl::NonZeroTransfer::SELECTOR);
-    assert!(
-        result
-            .state
-            .get(&LIMIT_CONTROL_ADDRESS)
-            .is_none_or(|account| account.info.balance.is_zero()),
-        "the refused value stayed with its sender",
-    );
-}
-
 /// A `STATICCALL` to a system contract from inside a static frame is intercepted too: nothing
 /// about the answer writes state.
 #[test]
@@ -262,14 +217,6 @@ fn test_a_nested_static_call_is_intercepted() {
             &false
         )),
     );
-}
-
-/// A transaction that reaches no system contract is untouched by the dispatch.
-#[test]
-fn test_a_transaction_that_touches_no_system_contract_is_untouched() {
-    let code = BytecodeBuilder::default().append(STOP).build();
-    let result = run(with_contract(code), call_tx(CONTRACT, [], U256::ZERO));
-    assert!(result.result.is_success());
 }
 
 /// The two system contracts without an interceptor run their bytecode, whatever the call

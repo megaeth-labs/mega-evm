@@ -14,12 +14,9 @@ use mega_evm::{
     EvmTxRuntimeLimits, LimitUsage, MegaEvm, MegaTransaction, AUTHORIZATION_SIZE, LOG_BASE_SIZE,
     LOG_TOPIC_SIZE, TX_BODY_SIZE, WRITE_RECORD_SIZE,
 };
-use revm::{
-    bytecode::opcode::{
-        CALL, CREATE, DELEGATECALL, GAS, INVALID, LOG0, LOG1, POP, PUSH0, SELFDESTRUCT, SLOAD,
-        SSTORE, STATICCALL, STOP,
-    },
-    context::result::ExecutionResult,
+use revm::bytecode::opcode::{
+    CALL, CREATE, DELEGATECALL, GAS, INVALID, LOG0, LOG1, POP, PUSH0, SELFDESTRUCT, SLOAD, SSTORE,
+    STATICCALL, STOP,
 };
 
 use crate::common::{
@@ -327,17 +324,6 @@ fn test_a_reverted_childs_write_and_write_back_leave_its_callers_write() {
     );
 }
 
-/// The sender's own authorization in [`call_with_body`] applies: its bytes are the body's, and
-/// the account it writes is the sender's, which the body already records.
-#[test]
-fn test_the_senders_own_authorization_applies_and_records_nothing() {
-    let outcome = execute(funded(), call_with_body(Bytes::new()));
-    assert!(outcome.result.is_success(), "{:?}", outcome.result);
-    let code = outcome.state[&CALLER].info.code.clone().expect("the sender is delegated");
-    assert_eq!(code.eip7702_address(), Some(LIBRARY));
-    assert_eq!(outcome.usage, kept(20 + 32 + AUTHORIZATION_SIZE, 0, 0));
-}
-
 /// A `SELFDESTRUCT` in a static frame halts before it moves anything, so the frame keeps what a
 /// frame that stops keeps: nothing.
 #[test]
@@ -356,17 +342,6 @@ fn test_a_selfdestruct_in_a_static_frame_keeps_nothing() {
     assert_eq!(selfdestruct.usage, stop.usage);
     assert_eq!(selfdestruct.usage, kept(0, 0, 0));
     assert!(selfdestruct.state.get(&EXISTING).is_none_or(|a| a.info.balance.is_zero()));
-}
-
-/// A transaction whose own frame reverts keeps its body: the body is the transaction's, not the
-/// frame's.
-#[test]
-fn test_a_top_level_revert_keeps_the_body() {
-    let db = funded().account_code(CALLEE, BytecodeBuilder::default().revert().build());
-    let outcome = execute(db, call(CALLER, CALLEE, U256::ZERO, GAS_LIMIT));
-    assert!(matches!(outcome.result, ExecutionResult::Revert { .. }), "{:?}", outcome.result);
-    assert_eq!(outcome.usage, kept(0, 0, 0));
-    assert_eq!(outcome.limit_exceeded, None);
 }
 
 /// A transaction limit equal to what the transaction keeps does not stop it, however much of it

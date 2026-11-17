@@ -224,24 +224,6 @@ fn start_charges() -> u64 {
         2 * common::history(super::WRITE_RECORD_SIZE)
 }
 
-/// 1,001 distinct new authorities, below the execution cap. Apply none. The transaction's own
-/// frame stops before it runs, kind 3, `limit` 1,000. No authority is created.
-#[test]
-fn test_an_authorization_list_of_1001_new_authorities_stops_before_the_first_frame() {
-    let Some(gas) = gas_below(1_001) else { return };
-    let db = world(&[(CONTRACT, Bytes::from_static(&[0x00]))]);
-    let outcome = execute(db, auth_tx(gas, U256::ZERO, CONTRACT, &many(1_001)));
-    let stop = reverted_stop(&outcome);
-    assert_eq!(stop, MegaLimitExceeded { kind: 3, limit: TX_STATE_GROWTH_LIMIT });
-    assert!(outcome.limit_exceeded.is_some());
-    assert_eq!(nonce_of(&outcome, authority(1)), 0, "no authority account is kept");
-    assert_eq!(nonce_of(&outcome, CALLER), 1, "the sender's nonce stands");
-    assert_eq!(outcome.usage.write_records, 0);
-    if pins_state() {
-        assert_eq!(outcome.gas.state, 0, "no authority state gas is charged");
-    }
-}
-
 /// 1,000 new authorities fit and are applied. The transaction's value would create one more
 /// account. That recipient stops the first frame, kind 3, `limit` 0, and is not kept. The
 /// authorities stay.

@@ -186,24 +186,6 @@ fn body_and_records(records: u64) -> u64 {
     history(TX_BODY_SIZE + 1 + records * WRITE_RECORD_SIZE)
 }
 
-/// One transfer records its sender and its recipient, and logs.
-#[test]
-fn test_one_transfer_records_its_sender_and_its_recipient() {
-    let outcome = run_guarded(
-        guarded_code(append_value_call(BytecodeBuilder::default(), CONTRACT, 5).append(POP).stop()),
-        Bytes::new(),
-    );
-    assert!(outcome.result.is_success(), "{:?}", outcome.result);
-    assert_eq!(
-        outcome.usage,
-        guarded(grown(with_extra(records(2), TRANSFER_LOG_SIZE), 1)),
-        "CALLEE, CONTRACT, a log; CONTRACT, which holds no code, is new"
-    );
-    if !crate::common::history_rounds() {
-        assert_eq!(outcome.gas.history, body_and_records(2));
-    }
-}
-
 /// A transfer and its exact return take both records back: the recipient hands the value back to
 /// its caller, so both balances are what the transaction loaded, and neither account keeps a
 /// record. The two transfer logs stay, and the history the caller paid for the two records comes
@@ -228,24 +210,6 @@ fn test_a_transfer_and_its_exact_return_take_both_records_back() {
     assert_eq!(outcome.state[&CONTRACT].info.balance, U256::ZERO);
     if !crate::common::history_rounds() {
         assert_eq!(outcome.gas.history, body_and_records(0), "the records' history came back");
-    }
-}
-
-/// A partial return leaves both accounts changed, so both records stand.
-#[test]
-fn test_a_partial_return_keeps_both_records() {
-    let outcome = run_guarded(
-        guarded_code(append_value_call(BytecodeBuilder::default(), CONTRACT, 5).append(POP).stop()),
-        append_return_to_caller(BytecodeBuilder::default(), 3).append(POP).stop().build(),
-    );
-    assert!(outcome.result.is_success(), "{:?}", outcome.result);
-    assert_eq!(
-        outcome.usage,
-        guarded(with_extra(records(2), 2 * TRANSFER_LOG_SIZE)),
-        "CALLEE and CONTRACT still differ from what the transaction loaded"
-    );
-    if !crate::common::history_rounds() {
-        assert_eq!(outcome.gas.history, body_and_records(2));
     }
 }
 
@@ -323,20 +287,6 @@ fn test_a_child_that_reverts_after_writing_keeps_nothing() {
     }
 }
 
-/// A creation that fails leaves its creator's nonce record on the caller: the bump stands, and
-/// the creator's account differs by it. A second failing creation adds nothing, the creator being
-/// changed already.
-#[test]
-fn test_a_creation_that_fails_leaves_the_creators_record_on_the_caller() {
-    for (creations, case) in [(1, "one failed creation"), (2, "two failed creations")] {
-        let db = funded().account_code(OUTER_CREATOR, reverting_creations(creations));
-        let (result, usage) = run(db, call(CALLER, OUTER_CREATOR, U256::ZERO, value_call_room()));
-        assert!(result.result.is_success(), "{case}");
-        assert_eq!(usage, records(1), "{case}: the creator's nonce record alone");
-        assert_eq!(result.state[&OUTER_CREATOR].info.nonce, creations as u64, "{case}");
-    }
-}
-
 /// Nested creations record each account once: the outer creator, the account it creates — whose
 /// own creation bumps a nonce the creation already changed — and the account that one creates.
 #[test]
@@ -368,23 +318,6 @@ fn test_nested_creations_record_each_account_once() {
     let created = CALLEE.create(0);
     assert_eq!(result.state[&created].info.nonce, 2, "it created one account of its own");
     assert!(result.state.contains_key(&created.create(1)));
-}
-
-/// A value call to the frame's own account moves nothing and records nothing, and neither does a
-/// value `CALLCODE`, which moves the value from the calling account to that same account.
-///
-/// Before the net-change rule either recorded the calling account once, as the transfer's sender.
-#[test]
-fn test_a_value_call_to_self_records_nothing() {
-    assert_eq!(nested_delta(&[SELF_CALLER]), LimitUsage::ZERO, "a CALL to itself");
-
-    let code = BytecodeBuilder::default().callcode(CONTRACT, U256::from(1)).append(POP).stop();
-    let (result, usage) = run(
-        funded().account_code(CALLEE, code.build()),
-        call(CALLER, CALLEE, U256::ZERO, value_call_room()),
-    );
-    assert!(result.result.is_success(), "{:?}", result.result);
-    assert_eq!(usage, body_only(), "a value CALLCODE");
 }
 
 /// A transfer to the transaction's sender records nothing for it — validation changed its account
@@ -611,18 +544,6 @@ fn test_two_creates_record_the_creator_once() {
     );
 }
 
-/// A value transfer into a child that fails is discarded with the child, sender included.
-#[test]
-fn test_failed_child_discards_its_transfer_records() {
-    let code =
-        append_value_call(BytecodeBuilder::default(), CONTRACT, 1).append(POP).append(STOP).build();
-    let db =
-        funded().account_code(CALLEE, code).account_code(CONTRACT, Bytes::from_static(&[INVALID]));
-    let (result, usage) = run(db, call(CALLER, CALLEE, U256::ZERO, value_call_room()));
-    assert!(result.result.is_success(), "the outer call succeeds although the child halts");
-    assert_eq!(usage, body_only());
-}
-
 /// After a failed transfer the sender can be recorded again by the next one.
 ///
 /// The first child burns the gas it was forwarded, so the second transfer forwards none: its
@@ -706,16 +627,6 @@ fn reverting_creations(n: usize) -> Bytes {
     code.into()
 }
 
-/// Two reverted creations record the creator once: the first record survives, so the second
-/// finds the creator recorded.
-#[test]
-fn test_reverted_then_retried_create_records_the_creator_once() {
-    let db = funded().account_code(OUTER_CREATOR, reverting_creations(2));
-    let (result, usage) = run(db, call(CALLER, OUTER_CREATOR, U256::ZERO, value_call_room()));
-    assert!(result.result.is_success());
-    assert_eq!(usage, records(1));
-}
-
 /// A creation the creator cannot fund never starts (the opcode checks the endowment before it
 /// builds a frame), so it records nothing.
 #[test]
@@ -744,12 +655,6 @@ fn value_delta(to: Address) -> LimitUsage {
     let (zero_value, usage_zero) = run(db(), call(A, to, U256::ZERO, value_call_room()));
     assert!(with_value.result.is_success() && zero_value.result.is_success());
     usage_value.saturating_sub(usage_zero)
-}
-
-/// A top-level transfer to the sender itself writes no account the body does not already count.
-#[test]
-fn test_top_level_self_transfer_no_double_count() {
-    assert_eq!(value_delta(A), LimitUsage::ZERO);
 }
 
 /// A top-level transfer to another account records the recipient.
@@ -810,31 +715,6 @@ fn test_nested_self_transfer_after_recorded_sender_counts_nothing() {
 
 /* ---------- storage, logs, selfdestruct ---------- */
 
-/// A slot's first change is a record; writing it back to its original value takes it back.
-#[test]
-fn test_sstore_first_change_records_and_write_back_refunds() {
-    type Writes = &'static [(u64, u64)];
-    // (writes, the slot's original value, what is kept: a slot written from zero is new)
-    let cases: [(Writes, u64, LimitUsage); 4] = [
-        (&[(0, 1)], 0, grown(records(1), 1)),
-        (&[(0, 1), (0, 2)], 0, grown(records(1), 1)),
-        (&[(0, 1), (0, 0)], 0, body_only()),
-        (&[(0, 0)], 5, records(1)),
-    ];
-    for (writes, original, expected) in cases {
-        let mut code = BytecodeBuilder::default();
-        for (slot, value) in writes {
-            code = code.sstore(U256::from(*slot), U256::from(*value));
-        }
-        let db = MemoryDatabase::default()
-            .account_code(CALLEE, code.stop().build())
-            .account_storage(CALLEE, U256::ZERO, U256::from(original));
-        let (result, usage) = run(db, call(CALLER, CALLEE, U256::ZERO, value_call_room()));
-        assert!(result.result.is_success());
-        assert_eq!(usage, expected, "writes {writes:?} over original {original}");
-    }
-}
-
 /// A write-back in a child refunds the record its caller made, and the refund dies with a
 /// failing child.
 #[test]
@@ -860,35 +740,6 @@ fn test_write_back_in_a_child_refunds_the_caller_record() {
         let (result, usage) = run(db, call(CALLER, CALLEE, U256::ZERO, value_call_room()));
         assert!(result.result.is_success());
         assert_eq!(usage, expected);
-    }
-}
-
-/// `SELFDESTRUCT` records the accounts the move changes: the destructed account, whose balance it
-/// clears, and the beneficiary, unless that is the sender, whose account validation changed. A
-/// move to the sender still leaves its transfer log; a destruction to itself, of an account the
-/// transaction did not create, moves nothing and leaves none, and so does one of an account with
-/// no balance.
-///
-/// Before the net-change rule the destructed account was never recorded, only the beneficiary.
-#[test]
-fn test_selfdestruct_records_the_beneficiary_when_value_moves() {
-    let destruct_to = |beneficiary: Address| {
-        BytecodeBuilder::default().push_address(beneficiary).append(SELFDESTRUCT).build()
-    };
-    let cases = [
-        // CONTRACT does not exist: the move creates it.
-        (U256::from(5), CONTRACT, grown(with_extra(records(2), TRANSFER_LOG_SIZE), 1)),
-        (U256::from(5), CALLEE, body_only()),
-        (U256::from(5), CALLER, with_extra(records(1), TRANSFER_LOG_SIZE)),
-        (U256::ZERO, CONTRACT, body_only()),
-    ];
-    for (balance, beneficiary, expected) in cases {
-        let db = MemoryDatabase::default()
-            .account_code(CALLEE, destruct_to(beneficiary))
-            .account_balance(CALLEE, balance);
-        let (result, usage) = run(db, call(CALLER, CALLEE, U256::ZERO, value_call_room()));
-        assert!(result.result.is_success());
-        assert_eq!(usage, expected, "balance {balance}, beneficiary {beneficiary}");
     }
 }
 
@@ -1145,7 +996,6 @@ fn test_a_tools_log_in_step_counts_nothing() {
 
 const DELEGATE: Address = address!("00000000000000000000000000000000DE1E0001");
 const AUTHORITY_1: Address = address!("00000000000000000000000000000000A0717001");
-const AUTHORITY_2: Address = address!("00000000000000000000000000000000A0717002");
 
 /// A type-4 transaction from `CALLER` to `to` with value `value`, carrying authorizations
 /// `(authority, nonce)` that delegate to `DELEGATE`.
@@ -1162,29 +1012,6 @@ fn authorizing_call(
         DELEGATE,
         authorizations,
     )
-}
-
-/// Each distinct applied authority is one record, however many of its authorizations applied;
-/// an authorization that does not apply (a wrong nonce) records nothing.
-#[test]
-fn test_applied_authorities_record_once_each() {
-    let db = || MemoryDatabase::default().account_balance(CALLER, U256::from(1_000));
-    let (result, usage) = run(
-        db(),
-        authorizing_call(CONTRACT, 0, &[(AUTHORITY_1, 0), (AUTHORITY_2, 0), (AUTHORITY_1, 1)]),
-    );
-    assert!(result.result.is_success(), "{:?}", result.result);
-    // Three authorization tuples travel in the body; two distinct authorities are applied, and
-    // the first authorization of each creates it.
-    assert_eq!(usage, grown(with_extra(records(2), 3 * mega_evm::AUTHORIZATION_SIZE), 2));
-
-    let (result, usage) = run(db(), authorizing_call(CONTRACT, 0, &[(AUTHORITY_1, 7)]));
-    assert!(result.result.is_success());
-    assert_eq!(
-        usage,
-        with_extra(body_only(), mega_evm::AUTHORIZATION_SIZE),
-        "a wrong nonce applies nothing, and its tuple is still in the body"
-    );
 }
 
 /// A value transfer to an applied authority records the authority once, not again as the

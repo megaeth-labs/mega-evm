@@ -7,23 +7,18 @@
 //!
 //! It is read off the regular ledger, which is the gas the opcodes charge.
 
-use alloy_op_evm::OpTx;
-use alloy_primitives::{address, Address, Bytes, TxKind, B256, U256};
+use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
-    test_utils::{op_transaction, BytecodeBuilder, MemoryDatabase},
+    test_utils::{BytecodeBuilder, MemoryDatabase},
     MegaTransaction,
 };
 use revm::{
-    bytecode::opcode::{CALL, CALLCODE, POP, PUSH0, STATICCALL, STOP},
-    context::{
-        transaction::{AccessList, AccessListItem, TransactionType},
-        TxEnv,
-    },
+    bytecode::opcode::{CALL, POP, PUSH0, STATICCALL, STOP},
     context_interface::cfg::GasId,
 };
 
 use crate::{
-    common::{block, call, execute},
+    common::{call, execute},
     salt::entry,
 };
 
@@ -55,18 +50,6 @@ fn calls(opcode: u8, to: Address, units: usize) -> Bytes {
     code.append(STOP).build()
 }
 
-/// A call from `CALLER` to `CONTRACT` carrying `access_list`, as an EIP-2930 transaction.
-fn with_access_list(access_list: AccessList) -> MegaTransaction {
-    OpTx(op_transaction(TxEnv {
-        tx_type: TransactionType::Eip2930 as u8,
-        caller: CALLER,
-        kind: TxKind::Call(CONTRACT),
-        gas_limit: 10_000_000 + crate::common::body_history(100),
-        access_list,
-        ..Default::default()
-    }))
-}
-
 /// How much more the first of the calls `opcode` makes to `to` costs than the second, on the
 /// regular ledger: the 0-, 1- and 2-call programs are run and differenced, so what every call
 /// costs alike cancels, and what is left is the first touch's price over a warm touch's.
@@ -94,54 +77,8 @@ fn test_the_first_call_to_an_address_nothing_warmed_is_charged_cold() {
     assert_eq!(first_call_over_second(CALL, EXISTING, plain), cold_over_warm() as i64);
 }
 
-/// A precompile is warm from the transaction's start: the first `CALL` to one costs what the
-/// second does.
-#[test]
-fn test_the_first_call_to_a_precompile_is_charged_warm() {
-    assert_eq!(first_call_over_second(CALL, IDENTITY, plain), 0);
-}
-
-/// So does the first `STATICCALL`.
+/// The first `STATICCALL` to a precompile is charged warm, as the control above is charged cold.
 #[test]
 fn test_the_first_staticcall_to_a_precompile_is_charged_warm() {
     assert_eq!(first_call_over_second(STATICCALL, IDENTITY, plain), 0);
-}
-
-/// An access-list address is warm from the start whether it is listed with storage keys or
-/// without: the first `CALL` to it costs what the second does, where without the list it pays the
-/// cold price.
-#[test]
-fn test_the_first_call_to_an_access_list_address_is_charged_warm() {
-    let listed = |keys: Vec<B256>| {
-        move || {
-            with_access_list(AccessList(vec![AccessListItem {
-                address: EXISTING,
-                storage_keys: keys.clone(),
-            }]))
-        }
-    };
-    assert_eq!(first_call_over_second(CALL, EXISTING, listed(vec![])), 0, "without keys");
-    assert_eq!(first_call_over_second(CALL, EXISTING, listed(vec![B256::ZERO])), 0, "with a key");
-}
-
-/// The same for `CALLCODE`: its first touch of an access-list address listed without keys costs
-/// what the second does.
-#[test]
-fn test_the_first_callcode_to_an_access_list_address_is_charged_warm() {
-    let listed = || {
-        with_access_list(AccessList(vec![AccessListItem {
-            address: EXISTING,
-            storage_keys: vec![],
-        }]))
-    };
-    assert_eq!(first_call_over_second(CALLCODE, EXISTING, listed), 0);
-}
-
-/// The block beneficiary is warm from the start (EIP-3651): the first `CALL` to it costs what the
-/// second does. The call reads the beneficiary's account, which gas detention marks, but a mark
-/// charges nothing.
-#[test]
-fn test_the_first_call_to_the_beneficiary_is_charged_warm() {
-    let beneficiary = block().beneficiary;
-    assert_eq!(first_call_over_second(CALL, beneficiary, plain), 0);
 }

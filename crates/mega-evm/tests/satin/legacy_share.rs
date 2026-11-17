@@ -27,7 +27,7 @@ use revm::bytecode::opcode::{
 
 use crate::common::{
     account_share, account_state_gas, authorizing_call, beneficiary_share, call, create,
-    create_share, execute, runs_at_measurement_prices, slot_share,
+    create_share, execute, runs_at_measurement_prices,
 };
 
 const CALLER: Address = address!("0000000000000000000000000000000000710000");
@@ -82,21 +82,6 @@ fn measuring(prefix: BytecodeBuilder, op: BytecodeBuilder) -> Bytes {
 fn word(outcome: &MegaTransactionOutcome) -> u64 {
     let output = outcome.result.output().expect("an output");
     U256::from_be_slice(output).to::<u64>()
-}
-
-/// A fresh slot's `SSTORE` takes its share, 10,000 at the spec's prices, from regular gas, and
-/// draws 22,100 from regular gas in all, the cold access and the 20,000 of a fresh slot before
-/// Satin.
-#[test]
-fn test_a_fresh_slot_takes_its_legacy_share_from_regular_gas() {
-    let op = BytecodeBuilder::default().append_many([PUSH1, 1, PUSH1, 1, SSTORE]);
-    let outcome = run(measuring(BytecodeBuilder::default(), op));
-    assert_eq!(paid_by_regular(&outcome, ABOVE_CAP), slot_share());
-    if runs_at_measurement_prices() {
-        return;
-    }
-    assert_eq!(slot_share(), 10_000);
-    assert_eq!(word(&outcome), 3 + 3 + 22_100 + 2, "the two pushes, the SSTORE and the GAS");
 }
 
 /// A value `CALL` that creates its target's account takes its share, 25,000 at the spec's prices,

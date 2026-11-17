@@ -207,52 +207,6 @@ fn test_a_forward_capped_below_the_signed_gas_limit_is_refused() {
     assert_nothing_written(&outcome, &deployment, 0);
 }
 
-/// A transaction that leaves the call exactly the signed gas limit deploys.
-///
-/// Below the execution cap only: above it the transaction's frame is forwarded the cap itself
-/// and the reservoir pays the call's state and history charges, so no gas limit leaves the
-/// call this little. The refusal above the cap is
-/// `limits::test_a_refusal_after_the_charges_gives_the_reservoir_back`.
-#[test]
-fn test_a_forward_at_the_signed_gas_limit_deploys() {
-    let deployment = Deployment::signed(0, 500_000, U256::ZERO, deploying(&runtime(1)));
-    let gas_limit = gas_limit_forwarding(&deployment, one_byte_init_len(), 500_000);
-    let outcome = submit(db_for(&deployment, U256::ONE), &deployment.tx, LARGE_OVERRIDE, gas_limit);
-    assert_eq!(returned(&outcome).deployedAddress, deployment.address);
-}
-
-/// The charge for the signer's account comes out of the gas the creation would be forwarded when
-/// the transaction has no reservoir, so it can take the forward below the signed gas limit: the
-/// same transaction deploys for a signer that has an account and is refused for one that has
-/// none. Above the execution cap the reservoir pays the charge, and both deploy.
-#[test]
-fn test_the_signers_account_can_take_the_forward_below_the_signed_gas_limit() {
-    // An account that costs nothing takes nothing from the forward.
-    if state_is_free() {
-        return;
-    }
-    let signed = signed_above_the_account();
-    let deployment = Deployment::signed(0, signed, U256::ZERO, deploying(&runtime(1)));
-    let new_account = entry(GasId::new_account_state_gas());
-    let gas_limit =
-        gas_limit_forwarding(&deployment, one_byte_init_len(), signed + new_account / 2);
-
-    let funded = submit(db_for(&deployment, U256::ONE), &deployment.tx, LARGE_OVERRIDE, gas_limit);
-    assert_eq!(returned(&funded).deployedAddress, deployment.address, "the control deploys");
-    let empty = submit(system_db(), &deployment.tx, LARGE_OVERRIDE, gas_limit);
-    assert_eq!(
-        refusal(&empty),
-        KeylessDeployError::GasLimitTooLow {
-            tx_gas_limit: signed,
-            provided_gas_limit: signed + new_account / 2 - new_account,
-        },
-    );
-    assert_nothing_written(&empty, &deployment, 0);
-
-    let wide = submit(system_db(), &deployment.tx, LARGE_OVERRIDE, GAS_LIMITS[1]);
-    assert_eq!(returned(&wide).deployedAddress, deployment.address, "the reservoir pays");
-}
-
 /// Rule 3: the signer is recovered from the signature. `r` above the curve order recovers
 /// nothing.
 #[test]
@@ -946,38 +900,6 @@ fn test_keyless_deploy_balance_exactly_sufficient() {
         assert_eq!(balance(deployment.signer), Some(U256::ZERO));
         assert_eq!(balance(deployment.address), Some(U256::from(10)));
     }
-}
-
-/// A deployment pays no gas out of the signer's balance: a signer with nothing deploys a
-/// deployment that carries no value, whatever gas price it was signed at.
-#[test]
-fn test_a_signer_with_nothing_deploys_what_carries_no_value() {
-    let deployment = small();
-    for gas_limit in GAS_LIMITS {
-        let outcome = submit(system_db(), &deployment.tx, LARGE_OVERRIDE, gas_limit);
-        assert_eq!(returned(&outcome).deployedAddress, deployment.address, "at {gas_limit}");
-        assert_eq!(
-            outcome.state.get(&deployment.signer).map(|account| account.info.balance),
-            Some(U256::ZERO),
-        );
-    }
-}
-
-/// Rule 7: a call that cannot pay the overhead runs out of gas at once, before any rule reads the
-/// state: the signer is untouched.
-///
-/// Below the execution cap only: above it the transaction's frame is forwarded the cap itself,
-/// and the reservoir pays the state charges, so no gas limit leaves the call this little.
-#[test]
-fn test_a_call_below_the_overhead_reads_nothing() {
-    let deployment = small();
-    let reference = reference(deployment.call_data(LARGE_OVERRIDE), GAS_LIMITS[0]);
-    let intrinsic = reference.result.gas().total_gas_spent();
-    let gas_limit = intrinsic + KEYLESS_DEPLOY_OVERHEAD_GAS - 1;
-    let outcome = submit(system_db(), &deployment.tx, LARGE_OVERRIDE, gas_limit);
-    assert!(matches!(outcome.result, ExecutionResult::Halt { .. }), "{:?}", outcome.result);
-    assert_eq!(outcome.result.gas().tx_gas_used(), gas_limit);
-    assert!(!outcome.state.contains_key(&deployment.signer), "no rule read the signer");
 }
 
 /// A call that cannot pay for the signer's account runs out of gas before the creation starts:

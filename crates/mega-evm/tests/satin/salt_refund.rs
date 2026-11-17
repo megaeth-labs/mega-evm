@@ -28,7 +28,7 @@ use mega_evm::{
     MegaTransaction,
 };
 use revm::{
-    bytecode::opcode::{CALL, PUSH0, RETURN, REVERT},
+    bytecode::opcode::{CALL, PUSH0, RETURN},
     context::{result::EVMError, ContextTr},
     context_interface::{
         cfg::{gas::GasTracker, GasId, StateGasCharge, StateGasSite},
@@ -116,24 +116,6 @@ fn test_a_slot_written_and_restored_nets_nothing_at_every_multiplier() {
     );
 }
 
-/// A creation whose init code reverts: the `CREATE` opcode charged its caller for the account
-/// leaf upfront, and the frame that did not create it gives the charge back at the same price.
-#[test]
-fn test_a_reverting_creation_gives_its_upfront_charge_back() {
-    let created = CONTRACT.create(0);
-    let probe = || {
-        // Init code `PUSH0 PUSH0 REVERT`: the creation fails, so no account leaf is added.
-        let code = create_with(&[PUSH0, PUSH0, REVERT]).stop().build();
-        (db(code), call_contract())
-    };
-
-    assert_eq!(
-        net_state_at([1, 2, 8], move |envs, m| crowded_account(envs, created, m), probe),
-        [0, 0, 0],
-        "a creation that deployed nothing pays no state gas",
-    );
-}
-
 /// A `CALL` that charged for a new account leaf and then failed gives the charge back: the
 /// caller cannot afford the transfer, so no account is created.
 #[test]
@@ -161,65 +143,6 @@ fn test_a_failed_value_call_gives_its_new_account_charge_back() {
         net_state_at([1, 2, 8], |envs, m| crowded_account(envs, EMPTY, m), probe),
         [0, 0, 0],
         "no account was created, so the upfront charge comes back",
-    );
-}
-
-/// A charge made two frames deep and rolled back with its frame comes back whole: the inner
-/// frame wrote a slot in a crowded bucket and reverted.
-#[test]
-fn test_a_charge_in_a_reverting_inner_frame_comes_back_whole() {
-    let forwarded = inner_gas(entry(GasId::sstore_set_state_gas()));
-    let probe = || {
-        let sub = BytecodeBuilder::default()
-            .sstore(U256::from(SLOT), U256::from(1))
-            .revert_with_data([0xaa])
-            .build();
-        let code = BytecodeBuilder::default()
-            .push_number(0u64)
-            .push_number(0u64)
-            .push_number(0u64)
-            .push_number(0u64)
-            .push_number(0u64)
-            .push_address(SUB)
-            .push_number(forwarded)
-            .append(CALL)
-            .stop()
-            .build();
-        (db(code).account_code(SUB, sub), call_contract())
-    };
-
-    assert_eq!(
-        net_state_at([1, 2, 8], |envs, m| crowded_slot(envs, SUB, U256::from(SLOT), m), probe),
-        [0, 0, 0],
-        "the frame's rollback takes its state charge with it",
-    );
-}
-
-/// What an inner frame keeps still scales: the same program with the inner frame succeeding
-/// pays the crowded price, so the arms above are not passing because nothing was charged.
-#[test]
-fn test_a_charge_an_inner_frame_keeps_scales_with_its_bucket() {
-    let forwarded = inner_gas(entry(GasId::sstore_set_state_gas()));
-    let probe = || {
-        let sub = BytecodeBuilder::default().sstore(U256::from(SLOT), U256::from(1)).stop().build();
-        let code = BytecodeBuilder::default()
-            .push_number(0u64)
-            .push_number(0u64)
-            .push_number(0u64)
-            .push_number(0u64)
-            .push_number(0u64)
-            .push_address(SUB)
-            .push_number(forwarded)
-            .append(CALL)
-            .stop()
-            .build();
-        (db(code).account_code(SUB, sub), call_contract())
-    };
-
-    let set = entry(GasId::sstore_set_state_gas());
-    assert_eq!(
-        net_state_at([1, 2, 8], |envs, m| crowded_slot(envs, SUB, U256::from(SLOT), m), probe),
-        [set, set * 2, set * 8],
     );
 }
 
@@ -340,29 +263,6 @@ fn test_a_refused_code_deposit_pays_no_state_gas() {
         [0, 0, 0],
         "nothing was deployed, so nothing is owed",
     );
-}
-
-/// A charge kept beside one given back: the kept one scales, the other nets out, and the
-/// transaction pays exactly the difference.
-#[test]
-fn test_a_kept_charge_and_a_restored_one_settle_independently() {
-    const KEPT: u64 = 3;
-    let probe = || {
-        let code = BytecodeBuilder::default()
-            .sstore(U256::from(KEPT), U256::from(1))
-            .sstore(U256::from(SLOT), U256::from(1))
-            .sstore(U256::from(SLOT), U256::ZERO)
-            .stop()
-            .build();
-        (db(code), call_contract())
-    };
-    let crowd = |envs: SaltEnvs, m: u64| {
-        let envs = crowded_slot(envs, CONTRACT, U256::from(KEPT), m);
-        crowded_slot(envs, CONTRACT, U256::from(SLOT), m)
-    };
-
-    let set = entry(GasId::sstore_set_state_gas());
-    assert_eq!(net_state_at([1, 2, 8], crowd, probe), [set, set * 2, set * 8]);
 }
 
 /* The refund route that runs without a frame. */

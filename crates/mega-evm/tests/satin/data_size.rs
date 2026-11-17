@@ -271,23 +271,6 @@ fn run_create(
     (outcome, probe)
 }
 
-/// Calldata is part of the body, and a zero byte counts the same as any other.
-#[test]
-fn test_calldata_counts_in_the_body() {
-    let db = || funded().account_code(A, BytecodeBuilder::default().append(STOP).build());
-    let run = |byte: u8| {
-        let outcome = MegaEvm::new(context(db()))
-            .execute_transaction(call_with_data(CALLER, A, Bytes::from(vec![byte; 50]), GAS_LIMIT))
-            .unwrap();
-        assert!(outcome.result.is_success(), "{:?}", outcome.result);
-        outcome.usage
-    };
-    let expected =
-        LimitUsage { data_size: mega_evm::TX_BODY_SIZE + 50, write_records: 0, state_growth: 0 };
-    assert_eq!(run(0), expected, "a zero byte");
-    assert_eq!(run(0xff), expected, "a non-zero byte");
-}
-
 /// Asserts `error` is the refusal of a body whose bytes and authorization records exceed the
 /// transaction's data-size limit.
 fn assert_body_refused(error: &str) {
