@@ -29,6 +29,7 @@ Subcommands:
 
   report      --results <mutants.out dir> [--suppressions <toml>]
               [--status <file>] [--scope diff|full]
+              [--title <name>] [--informational]
               [--comment <path>] [--summary <path>]
         Read the run outcomes, apply line-scoped suppressions (each anchored to
         one mutant's file:line:col and text), compute the
@@ -39,6 +40,14 @@ Subcommands:
         --scope says what the run covered, for the report's wording: `diff`
         (the default) for a PR's changed lines, `full` for every mutant of a
         crate or subsystem (the nightly runs).
+        --title names the report in its heading, for a run that is not the
+        cargo-mutants gate (`Mutation testing`) or full run (`Mutation testing
+        (full run)`, the default with --scope full); a titled full-scope report
+        labels its score `Mutation score`, not `Full-run mutation score`.
+        --informational is for a run that must not fail its job: the heading
+        says what the run found (survivors, timeouts, an incomplete run) instead
+        of PASS/FAIL, and the exit code is 0. Results that cannot be read still
+        exit 2.
 
 The PR gate runs diff-scoped (cargo mutants --in-diff), so every mutant it sees
 lives on a line the PR changed; an unsuppressed survivor there is a test gap the
@@ -313,10 +322,29 @@ def emit(report: str, args: argparse.Namespace) -> None:
     print(report)
 
 
+def verdict(args: argparse.Namespace, passed: bool, survivors: int = 0, timeouts: int = 0,
+            incomplete: bool = False) -> str:
+    """The verdict in the report's heading.
+
+    A gate passes or fails. An informational run does neither, so it says what it
+    found: its unsuppressed survivors and timeouts, and whether it was incomplete."""
+    if not args.informational:
+        return "✅ PASS" if passed else "❌ FAIL"
+    if passed:
+        return "✅ no survivors"
+    found = [f"{survivors} survivor{'s' if survivors != 1 else ''}"] if survivors else []
+    found += [f"{timeouts} timed out"] if timeouts else []
+    found += ["incomplete run"] if incomplete else []
+    return f"⚠️ {', '.join(found)} (informational; does not fail the run)"
+
+
 def cmd_report(args: argparse.Namespace) -> int:
     results = Path(args.results)
     full = args.scope == "full"
-    title = "## 🧬 Mutation testing (full run)" if full else "## 🧬 Mutation testing"
+    name = args.title or ("Mutation testing (full run)" if full else "Mutation testing")
+    title = f"## 🧬 {name}"
+    # An informational run reports what it found and never fails; a gate fails.
+    fail_code = 0 if args.informational else 1
 
     # The driver's status says whether the run tested every planned mutant. A
     # stopped run must never pass, even when everything it tested was caught.
@@ -339,8 +367,8 @@ def cmd_report(args: argparse.Namespace) -> int:
     #     report a 100% pass here is the whole point.
     if not results.exists():
         if note:
-            emit(f"{title} — ❌ FAIL\n\n{note}\n", args)
-            return 1
+            emit(f"{title} — {verdict(args, False, incomplete=True)}\n\n{note}\n", args)
+            return fail_code
         report = f"{title}\n\nNo results at "
         report += f"`{results}` — nothing was mutated (e.g. no mutatable changes).\n"
         emit(report, args)
@@ -360,8 +388,8 @@ def cmd_report(args: argparse.Namespace) -> int:
     unviable = read_lines(results / "unviable.txt")
     timeout = read_lines(results / "timeout.txt")
     if note and not (missed or caught or unviable or timeout):
-        emit(f"{title} — ❌ FAIL\n\n{note}\n", args)
-        return 1
+        emit(f"{title} — {verdict(args, False, incomplete=True)}\n\n{note}\n", args)
+        return fail_code
 
     _, line_supp = load_suppressions(Path(args.suppressions)) if args.suppressions else ([], [])
     # A line suppression matches one mutant: the same file, line, column and text.
@@ -388,7 +416,7 @@ def cmd_report(args: argparse.Namespace) -> int:
     gate_pass = not real_survivors and not real_timeouts and note is None
 
     # ---- Markdown report (PR comment + step summary) ----
-    status = "✅ PASS" if gate_pass else "❌ FAIL"
+    status = verdict(args, gate_pass, len(real_survivors), len(real_timeouts), note is not None)
 
     # No viable mutants and nothing inconclusive (typical diff run whose changed
     # lines contain nothing mutatable). Reporting "100% (0/0)" reads like a real
@@ -399,10 +427,12 @@ def cmd_report(args: argparse.Namespace) -> int:
             nothing += f" ({len(unviable)} unviable, {len(timeout)} timed out)"
         elif not full:
             nothing += " on the changed lines"
-        emit(f"{title} — ✅ PASS\n\n{nothing}.\n", args)
+        emit(f"{title} — {verdict(args, True)}\n\n{nothing}.\n", args)
         return 0
 
-    label = "Full-run mutation score" if full else "Diff mutation score"
+    # `Full-run` names the cargo-mutants full run, the untitled full-scope report.
+    label = ("Diff mutation score" if not full
+             else "Mutation score" if args.title else "Full-run mutation score")
     md = [
         f"{title} — {status}",
         "",
@@ -451,7 +481,7 @@ def cmd_report(args: argparse.Namespace) -> int:
                   else "No new test gaps introduced by this change. 🎉")
     emit("\n".join(md) + "\n", args)
 
-    return 0 if gate_pass else 1
+    return 0 if gate_pass else fail_code
 
 
 def cmd_orphans(args: argparse.Namespace) -> int:
@@ -535,6 +565,12 @@ def main() -> int:
                     help="the driver's status file; fail unless it says complete")
     pr.add_argument("--scope", choices=("diff", "full"), default="diff",
                     help="what the run covered: a PR's changed lines, or every mutant")
+    pr.add_argument("--title", default=None,
+                    help="the report's name in its heading (default: `Mutation testing`, "
+                         "with `(full run)` for --scope full)")
+    pr.add_argument("--informational", action="store_true",
+                    help="say what the run found instead of PASS/FAIL, and exit 0 "
+                         "(2 still means the results could not be read)")
     pr.add_argument("--comment", default=None, help="write Markdown report here")
     pr.add_argument("--summary", default=None, help="append report here (GITHUB_STEP_SUMMARY)")
     pr.set_defaults(func=cmd_report)

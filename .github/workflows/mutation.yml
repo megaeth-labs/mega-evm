@@ -282,6 +282,7 @@ jobs:
         run: |
           python3 scripts/mutation_gate.py report \
             --results target/umutate \
+            --title "Spec-gate mutation" \
             --suppressions mutants/suppressions.toml \
             --comment spec-gate-report.md \
             --summary "$GITHUB_STEP_SUMMARY"
@@ -363,10 +364,14 @@ jobs:
             --files "crates/mega-evm/src/${{ matrix.subsystem }}/*" \
             --output "target/umutate/${{ matrix.subsystem }}"
       - name: Score (informational)
+        # --informational exits 0 on survivors; `|| true` also keeps a scorer
+        # error (exit 2) from failing the sweep.
         run: |
           python3 scripts/mutation_gate.py report \
             --results "target/umutate/${{ matrix.subsystem }}" \
             --scope full \
+            --title "Spec-gate sweep (${{ matrix.subsystem }})" \
+            --informational \
             --suppressions mutants/suppressions.toml \
             --summary "$GITHUB_STEP_SUMMARY" || true
       - name: Upload artifacts

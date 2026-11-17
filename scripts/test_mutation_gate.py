@@ -160,6 +160,96 @@ class GateTest(unittest.TestCase):
         diff = self.report("--status", str(self.status))
         self.assertIn("**Diff mutation score: 100.0%**", diff.stdout)
 
+    # ---- report --title / --informational (the spec-gate reports) ----
+
+    def test_title_names_a_diff_report_and_keeps_its_gate(self) -> None:
+        self.write_run(2, caught=[CAUGHT], missed=[MISSED])
+        out = self.report("--title", "Spec-gate mutation")
+        self.assertEqual(out.returncode, 1, out.stdout)
+        heading = "## 🧬 Spec-gate mutation — ❌ FAIL\n"
+        self.assertTrue(out.stdout.startswith(heading), out.stdout)
+        self.assertIn("**Diff mutation score: 50.0%** (1/2", out.stdout)
+        self.assertNotIn("Mutation testing", out.stdout)
+        self.assertTrue(self.comment.read_text().startswith(heading))
+
+    def test_title_names_a_report_with_no_results(self) -> None:
+        out = self.report("--title", "Spec-gate mutation")
+        self.assertEqual(out.returncode, 0, out.stdout)
+        self.assertTrue(out.stdout.startswith("## 🧬 Spec-gate mutation\n\nNo results at "),
+                        out.stdout)
+
+    def test_titled_full_scope_report_is_not_called_the_full_run(self) -> None:
+        self.write_run(2, caught=[CAUGHT], unviable=[UNVIABLE])
+        out = self.report("--scope", "full", "--title", "Spec-gate sweep (evm)")
+        self.assertEqual(out.returncode, 0, out.stdout)
+        self.assertIn("## 🧬 Spec-gate sweep (evm) — ✅ PASS", out.stdout)
+        self.assertIn("**Mutation score: 100.0%** (1/1", out.stdout)
+        self.assertNotIn("Full-run", out.stdout)
+        self.assertNotIn("full run", out.stdout)
+
+    def informational(self, *extra: str) -> subprocess.CompletedProcess:
+        return self.report("--scope", "full", "--title", "Spec-gate sweep (evm)",
+                           "--informational", *extra)
+
+    def test_informational_survivors_are_reported_without_failing(self) -> None:
+        self.write_run(2, caught=[CAUGHT], missed=[MISSED])
+        out = self.informational()
+        self.assertEqual(out.returncode, 0, out.stdout)
+        self.assertTrue(out.stdout.startswith("## 🧬 Spec-gate sweep (evm) — ⚠️ 1 survivor "
+                                              "(informational; does not fail the run)\n"),
+                        out.stdout)
+        self.assertNotIn("FAIL", out.stdout)
+        self.assertNotIn("PASS", out.stdout)
+        self.assertIn("survived (real gaps): **1**", out.stdout)
+        self.assertIn(f"`{MISSED}`", out.stdout)
+
+    def test_informational_counts_survivors_and_timeouts(self) -> None:
+        other = f"{A_RS}:9:1: replace k -> bool with true"
+        hang = f"{A_RS}:8:1: replace j -> bool with true"
+        self.write_run(4, caught=[CAUGHT], missed=[MISSED, other], timeout=[hang])
+        out = self.informational()
+        self.assertEqual(out.returncode, 0, out.stdout)
+        self.assertIn("— ⚠️ 2 survivors, 1 timed out (informational; does not fail the run)",
+                      out.stdout)
+
+    def test_informational_clean_and_empty_runs_say_no_survivors(self) -> None:
+        self.write_run(2, caught=[CAUGHT], unviable=[UNVIABLE])
+        clean = self.informational()
+        self.assertEqual(clean.returncode, 0, clean.stdout)
+        self.assertIn("## 🧬 Spec-gate sweep (evm) — ✅ no survivors\n", clean.stdout)
+        self.assertIn("Every viable mutant was caught or suppressed.", clean.stdout)
+        for name in ("caught", "unviable"):
+            (self.results / f"{name}.txt").write_text("")
+        empty = self.informational()
+        self.assertEqual(empty.returncode, 0, empty.stdout)
+        self.assertEqual(empty.stdout, "## 🧬 Spec-gate sweep (evm) — ✅ no survivors\n\n"
+                                       "**Nothing to test** — no mutants were generated.\n\n")
+
+    def test_informational_incomplete_run_is_reported_without_failing(self) -> None:
+        self.write_status("not-started", "unknown", "0")
+        out = self.informational("--status", str(self.status))
+        self.assertEqual(out.returncode, 0, out.stdout)
+        self.assertIn("— ⚠️ incomplete run (informational; does not fail the run)\n",
+                      out.stdout)
+        self.assertIn("before any mutant was tested", out.stdout)
+        self.write_run(3, caught=[CAUGHT], missed=[MISSED])
+        self.write_status("partial", "3", "2")
+        out = self.informational("--status", str(self.status))
+        self.assertEqual(out.returncode, 0, out.stdout)
+        self.assertIn("— ⚠️ 1 survivor, incomplete run (informational;", out.stdout)
+
+    def test_informational_still_refuses_unreadable_results(self) -> None:
+        self.results.mkdir()
+        out = self.informational()
+        self.assertEqual(out.returncode, 2, out.stderr)
+        self.assertIn("caught.txt is missing", out.stderr)
+        (self.results / "caught.txt").write_text(f"{CAUGHT}\n")
+        (self.results / "missed.txt").write_text(f"{MISSED}\n")
+        bad = self.suppressions(line_entry(A_RS, None, None, MISSED_TEXT))
+        out = self.informational("--suppressions", bad)
+        self.assertEqual(out.returncode, 2, out.stderr)
+        self.assertIn("cannot be applied", out.stderr)
+
     def test_complete_run_still_gates_survivors(self) -> None:
         self.write_run(2, caught=[CAUGHT], missed=[MISSED])
         self.write_status("complete", "2", "2")
