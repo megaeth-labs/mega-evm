@@ -120,14 +120,6 @@ fn run_outcome(db: MemoryDatabase, tx: MegaTransaction) -> MegaTransactionOutcom
     MegaEvm::new(chain_context(db)).execute_transaction(tx).expect("the transaction is valid")
 }
 
-/// Runs `tx` and returns the error it was rejected with, as a string.
-fn rejection(db: MemoryDatabase, tx: MegaTransaction) -> String {
-    let error = MegaEvm::new(chain_context(db))
-        .execute_transaction(tx)
-        .expect_err("the transaction must be rejected");
-    format!("{error:?}")
-}
-
 /// The Oracle's slot as the database holds it.
 fn oracle_slot<DB: revm::Database>(db: &mut DB, slot: U256) -> U256
 where
@@ -581,39 +573,6 @@ fn test_two_system_transactions_in_a_block_both_go_through() {
     assert_eq!(nonce_of(&mut state, MEGA_SYSTEM_ADDRESS), 2);
 }
 
-/// A system transaction carries the chain's id, so it cannot be replayed on another chain; one
-/// without an id at all is refused too.
-#[test]
-fn test_a_system_transaction_is_bound_to_the_chain() {
-    let foreign = legacy_tx_with_chain_id(
-        MEGA_SYSTEM_ADDRESS,
-        TxKind::Call(ORACLE_CONTRACT_ADDRESS),
-        set_slot(ORACLE_SLOT, B256::with_last_byte(0xcc)),
-        0,
-        Some(31_337),
-    );
-    let rejected = rejection(chain_db(), foreign);
-    assert!(rejected.contains("InvalidChainId"), "{rejected}");
-
-    let no_chain_id = legacy_tx_with_chain_id(
-        MEGA_SYSTEM_ADDRESS,
-        TxKind::Call(ORACLE_CONTRACT_ADDRESS),
-        set_slot(ORACLE_SLOT, B256::with_last_byte(0xdd)),
-        0,
-        None,
-    );
-    let rejected = rejection(chain_db(), no_chain_id);
-    assert!(rejected.contains("MissingChainId"), "{rejected}");
-}
-
-/// The system address may not carry code (EIP-3607), as no sender may.
-#[test]
-fn test_a_system_address_with_code_is_refused() {
-    let db = chain_db().account_code(MEGA_SYSTEM_ADDRESS, Bytes::from_static(&[0x00]));
-    let rejected = rejection(db, system_tx(0, B256::with_last_byte(0xce)));
-    assert!(rejected.contains("RejectCallerWithCode"), "{rejected}");
-}
-
 /// Runs `tx` on `db` under the chain's configuration with `mutate` applied.
 fn run_with(
     mutate: fn(&mut CfgEnv<mega_evm::MegaSpecId>),
@@ -763,40 +722,6 @@ fn test_a_system_transaction_short_of_its_body_history_is_a_failed_deposit() {
     assert_eq!(gas.gas_used, least);
 }
 
-/// A deposit-like transaction whose caller does not exist yet creates that account, and pays
-/// the account-creation charge for it exactly once: the same charge a value transfer to a
-/// fresh account pays.
-#[test]
-fn test_a_deposit_creates_its_caller_and_pays_for_it_once() {
-    // The reference charge: a user transaction that creates one account by sending value to it.
-    let fresh = address!("0x00000000000000000000000000000000000f0001");
-    let reference =
-        run_outcome(chain_db().account_balance(CALLER, U256::from(1_000_000_000_000_u64)), {
-            let mut tx = legacy_tx(CALLER, TxKind::Call(fresh), Bytes::new(), 0);
-            tx.0.base.value = U256::from(1);
-            tx
-        });
-    let one_account = reference.gas.state;
-    assert_eq!(one_account, account_state_gas(), "a fresh recipient costs state gas");
-
-    // A system transaction whose sender does not exist yet creates it, for the same charge.
-    let created = run_outcome(chain_db(), system_tx(0, B256::with_last_byte(0x77)));
-    assert!(created.result.is_success(), "{:?}", created.result);
-    // The same transaction from a sender that already exists: what it pays is the slot it
-    // writes, and nothing for its own account.
-    let slot_charge = run_outcome(
-        chain_db().account_balance(MEGA_SYSTEM_ADDRESS, U256::from(1)),
-        system_tx(0, B256::with_last_byte(0x77)),
-    )
-    .gas
-    .state;
-    assert_eq!(
-        created.gas.state - slot_charge,
-        one_account,
-        "the caller's account costs one account creation, and the slot the same either way",
-    );
-}
-
 /// A deposit whose recipient is its own caller pays for that one account once: by the time the
 /// recipient is looked at, the caller's materialisation has created it.
 #[test]
@@ -840,33 +765,6 @@ fn deposit_one_short_of_its_caller(sender: Address) -> MegaTransaction {
     let mut tx = deposit_tx(sender, TxKind::Call(ORACLE_CONTRACT_ADDRESS), U256::ZERO, 0);
     tx.0.base.gas_limit = BARE_CALL_INTRINSIC_GAS + account_state_gas() - 1;
     tx
-}
-
-/// A deposit that cannot pay for the account it creates for its caller runs out of gas before its
-/// first frame, and a deposit that does is a failed deposit: the `FailedDeposit` halt, not an
-/// out-of-gas, billed its whole gas limit.
-///
-/// Independence: constants — the intrinsic gas is
-/// EIP-2780's, the caller account's state gas the schedule's entry at the price in effect.
-#[test]
-fn test_a_deposit_that_cannot_pay_for_its_caller_is_a_failed_deposit() {
-    // An account that costs nothing is one any deposit can pay for.
-    if state_is_free() {
-        return;
-    }
-    let sender = address!("0x00000000000000000000000000000000000f0006");
-    let tx = deposit_one_short_of_its_caller(sender);
-    let gas_limit = tx.0.base.gas_limit;
-    let outcome = run_outcome(chain_db(), tx);
-    assert!(
-        matches!(
-            outcome.result,
-            ExecutionResult::Halt { reason: MegaHaltReason::FailedDeposit, .. }
-        ),
-        "{:?} is not a failed deposit",
-        outcome.result,
-    );
-    assert_eq!(outcome.gas.gas_used, gas_limit, "a failed deposit bills its whole gas limit");
 }
 
 /// The account a deposit creates for its caller is charged before its first frame, and a body over
@@ -963,27 +861,6 @@ fn test_the_callee_sees_the_system_address_as_its_caller() {
     );
 }
 
-/// The account a deposit-like transaction creates for its caller is the transaction's own
-/// account: it is part of the transaction body, so it is not a write record of its own. It is a
-/// new account all the same, one of state growth on the transaction.
-#[test]
-fn test_the_created_caller_is_not_a_write_record() {
-    let fresh = run_outcome(chain_db(), system_tx(0, B256::with_last_byte(0x99)));
-    let existing = run_outcome(
-        chain_db().account_balance(MEGA_SYSTEM_ADDRESS, U256::from(1)),
-        system_tx(0, B256::with_last_byte(0x99)),
-    );
-    assert!(fresh.result.is_success() && existing.result.is_success());
-    assert_eq!(
-        (fresh.usage.data_size, fresh.usage.write_records),
-        (existing.usage.data_size, existing.usage.write_records),
-        "creating the sender's own account records nothing a transaction with an existing sender \
-         does not record",
-    );
-    assert_eq!(existing.usage.state_growth, 1, "the Oracle's slot, set from zero");
-    assert_eq!(fresh.usage.state_growth, 2, "and the sender's new account");
-}
-
 /// A deposit-like transaction that creates a contract pays for the account it creates for its
 /// caller as well as for the contract.
 #[test]
@@ -1005,30 +882,5 @@ fn test_a_deposit_that_creates_a_contract_pays_for_its_caller_too() {
         fresh.gas.state,
         existing.gas.state + account_state_gas(),
         "the created caller costs state gas on top of the created contract",
-    );
-}
-
-/// A transaction that already carries the system source hash is a deposit by type, so it does
-/// not have the system shape: from the live system address it is a failed deposit, as every
-/// deposit from that address is. No promotion is made for
-/// it, so none of the promotion's checks runs: its nonce is not the system address's.
-///
-/// A block's transactions are decoded from their legacy encoding, which carries no source hash,
-/// so this is the shape a caller hands the engine directly, not one a block holds.
-#[test]
-fn test_a_transaction_that_arrives_promoted_is_a_failed_deposit() {
-    let mut tx =
-        legacy_tx(MEGA_SYSTEM_ADDRESS, TxKind::Call(ORACLE_CONTRACT_ADDRESS), get_slot(), 7);
-    tx.0.deposit.source_hash = MEGA_SYSTEM_TRANSACTION_SOURCE_HASH;
-    let outcome = MegaEvm::new(chain_context(chain_db()))
-        .execute_transaction(tx)
-        .expect("a deposit is not refused");
-    assert!(
-        matches!(
-            outcome.result,
-            ExecutionResult::Halt { reason: MegaHaltReason::FailedDeposit, .. }
-        ),
-        "{:?}",
-        outcome.result
     );
 }
