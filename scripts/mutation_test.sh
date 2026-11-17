@@ -209,17 +209,23 @@ CLEARED=""
 
 # shellcheck disable=SC2329 # the EXIT trap below runs it
 finish() {
-    local rc=$? status=error expected=unknown outcomes=0 counts
-    if [[ -n "$CLEARED" ]] && counts="$(python3 "$ROOT_DIR/scripts/mutation_gate.py" progress --results "$OUT_DIR/mutants.out")"; then
-        expected="${counts#expected=}"
-        expected="${expected%% *}"
-        outcomes="${counts##*outcomes=}"
+    local rc=$? status=error expected=unknown outcomes=0 counts counted=1
+    if [[ -n "$CLEARED" ]]; then
+        if counts="$(python3 "$ROOT_DIR/scripts/mutation_gate.py" progress --results "$OUT_DIR/mutants.out")"; then
+            expected="${counts#expected=}"
+            expected="${expected%% *}"
+            outcomes="${counts##*outcomes=}"
+        else
+            # A record that cannot be counted (cut off while written) says nothing of how far the
+            # run got: the status is error, whatever the run's exit.
+            counted=""
+        fi
     fi
     case "$RESULT" in
         ran)
             # cargo-mutants exits 0 without an output directory when no mutant
             # intersects the diff: nothing was planned.
-            [[ "$expected" == unknown ]] && expected=0
+            [[ "$expected" == unknown && -n "$counted" ]] && expected=0
             [[ "$expected" == "$outcomes" ]] && status=complete
             ;;
         stopped)
@@ -233,6 +239,7 @@ finish() {
             ;;
         baseline-failed) status=baseline-failed ;;
     esac
+    [[ -n "$counted" ]] || status=error
     [[ "$status" == complete && -n "$FOLLOWUP_STOPPED" ]] && status=followup-stopped
     local line="MUTANTS-STATUS status=$status expected=$expected outcomes=$outcomes"
     mkdir -p "$OUT_DIR"

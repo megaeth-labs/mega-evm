@@ -430,13 +430,18 @@ def progress(results: Path) -> tuple[int | None, int]:
     expected = len(json.loads(plan.read_text())) if plan.exists() else None
     record = results / "outcomes.json"
     if record.exists():
-        outcomes = json.loads(record.read_text()).get("outcomes", [])
-        return expected, sum(1 for o in outcomes if isinstance(o, dict) and outcome_name(o))
+        outcomes, _, _, _ = read_record(results)
+        return expected, sum(1 for o in outcomes if outcome_name(o))
     return expected, sum(len(read_lines(results / name)) for name in OUTCOME_FILES)
 
 
 def cmd_progress(args: argparse.Namespace) -> int:
-    expected, outcomes = progress(Path(args.results))
+    try:
+        expected, outcomes = progress(Path(args.results))
+    except (UnreadableRecord, json.JSONDecodeError, OSError) as err:
+        # The driver then reports status=error: nothing says how far the run got.
+        print(f"cannot count the run's outcomes: {err}", file=sys.stderr)
+        return 2
     print(f"expected={'unknown' if expected is None else expected} outcomes={outcomes}")
     return 0
 
@@ -464,6 +469,7 @@ SHARD_CAUSES = {
     "no-status": "it ended without a status line (cancelled, killed by the job timeout, "
                  "or crashed)",
     "no-artifact": "it uploaded no results",
+    "unreadable": "its results cannot be read (a record cut off while it was written)",
 }
 BUDGET_STATES = ("partial", "not-started", "followup-stopped")
 
@@ -515,16 +521,27 @@ def incomplete_note(status: dict[str, str]) -> str:
             f"mutants tested).{tail}")
 
 
+class UnreadableRecord(Exception):
+    """A results directory whose record cannot be read: a run cut off while it wrote it."""
+
+
 def read_record(results: Path) -> tuple[list[dict], list[str], object, bool]:
     """A results directory's outcomes, its selection, its end_time, and whether its run
-    exited abnormally; no outcomes for a directory without outcomes.json."""
+    exited abnormally; no outcomes for a directory without outcomes.json. Raises
+    UnreadableRecord for a record that is not a run's (truncated, say)."""
     failed = (results / RUN_FAILED_NOTE).exists()
     path = results / "outcomes.json"
-    if not path.exists():
-        return [], read_selection(results) or [], None, failed
-    data = json.loads(path.read_text())
+    try:
+        selection = read_selection(results) or []
+        if not path.exists():
+            return [], selection, None, failed
+        data = json.loads(path.read_text())
+        if not isinstance(data, dict) or not isinstance(data.get("outcomes", []), list):
+            raise TypeError("not an object with a list of outcomes")
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ResultsError) as err:
+        raise UnreadableRecord(f"{results} cannot be read: {err}") from err
     outcomes = [o for o in data.get("outcomes", []) if isinstance(o, dict)]
-    return outcomes, read_selection(results) or [], data.get("end_time"), failed
+    return outcomes, selection, data.get("end_time"), failed
 
 
 def outcome_name(outcome: dict) -> str | None:
@@ -593,7 +610,14 @@ def cmd_merge(args: argparse.Namespace) -> int:
         print(f"| `{shard}` | {line} |")
         plan = (status or {}).get("expected", "")
         shard_plans.append(int(plan) if plan.isdigit() else None)
-        shard_outcomes, _, end_time, _ = read_record(shard / "mutants.out")
+        try:
+            shard_outcomes, _, end_time, _ = read_record(shard / "mutants.out")
+        except UnreadableRecord as err:
+            # Named, whatever its status line says; the other shards are still reported.
+            shard_states[-1] = "unreadable"
+            print(f"| `{shard}` | unreadable: {err} |")
+            finished = False
+            continue
         if shard_outcomes and not end_time:
             finished = False
         for o in copy_logs(shard / "mutants.out", results, f"shard{i}", shard_outcomes):
@@ -655,7 +679,12 @@ def cmd_merge_runs(args: argparse.Namespace) -> int:
     finished = True
     failed: list[str] = []
     for i, run in enumerate(present):
-        run_outcomes, run_selection, end_time, run_failed = read_record(run)
+        try:
+            run_outcomes, run_selection, end_time, run_failed = read_record(run)
+        except UnreadableRecord as err:
+            failed.append(str(err))
+            finished = False
+            continue
         if run_failed:
             failed.append(f"{run}: {(run / RUN_FAILED_NOTE).read_text().strip()}")
         if not end_time:

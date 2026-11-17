@@ -797,6 +797,9 @@ echo "dir=${MEGA_EEST_DIR-unset} modes=${MEGA_EEST_MODES-unset} work=${MEGA_EEST
 if [ -d "$FAKE_RUNS/$run" ]; then
     mkdir -p "$out/mutants.out"
     cp -R "$FAKE_RUNS/$run/." "$out/mutants.out/"
+    if [ -n "${FAKE_TRUNCATE:-}" ] && [ "$run" = main ]; then
+        printf '{"outcomes": [' > "$out/mutants.out/outcomes.json"
+    fi
 fi
 exit "$(cat "$FAKE_RUNS/$run.exit")"
 """
@@ -1014,6 +1017,14 @@ class DriverRun(GateCase):
         self.assertEqual((out / "status").read_text().strip(),
                          "MUTANTS-STATUS status=complete expected=2 outcomes=2")
         self.assertTrue(run.stdout.strip().endswith("MUTANTS-STATUS status=complete expected=2 outcomes=2"))
+
+    def test_a_record_that_cannot_be_counted_is_an_error(self) -> None:
+        runs_main = outcomes_json(mutant(CAUGHT, "CaughtMutant"))
+        run, runs, out = self.drive("file", "crates/mega-evm/src/a.rs", main=runs_main,
+                                    env={"FAKE_TRUNCATE": "1"})
+        self.assertEqual(run.returncode, 1, run.stderr)
+        self.assertEqual((out / "status").read_text().strip(),
+                         "MUTANTS-STATUS status=error expected=unknown outcomes=0")
 
     def test_a_warm_build_that_fails_is_a_failed_baseline(self) -> None:
         run, runs, out = self.drive("file", "crates/mega-evm/src/a.rs", main=outcomes_json(
@@ -1311,6 +1322,15 @@ class Progress(GateCase):
             selected=[CAUGHT, MISSED, UNVIABLE])
         self.assertEqual(self.progress(results), "expected=3 outcomes=2")
 
+    def test_a_record_cut_off_cannot_be_counted(self) -> None:
+        results = self.results(outcomes=outcomes_json(mutant(CAUGHT, "CaughtMutant")))
+        (results / "outcomes.json").write_text('{"outcomes": [{"scen')
+        err = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            code = gate.cmd_progress(Namespace(results=str(results)))
+        self.assertEqual(code, 2)
+        self.assertIn("cannot count", err.getvalue())
+
     def test_counts_the_plan_and_the_outcome_lists(self) -> None:
         results = self.results(selected=[CAUGHT, MISSED, UNVIABLE, TIMEOUT, "x"], files={
             "caught.txt": f"{CAUGHT}\n", "missed.txt": f"{MISSED}\n", "unviable.txt": f"{UNVIABLE}\n"})
@@ -1529,6 +1549,21 @@ class Merge(GateCase):
         self.assertEqual(code, 1, text)
         self.assertIn("the shards planned 2 mutants", text)
 
+    def test_a_shard_whose_record_is_cut_off_is_named_and_the_run_is_an_error(self) -> None:
+        a = self.shard("a", "status=complete expected=2 outcomes=2",
+                       mutant(CAUGHT, "CaughtMutant"), mutant(UNVIABLE, "Unviable"))
+        b = self.shard("b", "status=complete expected=1 outcomes=1", mutant(MISSED, "CaughtMutant"))
+        record = b / "mutants.out" / "outcomes.json"
+        record.write_text(record.read_text()[:40])  # killed while cargo-mutants rewrote it
+        printed = self.merge(a, b)
+        self.assertIn("unreadable", printed)
+        self.assertIn("status=error ", self.status())
+        self.assertIn("shards=complete,unreadable", self.status())
+        code, text = self.merged()
+        self.assertEqual(code, 1, text)
+        self.assertIn("shard 1: `unreadable` — its results cannot be read", text)
+        self.assertIn("caught: 1", text)  # the readable shard is still reported
+
     def test_an_empty_inventory_is_refused(self) -> None:
         (self.tmp / "inventory.txt").write_text("")
         with contextlib.redirect_stderr(io.StringIO()):
@@ -1570,6 +1605,13 @@ class MergeRuns(GateCase):
                          files={gate.RUN_FAILED_NOTE: "cargo-mutants exited 70\n"})
         with self.assertRaisesRegex(gate.ResultsError, "exited abnormally"):
             gate.load_run(self.merge_runs(a, c))
+
+    def test_a_run_whose_record_is_cut_off_makes_the_merge_unscorable(self) -> None:
+        a = self.results("a", outcomes=outcomes_json(mutant(MISSED, "CaughtMutant")))
+        b = self.results("b", outcomes=outcomes_json(mutant(TIMEOUT, "CaughtMutant")))
+        (b / "outcomes.json").write_text('{"outcomes": [')
+        with self.assertRaisesRegex(gate.ResultsError, "exited abnormally.*cannot be read"):
+            gate.load_run(self.merge_runs(a, b))
 
     def test_no_runs_writes_nothing(self) -> None:
         self.assertFalse(self.merge_runs(self.tmp / "absent").exists())
