@@ -209,17 +209,23 @@ CLEARED=""
 
 # shellcheck disable=SC2329 # the EXIT trap below runs it
 finish() {
-    local rc=$? status=error expected=unknown outcomes=0 counts
-    if [[ -n "$CLEARED" ]] && counts="$(python3 "$ROOT_DIR/scripts/mutation_gate.py" progress --results "$OUT_DIR/mutants.out")"; then
-        expected="${counts#expected=}"
-        expected="${expected%% *}"
-        outcomes="${counts##*outcomes=}"
+    local rc=$? status=error expected=unknown outcomes=0 counts counted=1
+    if [[ -n "$CLEARED" ]]; then
+        if counts="$(python3 "$ROOT_DIR/scripts/mutation_gate.py" progress --results "$OUT_DIR/mutants.out")"; then
+            expected="${counts#expected=}"
+            expected="${expected%% *}"
+            outcomes="${counts##*outcomes=}"
+        else
+            # A record that cannot be counted (cut off while written) says nothing of how far the
+            # run got: the status is error, whatever the run's exit.
+            counted=""
+        fi
     fi
     case "$RESULT" in
         ran)
             # cargo-mutants exits 0 without an output directory when no mutant
             # intersects the diff: nothing was planned.
-            [[ "$expected" == unknown ]] && expected=0
+            [[ "$expected" == unknown && -n "$counted" ]] && expected=0
             [[ "$expected" == "$outcomes" ]] && status=complete
             ;;
         stopped)
@@ -233,6 +239,7 @@ finish() {
             ;;
         baseline-failed) status=baseline-failed ;;
     esac
+    [[ -n "$counted" ]] || status=error
     [[ "$status" == complete && -n "$FOLLOWUP_STOPPED" ]] && status=followup-stopped
     local line="MUTANTS-STATUS status=$status expected=$expected outcomes=$outcomes"
     mkdir -p "$OUT_DIR"
@@ -281,19 +288,46 @@ if [[ -z "$LISTING" ]]; then
     CLEARED=1
 fi
 
-# The arguments that scope the first run (an `--in-diff` file, a `-f` glob): the
-# re-check and the Mega EEST run take them too. cargo-mutants 27.1.0 adds a
-# struct-field-deletion mutant without matching it against `--re`, so a run
-# selected by `--re` alone would also test every such mutant of the crate; under
-# the first run's scope it tests at most the ones the first run tested, whose
-# outcomes there the gate does not read.
+# The arguments that restrict the first run (an `--in-diff` file, `-f` globs), which the
+# re-check and the Mega EEST run take too, without the first run's `--shard`. The follow-ups
+# select their mutants by name (`--re`), and cargo-mutants 27.1.0 adds every struct-field-deletion
+# mutant without matching it against `--re`; under the first run's restriction those extras are at
+# most the ones the first run tested, whose outcomes there the gate does not read. A shard, though,
+# is applied after the selection: it would cut the follow-ups' own short list, extras included,
+# and leave out mutants they were asked to decide, so it is never passed on. A run with no
+# restriction (the full run, sharded or not) has the follow-ups name the files of their mutants
+# instead (FOLLOWUP_FILES), which keeps the extras to those files.
 SCOPE_ARGS=()
+FOLLOWUP_FILES=()
 
 # WARM=0 skips the warm build: a diff with no mutatable change builds nothing.
 WARM=1
 
+# The first run's arguments without `--shard k/n` or `--shard=k/n`; and whether they restrict
+# the mutants to files or a diff.
+set_scope() {
+    local arg skip="" restricted=""
+    SCOPE_ARGS=()
+    for arg in "$@"; do
+        if [[ -n "$skip" ]]; then
+            skip=""
+            continue
+        fi
+        case "$arg" in
+            --shard) skip=1 ;;
+            --shard=*) ;;
+            *) SCOPE_ARGS+=("$arg") ;;
+        esac
+        case "$arg" in
+            -f | --file | --file=* | --in-diff | --in-diff=*) restricted=1 ;;
+        esac
+    done
+    FOLLOWUP_FILES=()
+    [[ -n "$restricted" ]] || FOLLOWUP_FILES=(--with-files)
+}
+
 run_mutants() {
-    SCOPE_ARGS=("$@")
+    set_scope "$@"
     # --no-shuffle: test mutants in deterministic source order so runs are
     #   reproducible and comparable (recommended by https://mutants.rs/pr-diff.html).
     # -vV: verbose progress + version banner, for diagnosable CI logs.
@@ -370,14 +404,14 @@ record_failed_followup() {
 recheck_timeouts() {
     local re_output
     if ! re_output="$(python3 "$ROOT_DIR/scripts/mutation_gate.py" timeout-re \
-        --results "$OUT_DIR/mutants.out" --suppressions "$SUPPRESS")"; then
+        --results "$OUT_DIR/mutants.out" --suppressions "$SUPPRESS" "${FOLLOWUP_FILES[@]}")"; then
         echo "failed to list the timed-out mutants in $OUT_DIR/mutants.out" >&2
         return 1
     fi
     [[ -n "$re_output" ]] || return 0
     local re_args=()
     mapfile -t re_args <<< "$re_output"
-    echo "Re-checking $((${#re_args[@]} / 2)) timed-out mutant(s) one at a time" >&2
+    echo "Re-checking $(grep -c '^--re$' <<< "$re_output") timed-out mutant(s) one at a time" >&2
     local rc=0
     run_bounded cargo mutants \
         "${CONFIG_ARGS[@]}" \
@@ -405,7 +439,7 @@ run_missed_against_mega_eest() {
     local re_output
     if ! re_output="$(python3 "$ROOT_DIR/scripts/mutation_gate.py" missed-re \
         --results "$OUT_DIR/mutants.out" --recheck "$OUT_DIR/recheck/mutants.out" \
-        --suppressions "$SUPPRESS")"; then
+        --suppressions "$SUPPRESS" "${FOLLOWUP_FILES[@]}")"; then
         echo "failed to list the missed mutants in $OUT_DIR/mutants.out" >&2
         return 1
     fi
@@ -413,7 +447,7 @@ run_missed_against_mega_eest() {
     local re_args=()
     mapfile -t re_args <<< "$re_output"
     local results="$OUT_DIR/mega-eest/mutants.out"
-    echo "Running $((${#re_args[@]} / 2)) mutant(s) the tests missed against Mega EEST" >&2
+    echo "Running $(grep -c '^--re$' <<< "$re_output") mutant(s) the tests missed against Mega EEST" >&2
     local rc=0
     # MEGA_EEST_SCRIPT stands in for the script in the driver's own tests. The warm-up checks the
     # pin's provenance; no case set is compared here, the Mega EEST gate does that. It counts

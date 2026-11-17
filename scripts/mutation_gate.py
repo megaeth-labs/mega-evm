@@ -16,13 +16,14 @@ Subcommands:
         that line to <results>/no-mutants.txt. Does nothing when <results>
         exists, and fails when it does not and the output says no such thing.
 
-  timeout-re  --results <mutants.out dir> [--suppressions <toml>]
+  timeout-re  --results <mutants.out dir> [--suppressions <toml>] [--with-files]
         Print one `--re <regex>` pair per line for every unsuppressed mutant
-        that timed out, each regex matching that mutant's name alone. Consumed
-        by scripts/mutation_test.sh to re-run those mutants one at a time.
+        that timed out, each regex matching that mutant's name alone, and with
+        --with-files one `-f <file>` pair per file they are in. Consumed by
+        scripts/mutation_test.sh to re-run those mutants one at a time.
 
   missed-re   --results <mutants.out dir> [--recheck <mutants.out dir>]
-              [--suppressions <toml>]
+              [--suppressions <toml>] [--with-files]
         Print one `--re <regex>` pair per line for every unsuppressed mutant
         the tests missed: in the run, or in the re-check of one that timed out.
         Consumed by scripts/mutation_test.sh to run those mutants against the
@@ -429,13 +430,18 @@ def progress(results: Path) -> tuple[int | None, int]:
     expected = len(json.loads(plan.read_text())) if plan.exists() else None
     record = results / "outcomes.json"
     if record.exists():
-        outcomes = json.loads(record.read_text()).get("outcomes", [])
-        return expected, sum(1 for o in outcomes if isinstance(o, dict) and outcome_name(o))
+        outcomes, _, _, _ = read_record(results)
+        return expected, sum(1 for o in outcomes if outcome_name(o))
     return expected, sum(len(read_lines(results / name)) for name in OUTCOME_FILES)
 
 
 def cmd_progress(args: argparse.Namespace) -> int:
-    expected, outcomes = progress(Path(args.results))
+    try:
+        expected, outcomes = progress(Path(args.results))
+    except (UnreadableRecord, json.JSONDecodeError, OSError) as err:
+        # The driver then reports status=error: nothing says how far the run got.
+        print(f"cannot count the run's outcomes: {err}", file=sys.stderr)
+        return 2
     print(f"expected={'unknown' if expected is None else expected} outcomes={outcomes}")
     return 0
 
@@ -463,6 +469,7 @@ SHARD_CAUSES = {
     "no-status": "it ended without a status line (cancelled, killed by the job timeout, "
                  "or crashed)",
     "no-artifact": "it uploaded no results",
+    "unreadable": "its results cannot be read (a record cut off while it was written)",
 }
 BUDGET_STATES = ("partial", "not-started", "followup-stopped")
 
@@ -514,16 +521,27 @@ def incomplete_note(status: dict[str, str]) -> str:
             f"mutants tested).{tail}")
 
 
+class UnreadableRecord(Exception):
+    """A results directory whose record cannot be read: a run cut off while it wrote it."""
+
+
 def read_record(results: Path) -> tuple[list[dict], list[str], object, bool]:
     """A results directory's outcomes, its selection, its end_time, and whether its run
-    exited abnormally; no outcomes for a directory without outcomes.json."""
+    exited abnormally; no outcomes for a directory without outcomes.json. Raises
+    UnreadableRecord for a record that is not a run's (truncated, say)."""
     failed = (results / RUN_FAILED_NOTE).exists()
     path = results / "outcomes.json"
-    if not path.exists():
-        return [], read_selection(results) or [], None, failed
-    data = json.loads(path.read_text())
+    try:
+        selection = read_selection(results) or []
+        if not path.exists():
+            return [], selection, None, failed
+        data = json.loads(path.read_text())
+        if not isinstance(data, dict) or not isinstance(data.get("outcomes", []), list):
+            raise TypeError("not an object with a list of outcomes")
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ResultsError) as err:
+        raise UnreadableRecord(f"{results} cannot be read: {err}") from err
     outcomes = [o for o in data.get("outcomes", []) if isinstance(o, dict)]
-    return outcomes, read_selection(results) or [], data.get("end_time"), failed
+    return outcomes, selection, data.get("end_time"), failed
 
 
 def outcome_name(outcome: dict) -> str | None:
@@ -592,7 +610,14 @@ def cmd_merge(args: argparse.Namespace) -> int:
         print(f"| `{shard}` | {line} |")
         plan = (status or {}).get("expected", "")
         shard_plans.append(int(plan) if plan.isdigit() else None)
-        shard_outcomes, _, end_time, _ = read_record(shard / "mutants.out")
+        try:
+            shard_outcomes, _, end_time, _ = read_record(shard / "mutants.out")
+        except UnreadableRecord as err:
+            # Named, whatever its status line says; the other shards are still reported.
+            shard_states[-1] = "unreadable"
+            print(f"| `{shard}` | unreadable: {err} |")
+            finished = False
+            continue
         if shard_outcomes and not end_time:
             finished = False
         for o in copy_logs(shard / "mutants.out", results, f"shard{i}", shard_outcomes):
@@ -654,7 +679,12 @@ def cmd_merge_runs(args: argparse.Namespace) -> int:
     finished = True
     failed: list[str] = []
     for i, run in enumerate(present):
-        run_outcomes, run_selection, end_time, run_failed = read_record(run)
+        try:
+            run_outcomes, run_selection, end_time, run_failed = read_record(run)
+        except UnreadableRecord as err:
+            failed.append(str(err))
+            finished = False
+            continue
         if run_failed:
             failed.append(f"{run}: {(run / RUN_FAILED_NOTE).read_text().strip()}")
         if not end_time:
@@ -709,12 +739,23 @@ def cmd_timeout_re(args: argparse.Namespace) -> int:
         print(f"no timed-out mutants to re-check: {err}", file=sys.stderr)
         return 0
     supp = suppressed_anchors(args.suppressions)
-    for name in run.timeout:
-        if is_suppressed(name, supp):
-            continue
+    print_selection([name for name in run.timeout if not is_suppressed(name, supp)],
+                    getattr(args, "with_files", False))
+    return 0
+
+
+def print_selection(names: list[str], with_files: bool) -> None:
+    """One `--re <regex>` pair per line for each name, each regex matching that name alone; with
+    `with_files`, one `-f <file>` pair for each file the names are in. The files keep the struct-field
+    mutants cargo-mutants adds without matching them against `--re` to those files, for a run the
+    first run's own restriction does not scope."""
+    for name in names:
         print("--re")
         print(f"^{re.escape(name)}$")
-    return 0
+    if with_files:
+        for file in sorted({name.split(":", 1)[0] for name in names}):
+            print("-f")
+            print(file)
 
 
 # The summary line scripts/mega_eest.sh prints, as the mega_eest test prints it again into a
@@ -765,11 +806,8 @@ def cmd_missed_re(args: argparse.Namespace) -> int:
     if recheck is not None:
         missed += [name for name in run.timeout if name in set(recheck.missed)]
     supp = suppressed_anchors(args.suppressions)
-    for name in missed:
-        if is_suppressed(name, supp):
-            continue
-        print("--re")
-        print(f"^{re.escape(name)}$")
+    print_selection([name for name in missed if not is_suppressed(name, supp)],
+                    getattr(args, "with_files", False))
     return 0
 
 
@@ -1059,12 +1097,16 @@ def main() -> int:
     pt = sub.add_parser("timeout-re", help="--re arguments selecting the mutants that timed out")
     pt.add_argument("--results", required=True)
     pt.add_argument("--suppressions", default=None)
+    pt.add_argument("--with-files", action="store_true",
+                    help="also print one `-f <file>` pair per file of the selected mutants")
     pt.set_defaults(func=cmd_timeout_re)
 
     pm = sub.add_parser("missed-re", help="--re arguments selecting the mutants the tests missed")
     pm.add_argument("--results", required=True)
     pm.add_argument("--recheck", default=None)
     pm.add_argument("--suppressions", default=None)
+    pm.add_argument("--with-files", action="store_true",
+                    help="also print one `-f <file>` pair per file of the selected mutants")
     pm.set_defaults(func=cmd_missed_re)
 
     pp = sub.add_parser("progress", help="count planned and tested mutants")

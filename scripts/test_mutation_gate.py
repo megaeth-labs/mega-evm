@@ -16,6 +16,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -776,6 +777,7 @@ FAKE_CARGO = """#!/bin/sh
 if [ "$1" = nextest ]; then echo "$*" > "$FAKE_RUNS/warm.argv"; exit "${FAKE_WARM_EXIT:-0}"; fi
 [ "$1" = mutants ] || exit 99
 shift
+printf '%s\\0' "$@" > "$FAKE_RUNS/last.argv0"
 if [ "$1" = --version ]; then echo "cargo-mutants 27.1.0"; exit 0; fi
 argv="$*"; out=""; run=main
 while [ $# -gt 0 ]; do
@@ -789,11 +791,15 @@ case "$(basename "$out")" in
     mega-eest) run=mega-eest ;;
 esac
 echo "$argv" > "$FAKE_RUNS/$run.argv"
+mv "$FAKE_RUNS/last.argv0" "$FAKE_RUNS/$run.argv0"
 echo "dir=${MEGA_EEST_DIR-unset} modes=${MEGA_EEST_MODES-unset} work=${MEGA_EEST_WORK-unset}" \\
     "provenance=${MEGA_EEST_SKIP_PROVENANCE-checked} base=${MEGA_EEST_BASE_REV-unset}" > "$FAKE_RUNS/$run.env"
 if [ -d "$FAKE_RUNS/$run" ]; then
     mkdir -p "$out/mutants.out"
     cp -R "$FAKE_RUNS/$run/." "$out/mutants.out/"
+    if [ -n "${FAKE_TRUNCATE:-}" ] && [ "$run" = main ]; then
+        printf '{"outcomes": [' > "$out/mutants.out/outcomes.json"
+    fi
 fi
 exit "$(cat "$FAKE_RUNS/$run.exit")"
 """
@@ -1012,6 +1018,14 @@ class DriverRun(GateCase):
                          "MUTANTS-STATUS status=complete expected=2 outcomes=2")
         self.assertTrue(run.stdout.strip().endswith("MUTANTS-STATUS status=complete expected=2 outcomes=2"))
 
+    def test_a_record_that_cannot_be_counted_is_an_error(self) -> None:
+        runs_main = outcomes_json(mutant(CAUGHT, "CaughtMutant"))
+        run, runs, out = self.drive("file", "crates/mega-evm/src/a.rs", main=runs_main,
+                                    env={"FAKE_TRUNCATE": "1"})
+        self.assertEqual(run.returncode, 1, run.stderr)
+        self.assertEqual((out / "status").read_text().strip(),
+                         "MUTANTS-STATUS status=error expected=unknown outcomes=0")
+
     def test_a_warm_build_that_fails_is_a_failed_baseline(self) -> None:
         run, runs, out = self.drive("file", "crates/mega-evm/src/a.rs", main=outcomes_json(
             mutant(CAUGHT, "CaughtMutant")), env={"FAKE_WARM_EXIT": "101"})
@@ -1055,6 +1069,140 @@ class DriverRun(GateCase):
         self.assertEqual((runs / "main.argv").read_text().strip(),
                          "--list --colors never --package mega-evm")
         self.assertFalse((runs / "warm.argv").exists())
+
+
+class ShardDriver(GateCase):
+    """Runs the driver's sharded full run with the fake cargo, recording each run's arguments."""
+
+    def drive_shard(self, *shard: str, timed_out: str = TIMEOUT, missed: str = MISSED,
+                    env: dict[str, str] | None = None) -> tuple[subprocess.CompletedProcess, Path]:
+        shell = bash5()
+        if shell is None:
+            self.skipTest("no bash 5 or newer on this machine")
+        runs = self.tmp / "runs"
+        runs.mkdir(exist_ok=True)
+        # The first run: one mutant timed out, one missed; the re-check misses the timed-out one,
+        # so the Mega EEST pass is asked for both; it catches both, with the suite's verdict.
+        self.results("runs/main", outcomes=outcomes_json(
+            mutant(CAUGHT, "CaughtMutant"), mutant(timed_out, "Timeout"), mutant(missed, "MissedMutant")))
+        self.results("runs/recheck", outcomes=outcomes_json(mutant(timed_out, "MissedMutant")))
+        self.eest_results("runs/mega-eest", (missed, "CaughtMutant", eest_log(EEST_FAIL)),
+                          (timed_out, "CaughtMutant", eest_log(EEST_FAIL)))
+        for name in ("main", "recheck", "mega-eest"):
+            (runs / f"{name}.exit").write_text("0\n")
+        bin_dir = self.tmp / "bin"
+        bin_dir.mkdir(exist_ok=True)
+        for name, text in (("cargo", FAKE_CARGO), ("timeout", FAKE_TIMEOUT)):
+            (bin_dir / name).write_text(text)
+            (bin_dir / name).chmod(0o755)
+        if not (bin_dir / "python3").exists():
+            (bin_dir / "python3").symlink_to(sys.executable)
+        stub = self.tmp / "mega_eest.sh"
+        stub.write_text("#!/bin/sh\nexit 0\n")
+        stub.chmod(0o755)
+        out = self.tmp / "out" / "mutants"
+        run = subprocess.run(
+            [shell, str(DriverGuard.DRIVER), "full", *shard], capture_output=True, text=True, timeout=120,
+            env={"PATH": f"{bin_dir}:/usr/bin:/bin", "FAKE_RUNS": str(runs), "OUT_DIR": str(out),
+                 "JOBS": "1", "SUPPRESS": str(self.tmp / "no-suppressions.toml"),
+                 "MEGA_EEST_SCRIPT": str(stub), **(env or {})})
+        self.assertEqual(run.returncode, 0, run.stderr)
+        return run, runs
+
+    @staticmethod
+    def argv(runs: Path, name: str) -> list[str]:
+        return (runs / f"{name}.argv0").read_text().split("\0")[:-1]
+
+
+class DriverShardedFollowUps(ShardDriver):
+    """In a sharded full run the follow-up runs keep their mutants: they are not cut by the shard."""
+
+    def test_the_follow_ups_of_a_shard_are_not_sharded_again(self) -> None:
+        for shard in (["--shard", "1/4"], ["--shard=1/4"]):
+            with self.subTest(shard=shard):
+                _, runs = self.drive_shard(*shard)
+                main = self.argv(runs, "main")
+                self.assertIn(shard[-1].removeprefix("--shard="), " ".join(main))
+                recheck, eest = self.argv(runs, "recheck"), self.argv(runs, "mega-eest")
+                for argv in (recheck, eest):
+                    self.assertFalse([a for a in argv if a.startswith("--shard")], argv)
+                    self.assertNotIn("1/4", argv)
+                # Each follow-up names its mutants, and their files keep the struct-field extras
+                # cargo-mutants adds to those files.
+                self.assertIn(f"^{re.escape(TIMEOUT)}$", recheck)
+                self.assertEqual(recheck[recheck.index("-f") + 1], TIMEOUT.split(":", 1)[0])
+                self.assertIn(f"^{re.escape(MISSED)}$", eest)
+                self.assertIn(f"^{re.escape(TIMEOUT)}$", eest)
+                self.assertEqual(sorted(eest[i + 1] for i, a in enumerate(eest) if a == "-f"),
+                                 sorted({MISSED.split(":", 1)[0], TIMEOUT.split(":", 1)[0]}))
+                shutil.rmtree(self.tmp / "runs")
+                shutil.rmtree(self.tmp / "out")
+
+    def test_a_restricted_run_keeps_its_own_restriction(self) -> None:
+        _, runs = self.drive_shard("-f", "crates/mega-evm/src/a.rs", "--shard", "2/4")
+        for name in ("recheck", "mega-eest"):
+            argv = self.argv(runs, name)
+            self.assertEqual([argv[i + 1] for i, a in enumerate(argv) if a == "-f"], ["crates/mega-evm/src/a.rs"])
+            self.assertFalse([a for a in argv if a.startswith("--shard")], argv)
+
+
+@unittest.skipUnless(os.environ.get("MUTANTS_REAL_LIST") == "1",
+                     "set MUTANTS_REAL_LIST=1 to list the crate's mutants with the installed cargo-mutants")
+class FollowUpSelectionAgainstCargoMutants(ShardDriver):
+    """The follow-up arguments the driver builds, replayed through the installed cargo-mutants'
+    real `--list` on this tree: for every shard of the full run, each mutant a follow-up is asked
+    to decide is in the list it selects."""
+
+    ROOT = SCRIPTS.parent
+
+    def real_list(self, args: list[str]) -> list[str]:
+        run = subprocess.run(["cargo", "mutants", "--list", "--colors", "never", *args], cwd=self.ROOT,
+                             capture_output=True, text=True, timeout=600)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        return [line for line in run.stdout.splitlines() if line.strip()]
+
+    @staticmethod
+    def selection(argv: list[str]) -> list[str]:
+        """The arguments of a follow-up run that select mutants, as `--list` takes them."""
+        out, i = [], 0
+        while i < len(argv):
+            a = argv[i]
+            if a == "--":
+                break
+            if a in ("--output", "--jobs"):
+                i += 2
+                continue
+            if a in ("-vV", "--no-shuffle") or a.startswith("--cargo-arg"):
+                i += 1
+                continue
+            out.append(a)
+            i += 1
+        return out
+
+    def test_every_requested_mutant_is_selected_in_every_shard(self) -> None:
+        shell = bash5()
+        if shell is None:
+            self.skipTest("no bash 5 or newer on this machine")
+        for k in range(4):
+            with self.subTest(shard=k):
+                listed = subprocess.run([shell, str(DriverGuard.DRIVER), "list", "--shard", f"{k}/4"],
+                                        cwd=self.ROOT, capture_output=True, text=True, timeout=600)
+                self.assertEqual(listed.returncode, 0, listed.stderr)
+                names = [line for line in listed.stdout.splitlines() if line.strip()]
+                timed_out, missed = names[0], names[-1]
+                _, runs = self.drive_shard("--shard", f"{k}/4", timed_out=timed_out, missed=missed)
+                recheck = self.real_list(self.selection(self.argv(runs, "recheck")))
+                eest = self.real_list(self.selection(self.argv(runs, "mega-eest")))
+                self.assertIn(timed_out, recheck)
+                self.assertIn(missed, eest)
+                self.assertIn(timed_out, eest)
+                # The shard, added back, is what would cut them.
+                cut = self.real_list([*self.selection(self.argv(runs, "mega-eest")), "--shard", f"{k}/4"])
+                print(f"shard {k}/4: re-check lists {len(recheck)}, Mega EEST pass lists {len(eest)}, "
+                      f"both requested in each; with the shard again: "
+                      f"{sum(n in cut for n in (timed_out, missed))} of 2 kept", file=sys.stderr)
+                shutil.rmtree(self.tmp / "runs")
+                shutil.rmtree(self.tmp / "out")
 
 
 class DriverGuard(unittest.TestCase):
@@ -1173,6 +1321,15 @@ class Progress(GateCase):
             mutant(CAUGHT, "CaughtMutant"), mutant(MISSED, "MissedMutant"), end_time=None),
             selected=[CAUGHT, MISSED, UNVIABLE])
         self.assertEqual(self.progress(results), "expected=3 outcomes=2")
+
+    def test_a_record_cut_off_cannot_be_counted(self) -> None:
+        results = self.results(outcomes=outcomes_json(mutant(CAUGHT, "CaughtMutant")))
+        (results / "outcomes.json").write_text('{"outcomes": [{"scen')
+        err = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            code = gate.cmd_progress(Namespace(results=str(results)))
+        self.assertEqual(code, 2)
+        self.assertIn("cannot count", err.getvalue())
 
     def test_counts_the_plan_and_the_outcome_lists(self) -> None:
         results = self.results(selected=[CAUGHT, MISSED, UNVIABLE, TIMEOUT, "x"], files={
@@ -1392,6 +1549,21 @@ class Merge(GateCase):
         self.assertEqual(code, 1, text)
         self.assertIn("the shards planned 2 mutants", text)
 
+    def test_a_shard_whose_record_is_cut_off_is_named_and_the_run_is_an_error(self) -> None:
+        a = self.shard("a", "status=complete expected=2 outcomes=2",
+                       mutant(CAUGHT, "CaughtMutant"), mutant(UNVIABLE, "Unviable"))
+        b = self.shard("b", "status=complete expected=1 outcomes=1", mutant(MISSED, "CaughtMutant"))
+        record = b / "mutants.out" / "outcomes.json"
+        record.write_text(record.read_text()[:40])  # killed while cargo-mutants rewrote it
+        printed = self.merge(a, b)
+        self.assertIn("unreadable", printed)
+        self.assertIn("status=error ", self.status())
+        self.assertIn("shards=complete,unreadable", self.status())
+        code, text = self.merged()
+        self.assertEqual(code, 1, text)
+        self.assertIn("shard 1: `unreadable` — its results cannot be read", text)
+        self.assertIn("caught: 1", text)  # the readable shard is still reported
+
     def test_an_empty_inventory_is_refused(self) -> None:
         (self.tmp / "inventory.txt").write_text("")
         with contextlib.redirect_stderr(io.StringIO()):
@@ -1433,6 +1605,13 @@ class MergeRuns(GateCase):
                          files={gate.RUN_FAILED_NOTE: "cargo-mutants exited 70\n"})
         with self.assertRaisesRegex(gate.ResultsError, "exited abnormally"):
             gate.load_run(self.merge_runs(a, c))
+
+    def test_a_run_whose_record_is_cut_off_makes_the_merge_unscorable(self) -> None:
+        a = self.results("a", outcomes=outcomes_json(mutant(MISSED, "CaughtMutant")))
+        b = self.results("b", outcomes=outcomes_json(mutant(TIMEOUT, "CaughtMutant")))
+        (b / "outcomes.json").write_text('{"outcomes": [')
+        with self.assertRaisesRegex(gate.ResultsError, "exited abnormally.*cannot be read"):
+            gate.load_run(self.merge_runs(a, b))
 
     def test_no_runs_writes_nothing(self) -> None:
         self.assertFalse(self.merge_runs(self.tmp / "absent").exists())
