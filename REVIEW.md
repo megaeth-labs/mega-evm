@@ -99,7 +99,7 @@ Defer to the baseline for everything not listed here; the rules below take prece
 ## Test gates
 
 These checks guard every change to the Satin engine.
-`lint`, `test`, `no-std`, `require-label` and `Mega EEST gate` are the required checks on `satin`; the rest inform the review, and the reviewer reads them.
+`lint`, `test`, `no-std` and `require-label` are the required checks on `satin`, and `Mega EEST gate` becomes one once an administrator adds it to the branch rule; the rest inform the review, and the reviewer reads them.
 
 ### The op-revm baseline
 
@@ -146,13 +146,16 @@ These checks guard every change to the Satin engine.
 
 - Mega EEST is the conformance suite both Satin implementations share: state-transition cases, each pinned to rules of the Satin specification, run on an implementation through an adapter.
   `.github/workflows/mega-eest.yml` runs `scripts/mega_eest.sh`, which consumes every gating case of the suite at the commit `scripts/mega_eest.env` pins (`MEGA_EEST_REV`), plain and instrumented, through the suite's revm adapter built against the pull request's own mega-evm, `[patch]` blocks and `Cargo.lock` (AGENTS.md, Test Gates, has how).
-- The `Mega EEST gate` job always runs and is a required check; a pull request that changes documentation alone skips the run and passes it.
-  The step summary has the summary line (`MEGA-EEST rev=… cases=… plain=pass:…,fail:…,unsupported:…,error:… instrumented=… parity=… negative=… result=…`) and the run's time; a failing run uploads its reports.
+- The `Mega EEST gate` job always runs, and becomes a required check once an administrator adds it to the `satin` branch rule; a pull request that changes documentation alone skips the run and passes it.
+  The step summary has the summary line (`MEGA-EEST rev=… run=full cases=… plain=pass:…,fail:…,unsupported:…,error:… instrumented=… parity=… negative=… provenance=… caseset=… result=…`), the run's time and exit, and, when the pull request moves the pin, the case ids it removes, adds and changes; a failing run uploads its reports.
+  The script's exit says what failed: 1 the cases (a verdict), 2 no verdict (a fetch, a build, a report; the log names the step), 3 the pin refused; the job also requires the line of the full run of a pin on the suite's default branch.
 - A case that fails is a change of behaviour the specification pins.
   A pull request that makes it on purpose, or that changes the mega-evm API the suite's adapter calls (the adapter then no longer builds, and the gate says so), changes Mega EEST first: the case, derived from the changed rule, or the adapter, in a pull request there.
-  It then moves `MEGA_EEST_REV` to that Mega EEST commit, in the same mega-evm pull request, so the gate runs the suite that pull request needs; until the Mega EEST change merges, the pin may name its branch's commit, which the fetch reaches by its hash, and it moves to the merged commit before the mega-evm pull request merges.
+  It then moves `MEGA_EEST_REV` to that Mega EEST commit, in the same mega-evm pull request, so the gate runs the suite that pull request needs.
+  While the Mega EEST change is under review, the pin may name its branch's commit as a draft state only: the cases run and show in the log, but the gate fails (`provenance=unmerged`, exit 3) until the pin moves to the commit merged on the suite's default branch, which it must before the mega-evm pull request merges.
   Locally, a Mega EEST checkout at that commit is used with `MEGA_EEST_DIR=<checkout> scripts/mega_eest.sh` once the pin names it.
-- Moving the pin is a one-line change and is reviewed as one: the suite's own history between the two commits says which cases and which adapter code moved.
+- Moving the pin is a one-line change and is reviewed as one: the step summary lists the case ids it removes, adds and changes relative to the base's pin, and the suite's own history between the two commits says why.
+  A removal fails the gate unless the same pull request lists exactly the removed ids in `MEGA_EEST_REMOVED_CASES` in `scripts/mega_eest.env`, so every behaviour the suite stops pinning is a line the reviewer reads in the diff; a move that removes nothing leaves that line empty.
 - The coverage report and the mutation gate count the suite too: `scripts/coverage_mega_evm.sh` merges its run into the report Codecov receives, and the cargo-mutants gate runs a mutant the tests miss against it (Mutation testing, below).
 
 ### Byte-price grid
