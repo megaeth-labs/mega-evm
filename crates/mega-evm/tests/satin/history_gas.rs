@@ -75,7 +75,8 @@ fn caller_running(code: Bytes) -> MemoryDatabase {
     funded().account_balance(CALLEE, U256::from(10_000_000)).account_code(CALLEE, code)
 }
 
-/// The same for a creation, whose start records the created account and the creator's nonce.
+/// A creator that cannot pay the records its creation's start makes, the created account's and its
+/// own nonce's, halts without starting the creation, and the transaction pays for its body alone.
 #[test]
 fn test_a_creation_whose_creator_cannot_pay_its_records_starts_no_frame() {
     if runs_at_measurement_prices() {

@@ -1,12 +1,12 @@
 //! What the Satin gas schedule charges, measured on real transactions.
 //!
-//! The intrinsic numbers, the state gas a new slot and a new account draw, and the Amsterdam
-//! opcodes the schedule brings with it. Each number is read off a transaction the engine ran, not
-//! computed from the schedule, so a change to either side shows up here.
+//! What init code costs as transaction data, the state gas a `CREATE` frame rejected for its
+//! deployed code gives back, and the Amsterdam opcodes the schedule brings with it. Each number is
+//! read off a transaction the engine ran, not computed from the schedule, so a change to either
+//! side shows up here.
 //!
 //! Every transaction also pays the history gas of its body, which is not a schedule entry and is
-//! priced by the history mechanism. The numbers below are what is left once that ledger is taken
-//! out ([`Spend::schedule_gas`]); what the body costs is pinned in `history_gas.rs`.
+//! priced by the history mechanism; the figures below take it from the transaction's own ledgers.
 
 use alloy_evm::Evm;
 use alloy_primitives::{address, Address, Bytes, U256};
@@ -104,8 +104,8 @@ fn depositing_an_ef_byte() -> Bytes {
         .build()
 }
 
-/// The same from a `CREATE` frame: the frame fails and returns the zero address, the transaction
-/// around it goes through, and the state gas the frame took upfront is back.
+/// A `CREATE` frame whose deployed code starts with `0xEF` fails and returns the zero address, the
+/// transaction around it goes through, and the state gas the frame took upfront is back.
 #[test]
 fn test_a_create_frame_rejected_for_its_first_byte_draws_no_state_gas() {
     let init_code = depositing_an_ef_byte();

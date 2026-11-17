@@ -767,7 +767,7 @@ fn assert_beneficiary_paid(init_code: Bytes) {
     );
 }
 
-/// And for one that fails.
+/// The beneficiary is paid for a deployment whose creation fails, as for one that succeeds.
 #[test]
 fn test_beneficiary_receives_fees_on_execution_failure() {
     assert_beneficiary_paid(Bytes::from_static(&[PUSH0, PUSH0, REVERT]));

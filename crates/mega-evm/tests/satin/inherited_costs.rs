@@ -77,7 +77,7 @@ fn test_the_first_call_to_an_address_nothing_warmed_is_charged_cold() {
     assert_eq!(first_call_over_second(CALL, EXISTING, plain), cold_over_warm() as i64);
 }
 
-/// So does the first `STATICCALL`.
+/// The first `STATICCALL` to a precompile is charged warm, as the control above is charged cold.
 #[test]
 fn test_the_first_staticcall_to_a_precompile_is_charged_warm() {
     assert_eq!(first_call_over_second(STATICCALL, IDENTITY, plain), 0);

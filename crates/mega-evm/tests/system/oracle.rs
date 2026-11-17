@@ -125,8 +125,9 @@ fn unfunded_contract_db(data: &[u8]) -> MemoryDatabase {
     system_db().account_code(CONTRACT, unfunded_value_hint_call(data))
 }
 
-/// The same unfunded call under a data-size limit its input would cross is answered with the
-/// stop, not with the funds failure: nothing is forwarded and nothing is counted.
+/// A value-bearing `sendHint` its caller cannot fund, under a data-size limit its input would
+/// cross, is answered with the stop, not with the funds failure: nothing is forwarded and nothing
+/// is counted.
 #[test]
 fn test_an_unfunded_value_hint_over_the_limit_is_answered_with_the_stop() {
     let data = send_hint(b"unfunded");
