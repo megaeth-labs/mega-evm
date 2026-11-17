@@ -78,6 +78,20 @@ fn test_keyless_deploy_eip1820() {
     }
 }
 
+/// A deployment lands at the signer's first creation address, whoever the signer is, and the
+/// deployed code is the runtime the init code returned.
+#[test]
+fn test_the_deploy_address_is_the_signers_first_creation_address() {
+    for gas_limit in GAS_LIMITS {
+        for len in [1, 2, 3] {
+            let deployment = Deployment::new(deploying(&runtime(len)));
+            let outcome = deploy(system_db(), &deployment, gas_limit);
+            assert_eq!(returned(&outcome).deployedAddress, deployment.signer.create(0));
+            assert_eq!(code_hash(&outcome, deployment.address), Some(keccak(&runtime(len))));
+        }
+    }
+}
+
 /// The hash of `code`.
 fn keccak(code: &[u8]) -> B256 {
     alloy_primitives::keccak256(code)
