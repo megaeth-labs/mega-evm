@@ -488,6 +488,74 @@ fn test_authorization_list_boundaries() {
     assert_eq!(outcome.usage.write_records, 0);
 }
 
+/// Signer nonce 0, signer absent. With the deploy address's +1, the init code's 980th fresh slot
+/// crosses the creation's budget of 980, the share of the call's 1,000; the signer's rise is the
+/// call's, counted once the creation returned. The call answers `ExecutionReverted` with that stop.
+/// The deploy account and its record are taken back. The signer's bump stands, and its record with
+/// it, while the account still differs.
+#[test]
+fn test_a_keyless_creation_from_nonce_0_stopped_in_its_initcode() {
+    if 980 * common::slot_state_gas() > SIGNED_SLOT_GAS {
+        note_price_guard("980 slots of state gas do not fit the keyless forward");
+        return;
+    }
+    let deployment = Deployment::signed(SIGNED_SLOT_GAS, store_n_slots(980));
+    let data = deployment.call_data(LARGE_OVERRIDE);
+    let data_len = data.len() as u64;
+    let state = 980 * common::slot_state_gas() + 2 * common::account_state_gas();
+    let gas = EXECUTION_CAP + common::body_history(data.len() as u64) + state + 5_000_000;
+    let outcome = execute(keyless_db(), keyless_tx(data, gas));
+    let KeylessDeployError::ExecutionReverted { output, .. } = keyless_failure(&outcome) else {
+        panic!("the creation did not revert: {:?}", outcome.result);
+    };
+    let stop = MegaLimitExceeded::abi_decode(&output).expect("the revert data is a stop");
+    assert_eq!(stop, MegaLimitExceeded { kind: 3, limit: frame_share(1_000) });
+    assert_eq!(nonce_of(&outcome, deployment.signer), 1);
+    assert!(!super::has_code(&outcome, deployment.address));
+    assert!(outcome.limit_exceeded.is_none(), "the call caught the creation's stop");
+    // The signer's record stands, the deploy address's goes with the creation.
+    assert_eq!(outcome.usage.write_records, 1);
+    assert_eq!(outcome.usage.data_size, BODY_BYTES + data_len + super::WRITE_RECORD_SIZE);
+    if pins_state() {
+        assert_eq!(outcome.gas.state, ACCOUNT_LEAF_STATE_GAS_M1, "only the signer's leaf");
+    }
+}
+
+/// The same creation from signer nonce 1. The bump does not create the signer, so the creation's
+/// budget is `floor(1,000 × 98 / 100)` = 980, and the deploy address's rise is inside it. 980
+/// fresh slots cross that budget. The bump is the last nonce change the deployment made and is
+/// taken back, with its record and that record's history.
+#[test]
+fn test_a_keyless_creation_from_nonce_1_takes_the_bump_back() {
+    if 980 * common::slot_state_gas() > SIGNED_SLOT_GAS {
+        note_price_guard("980 slots of state gas do not fit the keyless forward");
+        return;
+    }
+    let deployment = Deployment::signed(SIGNED_SLOT_GAS, store_n_slots(980));
+    let mut db = keyless_db();
+    db.set_account_nonce(deployment.signer, 1);
+    db.set_account_balance(deployment.signer, U256::from(1));
+    let data = deployment.call_data(LARGE_OVERRIDE);
+    let data_len = data.len() as u64;
+    let state = 980 * common::slot_state_gas() + common::account_state_gas();
+    let gas = EXECUTION_CAP + common::body_history(data.len() as u64) + state + 5_000_000;
+    let outcome = execute(db, keyless_tx(data, gas));
+    let KeylessDeployError::ExecutionReverted { output, .. } = keyless_failure(&outcome) else {
+        panic!("the creation did not revert: {:?}", outcome.result);
+    };
+    let stop = MegaLimitExceeded::abi_decode(&output).expect("the revert data is a stop");
+    assert_eq!(stop, MegaLimitExceeded { kind: 3, limit: frame_share(TX_STATE_GROWTH_LIMIT) });
+    assert_eq!(nonce_of(&outcome, deployment.signer), 1, "the bump is taken back");
+    assert!(!super::has_code(&outcome, deployment.address));
+    // The signer is again as the transaction loaded it: its record and the record's history go.
+    assert_eq!(outcome.usage.write_records, 0);
+    assert_eq!(outcome.usage.data_size, BODY_BYTES + data_len);
+    assert_eq!(outcome.gas.history, common::body_history(data_len));
+    if pins_state() {
+        assert_eq!(outcome.gas.state, 0, "the deploy address's leaf goes with the creation");
+    }
+}
+
 /// The constructor `DELEGATECALL`s a library that self-destructs the account, then returns one
 /// byte of runtime. The creation's EVM result succeeds, and the call answers `EmptyCodeDeployed`
 /// with the zero address. The destruction gives the deploy address's leaf and its record back to

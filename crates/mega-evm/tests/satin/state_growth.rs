@@ -167,6 +167,109 @@ fn account_and_delegation() -> (u64, u64) {
     (entry(GasId::new_account_state_gas()), entry(GasId::tx_eip7702_state_gas_bytecode()))
 }
 
+/// An authorization adds state only when it applies: a new account for an authority that did not
+/// exist, and the delegation's bytes once for an authority that was not delegated. Each authority
+/// it applies to is one write record, however many of its authorizations applied, except the
+/// sender, whose account is the body's. An authorization that does not apply — a wrong nonce, a
+/// wrong chain, a nonce that cannot be bumped, an account with code, a signature that recovers to
+/// nobody — adds nothing and leaves its authority as it was.
+#[test]
+fn test_an_authorization_adds_state_only_when_it_applies() {
+    if state_is_free() {
+        return;
+    }
+    let (account, delegation) = account_and_delegation();
+    let a1 = Some(AUTHORITY_1);
+    let a2 = Some(AUTHORITY_2);
+    let with_code = || funded().account_code(AUTHORITY_1, Bytes::from_static(&[STOP]));
+    // (case, database, authorizations, state gas, records, AUTHORITY_1's nonce after)
+    type Case = (&'static str, MemoryDatabase, Vec<Authorization>, u64, u64, u64);
+    let cases: Vec<Case> = vec![
+        ("a new authority", funded(), vec![(a1, 0, 0)], account + delegation, 1, 1),
+        (
+            "two new authorities",
+            funded(),
+            vec![(a1, 0, 0), (a2, 0, 0)],
+            2 * (account + delegation),
+            2,
+            1,
+        ),
+        (
+            "one new authority authorized twice at its first nonce",
+            funded(),
+            vec![(a1, 0, 0), (a1, 0, 0)],
+            account + delegation,
+            1,
+            1,
+        ),
+        (
+            "one new authority authorized twice in sequence",
+            funded(),
+            vec![(a1, 0, 0), (a1, 0, 1)],
+            account + delegation,
+            1,
+            2,
+        ),
+        (
+            "an authority that exists",
+            funded().account_balance(AUTHORITY_1, U256::from(1)),
+            vec![(a1, 0, 0)],
+            delegation,
+            1,
+            1,
+        ),
+        (
+            "an authority on the transaction's chain",
+            funded(),
+            vec![(a1, 1, 0)],
+            account + delegation,
+            1,
+            1,
+        ),
+        ("an authority on another chain", funded(), vec![(a1, 999, 0)], 0, 0, 0),
+        ("a wrong nonce", funded(), vec![(a1, 0, 1)], 0, 0, 0),
+        ("a nonce that cannot be bumped", funded(), vec![(a1, 0, u64::MAX)], 0, 0, 0),
+        ("an authority with code", with_code(), vec![(a1, 0, 0)], 0, 0, 0),
+        ("a signature that recovers to nobody", funded(), vec![(None, 0, 0)], 0, 0, 0),
+        (
+            "the sender, at the nonce its transaction leaves it",
+            funded(),
+            vec![(Some(CALLER), 0, 1)],
+            delegation,
+            0,
+            0,
+        ),
+        (
+            "the sender, at its transaction's own nonce",
+            funded(),
+            vec![(Some(CALLER), 0, 0)],
+            0,
+            0,
+            0,
+        ),
+    ];
+    for (name, db, authorizations, state_gas, records, nonce) in cases {
+        let tuples = authorizations.len() as u64 * mega_evm::AUTHORIZATION_SIZE;
+        let outcome = run(
+            db.account_code(A, Bytes::from_static(&[STOP])),
+            authorizing(A, U256::ZERO, &authorizations),
+        );
+        assert!(outcome.result.is_success(), "{name}: {:?}", outcome.result);
+        assert_eq!(outcome.gas.state, state_gas, "{name}: the state gas");
+        assert_eq!(outcome.usage.write_records, records, "{name}: the records");
+        assert_eq!(
+            outcome.usage.data_size,
+            TX_BODY_SIZE + tuples + records * WRITE_RECORD_SIZE,
+            "{name}: the data size",
+        );
+        let authority = outcome.state.get(&AUTHORITY_1);
+        assert_eq!(authority.map_or(0, |a| a.info.nonce), nonce, "{name}: the authority's nonce");
+        let delegated =
+            outcome.state.values().any(|a| a.info.code.as_ref().is_some_and(|c| c.is_eip7702()));
+        assert_eq!(delegated, state_gas >= delegation, "{name}: whether anything was delegated");
+    }
+}
+
 /// An authority an earlier transaction funded is no new account, whether the two transactions run
 /// on one journal, as a block builder runs them, or the first is committed before the second runs:
 /// the application charges it no account, and the transaction counts no rise for it.
@@ -763,6 +866,31 @@ fn test_a_child_gets_98_percent_of_what_its_caller_has_left() {
             .is_none_or(|b| b.storage.values().all(|s| s.present_value.is_zero())),
         "the child's slots went with its stop"
     );
+}
+
+/// Under the spec's 1,000 a frame two calls down gets 960 and one three calls down 940
+/// (`960 × 98 / 100` rounded down), when nothing above it kept anything: the 940th slot there fits
+/// and the 941st stops that frame, naming 940; every caller catches the stop and ends.
+#[test]
+fn test_the_state_growth_budgets_at_depth() {
+    assert_eq!(share(share(share(1_000))), 940);
+    let db = |slots: u64| {
+        let d = BytecodeBuilder::default();
+        funded()
+            .account_code(A, call_answering(BytecodeBuilder::default(), B, U256::ZERO))
+            .account_code(B, call_answering(BytecodeBuilder::default(), C, U256::ZERO))
+            .account_code(C, call_answering(BytecodeBuilder::default(), D, U256::ZERO))
+            .account_code(D, write_slots(d, 1, slots + 1).stop().build())
+    };
+    let fits = run_a(db(940), 941, EvmTxRuntimeLimits::default());
+    assert!(fits.result.is_success(), "{:?}", fits.result);
+    assert_eq!(fits.usage.state_growth, 940);
+
+    let stopped = run_a(db(941), 941, EvmTxRuntimeLimits::default());
+    assert!(stopped.result.is_success(), "{:?}", stopped.result);
+    assert_eq!(stopped.limit_exceeded, None, "the callers caught it");
+    assert_eq!(output(&stopped), growth_stop(940), "D's stop, handed up as each caller's answer");
+    assert_eq!(stopped.usage.state_growth, 0);
 }
 
 /// A frame's net is signed, and its remaining is clamped to the budget it was given: a caller that
