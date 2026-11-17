@@ -452,7 +452,8 @@ run_missed_against_mega_eest() {
     # MEGA_EEST_SCRIPT stands in for the script in the driver's own tests. The warm-up checks the
     # pin's provenance; no case set is compared here, the Mega EEST gate does that. It counts
     # against the budget, as the whole pass does.
-    run_bounded env -u MEGA_EEST_BASE_REV MEGA_EEST_MODES=plain \
+    run_bounded env -u MEGA_EEST_BASE_REV -u MEGA_EEST_BASE_REPO -u MEGA_EEST_BASE_REPO_MOVED_FROM \
+        MEGA_EEST_MODES=plain \
         "${MEGA_EEST_SCRIPT:-$ROOT_DIR/scripts/mega_eest.sh}" \
         > "$OUT_DIR/mega-eest-warmup.log" 2>&1 || rc=$?
     if [[ $rc -eq 124 ]]; then
@@ -477,7 +478,8 @@ run_missed_against_mega_eest() {
     # the cases on the same cores, against a timeout the baseline set alone. On a 4-vCPU runner a
     # mutant is about three minutes (an incremental build of mega-evm for the test and again for
     # the adapter, and the 930 plain cases), estimated from local runs, not measured there.
-    run_bounded env -u MEGA_EEST_WORK -u MEGA_EEST_TARGET_DIR -u MEGA_EEST_BASE_REV \
+    run_bounded env -u MEGA_EEST_WORK -u MEGA_EEST_TARGET_DIR \
+        -u MEGA_EEST_BASE_REV -u MEGA_EEST_BASE_REPO -u MEGA_EEST_BASE_REPO_MOVED_FROM \
         MEGA_EEST_DIR="${MEGA_EEST_DIR:-${MEGA_EEST_WORK:-$ROOT_DIR/target/mega-eest}/src}" \
         MEGA_EEST_MODES=plain MEGA_EEST_SKIP_PROVENANCE=1 cargo mutants \
         "${PKG_ARGS[@]}" \

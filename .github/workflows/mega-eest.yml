@@ -18,7 +18,8 @@ name: Mega EEST
 # removed, added and changed relative to its base's pin in the step summary, where any removal or
 # change fails the gate unless scripts/mega_eest.env's MEGA_EEST_REMOVED_CASES and
 # MEGA_EEST_CHANGED_CASES list exactly those ids, lines the reviewer reads in the diff; and a pull
-# request that changes MEGA_EEST_REPO fails it, unless the base has no pin file.
+# request that changes MEGA_EEST_REPO fails it, unless the base has no pin file or the pull request
+# declares the move in MEGA_EEST_REPO_MOVED_FROM. A refusal's annotation names its cause.
 #
 # A failing case pins a rule of the Satin specification. A pull request that changes that
 # behaviour on purpose, or the mega-evm API the adapter calls, changes Mega EEST first (the case or
@@ -115,6 +116,7 @@ jobs:
           echo "rev=$rev" >> "$GITHUB_OUTPUT"
           base=""
           base_repo=""
+          base_moved_from=""
           if [ "$EVENT" = pull_request ]; then
             if ! git rev-parse --verify -q 'HEAD^2' > /dev/null; then
               echo "::error::HEAD is not the pull request's merge commit, so the base's pin is unknown"
@@ -124,11 +126,15 @@ jobs:
             if git cat-file -e 'HEAD^1:scripts/mega_eest.env' 2> /dev/null; then
               base=$(git show 'HEAD^1:scripts/mega_eest.env' | sed -n 's/^MEGA_EEST_REV=\(.*\)$/\1/p')
               base_repo=$(git show 'HEAD^1:scripts/mega_eest.env' | sed -n 's/^MEGA_EEST_REPO=\(.*\)$/\1/p')
+              base_moved_from=$(git show 'HEAD^1:scripts/mega_eest.env' | sed -n 's/^MEGA_EEST_REPO_MOVED_FROM=\(.*\)$/\1/p')
             fi
           fi
           echo "the base's pin: ${base:-(none)} in ${base_repo:-(none)}"
-          echo "base=$base" >> "$GITHUB_OUTPUT"
-          echo "base_repo=$base_repo" >> "$GITHUB_OUTPUT"
+          {
+            echo "base=$base"
+            echo "base_repo=$base_repo"
+            echo "base_moved_from=$base_moved_from"
+          } >> "$GITHUB_OUTPUT"
 
       # The job's cargo cache is the step below: setup-rust-toolchain's own cache handles the
       # workspace's target directory, and this job builds into another.
@@ -160,6 +166,7 @@ jobs:
           REV: ${{ steps.pin.outputs.rev }}
           MEGA_EEST_BASE_REV: ${{ steps.pin.outputs.base }}
           MEGA_EEST_BASE_REPO: ${{ steps.pin.outputs.base_repo }}
+          MEGA_EEST_BASE_REPO_MOVED_FROM: ${{ steps.pin.outputs.base_moved_from }}
         run: |
           set -uo pipefail
           start=$SECONDS
@@ -183,7 +190,7 @@ jobs:
           case "$status" in
             0) ;;
             1) echo "::error::Mega EEST cases failed on this tree; the failing cases are in the log above and in the uploaded reports" ;;
-            3) echo "::error::the cases passed, but the pin is refused: it is not on Mega EEST's default branch, or it removes cases scripts/mega_eest.env does not declare (see the log)" ;;
+            3) echo "::error::the cases passed, but the pin is refused: $(python3 scripts/mega_eest.py refusal --summary "$line")" ;;
             *) echo "::error::the Mega EEST run reached no verdict (exit $status): see the log for the step that failed" ;;
           esac
           [ "$status" -eq 0 ] || exit "$status"
