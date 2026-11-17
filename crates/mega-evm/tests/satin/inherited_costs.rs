@@ -12,9 +12,15 @@ use mega_evm::{
     test_utils::{BytecodeBuilder, MemoryDatabase},
     MegaTransaction,
 };
-use revm::bytecode::opcode::{POP, PUSH0, STATICCALL, STOP};
+use revm::{
+    bytecode::opcode::{CALL, POP, PUSH0, STATICCALL, STOP},
+    context_interface::cfg::GasId,
+};
 
-use crate::common::{call, execute};
+use crate::{
+    common::{call, execute},
+    salt::entry,
+};
 
 const CALLER: Address = address!("0000000000000000000000000000000000e20000");
 const CONTRACT: Address = address!("0000000000000000000000000000000000e20001");
@@ -22,6 +28,12 @@ const CONTRACT: Address = address!("0000000000000000000000000000000000e20001");
 const EXISTING: Address = address!("0000000000000000000000000000000000e20002");
 /// The identity precompile.
 const IDENTITY: Address = address!("0000000000000000000000000000000000000004");
+
+/// What the first touch of an address costs over a warm one: the schedule's cold account access
+/// less its warm read.
+fn cold_over_warm() -> u64 {
+    entry(GasId::cold_account_additional_cost())
+}
 
 /* ---------- preload-warm addresses ---------- */
 
@@ -56,6 +68,13 @@ fn first_call_over_second(opcode: u8, to: Address, tx: impl Fn() -> MegaTransact
 
 fn plain() -> MegaTransaction {
     call(CALLER, CONTRACT, U256::ZERO, 10_000_000 + crate::common::body_history(0))
+}
+
+/// The control the other cases are measured against: an address nothing preloads costs the cold
+/// price on its first touch, so the measurement sees a cold touch where there is one.
+#[test]
+fn test_the_first_call_to_an_address_nothing_warmed_is_charged_cold() {
+    assert_eq!(first_call_over_second(CALL, EXISTING, plain), cold_over_warm() as i64);
 }
 
 /// So does the first `STATICCALL`.
