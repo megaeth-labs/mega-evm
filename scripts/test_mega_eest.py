@@ -25,6 +25,7 @@ from argparse import Namespace
 from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parent
+ROOT = SCRIPTS.parent
 
 
 def load_script(name: str):
@@ -425,12 +426,15 @@ class Check(Case):
         (run / "work" / "plain.json").write_text(json.dumps({"cases": self.all_passed()}))
         (run / "work" / "plain.exit").write_text("0\n")
         (run / "work" / "negative.json").write_text(json.dumps({"cases": self.NEGATIVE}))
-        for repo, want in (("changed", 3), ("same", 0), ("unchecked", 0)):
+        for provenance, repo, want in (("default-branch", "changed", 3), ("default-branch", "stale", 3),
+                                       ("default-branch", "moved", 0), ("unchecked", "moved", 3),
+                                       ("default-branch", "same", 0), ("unchecked", "same", 0),
+                                       ("default-branch", "unchecked", 0)):
             code, out, err = self.run_quietly(eest.cmd_check, Namespace(
                 suite=str(run / "suite"), work=str(run / "work"), modes="plain", rev="f" * 40,
-                provenance="default-branch", repo=repo, caseset="kept"))
-            self.assertEqual(code, want, (repo, err))
-            self.assertIn(f"repo={repo} caseset=kept", out)
+                provenance=provenance, repo=repo, caseset="kept"))
+            self.assertEqual(code, want, (provenance, repo, err))
+            self.assertIn(f"provenance={provenance} repo={repo} caseset=kept", out)
 
     def test_a_refused_pin_exits_3_and_failing_cases_still_exit_1(self) -> None:
         for provenance, caseset in (("unmerged", "unmoved"), ("default-branch", "undeclared")):
@@ -455,6 +459,54 @@ class Check(Case):
             provenance="unchecked", caseset="unchecked"))
         self.assertEqual(code, 2, err)
         self.assertTrue(out.strip().endswith("stage=check result=INCOMPLETE"), out)
+
+
+class Refusal(Case):
+    """The causes a refused run's annotation and log name, read off the summary line."""
+
+    LINE = "MEGA-EEST rev={} run=full cases=2 negative=fail-as-recorded {} result=REFUSED".format("f" * 40, "{}")
+
+    def refusal(self, fields: str) -> str:
+        code, out, _ = self.run_quietly(eest.cmd_refusal, Namespace(summary=self.LINE.format(fields)))
+        self.assertEqual(code, 0)
+        return out.strip()
+
+    def test_each_cause_is_named_by_its_field(self) -> None:
+        for fields, cause in (
+                ("provenance=unmerged repo=same caseset=kept", "(provenance=unmerged)"),
+                ("provenance=default-branch repo=changed caseset=kept", "(repo=changed)"),
+                ("provenance=default-branch repo=stale caseset=kept", "(repo=stale)"),
+                ("provenance=unchecked repo=moved caseset=kept", "(repo=moved provenance=unchecked)"),
+                ("provenance=default-branch repo=same caseset=undeclared", "(caseset=undeclared)")):
+            said = self.refusal(fields)
+            self.assertTrue(said.endswith(cause), (fields, said))
+            self.assertNotIn(";", said, fields)
+
+    def test_several_causes_are_all_named(self) -> None:
+        said = self.refusal("provenance=unmerged repo=changed caseset=undeclared")
+        for cause in ("(provenance=unmerged)", "(repo=changed)", "(caseset=undeclared)"):
+            self.assertIn(cause, said)
+
+    def test_the_checker_refuses_exactly_for_a_cause(self) -> None:
+        for provenance in ("default-branch", "unmerged", "unchecked"):
+            for repo in ("same", "moved", "changed", "stale", "unchecked"):
+                for caseset in ("unmoved", "kept", "declared", "undeclared", "unchecked"):
+                    fields = {"provenance": provenance, "repo": repo, "caseset": caseset}
+                    refused = (provenance == "unmerged" or repo in ("changed", "stale")
+                               or (repo == "moved" and provenance == "unchecked") or caseset == "undeclared")
+                    self.assertEqual(bool(eest.refusal_causes(fields)), refused, fields)
+
+    def test_the_jobs_annotation_names_the_cause(self) -> None:
+        workflow = (ROOT / ".github" / "workflows" / "mega-eest.yml").read_text()
+        arms = [line.strip() for line in workflow.splitlines() if line.strip().startswith("3) echo \"::error::")]
+        self.assertEqual(len(arms), 1, arms)
+        line = self.LINE.format("provenance=default-branch repo=same caseset=undeclared")
+        run = subprocess.run(["bash", "-c", f'status=3; case "$status" in {arms[0]} esac', "_"],
+                             cwd=ROOT, env={"PATH": f"{Path(sys.executable).parent}:/usr/bin:/bin",
+                                            "line": line}, capture_output=True, text=True, timeout=60)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertIn("MEGA_EEST_CHANGED_CASES do not list exactly (caseset=undeclared)", run.stdout)
+        self.assertNotIn("not on Mega EEST's default branch", run.stdout)
 
 
 class Executable(Case):
@@ -696,8 +748,10 @@ class Script(Case):
         return rev
 
     def run_script(self, rev: str | None = None, declared: str | None = None, changed: str | None = None,
-                   **env: str) -> tuple[int, str, str]:
+                   moved_from: str | None = None, **env: str) -> tuple[int, str, str]:
         pin = [f"MEGA_EEST_REPO=file://{self.suite}", f"MEGA_EEST_REV={rev or self.rev}"]
+        if moved_from is not None:
+            pin.append(f"MEGA_EEST_REPO_MOVED_FROM={moved_from}")
         if declared is not None:
             pin.append(f"MEGA_EEST_REMOVED_CASES={declared}")
         if changed is not None:
@@ -817,15 +871,62 @@ class Script(Case):
         self.assertEqual(code, 0, err)
         self.assertIn("caseset=declared result=pass", self.summary(out))
 
-    def test_a_pin_move_to_another_repository_is_refused(self) -> None:
+    def mirror(self) -> str:
+        """Another repository holding the suite's history: the base's, for a move from it."""
         mirror = self.tmp / "mirror"
-        self.git("clone", "-q", str(self.suite), str(mirror))
-        code, out, err = self.run_script(MEGA_EEST_BASE_REV=self.rev, MEGA_EEST_BASE_REPO=f"file://{mirror}")
+        if not mirror.exists():
+            self.git("clone", "-q", str(self.suite), str(mirror))
+        return f"file://{mirror}"
+
+    def test_a_pin_move_to_another_repository_is_refused(self) -> None:
+        mirror = self.mirror()
+        code, out, err = self.run_script(MEGA_EEST_BASE_REV=self.rev, MEGA_EEST_BASE_REPO=mirror)
         self.assertEqual(code, 3, err)
         self.assertIn("MEGA_EEST_REPO moves from", err)
         self.assertIn("repo=changed", self.summary(out))
+        self.assertIn("the pin is refused: MEGA_EEST_REPO is not the base's", err)
         code, out, err = self.run_script(MEGA_EEST_BASE_REV=self.rev, MEGA_EEST_BASE_REPO=f"file://{self.suite}")
         self.assertEqual(code, 0, err)
+        self.assertIn("repo=same caseset=unmoved result=pass", self.summary(out))
+
+    def test_a_declared_repository_move_passes(self) -> None:
+        mirror = self.mirror()
+        code, out, err = self.run_script(moved_from=mirror, MEGA_EEST_BASE_REV=self.rev, MEGA_EEST_BASE_REPO=mirror)
+        self.assertEqual(code, 0, err)
+        self.assertIn("as MEGA_EEST_REPO_MOVED_FROM declares", err)
+        self.assertIn("provenance=default-branch repo=moved caseset=unmoved result=pass", self.summary(out))
+
+    def test_a_declared_move_from_another_repository_than_the_bases_is_refused(self) -> None:
+        mirror = self.mirror()
+        code, out, err = self.run_script(moved_from=f"{mirror}-elsewhere", MEGA_EEST_BASE_REV=self.rev,
+                                         MEGA_EEST_BASE_REPO=mirror)
+        self.assertEqual(code, 3, err)
+        self.assertIn(f"is '{mirror}-elsewhere', not the base's repository", err)
+        self.assertIn("repo=changed caseset=kept result=REFUSED", self.summary(out))
+
+    def test_a_declared_move_whose_pin_is_off_the_new_default_branch_is_refused(self) -> None:
+        mirror = self.mirror()
+        off = self.commit_cases(["satin/a", "satin/b", "satin/c", "satin/d"], branch="draft")
+        code, out, err = self.run_script(rev=off, moved_from=mirror, MEGA_EEST_BASE_REV=self.rev,
+                                         MEGA_EEST_BASE_REPO=mirror)
+        self.assertEqual(code, 3, err)
+        self.assertIn("provenance=unmerged repo=moved", self.summary(out))
+        self.assertIn("the pin is refused: the pin is not on the default branch", err)
+
+    def test_a_move_declaration_without_a_move_is_stale(self) -> None:
+        mirror = self.mirror()
+        code, out, err = self.run_script(moved_from=mirror, MEGA_EEST_BASE_REV=self.rev,
+                                         MEGA_EEST_BASE_REPO=f"file://{self.suite}")
+        self.assertEqual(code, 3, err)
+        self.assertIn(f"declares a move from {mirror}", err)
+        self.assertIn("repo=stale caseset=unmoved result=REFUSED", self.summary(out))
+        self.assertIn("(repo=stale)", err)
+        # The declaration a merged move left in the base only warns, until it is cleared.
+        code, out, err = self.run_script(moved_from=mirror, MEGA_EEST_BASE_REV=self.rev,
+                                         MEGA_EEST_BASE_REPO=f"file://{self.suite}",
+                                         MEGA_EEST_BASE_REPO_MOVED_FROM=mirror)
+        self.assertEqual(code, 0, err)
+        self.assertIn("still declares the last move", err)
         self.assertIn("repo=same caseset=unmoved result=pass", self.summary(out))
 
     def test_a_pin_move_must_declare_the_cases_it_removes(self) -> None:

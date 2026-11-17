@@ -43,7 +43,8 @@ Subcommands:
         `undeclared` (anything else).
 
   check       --suite <Mega EEST checkout> --work <dir> --modes <"plain instrumented"> --rev <commit>
-              [--provenance <default-branch|unmerged|unchecked>] [--repo <same|changed|unchecked>]
+              [--provenance <default-branch|unmerged|unchecked>]
+              [--repo <same|moved|changed|stale|unchecked>]
               [--caseset <unmoved|kept|declared|undeclared|unchecked>]
         Read the run reports `mega-fixture consume` wrote into <dir> (<mode>.json, and
         negative.json for the suite's deliberately wrong expectation) and decide: in every mode, the
@@ -62,9 +63,15 @@ Subcommands:
         consume exit its report does not explain, a case the adapter does not support, a case
         status other than the consumer's four (pass, fail, unsupported, error), no control,
         a control not run or passing, a control that failed elsewhere while every gating case
-        passed, or the checker itself failing); 3 REFUSED, every case passed but the pin's
-        provenance is `unmerged`, its repository is not the base's (`repo=changed`) or its case set
-        `undeclared`. `run=full` in the line is both
+        passed, or the checker itself failing); 3 REFUSED, every case passed but the pin is refused
+        for a cause `refusal` names: its provenance is `unmerged`; its repository is not the base's
+        and no declaration names the base's (`repo=changed`); a declaration names a move the change
+        does not make (`repo=stale`); its repository moves and its provenance is unchecked; or its
+        case set is `undeclared`.
+
+  refusal     --summary <MEGA-EEST line>
+        The causes for which the pin of a summary line is refused, one sentence, from the line's
+        fields: what the job's annotation and the script's log say on exit 3. `run=full` in the line is both
         modes; `run=partial` one.
 """
 from __future__ import annotations
@@ -537,7 +544,7 @@ def check(args: argparse.Namespace) -> int:
         result = "INCOMPLETE"
     elif cases_failed:
         result = "FAIL"
-    elif args.provenance == "unmerged" or args.caseset == "undeclared" or repo == "changed":
+    elif refusal_causes({"provenance": args.provenance, "repo": repo, "caseset": args.caseset}):
         result = "REFUSED"
     else:
         result = "pass"
@@ -546,6 +553,37 @@ def check(args: argparse.Namespace) -> int:
     summary.append(f"result={result}")
     print("MEGA-EEST " + " ".join(summary))
     return RESULT_EXIT[result]
+
+
+# ---- refusal ----------------------------------------------------------------------------------
+
+# Why a run whose cases passed refuses its pin, by the summary line's fields: the checker refuses a
+# pin for exactly these, and the job's annotation and the script's log name them from the same list.
+def refusal_causes(fields: dict[str, str]) -> list[str]:
+    causes = []
+    if fields.get("provenance") == "unmerged":
+        causes.append("the pin is not on the default branch of MEGA_EEST_REPO (provenance=unmerged)")
+    repo = fields.get("repo")
+    if repo == "changed":
+        causes.append("MEGA_EEST_REPO is not the base's, and MEGA_EEST_REPO_MOVED_FROM does not name the "
+                      "base's repository (repo=changed)")
+    elif repo == "stale":
+        causes.append("MEGA_EEST_REPO_MOVED_FROM declares a move from another repository, and this "
+                      "change makes none: clear it (repo=stale)")
+    elif repo == "moved" and fields.get("provenance") == "unchecked":
+        causes.append("MEGA_EEST_REPO moves, and the pin is not checked to be on the new repository's "
+                      "default branch (repo=moved provenance=unchecked)")
+    if fields.get("caseset") == "undeclared":
+        causes.append("the pin removes or changes cases that MEGA_EEST_REMOVED_CASES and "
+                      "MEGA_EEST_CHANGED_CASES do not list exactly (caseset=undeclared)")
+    return causes
+
+
+def cmd_refusal(args: argparse.Namespace) -> int:
+    fields = dict(f.split("=", 1) for f in args.summary.split() if "=" in f)
+    causes = refusal_causes(fields)
+    print("; ".join(causes) if causes else f"no refusal cause in the summary line: {args.summary}")
+    return 0
 
 
 # ---- executable, case-diff --------------------------------------------------------------------
@@ -640,10 +678,14 @@ def main() -> int:
     pc.add_argument("--modes", required=True)
     pc.add_argument("--rev", required=True)
     pc.add_argument("--provenance", default="unchecked", choices=["default-branch", "unmerged", "unchecked"])
-    pc.add_argument("--repo", default="unchecked", choices=["same", "changed", "unchecked"])
+    pc.add_argument("--repo", default="unchecked", choices=["same", "moved", "changed", "stale", "unchecked"])
     pc.add_argument("--caseset", default="unchecked",
                     choices=["unmoved", "kept", "declared", "undeclared", "unchecked"])
     pc.set_defaults(func=cmd_check)
+
+    pr = sub.add_parser("refusal", help="why a summary line's pin is refused, by its fields")
+    pr.add_argument("--summary", required=True)
+    pr.set_defaults(func=cmd_refusal)
 
     pe = sub.add_parser("executable", help="the executable a cargo build reported, from its JSON messages")
     pe.add_argument("--name", required=True)

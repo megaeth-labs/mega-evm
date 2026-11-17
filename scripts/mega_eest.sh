@@ -20,7 +20,10 @@
 #    $MEGA_EEST_WORK/case-diff.md), and the removed ids and the ids of cases changed under them
 #    (another file digest) must be exactly those scripts/mega_eest.env's MEGA_EEST_REMOVED_CASES and
 #    MEGA_EEST_CHANGED_CASES declare, or the script exits 3. When MEGA_EEST_BASE_REPO names the
-#    base's repository, a pin file that names another one exits 3 too.
+#    base's repository, a pin file that names another one exits 3 too, unless its
+#    MEGA_EEST_REPO_MOVED_FROM names the base's repository exactly (a declared move); a declaration
+#    of a move the change does not make exits 3 as stale, unless it is the base's own
+#    (MEGA_EEST_BASE_REPO_MOVED_FROM), which then only warns.
 # 4. Builds the suite's `mega-fixture` CLI, and its revm adapter against this checkout: the adapter
 #    is written out as a workspace of its own ($MEGA_EEST_WORK/adapter-revm, by scripts/mega_eest.py)
 #    whose mega-evm is a path dependency on crates/mega-evm here, whose other crates take their
@@ -51,7 +54,7 @@
 #
 #   MEGA-EEST rev=<commit> run=<full|partial> cases=<n> <mode>=pass:<n>,fail:<n>,unsupported:<n>,error:<n> ...
 #     [parity=<identical|N-differ>] negative=<...> provenance=<default-branch|unmerged|unchecked>
-#     repo=<same|changed|unchecked> caseset=<unmoved|kept|declared|undeclared|unchecked>
+#     repo=<same|moved|changed|stale|unchecked> caseset=<unmoved|kept|declared|undeclared|unchecked>
 #     result=<pass|FAIL|INCOMPLETE|REFUSED>
 #
 # `run=full` is both modes, which the gate requires; `run=partial` is one, which the mutation gate
@@ -70,8 +73,9 @@
 #      not support, no mode, a wrong expectation not run or passing, or one that failed elsewhere
 #      while every gating case passed (result=INCOMPLETE)
 #   3  the cases passed, but the pin is refused: not on Mega EEST's default branch, in another
-#      repository than the base's, or it removes or changes cases scripts/mega_eest.env does not
-#      declare (result=REFUSED)
+#      repository than the base's without a declared move, with a stale move declaration, or it
+#      removes or changes cases scripts/mega_eest.env does not declare (result=REFUSED; the log
+#      names the cause)
 #
 # Environment:
 #   MEGA_EEST_DIR         a Mega EEST checkout at the pin to use instead of fetching one
@@ -82,6 +86,7 @@
 #   MEGA_EEST_JOBS        cases run at once (default: the number of CPUs)
 #   MEGA_EEST_BASE_REV    the pin to compare the case set with (CI: the pull request base's pin)
 #   MEGA_EEST_BASE_REPO   the repository the base's pin file names (CI: when the base has the file)
+#   MEGA_EEST_BASE_REPO_MOVED_FROM  the base pin file's MEGA_EEST_REPO_MOVED_FROM (CI: likewise)
 #   MEGA_EEST_SKIP_PROVENANCE=1
 #                         skips step 2 (provenance=unchecked): for the mutation gate's runs, which
 #                         its warm-up already checked, and the coverage report; never the gate
@@ -171,6 +176,7 @@ REV=$(read_pin MEGA_EEST_REV)
 [[ "$REV" =~ ^[0-9a-f]{40}$ ]] || die "$PIN_FILE: MEGA_EEST_REV is '$REV', not a full commit hash"
 DECLARED_REMOVALS=$(read_optional MEGA_EEST_REMOVED_CASES)
 DECLARED_CHANGES=$(read_optional MEGA_EEST_CHANGED_CASES)
+MOVED_FROM=$(read_optional MEGA_EEST_REPO_MOVED_FROM)
 
 # The paths of a checkout that decide what runs: a change to any of them is a different suite.
 SUITE_PATHS=(slice specs adapters crates Cargo.toml Cargo.lock)
@@ -282,15 +288,31 @@ else
 fi
 
 # The repository against the base's, when it is given: the default branch the provenance check
-# reads is the pin repository's own, so a change of repository is a change of what is trusted.
+# reads is the pin repository's own, so a change of repository is a change of what is trusted, and
+# is declared as a removed or changed case is. A move names the base's repository in
+# MEGA_EEST_REPO_MOVED_FROM, exactly, and its pin is then checked on the new repository's default
+# branch; a declaration of a move the change does not make is stale, unless it is the base's own,
+# left by the move that merged, which the line describes until it is cleared.
 REPO_STATE=unchecked
 if [ -n "${MEGA_EEST_BASE_REPO:-}" ]; then
-    if [ "$MEGA_EEST_BASE_REPO" = "$REPO" ]; then
+    if [ "$MEGA_EEST_BASE_REPO" != "$REPO" ]; then
+        if [ "$MOVED_FROM" = "$MEGA_EEST_BASE_REPO" ]; then
+            REPO_STATE=moved
+            log "MEGA_EEST_REPO moves from $MEGA_EEST_BASE_REPO to $REPO, as MEGA_EEST_REPO_MOVED_FROM declares"
+        else
+            REPO_STATE=changed
+            log "error: MEGA_EEST_REPO moves from $MEGA_EEST_BASE_REPO to $REPO, and MEGA_EEST_REPO_MOVED_FROM" \
+                "is '$MOVED_FROM', not the base's repository"
+        fi
+    elif [ -z "$MOVED_FROM" ]; then
         REPO_STATE=same
+    elif [ "$MOVED_FROM" = "${MEGA_EEST_BASE_REPO_MOVED_FROM:-}" ]; then
+        REPO_STATE=same
+        log "warning: MEGA_EEST_REPO_MOVED_FROM still declares the last move, from $MOVED_FROM; clear it"
     else
-        REPO_STATE=changed
-        log "error: MEGA_EEST_REPO moves from $MEGA_EEST_BASE_REPO to $REPO; the suite's repository is" \
-            "not changed in a pull request that runs this gate"
+        REPO_STATE=stale
+        log "error: MEGA_EEST_REPO_MOVED_FROM declares a move from $MOVED_FROM, and MEGA_EEST_REPO stays" \
+            "$REPO"
     fi
 fi
 
@@ -394,7 +416,7 @@ case "$status" in
     1) log "a case that fails pins behaviour of the Satin specification: fix the change, or, when it" \
         "changes that behaviour on purpose, change the case in Mega EEST first and move the pin" \
         "(AGENTS.md, the Mega EEST gate)" ;;
-    3) log "the cases passed, but the pin is refused (provenance=$PROVENANCE repo=$REPO_STATE caseset=$CASESET)" ;;
+    3) log "the cases passed, but the pin is refused: $(python3 "$HELPER" refusal --summary "$summary")" ;;
 esac
 FINISHED=1
 exit "$status"
