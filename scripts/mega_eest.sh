@@ -43,6 +43,10 @@
 #   MEGA_EEST_TARGET_DIR  the cargo target directory of both builds (default $MEGA_EEST_WORK/target)
 #   MEGA_EEST_MODES       the modes to consume in (default "plain instrumented")
 #   MEGA_EEST_JOBS        cases run at once (default: the number of CPUs)
+#   MEGA_EEST_ENGINE_RUSTFLAGS
+#                         compiler flags for this tree's packages and the adapter's own crate in
+#                         the adapter build, for a coverage build (scripts/coverage_mega_evm.sh):
+#                         the crates.io and git crates it links are built without them
 #
 # Requires git, cargo (rustup, for this tree's toolchain), Foundry (mega-evm's system contracts
 # build with forge, as for every build of this tree) and Python 3.11 or newer.
@@ -142,6 +146,7 @@ CLI="$TARGET/debug/mega-fixture"
 
 ADAPTER_DIR="$WORK/adapter-revm"
 python3 "$HELPER" adapter --tree "$ROOT_DIR" --suite "$SUITE" --out "$ADAPTER_DIR" \
+    --engine-rustflags "${MEGA_EEST_ENGINE_RUSTFLAGS:-}" \
     || die "cannot write the adapter workspace"
 log "resolving the adapter workspace on this tree's lock ($(elapsed))"
 cargo metadata --format-version 1 --manifest-path "$ADAPTER_DIR/Cargo.toml" > /dev/null \

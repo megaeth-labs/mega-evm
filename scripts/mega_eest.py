@@ -4,6 +4,7 @@
 Subcommands:
 
   adapter     --tree <mega-evm checkout> --suite <Mega EEST checkout> --out <dir>
+              [--engine-rustflags <flags>]
         Write the Mega EEST revm adapter as a workspace of its own at <dir>, built against the
         mega-evm checkout rather than the commit the adapter pins. Its sources are copied as they
         are; its manifest is the adapter's with three changes. A dependency on a package of this
@@ -16,7 +17,10 @@ Subcommands:
         workspace (the format crate) stays a path dependency on the suite's checkout. The adapter's
         own Cargo.lock, resolved for the commit it pins, is not used: the workspace's lock starts as
         this checkout's Cargo.lock, which cargo then prunes to what the adapter links and extends
-        with anything only the adapter needs.
+        with anything only the adapter needs. `--engine-rustflags` adds compiler flags to this
+        workspace's packages and the adapter's own crate alone (cargo's `profile-rustflags`, which
+        the pinned nightly has), so a coverage build instruments mega-evm and the instances of its
+        generic code the adapter compiles, and not the crates.io and git crates it links.
 
   check-lock  --tree <mega-evm checkout> --adapter <dir>
         After cargo resolved the adapter workspace: every package mega-evm links in it, through
@@ -245,7 +249,17 @@ def cmd_adapter(args: argparse.Namespace) -> int:
             f"({', '.join(sorted(members))}): it would not test this tree")
     for key in ("patch", "profile"):
         if key in root:
-            manifest[key] = root[key]
+            manifest[key] = json.loads(json.dumps(root[key]))
+    flags = args.engine_rustflags.split()
+    if flags:
+        manifest["cargo-features"] = ["profile-rustflags"]
+        overrides = manifest.setdefault("profile", {}).setdefault("dev", {}).setdefault("package", {})
+        # The adapter's own crate too: mega-evm's generic code is compiled where it is used.
+        overrides.setdefault(manifest["package"]["name"], {})["rustflags"] = flags
+        for name, spec in manifest["dependencies"].items():
+            package = spec.get("package", name) if isinstance(spec, dict) else name
+            if package in members:
+                overrides.setdefault(package, {})["rustflags"] = flags
 
     out.mkdir(parents=True, exist_ok=True)
     sync_tree(adapter_dir, out, keep={SEED_MARKER})
@@ -442,6 +456,8 @@ def main() -> int:
     pa.add_argument("--tree", required=True)
     pa.add_argument("--suite", required=True)
     pa.add_argument("--out", required=True)
+    pa.add_argument("--engine-rustflags", default="",
+                    help="compiler flags for this workspace's packages alone, space-separated")
     pa.set_defaults(func=cmd_adapter)
 
     pl = sub.add_parser("check-lock", help="hold the resolved adapter workspace to this checkout's lock")

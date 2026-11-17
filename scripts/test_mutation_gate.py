@@ -130,11 +130,13 @@ class GateCase(unittest.TestCase):
         return path
 
     def report(self, results: Path, recheck: Path | None = None,
-               suppressions: Path | None = None) -> tuple[int, str]:
+               suppressions: Path | None = None,
+               mega_eest: Path | None = None) -> tuple[int, str]:
         comment = self.tmp / "comment.md"
         args = Namespace(
             results=str(results),
             recheck=str(recheck) if recheck else None,
+            mega_eest=str(mega_eest) if mega_eest else None,
             suppressions=str(suppressions) if suppressions else None,
             comment=str(comment),
             summary=None,
@@ -395,6 +397,128 @@ class Scoring(GateCase):
         self.assertIn(MISSED, text)
 
 
+class MegaEestScoring(GateCase):
+    """A mutant the tests missed is decided by its Mega EEST run, and only such a mutant."""
+
+    def against_mega_eest(self, summary: str, *, suppressions: Path | None = None) -> tuple[int, str]:
+        results = self.results(outcomes=outcomes_json(
+            mutant(CAUGHT, "CaughtMutant"), mutant(MISSED, "MissedMutant")))
+        eest = self.results("mega-eest", outcomes=outcomes_json(mutant(MISSED, summary)))
+        return self.report(results, suppressions=suppressions, mega_eest=eest)
+
+    def test_a_missed_mutant_mega_eest_catches_passes(self) -> None:
+        code, text = self.against_mega_eest("CaughtMutant")
+        self.assertEqual(code, 0, text)
+        self.assertIn("run against Mega EEST after the tests missed them: 1 — 1 caught, 0 survived", text)
+        self.assertIn("(2/2 viable mutants killed)", text)
+
+    def test_a_missed_mutant_mega_eest_misses_is_a_survivor(self) -> None:
+        code, text = self.against_mega_eest("MissedMutant")
+        self.assertEqual(code, 1, text)
+        self.assertIn("Survivors needing attention", text)
+        self.assertIn(MISSED, text)
+
+    def test_a_missed_mutant_mega_eest_times_out_on_is_inconclusive(self) -> None:
+        code, text = self.against_mega_eest("Timeout")
+        self.assertEqual(code, 1, text)
+        self.assertIn("Timed-out mutants", text)
+        self.assertNotIn("Survivors needing attention", text)
+
+    def test_a_missed_mutant_without_mega_eest_results_is_a_survivor(self) -> None:
+        results = self.results(outcomes=outcomes_json(mutant(MISSED, "MissedMutant")))
+        code, text = self.report(results, mega_eest=self.tmp / "absent")
+        self.assertEqual(code, 1, text)
+        self.assertIn("none of the 1 the tests missed (no Mega EEST results)", text)
+
+    def test_a_missed_mutant_mega_eest_did_not_run_is_a_survivor(self) -> None:
+        other = "crates/mega-evm/src/b.rs:9:9: replace * with + in k"
+        results = self.results(outcomes=outcomes_json(mutant(MISSED, "MissedMutant")))
+        eest = self.results("mega-eest", outcomes=outcomes_json(mutant(other, "CaughtMutant")))
+        code, text = self.report(results, mega_eest=eest)
+        self.assertEqual(code, 1, text)
+        self.assertIn("0 caught, 0 survived, 0 timed out, 1 not run", text)
+
+    def test_mega_eest_results_only_speak_for_the_missed(self) -> None:
+        # A timeout is the re-check's to decide, whatever a Mega EEST run says of it.
+        results = self.results(outcomes=outcomes_json(
+            mutant(MISSED, "MissedMutant"), mutant(TIMEOUT, "Timeout")))
+        eest = self.results("mega-eest", outcomes=outcomes_json(
+            mutant(MISSED, "CaughtMutant"), mutant(TIMEOUT, "CaughtMutant")))
+        code, text = self.report(results, self.tmp / "no-recheck", mega_eest=eest)
+        self.assertEqual(code, 1, text)
+        self.assertIn("Timed-out mutants", text)
+        self.assertIn(TIMEOUT, text)
+
+    def test_a_timeout_that_survives_alone_is_decided_by_mega_eest(self) -> None:
+        results = self.results(outcomes=outcomes_json(mutant(TIMEOUT, "Timeout")))
+        recheck = self.results("recheck", outcomes=outcomes_json(mutant(TIMEOUT, "MissedMutant")))
+        eest = self.results("mega-eest", outcomes=outcomes_json(mutant(TIMEOUT, "CaughtMutant")))
+        code, text = self.report(results, recheck, mega_eest=eest)
+        self.assertEqual(code, 0, text)
+
+    def test_mega_eest_results_that_cannot_be_scored_fail(self) -> None:
+        results = self.results(outcomes=outcomes_json(mutant(MISSED, "MissedMutant")))
+        for name, eest in [
+            ("failed-baseline", outcomes_json(mutant(MISSED, "CaughtMutant"), baseline="Failure")),
+            ("unfinished", outcomes_json(mutant(MISSED, "CaughtMutant"), end_time=None)),
+        ]:
+            code, text = self.report(results, mega_eest=self.results(name, outcomes=eest))
+            self.assertEqual(code, 2, text)
+            self.assertIn("Mega EEST run of the mutants the tests missed cannot be scored", text)
+        failed = self.results("run-failed", outcomes=outcomes_json(mutant(MISSED, "CaughtMutant")),
+                              files={"run-failed.txt": "cargo-mutants exited 70\n"})
+        code, text = self.report(results, mega_eest=failed)
+        self.assertEqual(code, 2, text)
+        self.assertIn("exited abnormally (cargo-mutants exited 70)", text)
+
+    def test_a_suppressed_survivor_needs_no_mega_eest_run(self) -> None:
+        results = self.results(outcomes=outcomes_json(mutant(MISSED, "MissedMutant")))
+        code, text = self.report(results, suppressions=self.suppressions(MISSED),
+                                 mega_eest=self.tmp / "absent")
+        self.assertEqual(code, 0, text)
+
+
+class MissedRe(GateCase):
+    """`missed-re` selects exactly the unsuppressed mutants the tests missed."""
+
+    def regexes(self, results: Path, recheck: Path | None = None,
+                suppressions: Path | None = None) -> list[str]:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            code = gate.cmd_missed_re(Namespace(
+                results=str(results), recheck=str(recheck) if recheck else None,
+                suppressions=str(suppressions) if suppressions else None))
+        self.assertEqual(code, 0)
+        lines = out.getvalue().splitlines()
+        self.assertEqual(lines[0::2], ["--re"] * (len(lines) // 2))
+        return lines[1::2]
+
+    def test_one_anchored_regex_per_missed_mutant(self) -> None:
+        other = "crates/mega-evm/src/a.rs:2:5: replace + with - in g2"
+        results = self.results(outcomes=outcomes_json(
+            mutant(CAUGHT, "CaughtMutant"), mutant(MISSED, "MissedMutant"),
+            mutant(other, "MissedMutant"), mutant(TIMEOUT, "Timeout")))
+        regexes = self.regexes(results)
+        names = [CAUGHT, MISSED, other, TIMEOUT]
+        self.assertEqual([[n for n in names if re.search(r, n)] for r in regexes], [[MISSED], [other]])
+
+    def test_a_timeout_the_recheck_missed_is_selected(self) -> None:
+        results = self.results(outcomes=outcomes_json(mutant(TIMEOUT, "Timeout")))
+        for summary, selected in [("MissedMutant", [TIMEOUT]), ("CaughtMutant", []), ("Timeout", [])]:
+            recheck = self.results(f"recheck-{summary}", outcomes=outcomes_json(mutant(TIMEOUT, summary)))
+            regexes = self.regexes(results, recheck)
+            self.assertEqual([n for n in [TIMEOUT] if any(re.search(r, n) for r in regexes)], selected)
+
+    def test_suppressed_survivors_are_not_selected(self) -> None:
+        results = self.results(outcomes=outcomes_json(mutant(MISSED, "MissedMutant")))
+        self.assertEqual(self.regexes(results, suppressions=self.suppressions(MISSED)), [])
+
+    def test_results_that_cannot_be_scored_select_nothing(self) -> None:
+        self.assertEqual(self.regexes(self.tmp / "absent"), [])
+        unfinished = self.results(outcomes=outcomes_json(mutant(MISSED, "MissedMutant"), end_time=None))
+        self.assertEqual(self.regexes(unfinished), [])
+
+
 class UmutateRecord(GateCase):
     """scripts/umutate.py writes the record the gate scores, on the contract cargo-mutants keeps."""
 
@@ -533,19 +657,24 @@ def bash5() -> str | None:
 
 
 # A stand-in for `cargo mutants`: it writes the results the test prepared for the run it is asked
-# for, the first run or the re-check (the one given `--re`), and exits as the test says.
+# for, by its output directory — the first run, the re-check or the Mega EEST run — records the
+# arguments it was given in <run>.argv, and exits as the test says.
 FAKE_CARGO = """#!/bin/sh
 [ "$1" = mutants ] || exit 99
 shift
 if [ "$1" = --version ]; then echo "cargo-mutants 27.1.0"; exit 0; fi
-out=""; run=main
+argv="$*"; out=""; run=main
 while [ $# -gt 0 ]; do
     case "$1" in
         --output) out="$2"; shift ;;
-        --re) run=recheck ;;
     esac
     shift
 done
+case "$(basename "$out")" in
+    recheck) run=recheck ;;
+    mega-eest) run=mega-eest ;;
+esac
+echo "$argv" > "$FAKE_RUNS/$run.argv"
 if [ -d "$FAKE_RUNS/$run" ]; then
     mkdir -p "$out/mutants.out"
     cp -R "$FAKE_RUNS/$run/." "$out/mutants.out/"
@@ -581,6 +710,7 @@ class DriverRecheck(GateCase):
                              capture_output=True, text=True, timeout=120, env=env)
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertIn("Re-checking 1 timed-out mutant(s) one at a time", run.stderr)
+        self.assertIn("-f crates/mega-evm/src/a.rs", (runs / "recheck.argv").read_text())
         code, text = self.report(out / "mutants.out", out / "recheck" / "mutants.out")
         return code, text, out / "recheck" / "mutants.out"
 
@@ -603,6 +733,82 @@ class DriverRecheck(GateCase):
         self.assertEqual(sorted(p.name for p in recheck.iterdir()), ["run-failed.txt"])
         self.assertEqual(code, 2, text)
         self.assertIn("exited abnormally (cargo-mutants exited 1)", text)
+
+
+class DriverMegaEest(GateCase):
+    """scripts/mutation_test.sh runs a mutant the tests missed against Mega EEST, with mega-evm's
+    `mega_eest` test alone, after the suite passed on the unmutated tree, and carries a failed
+    warm-up or run into the results, which the gate then refuses."""
+
+    def drive(self, *, warmup_exit: int = 0, eest_exit: int = 0, eest: dict | None = None,
+              env: dict[str, str] | None = None) -> tuple[int, str, Path, Path]:
+        shell = bash5()
+        if shell is None:
+            self.skipTest("no bash 5 or newer on this machine")
+        runs = self.tmp / "runs"
+        self.results("runs/main", outcomes=outcomes_json(
+            mutant(CAUGHT, "CaughtMutant"), mutant(MISSED, "MissedMutant")))
+        (runs / "main.exit").write_text("2\n")
+        if eest is not None:
+            self.results("runs/mega-eest", outcomes=eest)
+        (runs / "mega-eest.exit").write_text(f"{eest_exit}\n")
+        bin_dir = self.tmp / "bin"
+        bin_dir.mkdir()
+        (bin_dir / "cargo").write_text(FAKE_CARGO)
+        (bin_dir / "cargo").chmod(0o755)
+        (bin_dir / "python3").symlink_to(sys.executable)
+        # The warm-up's stand-in records the modes it was asked for and exits as the test says.
+        stub = self.tmp / "mega_eest.sh"
+        stub.write_text(f'#!/bin/sh\necho "$MEGA_EEST_MODES" > "{runs}/warmup.modes"\nexit {warmup_exit}\n')
+        stub.chmod(0o755)
+        out = self.tmp / "out" / "mutants"
+        run = subprocess.run(
+            [shell, str(DriverGuard.DRIVER), "file", "crates/mega-evm/src/a.rs"],
+            capture_output=True, text=True, timeout=120,
+            env={"PATH": f"{bin_dir}:/usr/bin:/bin", "FAKE_RUNS": str(runs), "OUT_DIR": str(out),
+                 "JOBS": "1", "SUPPRESS": str(self.tmp / "no-suppressions.toml"),
+                 "MEGA_EEST_SCRIPT": str(stub), **(env or {})})
+        self.assertEqual(run.returncode, 0, run.stderr)
+        results = out / "mega-eest" / "mutants.out"
+        code, text = self.report(out / "mutants.out", out / "recheck" / "mutants.out",
+                                 mega_eest=results)
+        return code, text, runs, results
+
+    def test_a_missed_mutant_runs_against_mega_eest_alone(self) -> None:
+        code, text, runs, _ = self.drive(eest=outcomes_json(mutant(MISSED, "CaughtMutant")))
+        self.assertEqual(code, 0, text)
+        self.assertEqual((runs / "warmup.modes").read_text(), "plain\n")
+        argv = (runs / "mega-eest.argv").read_text().strip()
+        self.assertIn("--cargo-arg=--test --cargo-arg=mega_eest", argv)
+        # The first run's scope, which keeps cargo-mutants' unfiltered struct-field mutants to it.
+        self.assertIn("-f crates/mega-evm/src/a.rs", argv)
+        self.assertIn(f"--re ^{re.escape(MISSED)}$", argv)
+        self.assertNotIn(re.escape(CAUGHT), argv)
+        self.assertTrue(argv.endswith("-- --run-ignored only"), argv)
+
+    def test_a_warmup_that_fails_is_refused(self) -> None:
+        code, text, runs, results = self.drive(
+            warmup_exit=1, eest=outcomes_json(mutant(MISSED, "CaughtMutant")))
+        self.assertFalse((runs / "mega-eest.argv").exists())
+        self.assertEqual((results / "run-failed.txt").read_text(),
+                         "scripts/mega_eest.sh exited 1 on the unmutated tree\n")
+        self.assertEqual(code, 2, text)
+
+    def test_a_mega_eest_run_that_exits_abnormally_is_refused(self) -> None:
+        # Its files are those of a finished run that caught the mutant: only its exit says otherwise.
+        code, text, _, results = self.drive(
+            eest_exit=70, eest=outcomes_json(mutant(MISSED, "CaughtMutant")))
+        self.assertEqual((results / "run-failed.txt").read_text(), "cargo-mutants exited 70\n")
+        self.assertEqual(code, 2, text)
+        self.assertIn("exited abnormally (cargo-mutants exited 70)", text)
+
+    def test_the_pass_can_be_left_out(self) -> None:
+        code, text, runs, _ = self.drive(eest=outcomes_json(mutant(MISSED, "CaughtMutant")),
+                                         env={"MUTANTS_MEGA_EEST": "0"})
+        self.assertFalse((runs / "mega-eest.argv").exists())
+        self.assertFalse((runs / "warmup.modes").exists())
+        self.assertEqual(code, 1, text)
+        self.assertIn(MISSED, text)
 
 
 class DriverGuard(unittest.TestCase):

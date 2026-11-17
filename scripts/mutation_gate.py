@@ -21,10 +21,19 @@ Subcommands:
         that timed out, each regex matching that mutant's name alone. Consumed
         by scripts/mutation_test.sh to re-run those mutants one at a time.
 
+  missed-re   --results <mutants.out dir> [--recheck <mutants.out dir>]
+              [--suppressions <toml>]
+        Print one `--re <regex>` pair per line for every unsuppressed mutant
+        the tests missed: in the run, or in the re-check of one that timed out.
+        Consumed by scripts/mutation_test.sh to run those mutants against the
+        Mega EEST suite.
+
   report      --results <mutants.out dir> [--recheck <mutants.out dir>]
+              [--mega-eest <mutants.out dir>]
               [--suppressions <toml>] [--comment <path>] [--summary <path>]
         Read the run outcomes, take the re-check's outcome for a mutant that
-        timed out, apply line-scoped suppressions, compute the mutation score,
+        timed out and the Mega EEST run's outcome for a mutant the tests
+        missed, apply line-scoped suppressions, compute the mutation score,
         write a Markdown report, and exit non-zero if any unsuppressed survivor
         or timeout remains (the "no new survivors" gate). Exits 2, with a
         report saying why, when the results cannot be scored.
@@ -364,6 +373,28 @@ def cmd_timeout_re(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_missed_re(args: argparse.Namespace) -> int:
+    try:
+        run = load_run(Path(args.results))
+        recheck = None
+        if run.timeout and args.recheck and Path(args.recheck).exists():
+            recheck = load_run(Path(args.recheck))
+    except ResultsError as err:
+        # Nothing to run; the gate reports why the results cannot be scored.
+        print(f"no missed mutants to run against Mega EEST: {err}", file=sys.stderr)
+        return 0
+    missed = list(run.missed)
+    if recheck is not None:
+        missed += [name for name in run.timeout if name in set(recheck.missed)]
+    supp = suppressed_names(args.suppressions)
+    for name in missed:
+        if is_suppressed(name, supp):
+            continue
+        print("--re")
+        print(f"^{re.escape(name)}$")
+    return 0
+
+
 def write_report(report: str, args: argparse.Namespace) -> None:
     if args.comment:
         Path(args.comment).write_text(report)
@@ -426,6 +457,38 @@ def cmd_report(args: argparse.Namespace) -> int:
     else:
         timeout = list(run.timeout)
 
+    # A mutant the tests missed was run once more against the Mega EEST suite; one it catches is
+    # caught, one it times out on is inconclusive, and the rest stay survivors. Its results speak
+    # for those mutants alone, as a re-check's speak for the timeouts.
+    mega_eest_dir = getattr(args, "mega_eest", None)
+    against_eest: dict[str, list[str]] = {"caught": [], "missed": [], "timeout": [], "absent": []}
+    eest = None
+    if missed and mega_eest_dir and Path(mega_eest_dir).exists():
+        try:
+            eest = load_run(Path(mega_eest_dir))
+        except ResultsError as err:
+            write_report(
+                "## 🧬 Mutation testing — ❌ FAIL\n\n"
+                f"**The Mega EEST run of the mutants the tests missed cannot be scored:** {err}.\n",
+                args,
+            )
+            return 2
+    if eest is not None:
+        verdicts = {n: k for k in ("caught", "missed", "timeout", "unviable") for n in getattr(eest, k)}
+        remaining = []
+        for name in missed:
+            verdict = verdicts.get(name)
+            if verdict == "caught":
+                caught.append(name)
+                against_eest["caught"].append(name)
+            elif verdict == "timeout":
+                timeout.append(name)
+                against_eest["timeout"].append(name)
+            else:
+                remaining.append(name)
+                against_eest["missed" if verdict else "absent"].append(name)
+        missed = remaining
+
     supp = {e["mutant"].strip() for e in line_supp if "mutant" in e}
 
     def partition(items: list[str]) -> tuple[list[str], list[str]]:
@@ -478,6 +541,15 @@ def cmd_report(args: argparse.Namespace) -> int:
                 f"{len(rechecked['caught'])} caught, {len(rechecked['missed'])} survived, "
                 f"{len(rechecked['timeout'])} timed out again, {len(rechecked['absent'])} not re-run"
             )
+    ran_against_eest = sum(len(v) for v in against_eest.values())
+    if eest is not None:
+        md.append(
+            f"- run against Mega EEST after the tests missed them: {ran_against_eest} — "
+            f"{len(against_eest['caught'])} caught, {len(against_eest['missed'])} survived, "
+            f"{len(against_eest['timeout'])} timed out, {len(against_eest['absent'])} not run"
+        )
+    elif mega_eest_dir and missed:
+        md.append(f"- run against Mega EEST: none of the {len(missed)} the tests missed (no Mega EEST results)")
     md.append("")
 
     def section(title: str, blurb: str, items: list[str], artifact: str) -> list[str]:
@@ -591,10 +663,18 @@ def main() -> int:
     pt.add_argument("--suppressions", default=None)
     pt.set_defaults(func=cmd_timeout_re)
 
+    pm = sub.add_parser("missed-re", help="--re arguments selecting the mutants the tests missed")
+    pm.add_argument("--results", required=True)
+    pm.add_argument("--recheck", default=None)
+    pm.add_argument("--suppressions", default=None)
+    pm.set_defaults(func=cmd_missed_re)
+
     pr = sub.add_parser("report")
     pr.add_argument("--results", required=True)
     pr.add_argument("--recheck", default=None,
                     help="results of re-running the timed-out mutants one at a time")
+    pr.add_argument("--mega-eest", default=None,
+                    help="results of running the mutants the tests missed against Mega EEST")
     pr.add_argument("--suppressions", default=None)
     pr.add_argument("--comment", default=None, help="write Markdown report here")
     pr.add_argument("--summary", default=None, help="append report here (GITHUB_STEP_SUMMARY)")
