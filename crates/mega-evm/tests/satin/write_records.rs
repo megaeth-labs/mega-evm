@@ -248,6 +248,26 @@ fn test_nested_creations_record_each_account_once() {
     assert!(result.state.contains_key(&created.create(1)));
 }
 
+/// A transfer to the transaction's sender records nothing for it — validation changed its account
+/// already, by its fee and its nonce — and one to a fee account records it, unchanged until
+/// execution writes it. The sender of the transfer is recorded either way.
+#[test]
+fn test_a_transfer_to_the_sender_and_to_a_fee_account() {
+    for (case, target, expected) in [
+        ("the sender", CALLER, with_extra(records(1), TRANSFER_LOG_SIZE)),
+        ("the block beneficiary", COINBASE, with_extra(records(2), TRANSFER_LOG_SIZE)),
+    ] {
+        let code = append_value_call(BytecodeBuilder::default(), target, 1).append(POP).stop();
+        let db = funded().account_code(CALLEE, code.build()).account_balance(COINBASE, U256::ONE);
+        let block = revm::context::BlockEnv { beneficiary: COINBASE, ..crate::common::block() };
+        let outcome = MegaEvm::new(context(db).with_block(block))
+            .execute_transaction(call(CALLER, CALLEE, U256::ZERO, value_call_room()))
+            .expect("the transaction is valid");
+        assert!(outcome.result.is_success(), "{case}: {:?}", outcome.result);
+        assert_eq!(outcome.usage, expected, "{case}");
+    }
+}
+
 /// A `SELFDESTRUCT` that moves value writes two accounts: the beneficiary, recorded when the
 /// move changes it, and the destructed account, whose balance the move clears. A fresh
 /// beneficiary is recorded; one a transfer already changed is not; and a destructed account whose
@@ -535,6 +555,148 @@ fn test_nested_self_transfer_after_recorded_sender_counts_nothing() {
         grown(with_extra(records_only(2), TRANSFER_LOG_SIZE), 1),
         "the transfer to B and its log; the transfer creates B"
     );
+}
+
+/* ---------- the fee accounts and the sender ---------- */
+
+/// The block beneficiary of the fee-account rows: an account of its own, not the zero address.
+const COINBASE: Address = address!("00000000000000000000000000000000000C0B00");
+
+/// How execution reaches an account in the rows of
+/// [`test_execution_writes_to_the_fee_accounts_are_records`].
+#[derive(Clone, Copy, Debug)]
+enum FeeRowPath {
+    /// `CALLEE` sends it one wei with a `CALL`.
+    ValueTransfer,
+    /// `CALLEE` destructs itself naming it as beneficiary, which moves `CALLEE`'s balance to it.
+    SelfDestruct,
+}
+
+/// A write execution makes to one of the four accounts a transaction's fees are credited to is a
+/// record like a write to any other account: the body's five fixed records bound the fee credits
+/// the settlement makes, not what the transaction's frames write. The sender's account is the
+/// converse: the body counts it, so nothing execution writes to it is recorded again, and that
+/// holds for a fee account that is the sender too.
+///
+/// Every row runs from a contract frame, `CALLEE`, which the transaction calls without value and
+/// which holds ten million wei. A value transfer records its sender, `CALLEE`, and its recipient;
+/// a `SELFDESTRUCT` of an account the transaction did not create records the account it clears,
+/// `CALLEE`, and its beneficiary.
+/// Each row moves value to another account, so each keeps one EIP-7708 transfer log, which is
+/// data size and neither a record nor history. The fee accounts exist before the transaction, so
+/// no row adds state; the transaction pays a fee at a gas price of ten over a base fee of one, so
+/// the settlement credits the beneficiary and the base fee vault on top of what execution wrote.
+///
+/// A record weighs `WRITE_RECORD_SIZE` bytes of data size and history and is one KV update; the
+/// history is its bytes at the cost per history byte, on top of the body's `TX_BODY_SIZE`.
+///
+/// Independence: constants —
+/// the record counts are written out per row, and the data size, KV count and history are hand
+/// arithmetic from `TX_BODY_SIZE`, `WRITE_RECORD_SIZE`, `TRANSFER_LOG_SIZE` and the cost per
+/// history byte in effect.
+#[test]
+fn test_execution_writes_to_the_fee_accounts_are_records() {
+    use op_revm::constants::{BASE_FEE_RECIPIENT, L1_FEE_RECIPIENT, OPERATOR_FEE_RECIPIENT};
+    use FeeRowPath::{SelfDestruct, ValueTransfer};
+
+    // (row, the transaction's sender, the account execution writes, the path, the records kept)
+    let rows: [(&str, Address, Address, FeeRowPath, u64); 12] = [
+        ("the block beneficiary, by a value transfer", CALLER, COINBASE, ValueTransfer, 2),
+        ("the block beneficiary, by a SELFDESTRUCT", CALLER, COINBASE, SelfDestruct, 2),
+        ("the L1 fee vault, by a value transfer", CALLER, L1_FEE_RECIPIENT, ValueTransfer, 2),
+        ("the L1 fee vault, by a SELFDESTRUCT", CALLER, L1_FEE_RECIPIENT, SelfDestruct, 2),
+        ("the base fee vault, by a value transfer", CALLER, BASE_FEE_RECIPIENT, ValueTransfer, 2),
+        ("the base fee vault, by a SELFDESTRUCT", CALLER, BASE_FEE_RECIPIENT, SelfDestruct, 2),
+        (
+            "the operator fee vault, by a value transfer",
+            CALLER,
+            OPERATOR_FEE_RECIPIENT,
+            ValueTransfer,
+            2,
+        ),
+        (
+            "the operator fee vault, by a SELFDESTRUCT",
+            CALLER,
+            OPERATOR_FEE_RECIPIENT,
+            SelfDestruct,
+            2,
+        ),
+        ("the sender, by a value transfer", CALLER, CALLER, ValueTransfer, 1),
+        ("the sender, by a SELFDESTRUCT", CALLER, CALLER, SelfDestruct, 1),
+        (
+            "the block beneficiary that is the sender, by a value transfer",
+            COINBASE,
+            COINBASE,
+            ValueTransfer,
+            1,
+        ),
+        (
+            "the block beneficiary that is the sender, by a SELFDESTRUCT",
+            COINBASE,
+            COINBASE,
+            SelfDestruct,
+            1,
+        ),
+    ];
+    for (row, sender, target, path, records) in rows {
+        let code = match path {
+            ValueTransfer => append_value_call(BytecodeBuilder::default(), target, 1)
+                .append(POP)
+                .append(STOP)
+                .build(),
+            SelfDestruct => {
+                BytecodeBuilder::default().push_address(target).append(SELFDESTRUCT).build()
+            }
+        };
+        let mut db = funded().account_code(CALLEE, code).account_balance(sender, U256::MAX >> 2);
+        for account in [COINBASE, L1_FEE_RECIPIENT, BASE_FEE_RECIPIENT, OPERATOR_FEE_RECIPIENT] {
+            if account != sender {
+                db = db.account_balance(account, U256::from(1));
+            }
+        }
+        let mut tx = call(sender, CALLEE, U256::ZERO, value_call_room());
+        tx.0.base.gas_price = 10;
+        let block =
+            revm::context::BlockEnv { beneficiary: COINBASE, basefee: 1, ..crate::common::block() };
+        let outcome = MegaEvm::new(context(db).with_block(block))
+            .execute_transaction(tx)
+            .expect("the transaction is valid");
+        assert!(outcome.result.is_success(), "{row}: {:?}", outcome.result);
+        assert_eq!(transfer_logs(&outcome.result), 1, "{row}: the transfer log");
+        // The settlement credited the fees on top of what execution moved: the priority fee of
+        // nine a gas to the beneficiary, the base fee of one a gas to the base fee vault.
+        for (credited, per_gas) in [(COINBASE, 9u64), (BASE_FEE_RECIPIENT, 1)] {
+            if credited == sender {
+                continue;
+            }
+            let moved = match path {
+                _ if credited != target => 0,
+                ValueTransfer => 1,
+                SelfDestruct => 10_000_000,
+            };
+            assert_eq!(
+                outcome.state[&credited].info.balance,
+                U256::from(1 + moved + outcome.gas.gas_used * per_gas),
+                "{row}: the fee credited to {credited}"
+            );
+        }
+
+        let history_bytes = TX_BODY_SIZE + records * WRITE_RECORD_SIZE;
+        assert_eq!(outcome.usage.write_records, records, "{row}: the records, the KV count");
+        assert_eq!(
+            outcome.usage.data_size,
+            history_bytes + TRANSFER_LOG_SIZE,
+            "{row}: the data size: the body, the records and the transfer log"
+        );
+        assert_eq!(outcome.gas.history_bytes, history_bytes, "{row}: the history bytes");
+        if !crate::common::history_rounds() {
+            assert_eq!(
+                outcome.gas.history,
+                history(history_bytes),
+                "{row}: the history gas: the body and the records at the cost per history byte"
+            );
+        }
+    }
 }
 
 /* ---------- the commit happens after the opcode ---------- */
