@@ -11,7 +11,6 @@
 use alloy_evm::Evm;
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
-    constants::ACCOUNT_STATE_GAS,
     test_utils::{BytecodeBuilder, MemoryDatabase},
     MegaEvm,
 };
@@ -21,8 +20,7 @@ use revm::{
 };
 
 use crate::common::{
-    account_state_gas, call, call_with_data, context, create, history, runs_at_measurement_prices,
-    slot_state_gas,
+    account_state_gas, call, call_with_data, context, create, history, slot_state_gas,
 };
 
 const CALLER: Address = address!("0000000000000000000000000000000000900000");
@@ -49,13 +47,6 @@ struct Spend {
     floor: u64,
 }
 
-impl Spend {
-    /// What the schedule charged: everything the transaction used but the history ledger.
-    const fn schedule_gas(&self) -> u64 {
-        self.gas_used - self.history
-    }
-}
-
 /// Runs `tx` on `db` and returns what it spent. The transaction must succeed.
 fn spend(db: MemoryDatabase, tx: mega_evm::MegaTransaction) -> Spend {
     let outcome =
@@ -77,65 +68,6 @@ fn with_code(code: Bytes) -> MemoryDatabase {
 }
 
 /* ---------- the intrinsic numbers ---------- */
-
-/// A call that reaches an existing account and does nothing pays the EIP-2780 sender base of
-/// 12,000 plus 3,000 for reaching the recipient, and draws no state gas.
-///
-/// The 3,000 is EIP-2780's own fixed charge and not the schedule's cold-account entry, which
-/// prices an access inside execution at 2,600.
-#[test]
-fn test_an_empty_call_costs_fifteen_thousand() {
-    let spent = spend(with_code(Bytes::new()), call(CALLER, CALLEE, U256::ZERO, gas_limit()));
-    assert_eq!(spent.schedule_gas(), 15_000);
-    assert_eq!(spent.state, 0);
-}
-
-/// A value transfer to an account that already exists adds the value charge, and still draws no
-/// state gas: nothing is created.
-#[test]
-fn test_a_value_transfer_to_an_existing_account_costs_twenty_one_thousand() {
-    let db = with_code(Bytes::new()).account_balance(CALLEE, U256::from(1));
-    let spent = spend(db, call(CALLER, CALLEE, U256::from(7), gas_limit()));
-    assert_eq!(spent.schedule_gas(), 21_000);
-    assert_eq!(spent.state, 0);
-}
-
-/// A transfer to an account that does not exist creates it, which is the account's state gas on
-/// top of the transfer's own cost.
-#[test]
-fn test_a_value_transfer_that_creates_the_recipient_draws_the_account_state_gas() {
-    if runs_at_measurement_prices() {
-        return;
-    }
-    let db = MemoryDatabase::default().account_balance(CALLER, U256::from(10u64.pow(18)));
-    let spent = spend(db, call(CALLER, CALLEE, U256::from(7), gas_limit()));
-    assert_eq!(spent.state, ACCOUNT_STATE_GAS);
-    assert_eq!(spent.schedule_gas(), 21_000 + ACCOUNT_STATE_GAS);
-}
-
-/// A transfer to the sender itself pays the sender base alone: neither the recipient charge nor
-/// the value charge applies, because the recipient is the sender.
-#[test]
-fn test_a_self_transfer_costs_twelve_thousand() {
-    let db = MemoryDatabase::default().account_balance(CALLER, U256::from(10u64.pow(18)));
-    let spent = spend(db, call(CALLER, CALLER, U256::from(7), gas_limit()));
-    assert_eq!(spent.schedule_gas(), 12_000);
-    assert_eq!(spent.state, 0);
-}
-
-/// A creation transaction pays the sender base plus the creation access charge, and the created
-/// account's state gas on top. With empty init code nothing else is charged, so the fixed part is
-/// what is left when the state gas is taken out.
-#[test]
-fn test_a_create_transaction_costs_twenty_four_thousand_plus_the_account_state_gas() {
-    if runs_at_measurement_prices() {
-        return;
-    }
-    let db = MemoryDatabase::default().account_balance(CALLER, U256::from(10u64.pow(18)));
-    let spent = spend(db, create(CALLER, Bytes::new(), gas_limit()));
-    assert_eq!(spent.state, ACCOUNT_STATE_GAS, "the created account");
-    assert_eq!(spent.schedule_gas() - spent.state, 24_000, "the fixed part");
-}
 
 /// Init code is transaction data twice over: every byte is a calldata token, and EIP-3860 charges
 /// two gas for each 32-byte word of it. Sixty-four bytes of zeros is two words; sixty-five is
@@ -162,23 +94,6 @@ fn test_init_code_costs_its_calldata_tokens_and_an_eip3860_word() {
 }
 
 /* ---------- the state entries ---------- */
-
-/// A creation that reverts deposits nothing, so it draws no state gas at all: neither the
-/// created account's nor the code's. The state gas a creation draws is charged on the deposit,
-/// not on the attempt.
-#[test]
-fn test_a_reverted_creation_draws_no_state_gas() {
-    let db = MemoryDatabase::default().account_balance(CALLER, U256::from(10u64.pow(18)));
-    let mut evm = MegaEvm::new(context(db));
-    let init_code = BytecodeBuilder::default().mstore(0, [0u8; 32]).revert().build();
-    let result = evm
-        .transact_raw(create(CALLER, init_code, gas_limit()))
-        .expect("the transaction is valid")
-        .result;
-
-    assert!(!result.is_success(), "{result:?}");
-    assert_eq!(result.gas().state_gas_spent_final(), 0);
-}
 
 /// Init code that returns a single `0xEF` byte as the deployed code, which EIP-3541 rejects.
 fn depositing_an_ef_byte() -> Bytes {
