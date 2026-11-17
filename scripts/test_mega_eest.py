@@ -366,6 +366,14 @@ class Check(Case):
             code, out, err = self.write({"plain": cases}, self.NEGATIVE, exits={"plain": exit_code})
             self.assert_no_verdict(code, out, err, f"exited {exit_code}")
 
+    def test_a_status_the_consumer_does_not_define_is_no_verdict(self) -> None:
+        # A consumer of a later pin with a fifth status: the four counts no longer add up.
+        cases = [self.case("satin/a", "sha256:1"), self.case("satin/b", "sha256:2", "skipped")]
+        for exit_code in (1, 0):
+            code, out, err = self.write({"plain": cases}, self.NEGATIVE, exits={"plain": exit_code})
+            self.assert_no_verdict(code, out, err, "case statuses the consumer does not define: skipped (1)")
+            self.assertIn("plain=pass:1,fail:0,unsupported:0,error:0,skipped:1", out)
+
     def test_an_unsupported_case_is_no_verdict(self) -> None:
         code, out, err = self.write({"plain": self.one_failing("unsupported")}, self.NEGATIVE)
         self.assert_no_verdict(code, out, err, "the adapter does not support")

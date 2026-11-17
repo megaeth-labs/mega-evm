@@ -58,7 +58,8 @@ Subcommands:
         0 pass; 1 FAIL, a verdict (complete reports of exactly the index in every mode, a case
         failed or erred, or the modes' observations differ, and the control ran and did not pass);
         2 INCOMPLETE, no verdict (no mode, a report missing, cases that are not the index, a
-        consume exit its report does not explain, a case the adapter does not support, no control,
+        consume exit its report does not explain, a case the adapter does not support, a case
+        status other than the consumer's four (pass, fail, unsupported, error), no control,
         a control not run or passing, a control that failed elsewhere while every gating case
         passed, or the checker itself failing); 3 REFUSED, every case passed but the pin's
         provenance is `unmerged` or its case set `undeclared`. `run=full` in the line is both
@@ -391,6 +392,9 @@ def canonical(value) -> str:
     return "(absent)" if value is None else json.dumps(value, sort_keys=True, separators=(",", ":"))
 
 
+# The statuses `mega-fixture consume` gives a case.
+CASE_STATUSES = ("pass", "fail", "unsupported", "error")
+
 # The results of `check`, by the exit code each has.
 RESULT_EXIT = {"pass": 0, "FAIL": 1, "INCOMPLETE": 2, "REFUSED": 3}
 
@@ -467,10 +471,16 @@ def check(args: argparse.Namespace) -> int:
                               f"{len(not_passed)} case(s) not passing in its report")
         if statuses.get("unsupported"):
             incomplete.append(f"{mode}: {statuses['unsupported']} case(s) the adapter does not support")
+        # The consumer has four statuses; another is one this checker cannot read, never a pass, and
+        # the four counts the summary line shows must add up to the cases consumed.
+        unknown = sorted(set(statuses) - set(CASE_STATUSES))
+        if unknown or sum(statuses.get(k, 0) for k in CASE_STATUSES) != len(cases):
+            incomplete.append(f"{mode}: case statuses the consumer does not define: "
+                              + ", ".join(f"{k} ({statuses[k]})" for k in unknown))
         if statuses.get("fail") or statuses.get("error"):
             cases_failed = True
-        summary.append(f"{mode}=" + ",".join(
-            f"{s}:{statuses.get(s, 0)}" for s in ("pass", "fail", "unsupported", "error")))
+        summary.append(f"{mode}=" + ",".join(f"{s}:{statuses.get(s, 0)}" for s in CASE_STATUSES)
+                       + "".join(f",{k}:{statuses[k]}" for k in sorted(set(statuses) - set(CASE_STATUSES))))
 
     if {"plain", "instrumented"} <= observations.keys():
         plain, inst = observations["plain"], observations["instrumented"]
