@@ -41,7 +41,11 @@ jobs:
         uses: foundry-rs/foundry-toolchain@v1
 
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          # Pin the version: scripts/coverage_mega_evm.sh places the Mega EEST adapter where this
+          # release's report finds executables, and checks it did; a new release can change both.
+          tool: cargo-llvm-cov@0.8.7
 
       # The report merges the tests' coverage with the Mega EEST cases', so a line only a Mega EEST
       # case runs counts as covered.
