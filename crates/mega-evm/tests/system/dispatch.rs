@@ -68,6 +68,26 @@ fn test_an_intercepted_call_costs_what_a_plain_call_costs() {
     assert_eq!(spent(intercepted), spent(plain));
 }
 
+/// Admission is the four selector bytes: the exact selector and the selector followed by
+/// anything are both intercepted, and an input too short to hold one is not.
+#[test]
+fn test_admission_is_the_selector_alone() {
+    let intercepted = |data: Vec<u8>| {
+        let result = run(system_db(), call_tx(ACCESS_CONTROL_ADDRESS, &data, U256::ZERO));
+        // The interceptor answers `false`; the deployed bytecode reverts.
+        result.result.is_success()
+    };
+    assert!(intercepted(IS_DISABLED.to_vec()), "the exact selector");
+    assert!(intercepted(IS_DISABLED.iter().copied().chain([0xff]).collect()), "one byte after it");
+    assert!(
+        intercepted(IS_DISABLED.iter().copied().chain([0_u8; 32]).collect()),
+        "a padded argument after it",
+    );
+    assert!(!intercepted(IS_DISABLED[..3].to_vec()), "three bytes are not a selector");
+    assert!(!intercepted(Vec::new()), "no input is not a selector");
+    assert!(!intercepted(vec![0xde, 0xad, 0xbe, 0xef]), "another selector");
+}
+
 /// Records which addresses an inspector sees called, and in which order they end.
 #[derive(Default)]
 struct CallTracker {

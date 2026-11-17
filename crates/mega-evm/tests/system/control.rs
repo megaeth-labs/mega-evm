@@ -4,7 +4,7 @@
 use alloy_primitives::{Bytes, U256};
 use alloy_sol_types::{SolCall, SolError};
 use mega_evm::{
-    system::{IMegaAccessControl, ACCESS_CONTROL_ADDRESS},
+    system::{IMegaAccessControl, ACCESS_CONTROL_ADDRESS, NON_ZERO_TRANSFER_REVERT_DATA},
     test_utils::MemoryDatabase,
 };
 use revm::bytecode::opcode::{CALL, CALLCODE, DELEGATECALL, STATICCALL};
@@ -62,6 +62,17 @@ fn test_a_static_call_is_intercepted() {
     let (status, data) = through_contract(STATICCALL, &DISABLE, 0);
     assert!(status, "the switch does not write state, so a static caller may set it");
     assert!(data.is_empty());
+}
+
+/// A call that carries value to one of the three methods is refused with `NonZeroTransfer()`:
+/// they read or steer execution and take no value.
+#[test]
+fn test_a_value_bearing_call_is_refused() {
+    for selector in [DISABLE, ENABLE, IS_DISABLED] {
+        let (status, data) = through_contract(CALL, &selector, 1);
+        assert!(!status, "a value-bearing call must not succeed");
+        assert_eq!(data, Bytes::from_static(&NON_ZERO_TRANSFER_REVERT_DATA));
+    }
 }
 
 /// The value policy is per method, after the selector matched: a value-bearing call to a
