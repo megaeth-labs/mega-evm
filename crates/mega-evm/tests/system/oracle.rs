@@ -22,7 +22,7 @@ use revm::{
 };
 
 use crate::common::{
-    block, call_tx, call_tx_with_gas, steer, system_db, with_contract, CALLER, CONTRACT,
+    block, call_tx, call_tx_with_gas, run, steer, system_db, with_contract, CALLER, CONTRACT,
 };
 
 /// A topic and payload the tests send.
@@ -266,6 +266,19 @@ fn test_an_unknown_selector_runs_the_bytecode() {
     );
     assert!(hints.is_empty());
     assert_eq!(usage.data_size, mega_evm::TX_BODY_SIZE + 4);
+}
+
+/// Reading the Oracle's storage is not intercepted: `getSlot` runs the contract's code.
+#[test]
+fn test_reading_a_slot_runs_the_bytecode() {
+    let db = system_db().account_storage(ORACLE_CONTRACT_ADDRESS, U256::from(3), U256::from(42));
+    let data = IOracle::getSlotCall { slot: U256::from(3) }.abi_encode();
+    let result = run(db, call_tx(ORACLE_CONTRACT_ADDRESS, &data, U256::ZERO));
+    assert!(result.result.is_success(), "{:?}", result.result);
+    assert_eq!(
+        IOracle::getSlotCall::abi_decode_returns(result.result.output().unwrap()).unwrap(),
+        B256::from(U256::from(42)),
+    );
 }
 
 /// A payload that does not fit in what is left of the transaction's data-size limit is not
