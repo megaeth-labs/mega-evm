@@ -82,6 +82,8 @@ The merged record keeps the contract the gate reads: the inventory as `mutants.j
 Each shard's own status is folded into the combined status, and the report names every shard that did not complete and why.
 A shard whose budget ran out makes the combined status `partial` (or `not-started`), one whose baseline failed makes it `baseline-failed`, and one that errored, ended without a status line (cancelled or killed by the job timeout) or uploaded nothing makes it `error`.
 Every shard outcome is kept.
+A shard whose results cannot be read (a record cut off while it was written) is named as `unreadable` and makes the combined status `error`; the other shards are still reported, and a follow-up run whose record cannot be read is refused like one that exited abnormally.
+A shard's re-check and Mega EEST pass are not sharded again: they take the shard's mutants by name, and a shard applied after that selection would cut their own short list (see below).
 An outcome for a mutant the inventory does not list, a second outcome for one mutant, or shard plans that do not add up to the inventory mean the shards and the inventory were built from different mutant sets: the combined status is `mismatch`, and `unplanned.txt` lists the outcomes that do not fit.
 Only `complete` passes the gate.
 A cancelled run is not scored.
@@ -116,7 +118,9 @@ It costs nothing while the tests catch every mutant.
 Otherwise it costs the warm-up (a cold build of the adapter's dependencies when the job's cache holds none, and one run of the suite), cargo-mutants' baseline in its build directory (another run of the suite), the copy of `./target` (now with the warm-up's `target/mega-eest`) into that build directory, and, per mutant, an incremental build of mega-evm for the `mega_eest` test and again for the adapter, and one plain run of the 930 cases: about three minutes a mutant on a 4-vCPU runner, estimated from local runs (30 s a mutant on 15 cores), not measured there.
 The mutants it runs are those the tests missed, plus any struct-field-deletion mutant in the first run's scope (below), whose outcome the gate does not read.
 `MUTANTS_MEGA_EEST=0` leaves the pass out, and the mutants it would have run stay survivors.
-The re-check and this run take the first run's own scope (its `--in-diff` file or `-f` glob) beside their `--re` selections, because cargo-mutants 27.1.0 adds struct-field-deletion mutants without matching them against `--re`; the gate reads their outcomes only for the mutants it asked about.
+The re-check and this run take the first run's own restriction (its `--in-diff` file or `-f` glob) beside their `--re` selections, because cargo-mutants 27.1.0 adds struct-field-deletion mutants without matching them against `--re`; the gate reads their outcomes only for the mutants it asked about.
+They never take the first run's `--shard`: cargo-mutants applies a shard after the `--re` selection, so it would cut the follow-up's own short list, extras included, and drop mutants it was asked to decide.
+A run with no restriction of its own (the full run, sharded or not) has the follow-ups name the files of their mutants instead (`-f`, from `mutation_gate.py timeout-re`/`missed-re --with-files`), which keeps the extras to those files.
 
 ## Suppressions (hybrid)
 

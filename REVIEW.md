@@ -156,7 +156,8 @@ These checks guard every change to the Satin engine.
   While the Mega EEST change is under review, the pin may name its branch's commit as a draft state only: the cases run and show in the log, but the gate fails (`provenance=unmerged`, exit 3) until the pin moves to the commit merged on the suite's default branch, which it must before the mega-evm pull request merges.
   Locally, a Mega EEST checkout at that commit is used with `MEGA_EEST_DIR=<checkout> scripts/mega_eest.sh` once the pin names it.
 - Moving the pin is a one-line change and is reviewed as one: the step summary lists the case ids it removes, adds and changes relative to the base's pin, and the suite's own history between the two commits says why.
-  A removal fails the gate unless the same pull request lists exactly the removed ids in `MEGA_EEST_REMOVED_CASES` in `scripts/mega_eest.env`, so every behaviour the suite stops pinning is a line the reviewer reads in the diff; a move that removes nothing leaves that line empty.
+  A removal fails the gate unless the same pull request lists exactly the removed ids in `MEGA_EEST_REMOVED_CASES` in `scripts/mega_eest.env`, and so does a case changed under its id (another file digest) unless it is listed exactly in `MEGA_EEST_CHANGED_CASES`, so every behaviour the suite stops pinning, or pins differently, is a line the reviewer reads in the diff; a move that removes or changes nothing leaves both lines empty.
+  A pull request that changes `MEGA_EEST_REPO` fails the gate (`repo=changed`, exit 3), unless its base has no pin file: the default branch the pin must be on is that repository's.
 - The coverage report and the mutation gate count the suite too: `scripts/coverage_mega_evm.sh` merges its run into the report Codecov receives, and the cargo-mutants gate runs a mutant the tests miss against it (Mutation testing, below).
 
 ### Byte-price grid
