@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
-"""Tests for scripts/mutation_gate.py, run through its command line.
+"""Tests for scripts/mutation_gate.py, run through its command line (and its
+`verdict` helper directly).
 
     python3 scripts/test_mutation_gate.py
 """
 from __future__ import annotations
 
+import argparse
+import importlib.util
 import json
 import subprocess
 import sys
@@ -13,6 +16,9 @@ import unittest
 from pathlib import Path
 
 GATE = Path(__file__).resolve().with_name("mutation_gate.py")
+_spec = importlib.util.spec_from_file_location("mutation_gate", GATE)
+mutation_gate = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(mutation_gate)
 
 CAUGHT = "crates/mega-evm/src/a.rs:1:1: replace f -> bool with true"
 MISSED = "crates/mega-evm/src/a.rs:2:1: replace g -> bool with false"
@@ -225,18 +231,82 @@ class GateTest(unittest.TestCase):
         self.assertEqual(empty.stdout, "## 🧬 Spec-gate sweep (evm) — ✅ no survivors\n\n"
                                        "**Nothing to test** — no mutants were generated.\n\n")
 
+    def assert_incomplete(self, found: str, note: str) -> None:
+        """The informational report opens with `found` and `note`, and its note does
+        not say the run fails; the same run as a gate still never passes."""
+        out = self.informational("--status", str(self.status))
+        self.assertEqual(out.returncode, 0, out.stdout)
+        self.assertTrue(out.stdout.startswith(
+            f"## 🧬 Spec-gate sweep (evm) — ⚠️ {found} (informational; does not fail the run)"
+            f"\n\n{note}\n"), out.stdout)
+        self.assertNotIn("never passes", out.stdout)
+        gated = self.report("--status", str(self.status))
+        self.assertEqual(gated.returncode, 1, gated.stdout)
+        self.assertIn("never passes", gated.stdout)
+
     def test_informational_incomplete_run_is_reported_without_failing(self) -> None:
+        # not-started, before the run wrote anything
         self.write_status("not-started", "unknown", "0")
-        out = self.informational("--status", str(self.status))
-        self.assertEqual(out.returncode, 0, out.stdout)
-        self.assertIn("— ⚠️ incomplete run (informational; does not fail the run)\n",
-                      out.stdout)
-        self.assertIn("before any mutant was tested", out.stdout)
-        self.write_run(3, caught=[CAUGHT], missed=[MISSED])
+        self.assert_incomplete(
+            "incomplete run",
+            "**Incomplete run** — the time budget ran out before any mutant was tested "
+            "(unknown planned). Nothing below is a result.")
+        # not-started, with a plan but no outcome
+        self.write_run(3)
+        self.write_status("not-started", "3", "0")
+        self.assert_incomplete(
+            "incomplete run",
+            "**Incomplete run** — the time budget ran out before any mutant was tested "
+            "(3 planned). Nothing below is a result.")
+        # partial
+        for name, items in (("caught", [CAUGHT]), ("missed", [MISSED])):
+            (self.results / f"{name}.txt").write_text("".join(f"{m}\n" for m in items))
         self.write_status("partial", "3", "2")
-        out = self.informational("--status", str(self.status))
-        self.assertEqual(out.returncode, 0, out.stdout)
-        self.assertIn("— ⚠️ 1 survivor, incomplete run (informational;", out.stdout)
+        self.assert_incomplete(
+            "1 survivor, incomplete run",
+            "**Incomplete run** — the time budget ran out after 2 of 3 planned mutants; the "
+            "rest were not tested. The results below cover only the tested mutants.")
+        # mismatch: the merged shards and the inventory disagree
+        self.status.write_text("MUTANTS-STATUS status=mismatch expected=3 outcomes=2 "
+                               "unplanned=1 duplicated=0 shards-planned=3 "
+                               "shards=complete,complete\n")
+        self.assert_incomplete(
+            "1 survivor, incomplete run",
+            "**Shards and inventory disagree** — the inventory lists 3 mutants, 2 of them "
+            "have an outcome, and 1 shard outcome(s) are for mutants the inventory does not "
+            "list. The shards did not test the inventory's mutant set. Every shard outcome is "
+            "still reported below; `unplanned.txt` in the run artifacts lists the outcomes "
+            "that do not fit the inventory.")
+
+    def test_empty_title_is_refused(self) -> None:
+        # An empty name would fall back to a cargo-mutants heading.
+        self.write_run(2, caught=[CAUGHT], missed=[MISSED])
+        for title in ("", "  "):
+            out = self.report("--scope", "full", "--title", title, "--informational")
+            self.assertEqual(out.returncode, 2, out.stdout)
+            self.assertIn("argument --title: must not be empty", out.stderr)
+            self.assertEqual(out.stdout, "")
+            self.assertFalse(self.comment.exists())
+
+    def test_verdict_follows_what_the_run_found(self) -> None:
+        # The verdict comes from the counts alone, so it cannot disagree with them:
+        # nothing found is a pass, or "no survivors" for an informational run.
+        gate, info = (argparse.Namespace(informational=i) for i in (False, True))
+        tail = " (informational; does not fail the run)"
+        cases = [
+            ({}, "✅ PASS", "✅ no survivors"),
+            ({"survivors": 0, "timeouts": 0, "incomplete": False}, "✅ PASS", "✅ no survivors"),
+            ({"survivors": 1}, "❌ FAIL", f"⚠️ 1 survivor{tail}"),
+            ({"survivors": 2}, "❌ FAIL", f"⚠️ 2 survivors{tail}"),
+            ({"timeouts": 1}, "❌ FAIL", f"⚠️ 1 timed out{tail}"),
+            ({"incomplete": True}, "❌ FAIL", f"⚠️ incomplete run{tail}"),
+            ({"survivors": 1, "timeouts": 3, "incomplete": True}, "❌ FAIL",
+             f"⚠️ 1 survivor, 3 timed out, incomplete run{tail}"),
+        ]
+        for found, gated, informational in cases:
+            with self.subTest(**found):
+                self.assertEqual(mutation_gate.verdict(gate, **found), gated)
+                self.assertEqual(mutation_gate.verdict(info, **found), informational)
 
     def test_informational_still_refuses_unreadable_results(self) -> None:
         self.results.mkdir()
