@@ -16,13 +16,14 @@ Subcommands:
         that line to <results>/no-mutants.txt. Does nothing when <results>
         exists, and fails when it does not and the output says no such thing.
 
-  timeout-re  --results <mutants.out dir> [--suppressions <toml>]
+  timeout-re  --results <mutants.out dir> [--suppressions <toml>] [--with-files]
         Print one `--re <regex>` pair per line for every unsuppressed mutant
-        that timed out, each regex matching that mutant's name alone. Consumed
-        by scripts/mutation_test.sh to re-run those mutants one at a time.
+        that timed out, each regex matching that mutant's name alone, and with
+        --with-files one `-f <file>` pair per file they are in. Consumed by
+        scripts/mutation_test.sh to re-run those mutants one at a time.
 
   missed-re   --results <mutants.out dir> [--recheck <mutants.out dir>]
-              [--suppressions <toml>]
+              [--suppressions <toml>] [--with-files]
         Print one `--re <regex>` pair per line for every unsuppressed mutant
         the tests missed: in the run, or in the re-check of one that timed out.
         Consumed by scripts/mutation_test.sh to run those mutants against the
@@ -709,12 +710,23 @@ def cmd_timeout_re(args: argparse.Namespace) -> int:
         print(f"no timed-out mutants to re-check: {err}", file=sys.stderr)
         return 0
     supp = suppressed_anchors(args.suppressions)
-    for name in run.timeout:
-        if is_suppressed(name, supp):
-            continue
+    print_selection([name for name in run.timeout if not is_suppressed(name, supp)],
+                    getattr(args, "with_files", False))
+    return 0
+
+
+def print_selection(names: list[str], with_files: bool) -> None:
+    """One `--re <regex>` pair per line for each name, each regex matching that name alone; with
+    `with_files`, one `-f <file>` pair for each file the names are in. The files keep the struct-field
+    mutants cargo-mutants adds without matching them against `--re` to those files, for a run the
+    first run's own restriction does not scope."""
+    for name in names:
         print("--re")
         print(f"^{re.escape(name)}$")
-    return 0
+    if with_files:
+        for file in sorted({name.split(":", 1)[0] for name in names}):
+            print("-f")
+            print(file)
 
 
 # The summary line scripts/mega_eest.sh prints, as the mega_eest test prints it again into a
@@ -765,11 +777,8 @@ def cmd_missed_re(args: argparse.Namespace) -> int:
     if recheck is not None:
         missed += [name for name in run.timeout if name in set(recheck.missed)]
     supp = suppressed_anchors(args.suppressions)
-    for name in missed:
-        if is_suppressed(name, supp):
-            continue
-        print("--re")
-        print(f"^{re.escape(name)}$")
+    print_selection([name for name in missed if not is_suppressed(name, supp)],
+                    getattr(args, "with_files", False))
     return 0
 
 
@@ -1059,12 +1068,16 @@ def main() -> int:
     pt = sub.add_parser("timeout-re", help="--re arguments selecting the mutants that timed out")
     pt.add_argument("--results", required=True)
     pt.add_argument("--suppressions", default=None)
+    pt.add_argument("--with-files", action="store_true",
+                    help="also print one `-f <file>` pair per file of the selected mutants")
     pt.set_defaults(func=cmd_timeout_re)
 
     pm = sub.add_parser("missed-re", help="--re arguments selecting the mutants the tests missed")
     pm.add_argument("--results", required=True)
     pm.add_argument("--recheck", default=None)
     pm.add_argument("--suppressions", default=None)
+    pm.add_argument("--with-files", action="store_true",
+                    help="also print one `-f <file>` pair per file of the selected mutants")
     pm.set_defaults(func=cmd_missed_re)
 
     pp = sub.add_parser("progress", help="count planned and tested mutants")
