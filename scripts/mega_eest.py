@@ -48,16 +48,21 @@ Subcommands:
         negative.json for the suite's deliberately wrong expectation) and decide: in every mode, the
         cases consumed are exactly the slice's index, by case id and file digest, and every one
         passed; with both modes, every case's observations are the same bytes plain and
-        instrumented; and the wrong expectation, which the index must list, fails at the path it
-        records. Prints the failures (case id, first differing path, both values, the rules the
+        instrumented. The wrong expectation, which the index must list, is the control that shows
+        the consumer and the adapter can report a failure at all: it decides only when every
+        gating case passed, and then it must fail at the path it records; when gating cases
+        failed, the failures already show that, and the control need only have run and not passed
+        (failed or erred, at any path), since a change of behaviour can move where it first
+        differs. Prints the failures (case id, first differing path, both values, the rules the
         case pins) and one summary line, `MEGA-EEST … result=<result>`, and exits with its code:
-        0 pass; 1 FAIL, a verdict (complete reports of exactly the index in every mode, the wrong
-        expectation caught, and a case failed or erred, or the modes' observations differ);
+        0 pass; 1 FAIL, a verdict (complete reports of exactly the index in every mode, a case
+        failed or erred, or the modes' observations differ, and the control ran and did not pass);
         2 INCOMPLETE, no verdict (no mode, a report missing, cases that are not the index, a
-        consume exit its report does not explain, a case the adapter does not support, no wrong
-        expectation or one not caught, or the checker itself failing); 3 REFUSED, every case passed
-        but the pin's provenance is `unmerged` or its case set `undeclared`. `run=full` in the line
-        is both modes; `run=partial` one.
+        consume exit its report does not explain, a case the adapter does not support, no control,
+        a control not run or passing, a control that failed elsewhere while every gating case
+        passed, or the checker itself failing); 3 REFUSED, every case passed but the pin's
+        provenance is `unmerged` or its case set `undeclared`. `run=full` in the line is both
+        modes; `run=partial` one.
 """
 from __future__ import annotations
 
@@ -477,8 +482,12 @@ def check(args: argparse.Namespace) -> int:
         summary.append(f"parity={'identical' if not differ else f'{len(differ)}-differ'}")
         cases_failed |= bool(differ)
 
-    # The wrong expectation is what shows the consumer and the adapter can fail at all: an index
-    # without one, or a run that did not fail it where recorded, says nothing about the cases.
+    # The wrong expectation is the control that shows the consumer and the adapter can report a
+    # failure at all. When every gating case passed, nothing else shows it, so the control must
+    # fail at the path it records. When gating cases failed, the failures show it, and a change
+    # of behaviour can also move where the control first differs, so it need only have run and
+    # not passed (failed or erred, at any path). A control that was not run, or that passed,
+    # says the consumer cannot be trusted either way. Without one, there is no verdict.
     negative_path = work / "negative.json"
     wrong_at = {n["caseId"]: n["wrongAt"] for n in index.get("negative", [])}
     if not wrong_at:
@@ -488,14 +497,24 @@ def check(args: argparse.Namespace) -> int:
         verdict = "no-report"
         incomplete.append("`mega-fixture consume` wrote no report of the wrong expectation")
     else:
-        verdict = "fail-as-recorded"
         cases = {c.get("caseId"): c for c in json.loads(negative_path.read_text())["cases"]}
+        states = []
         for case_id, path in wrong_at.items():
             c = cases.get(case_id)
-            if not c or c["status"] != "fail" or c.get("path") != path:
-                incomplete.append(f"the wrong expectation {case_id} did not fail at {path}: "
-                                  f"{c['status'] + ' at ' + str(c.get('path')) if c else 'not consumed'}")
-                verdict = "not-caught"
+            seen = f"{c['status']} at {c.get('path')}" if c else "not consumed"
+            if c and c["status"] == "fail" and c.get("path") == path:
+                states.append("fail-as-recorded")
+            elif c and c["status"] in ("fail", "error") and cases_failed:
+                states.append("fail-elsewhere")
+                print(f"mega-eest: the wrong expectation {case_id} did not fail at {path} ({seen}); "
+                      f"gating cases failed, which can move where it first differs", file=sys.stderr)
+            else:
+                states.append("not-caught")
+                why = ("gating cases failed, and it did not fail" if cases_failed
+                       else "every gating case passed, so it must fail where recorded")
+                incomplete.append(f"the wrong expectation {case_id} did not fail at {path} ({seen}): {why}")
+        verdict = ("not-caught" if "not-caught" in states
+                   else "fail-elsewhere" if "fail-elsewhere" in states else "fail-as-recorded")
     summary.append(f"negative={verdict}")
     summary.append(f"provenance={args.provenance}")
     summary.append(f"caseset={args.caseset}")

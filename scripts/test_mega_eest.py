@@ -370,14 +370,39 @@ class Check(Case):
         code, out, err = self.write({"plain": self.one_failing("unsupported")}, self.NEGATIVE)
         self.assert_no_verdict(code, out, err, "the adapter does not support")
 
-    def test_a_wrong_expectation_missing_or_not_caught_is_no_verdict(self) -> None:
-        for negative, reason in (
-                (None, "no report of the wrong expectation"),
-                ([{"caseId": "satin/negative/wrong", "status": "pass"}], "did not fail at /expected/x"),
-                ([{"caseId": "satin/negative/wrong", "status": "fail", "path": "/expected/y"}], "did not fail"),
-        ):
-            code, out, err = self.write({"plain": self.one_failing()}, negative)
+    @staticmethod
+    def control(status: str, path: str | None = None) -> list[dict]:
+        case = {"caseId": "satin/negative/wrong", "status": status}
+        if path is not None:
+            case["path"] = path
+        return [case]
+
+    def test_failing_cases_with_the_control_failing_elsewhere_are_a_verdict(self) -> None:
+        # A change of behaviour can move where the control first differs; the failing cases
+        # already show the pipeline reports failures.
+        for control in (self.control("fail", "/expected/gasLedgers/gasUsed"), self.control("error")):
+            code, out, err = self.write({"plain": self.one_failing()}, control)
+            self.assertEqual(code, 1, (control, err))
+            self.assertIn("negative=fail-elsewhere", out)
+            self.assertTrue(out.strip().endswith("result=FAIL"), out)
+            self.assertIn("can move where it first differs", err)
+
+    def test_failing_cases_with_a_control_that_did_not_fail_are_no_verdict(self) -> None:
+        for control, reason in ((self.control("pass"), "gating cases failed, and it did not fail"),
+                                (self.control("unsupported"), "gating cases failed, and it did not fail"),
+                                ([], "not consumed"),
+                                (None, "no report of the wrong expectation")):
+            code, out, err = self.write({"plain": self.one_failing()}, control)
             self.assert_no_verdict(code, out, err, reason)
+
+    def test_passing_cases_need_the_control_to_fail_where_recorded(self) -> None:
+        for control, reason in ((self.control("fail", "/expected/y"), "so it must fail where recorded"),
+                                (self.control("error"), "so it must fail where recorded"),
+                                (self.control("pass"), "so it must fail where recorded"),
+                                (None, "no report of the wrong expectation")):
+            code, out, err = self.write({"plain": self.all_passed()}, control)
+            self.assert_no_verdict(code, out, err, reason)
+            self.assertNotIn("negative=fail-as-recorded", out)
         run = self.write({"plain": self.all_passed()}, self.NEGATIVE, index_negative=[])
         self.assert_no_verdict(*run, "lists no wrong expectation")
         self.assertIn("negative=none", run[1])
@@ -534,17 +559,17 @@ esac
 """
 
 # The consumer: every case of the index passes, or fails when the adapter says so; the wrong
-# expectation fails where the index records it.
+# expectation fails where the index records it, or at FAKE_CONTROL_PATH when that is set.
 FAKE_CLI = """#!/usr/bin/env python3
-import json, subprocess, sys
+import json, os, subprocess, sys
 from pathlib import Path
 args = sys.argv[1:]
 assert args[0] == "consume"
 adapter, report, path = args[args.index("--adapter") + 1], args[args.index("--report") + 1], Path(args[-1])
 index = json.loads((path.parent / "index.json").read_text())
 if path.name == "negative":
-    cases = [{"caseId": n["caseId"], "fileDigest": "sha256:n", "status": "fail", "path": n["wrongAt"]}
-             for n in index["negative"]]
+    cases = [{"caseId": n["caseId"], "fileDigest": "sha256:n", "status": "fail",
+              "path": os.environ.get("FAKE_CONTROL_PATH") or n["wrongAt"]} for n in index["negative"]]
 else:
     failing = subprocess.run([adapter, "verdict"], capture_output=True, text=True).stdout.strip() == "fail"
     cases = [{"caseId": c["caseId"], "fileDigest": c["fileDigest"], "observationsDigest": "sha256:o",
@@ -659,6 +684,16 @@ class Script(Case):
         code, out, err = self.run_script(FAKE_VERDICT="fail", MEGA_EEST_MODES="plain")
         self.assertEqual(code, 1, err)
         self.assertRegex(self.summary(out), r" run=partial cases=3 plain=pass:0,fail:3,.* result=FAIL$")
+
+    def test_failing_cases_that_move_the_control_are_still_exit_1(self) -> None:
+        # A change that fails the cases can also move where the control first differs.
+        code, out, err = self.run_script(FAKE_VERDICT="fail", FAKE_CONTROL_PATH="/expected/gasLedgers/gasUsed")
+        self.assertEqual(code, 1, err)
+        self.assertRegex(self.summary(out), r" negative=fail-elsewhere .* result=FAIL$")
+        # With every case passing, the control must fail where recorded.
+        code, out, err = self.run_script(FAKE_CONTROL_PATH="/expected/gasLedgers/gasUsed")
+        self.assertEqual(code, 2, err)
+        self.assertRegex(self.summary(out), r" negative=not-caught .* result=INCOMPLETE$")
 
     def test_a_step_that_fails_before_the_verdict_exits_2(self) -> None:
         for fail, stage in (("mega-fixture", "cli-build"), ("metadata", "adapter-resolve"),

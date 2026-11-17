@@ -508,6 +508,13 @@ class MegaEestScoring(GateCase):
             self.assertIn("recorded as caught without the suite's verdict", text)
             self.assertIn(reason, text)
 
+    def test_a_kill_that_moved_the_control_is_credited(self) -> None:
+        # The mutant failed gating cases and moved where the wrong expectation first differs.
+        moved = EEST_FAIL.replace("negative=fail-as-recorded", "negative=fail-elsewhere")
+        code, text = self.against_mega_eest("CaughtMutant", eest_log(moved))
+        self.assertEqual(code, 0, text)
+        self.assertIn("1 caught, 0 survived", text)
+
     def test_a_kill_without_a_log_cannot_be_scored(self) -> None:
         results = self.results(outcomes=outcomes_json(mutant(MISSED, "MissedMutant")))
         for eest in (self.eest_results("no-log-path", (MISSED, "CaughtMutant", None)),

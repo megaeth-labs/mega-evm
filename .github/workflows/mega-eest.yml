@@ -6,7 +6,8 @@ name: Mega EEST
 # pull request that moves the revm or op-revm fork is tested with its own fork. Each case is
 # consumed plain and instrumented; the gate passes when the cases consumed are exactly the slice's
 # index, every one passes in both modes with the same observations, and the suite's deliberately
-# wrong expectation fails where it records. The script's exit says which: 0 pass, 1 cases failed,
+# wrong expectation fails where it records (when gating cases fail, it need only fail somewhere: a
+# change of behaviour can move where it first differs). The script's exit says which: 0 pass, 1 cases failed,
 # 2 no verdict (a fetch, a build, a report), 3 the pin refused; the job also requires the summary
 # line of the full run (`run=full`) of a pin on Mega EEST's default branch.
 #
