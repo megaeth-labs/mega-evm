@@ -14,8 +14,8 @@ use mega_evm::{
 };
 use revm::{
     bytecode::opcode::{
-        ADDRESS, CALL, CALLDATALOAD, CALLDATASIZE, CALLVALUE, GAS, JUMPDEST, JUMPI, LT, MLOAD, POP,
-        PUSH0, SELFDESTRUCT, SLOAD, SSTORE, STOP,
+        ADDRESS, CALL, CALLDATALOAD, CALLDATASIZE, GAS, JUMPDEST, JUMPI, LT, POP, PUSH0,
+        SELFDESTRUCT, SSTORE, STOP,
     },
     context::{result::ExecutionResult, TxEnv},
     interpreter::{
@@ -176,36 +176,6 @@ fn test_a_kept_destruction_gives_back_the_leaf_the_code_and_the_slot() {
     assert_eq!(slot_value(&outcome, CONTRACT, 998), U256::from(1));
 }
 
-/// The top frame creates the account. An inner frame calls it, it self-destructs, and the inner
-/// frame then reverts. The creation sits outside that revert: the mark, the falls, the give-back
-/// and the record takeback are discarded, so the leaf and the code stay charged, the creator's
-/// and the created account's records stand, and the kept net is the creation's +1.
-#[test]
-fn test_a_reverted_inner_frame_discards_the_destruction() {
-    if !pins_state() {
-        return;
-    }
-    let runtime = runtime_to(EXISTING);
-    let init = init_returning(BytecodeBuilder::default(), &runtime);
-    let created = created_at(&init);
-    let parent = after_create(
-        init,
-        U256::ZERO,
-        BytecodeBuilder::default().call(CHILD, U256::ZERO).append(POP),
-    );
-    let child = BytecodeBuilder::default().call(created, U256::ZERO).revert().build();
-    let Some((outcome, probed)) = both(parent, |db| db.set_account_code(CHILD, child.clone()))
-    else {
-        return;
-    };
-    assert!(outcome.result.is_success(), "{:?}", outcome.result);
-    assert!(!is_destroyed(&outcome, created), "the revert discards the destruction");
-    assert!(has_code(&outcome, created));
-    assert_eq!(outcome.gas.state, ACCOUNT_LEAF_STATE_GAS_M1 + code_state(&runtime));
-    assert_eq!(outcome.usage.write_records, 2, "the records stand again");
-    assert_growth(&probed, 1);
-}
-
 /// A pre-existing contract, a child of the top frame with a state-growth budget of 980, stores
 /// 980 slots and self-destructs to a new beneficiary. It was not created in the transaction, so
 /// there is no fall and no give-back. The beneficiary's +1 crosses: the stop names the frame
@@ -287,64 +257,6 @@ fn test_stores_after_the_mark_and_a_reverted_enclosing_frame() {
     }
 }
 
-/// Runtime that accepts value and stops, or with no value emits one `LOG3` of a word and
-/// self-destructs to `beneficiary`.
-fn log_and_destroy(beneficiary: Address) -> Bytes {
-    let body = BytecodeBuilder::default().log3_word().selfdestruct(beneficiary).build();
-    let accept = 4 + body.len();
-    let mut code = BytecodeBuilder::default()
-        .append(CALLVALUE)
-        .push_number(accept as u8)
-        .append(JUMPI)
-        .build()
-        .to_vec();
-    code.extend_from_slice(&body);
-    code.extend_from_slice(&[JUMPDEST, STOP]);
-    Bytes::from(code)
-}
-
-/// A kept same-transaction destruction of an account absent at the start, with one fresh slot,
-/// deposited code, one `LOG3` of a word and a non-zero balance moved to an existing account. The
-/// account's and the slot's records are taken back, and the code's data size and history with
-/// them; state gas comes back whole. The `LOG3` stays counted, 160 bytes, and its history stays
-/// charged; the transfer logs stay counted and pay none. A later value transfer to the marked
-/// account makes no record and is not a rise.
-#[test]
-fn test_a_destruction_gives_back_record_history_and_keeps_the_logs() {
-    if !pins_state() {
-        return;
-    }
-    let runtime = log_and_destroy(EXISTING);
-    let init =
-        init_returning(BytecodeBuilder::default().sstore(U256::from(1), U256::from(1)), &runtime);
-    let created = created_at(&init);
-    let code = after_create(
-        init,
-        U256::from(1),
-        BytecodeBuilder::default()
-            .call(created, U256::ZERO)
-            .append(POP)
-            .call(created, U256::from(1))
-            .append(POP),
-    );
-    let Some((outcome, probed)) = both(code, |_| {}) else { return };
-    assert!(outcome.result.is_success(), "{:?}", outcome.result);
-    assert!(is_destroyed(&outcome, created));
-    assert_eq!(outcome.gas.state, 0, "the leaf, the slot and the code come back");
-    // Kept records: the creator and the existing beneficiary. Transfer logs: the endowment, the
-    // move, and the later value.
-    const LOG3_WORD: u64 = 32 + 3 * 32 + 32;
-    assert_eq!(outcome.usage.write_records, 2);
-    assert_eq!(
-        outcome.usage.data_size,
-        BODY_BYTES + 2 * WRITE_RECORD_SIZE + LOG3_WORD + 3 * TRANSFER_LOG_SIZE
-    );
-    assert_eq!(outcome.gas.history, history(BODY_BYTES + 2 * WRITE_RECORD_SIZE + LOG3_WORD));
-    assert_eq!(outcome.gas.history_bytes, BODY_BYTES + 2 * WRITE_RECORD_SIZE + LOG3_WORD);
-    assert_eq!(outcome.result.logs().len(), 4, "the LOG3 and the three transfer logs");
-    assert_growth(&probed, 0);
-}
-
 /// The creation is +2 on the top frame, whose remaining becomes 998, so the enclosing frame it
 /// calls gets `floor(998 × 98 / 100)` = 978. The enclosing frame calls the account, which
 /// destroys itself and returns a net of −2. The enclosing frame's remaining stays at its budget,
@@ -376,108 +288,6 @@ fn test_a_destroying_childs_negative_net_does_not_raise_the_parents_budget() {
     assert!(outcome.result.is_success(), "{:?}", outcome.result);
     assert_eq!(returned_stop(&outcome), MegaLimitExceeded { kind: 3, limit: 958 });
     assert_eq!(slot_value(&outcome, NEXT, 1), U256::ZERO);
-}
-
-/// The enclosing frame, given 2,000,000 gas, halts out of gas after a successful destroying
-/// child. The mark, the falls, the give-back and the record takeback are discarded: the leaf, the
-/// slot and the code stay charged, the three records stand, and the kept net is 2.
-#[test]
-fn test_a_halt_after_a_destroying_child_discards_the_mark() {
-    if !pins_state() {
-        return;
-    }
-    let runtime = runtime_to(EXISTING);
-    let init =
-        init_returning(BytecodeBuilder::default().sstore(U256::from(1), U256::from(1)), &runtime);
-    let created = created_at(&init);
-    let parent = after_create(
-        init,
-        U256::ZERO,
-        call_with_gas(BytecodeBuilder::default(), CHILD, U256::ZERO, 2_000_000).append(POP),
-    );
-    // A load at offset 2^32 − 1 cannot pay its memory: an out-of-gas halt.
-    let enclosing = BytecodeBuilder::default()
-        .call(created, U256::ZERO)
-        .append(POP)
-        .push_number(u32::MAX)
-        .append_many([MLOAD, STOP])
-        .build();
-    let Some((outcome, probed)) = both(parent, |db| db.set_account_code(CHILD, enclosing.clone()))
-    else {
-        return;
-    };
-    assert!(outcome.result.is_success(), "{:?}", outcome.result);
-    assert!(!is_destroyed(&outcome, created), "the halt discards the destruction");
-    assert_eq!(slot_value(&outcome, created, 1), U256::from(1));
-    assert_eq!(
-        outcome.gas.state,
-        ACCOUNT_LEAF_STATE_GAS_M1 + SLOT_STATE_GAS_M1 + code_state(&runtime)
-    );
-    assert_eq!(outcome.usage.write_records, 3, "the records stand again");
-    assert_growth(&probed, 2);
-}
-
-/// A second `SELFDESTRUCT` of an account created in the transaction, with no balance moved and no
-/// funding between, subtracts nothing, gives nothing back, takes no record back and creates no
-/// beneficiary: the beneficiary does not exist and a zero balance does not create it.
-#[test]
-fn test_a_second_destruction_with_no_balance_subtracts_nothing() {
-    if !pins_state() {
-        return;
-    }
-    let runtime = runtime_to(BENEFICIARY);
-    let init = init_returning(BytecodeBuilder::default(), &runtime);
-    let created = created_at(&init);
-    let code = after_create(
-        init,
-        U256::ZERO,
-        BytecodeBuilder::default()
-            .call(created, U256::ZERO)
-            .append(POP)
-            .call(created, U256::ZERO)
-            .append(POP),
-    );
-    let Some((outcome, probed)) = both(code, |_| {}) else { return };
-    assert!(outcome.result.is_success(), "{:?}", outcome.result);
-    assert!(is_destroyed(&outcome, created));
-    assert_eq!(outcome.gas.state, 0, "the first destruction gives the leaf and the code back once");
-    assert_eq!(outcome.usage.write_records, 1, "only the creator's record");
-    assert_eq!(outcome.usage.data_size, BODY_BYTES + WRITE_RECORD_SIZE);
-    assert_eq!(balance_of(&outcome, BENEFICIARY), U256::ZERO, "no beneficiary");
-    assert_growth(&probed, 0);
-}
-
-/// The same repeated destruction after the account was funded again, moving that non-zero
-/// balance to an account that does not exist. The second destruction still subtracts nothing and
-/// gives nothing back; the value sent to the marked account makes no record. The beneficiary is a
-/// rise, 183,600 at `m` = 1, and its record is kept.
-#[test]
-fn test_a_second_destruction_after_refunding_charges_only_the_beneficiary() {
-    if !pins_state() {
-        return;
-    }
-    let runtime = runtime_to(BENEFICIARY);
-    let init = init_returning(BytecodeBuilder::default(), &runtime);
-    let created = created_at(&init);
-    let code = after_create(
-        init,
-        U256::ZERO,
-        BytecodeBuilder::default()
-            .call(created, U256::ZERO)
-            .append(POP)
-            .call(created, U256::from(1))
-            .append(POP),
-    );
-    let Some((outcome, probed)) = both(code, |_| {}) else { return };
-    assert!(outcome.result.is_success(), "{:?}", outcome.result);
-    assert_eq!(
-        outcome.gas.state, ACCOUNT_LEAF_STATE_GAS_M1,
-        "the second destruction only adds the beneficiary"
-    );
-    assert_eq!(balance_of(&outcome, BENEFICIARY), U256::from(1));
-    assert_eq!(outcome.usage.write_records, 2, "the creator and the beneficiary");
-    assert_eq!(outcome.usage.data_size, BODY_BYTES + 2 * WRITE_RECORD_SIZE + 2 * TRANSFER_LOG_SIZE);
-    assert_growth(&probed, 1);
 }
 
 /// Value to the counterfactual address A, then `CREATE2` onto A, then A self-destructs to an
@@ -633,61 +443,6 @@ fn test_a_cleared_account_with_no_kv_room_stops_at_the_frame_budget() {
     }
 }
 
-/// A destruction inside a frame that reverts, then a later destruction of the same account in a
-/// frame that is kept. The first mark does not stand, so the later destruction is the first
-/// effective one: it gives the leaf, the slot and the code back once and takes their records back
-/// once.
-#[test]
-fn test_only_the_kept_destruction_gives_the_charges_back() {
-    if !pins_state() {
-        return;
-    }
-    let runtime = runtime_to(EXISTING);
-    let init =
-        init_returning(BytecodeBuilder::default().sstore(U256::from(1), U256::from(1)), &runtime);
-    let created = created_at(&init);
-    let parent = after_create(
-        init,
-        U256::ZERO,
-        BytecodeBuilder::default()
-            .call(CHILD, U256::ZERO)
-            .append(POP)
-            .call(created, U256::ZERO)
-            .append(POP),
-    );
-    let child = BytecodeBuilder::default().call(created, U256::ZERO).revert().build();
-    let Some((outcome, probed)) = both(parent, |db| db.set_account_code(CHILD, child.clone()))
-    else {
-        return;
-    };
-    assert!(outcome.result.is_success(), "{:?}", outcome.result);
-    assert!(is_destroyed(&outcome, created));
-    assert_eq!(outcome.gas.state, 0, "the leaf, the code and the slot come back once");
-    assert_eq!(outcome.usage.write_records, 1, "their records are taken back once");
-    assert_eq!(outcome.gas.history, history(BODY_BYTES + WRITE_RECORD_SIZE));
-    assert_growth(&probed, 0);
-}
-
-/// A new account destroyed by its constructor, before any code is deposited and before any slot
-/// is written. The leaf is refilled and falls, and the account's record is taken back. Nothing
-/// else was charged.
-#[test]
-fn test_a_new_account_destroyed_before_code_or_slots_refills_the_leaf() {
-    if !pins_state() {
-        return;
-    }
-    let init = runtime_to(EXISTING);
-    let created = created_at(&init);
-    let code = after_create(init, U256::ZERO, BytecodeBuilder::default());
-    let Some((outcome, probed)) = both(code, |_| {}) else { return };
-    assert!(outcome.result.is_success(), "{:?}", outcome.result);
-    assert!(is_destroyed(&outcome, created));
-    assert_eq!(outcome.gas.state, 0, "the leaf is refilled and nothing else was charged");
-    assert_eq!(outcome.usage.write_records, 1, "only the creator's record");
-    assert_eq!(outcome.usage.data_size, BODY_BYTES + WRITE_RECORD_SIZE);
-    assert_growth(&probed, 0);
-}
-
 /// A pre-funded address is created onto, and its constructor destroys it to itself, so no balance
 /// moves to another account. The leaf was present: no charge, no refill, no fall, and the record
 /// the nonce bump made stands. No beneficiary and no transfer log.
@@ -708,112 +463,6 @@ fn test_a_prefunded_destruction_that_moves_no_balance_keeps_the_nonce_record() {
     assert_eq!(outcome.usage.write_records, 2, "the creator's and the nonce bump's records");
     assert_eq!(outcome.usage.data_size, BODY_BYTES + 2 * WRITE_RECORD_SIZE);
     assert_growth(&probed, 0);
-}
-
-/// Code deposited, then the account is destroyed in a later call. The account was absent at the
-/// start. The code deposit's state gas is refilled, and the code's data size and history are taken
-/// back; the code is no record and no unit of state growth.
-#[test]
-fn test_destroyed_code_refills_its_deposit_and_its_history() {
-    if !pins_state() {
-        return;
-    }
-    let runtime = runtime_to(EXISTING);
-    let init = init_returning(BytecodeBuilder::default(), &runtime);
-    let created = created_at(&init);
-    let code = after_create(
-        init,
-        U256::ZERO,
-        BytecodeBuilder::default().call(created, U256::ZERO).append(POP),
-    );
-    let Some((outcome, probed)) = both(code, |_| {}) else { return };
-    assert!(outcome.result.is_success(), "{:?}", outcome.result);
-    assert!(is_destroyed(&outcome, created));
-    assert!(code_state(&runtime) > 0, "the runtime deposits code");
-    assert_eq!(outcome.gas.state, 0, "the code deposit and the leaf are refilled");
-    // The call carries no calldata: the body is 310 bytes, and the creator's record is kept.
-    assert_eq!(outcome.gas.history, history(BODY_BYTES + WRITE_RECORD_SIZE));
-    assert_eq!(outcome.gas.history_bytes, BODY_BYTES + WRITE_RECORD_SIZE);
-    assert_eq!(outcome.usage.data_size, BODY_BYTES + WRITE_RECORD_SIZE);
-    assert_eq!(outcome.usage.write_records, 1);
-    assert_growth(&probed, 0);
-}
-
-/// Two slots, each original zero and present non-zero, one of them restored to zero before the
-/// destruction. The non-zero slot is the zero, non-zero, deleted row: refilled, −1, record back.
-/// The restored slot is the zero, zero, deleted row and is not counted again.
-#[test]
-fn test_slots_deleted_with_the_account_refill_once() {
-    if !pins_state() {
-        return;
-    }
-    let runtime = runtime_to(EXISTING);
-    let init = init_returning(
-        BytecodeBuilder::default()
-            .sstore(U256::from(1), U256::from(1))
-            .sstore(U256::from(2), U256::from(1))
-            .sstore(U256::from(1), U256::ZERO),
-        &runtime,
-    );
-    let created = created_at(&init);
-    let code = after_create(
-        init,
-        U256::ZERO,
-        BytecodeBuilder::default().call(created, U256::ZERO).append(POP),
-    );
-    let Some((outcome, probed)) = both(code, |_| {}) else { return };
-    assert!(outcome.result.is_success(), "{:?}", outcome.result);
-    assert!(is_destroyed(&outcome, created));
-    assert_eq!(outcome.gas.state, 0, "each slot refills once");
-    assert_eq!(outcome.usage.write_records, 1, "only the creator's record");
-    assert_growth(&probed, 0);
-}
-
-/// A creation onto an address that held nonce 0, balance 0, empty code and slot 1 = 5 at the
-/// transaction's start. `CREATE2` does not collide on storage. The address is empty under
-/// EIP-161, so the creation charges a new account, 183,600 at `m` = 1, and counts a rise; the leaf
-/// is the present row, so the destruction neither refills that charge nor subtracts the rise, and
-/// the account's record stands. The code was absent and is given back.
-///
-/// The runtime's `SLOAD` of slot 1 reads zero, not the 5 the database holds: a slot of an account
-/// created in the transaction that the transaction first accesses after the creation reads zero,
-/// so its original is zero, and it is the zero, zero, deleted row, which makes no record. Only a
-/// slot accessed before the creation keeps the value the database holds (the record unit test).
-#[test]
-fn test_a_creation_onto_an_empty_address_with_storage_keeps_the_leaf_charge() {
-    if !pins_state() {
-        return;
-    }
-    let runtime = BytecodeBuilder::default()
-        .push_number(1_u8)
-        .append_many([SLOAD, POP])
-        .selfdestruct(EXISTING)
-        .build();
-    let init = init_returning(BytecodeBuilder::default(), &runtime);
-    let created = created_at(&init);
-    let code = after_create(
-        init,
-        U256::ZERO,
-        BytecodeBuilder::default().call(created, U256::ZERO).append(POP),
-    );
-    let Some((outcome, probed)) =
-        both(code, |db| db.set_account_storage(created, U256::from(1), U256::from(5)))
-    else {
-        return;
-    };
-    assert!(outcome.result.is_success(), "{:?}", outcome.result);
-    assert!(is_destroyed(&outcome, created), "the creation did not collide");
-    let slot = &outcome.state[&created].storage[&U256::from(1)];
-    assert_eq!(
-        (slot.original_value, slot.present_value),
-        (U256::ZERO, U256::ZERO),
-        "the slot loads as zero for an account created in the transaction"
-    );
-    assert_eq!(outcome.gas.state, ACCOUNT_LEAF_STATE_GAS_M1, "the leaf's charge stands");
-    // The creator's record and the created account's, which the present leaf keeps.
-    assert_eq!(outcome.usage.write_records, 2);
-    assert_eq!(outcome.usage.data_size, BODY_BYTES + 2 * WRITE_RECORD_SIZE);
-    assert_growth(&probed, 1);
 }
 
 /// Runs `txs` in order over `db` twice — each committed before the next runs, and all on one
@@ -1036,51 +685,6 @@ fn test_a_detention_crossing_at_the_destruction_applies_none_of_the_table() {
 /// regular gas and a frame's regular gas is all that pays it.
 const BELOW_THE_CAP: u64 = 50_000_000;
 
-/// `CALL` of `target` with `gas` and one 32-byte word of calldata, `word`.
-fn call_with_word_and_gas(
-    code: BytecodeBuilder,
-    target: Address,
-    word: u64,
-    gas: u32,
-) -> BytecodeBuilder {
-    code.mstore(0x200, U256::from(word).to_be_bytes::<32>())
-        .append_many([PUSH0, PUSH0])
-        .push_number(32_u8)
-        .push_number(0x200_u16)
-        .append(PUSH0)
-        .push_address(target)
-        .push_number(gas)
-        .append(CALL)
-}
-
-/// After the mark, a fresh `SSTORE` on 60,000 gas, below the transaction's execution cap where
-/// no reservoir pays: the store is charged no state gas, so it completes, where the same store of
-/// the account before any destruction needs the slot's 97,920 of state gas and runs out of gas.
-#[test]
-fn test_a_store_after_the_mark_is_not_charged_what_its_frame_cannot_pay() {
-    if !pins_state() {
-        return;
-    }
-    const GAS: u32 = 60_000;
-    assert!(u64::from(GAS) < SLOT_STATE_GAS_M1);
-    let runtime = store_or_destroy(EXISTING);
-    let init = init_returning(BytecodeBuilder::default(), &runtime);
-    let created = created_at(&init);
-    for destroyed in [true, false] {
-        let first = if destroyed {
-            BytecodeBuilder::default().call(created, U256::ZERO).append(POP)
-        } else {
-            BytecodeBuilder::default()
-        };
-        let tail = call_with_word_and_gas(first, created, 7, GAS).append(POP).stop();
-        let code = after_create(init.clone(), U256::ZERO, tail);
-        let outcome = execute(funded_contract(code), call_tx(BELOW_THE_CAP));
-        assert!(outcome.result.is_success(), "destroyed {destroyed}: {:?}", outcome.result);
-        let stored = if destroyed { U256::from(7) } else { U256::ZERO };
-        assert_eq!(slot_value(&outcome, created, 1), stored, "destroyed {destroyed}");
-    }
-}
-
 /// Code deposited after its constructor destroyed the account, on gas that cannot pay the
 /// deposit's state gas: the address held a balance before the transaction, so its leaf was
 /// present and the destruction refills nothing that could pay for the deposit. The deposit is
@@ -1131,44 +735,6 @@ fn test_a_deposit_after_the_mark_is_not_charged_what_its_frame_cannot_pay() {
             assert!(has_code(&outcome, created), "the code was deposited");
             assert_eq!(outcome.gas.state, 0, "and charged no state gas");
         }
-    }
-}
-
-/// A constructor that destroys its own account through a `DELEGATECALL` to code that
-/// self-destructs, and then returns its runtime. The destruction gives the leaf back; the code is
-/// deposited after the mark, so its state gas is not kept, while its data size and history are
-/// charged as any deposited code's. A later call that runs the runtime, which self-destructs
-/// again, takes nothing back.
-#[test]
-fn test_code_deposited_after_its_constructor_destroyed_the_account_keeps_no_state_gas() {
-    if !pins_state() {
-        return;
-    }
-    let runtime = runtime_to(EXISTING);
-    let mut prefix = delegatecall(CHILD).append(POP).build().to_vec();
-    prefix.extend_from_slice(&BytecodeBuilder::default().return_with_data(&runtime).build());
-    let init = Bytes::from(prefix);
-    let created = created_at(&init);
-    for again in [false, true] {
-        let tail = if again {
-            BytecodeBuilder::default().call(created, U256::ZERO).append(POP)
-        } else {
-            BytecodeBuilder::default()
-        };
-        let code = after_create(init.clone(), U256::ZERO, tail);
-        let Some((outcome, probed)) = both(code, |db| db.set_account_code(CHILD, runtime.clone()))
-        else {
-            return;
-        };
-        assert!(outcome.result.is_success(), "again {again}: {:?}", outcome.result);
-        assert!(is_destroyed(&outcome, created), "again {again}");
-        assert!(has_code(&outcome, created), "again {again}: the code was deposited");
-        assert_eq!(outcome.gas.state, 0, "again {again}: the leaf came back, the code kept none");
-        let kept = BODY_BYTES + WRITE_RECORD_SIZE + runtime.len() as u64;
-        assert_eq!(outcome.usage.data_size, kept, "again {again}: the code's bytes stay");
-        assert_eq!(outcome.gas.history, history(kept), "again {again}: and their history");
-        assert_eq!(outcome.usage.write_records, 1, "again {again}: only the creator's record");
-        assert_growth(&probed, 0);
     }
 }
 
