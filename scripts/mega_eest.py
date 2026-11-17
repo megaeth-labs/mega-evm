@@ -34,15 +34,16 @@ Subcommands:
         file this build produced, wherever the target directory or the build target put it.
 
   case-diff   --base-rev <commit> --rev <commit> --base-index <index.json> --index <index.json>
-              --declared <case ids> --summary <file>
+              --declared <case ids> --declared-changes <case ids> --summary <file>
         Compare the case sets of two pins' slice indexes: the case ids removed, added and changed
         (same id, another file digest) are listed on stderr and as Markdown in <file>, and the word
-        printed on stdout says whether the removals are what scripts/mega_eest.env's
-        MEGA_EEST_REMOVED_CASES declares, exactly: `kept` (none removed, none declared), `declared`
-        (the removed ids and no other) or `undeclared` (anything else).
+        printed on stdout says whether the removals and the changes are what scripts/mega_eest.env's
+        MEGA_EEST_REMOVED_CASES and MEGA_EEST_CHANGED_CASES declare, exactly: `kept` (none removed
+        or changed, none declared), `declared` (exactly the removed and the changed ids) or
+        `undeclared` (anything else).
 
   check       --suite <Mega EEST checkout> --work <dir> --modes <"plain instrumented"> --rev <commit>
-              [--provenance <default-branch|unmerged|unchecked>]
+              [--provenance <default-branch|unmerged|unchecked>] [--repo <same|changed|unchecked>]
               [--caseset <unmoved|kept|declared|undeclared|unchecked>]
         Read the run reports `mega-fixture consume` wrote into <dir> (<mode>.json, and
         negative.json for the suite's deliberately wrong expectation) and decide: in every mode, the
@@ -62,7 +63,8 @@ Subcommands:
         status other than the consumer's four (pass, fail, unsupported, error), no control,
         a control not run or passing, a control that failed elsewhere while every gating case
         passed, or the checker itself failing); 3 REFUSED, every case passed but the pin's
-        provenance is `unmerged` or its case set `undeclared`. `run=full` in the line is both
+        provenance is `unmerged`, its repository is not the base's (`repo=changed`) or its case set
+        `undeclared`. `run=full` in the line is both
         modes; `run=partial` one.
 """
 from __future__ import annotations
@@ -527,13 +529,15 @@ def check(args: argparse.Namespace) -> int:
                    else "fail-elsewhere" if "fail-elsewhere" in states else "fail-as-recorded")
     summary.append(f"negative={verdict}")
     summary.append(f"provenance={args.provenance}")
+    repo = getattr(args, "repo", "unchecked")
+    summary.append(f"repo={repo}")
     summary.append(f"caseset={args.caseset}")
 
     if incomplete:
         result = "INCOMPLETE"
     elif cases_failed:
         result = "FAIL"
-    elif args.provenance == "unmerged" or args.caseset == "undeclared":
+    elif args.provenance == "unmerged" or args.caseset == "undeclared" or repo == "changed":
         result = "REFUSED"
     else:
         result = "pass"
@@ -579,9 +583,13 @@ def cmd_case_diff(args: argparse.Namespace) -> int:
     removed = sorted(base.keys() - head.keys())
     added = sorted(head.keys() - base.keys())
     changed = sorted(k for k in base.keys() & head.keys() if base[k] != head[k])
-    declared = sorted(set(args.declared.split()))
-    if removed == declared:
-        caseset = "declared" if removed else "kept"
+    # A case removed, or changed under its id, stops pinning what it pinned: both are declared in
+    # scripts/mega_eest.env, exactly, so each is a line the reviewer reads in the diff.
+    declared = {"removed": sorted(set(args.declared.split())),
+                "changed": sorted(set(args.declared_changes.split()))}
+    found = {"removed": removed, "changed": changed}
+    if found == declared:
+        caseset = "declared" if removed or changed else "kept"
     else:
         caseset = "undeclared"
     print(f"mega-eest: the pin moves {args.base_rev} -> {args.rev}: {len(removed)} case(s) removed, "
@@ -589,13 +597,16 @@ def cmd_case_diff(args: argparse.Namespace) -> int:
     for title, ids in (("removed", removed), ("added", added), ("changed", changed)):
         for case_id in ids:
             print(f"mega-eest:   {title} {case_id}", file=sys.stderr)
-    if caseset == "undeclared":
-        print("mega-eest: error: scripts/mega_eest.env's MEGA_EEST_REMOVED_CASES must list exactly the "
-              "case ids the pin removes: removed and not declared: "
-              f"{' '.join(sorted(set(removed) - set(declared))) or '(none)'}; declared and not removed: "
-              f"{' '.join(sorted(set(declared) - set(removed))) or '(none)'}", file=sys.stderr)
+    for kind, variable in (("removed", "MEGA_EEST_REMOVED_CASES"), ("changed", "MEGA_EEST_CHANGED_CASES")):
+        if found[kind] != declared[kind]:
+            print(f"mega-eest: error: scripts/mega_eest.env's {variable} must list exactly the case ids "
+                  f"the pin {'removes' if kind == 'removed' else 'changes under their ids'}: {kind} and "
+                  f"not declared: {' '.join(sorted(set(found[kind]) - set(declared[kind]))) or '(none)'}; "
+                  f"declared and not {kind}: "
+                  f"{' '.join(sorted(set(declared[kind]) - set(found[kind]))) or '(none)'}", file=sys.stderr)
     md = [f"### Mega EEST case set, {args.base_rev[:12]} → {args.rev[:12]}", "",
-          f"{len(removed)} removed, {len(added)} added, {len(changed)} changed; removals: **{caseset}**.", ""]
+          f"{len(removed)} removed, {len(added)} added, {len(changed)} changed; removals and changes: "
+          f"**{caseset}**.", ""]
     for title, ids in (("Removed", removed), ("Added", added), ("Changed", changed)):
         if ids:
             md += [f"<details><summary>{title} ({len(ids)})</summary>", ""]
@@ -629,6 +640,7 @@ def main() -> int:
     pc.add_argument("--modes", required=True)
     pc.add_argument("--rev", required=True)
     pc.add_argument("--provenance", default="unchecked", choices=["default-branch", "unmerged", "unchecked"])
+    pc.add_argument("--repo", default="unchecked", choices=["same", "changed", "unchecked"])
     pc.add_argument("--caseset", default="unchecked",
                     choices=["unmoved", "kept", "declared", "undeclared", "unchecked"])
     pc.set_defaults(func=cmd_check)
@@ -642,7 +654,8 @@ def main() -> int:
     pd.add_argument("--rev", required=True)
     pd.add_argument("--base-index", required=True)
     pd.add_argument("--index", required=True)
-    pd.add_argument("--declared", default="")
+    pd.add_argument("--declared", default="", help="the removed case ids the env file declares")
+    pd.add_argument("--declared-changes", default="", help="the changed case ids the env file declares")
     pd.add_argument("--summary", required=True)
     pd.set_defaults(func=cmd_case_diff)
 

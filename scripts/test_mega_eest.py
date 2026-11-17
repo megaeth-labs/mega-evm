@@ -311,7 +311,7 @@ class Check(Case):
         self.assertEqual(code, 0, err)
         self.assertEqual(out.strip(), f"MEGA-EEST rev={'f' * 40} run=full cases=2 "
                          "plain=pass:2,fail:0,unsupported:0,error:0 instrumented=pass:2,fail:0,unsupported:0,error:0 "
-                         "parity=identical negative=fail-as-recorded provenance=unchecked caseset=unchecked result=pass")
+                         "parity=identical negative=fail-as-recorded provenance=unchecked repo=unchecked caseset=unchecked result=pass")
 
     def test_one_mode_is_a_partial_run(self) -> None:
         code, out, err = self.write({"plain": self.all_passed()}, self.NEGATIVE)
@@ -415,12 +415,29 @@ class Check(Case):
         self.assert_no_verdict(*run, "lists no wrong expectation")
         self.assertIn("negative=none", run[1])
 
+    def test_a_changed_repository_is_refused(self) -> None:
+        run = Path(tempfile.mkdtemp(dir=self.tmp))
+        (run / "suite" / "slice").mkdir(parents=True)
+        (run / "work").mkdir()
+        (run / "suite" / "slice" / "index.json").write_text(json.dumps({
+            "cases": [{"caseId": c, "fileDigest": d} for c, d in self.CASES],
+            "negative": [{"caseId": "satin/negative/wrong", "wrongAt": "/expected/x"}]}))
+        (run / "work" / "plain.json").write_text(json.dumps({"cases": self.all_passed()}))
+        (run / "work" / "plain.exit").write_text("0\n")
+        (run / "work" / "negative.json").write_text(json.dumps({"cases": self.NEGATIVE}))
+        for repo, want in (("changed", 3), ("same", 0), ("unchecked", 0)):
+            code, out, err = self.run_quietly(eest.cmd_check, Namespace(
+                suite=str(run / "suite"), work=str(run / "work"), modes="plain", rev="f" * 40,
+                provenance="default-branch", repo=repo, caseset="kept"))
+            self.assertEqual(code, want, (repo, err))
+            self.assertIn(f"repo={repo} caseset=kept", out)
+
     def test_a_refused_pin_exits_3_and_failing_cases_still_exit_1(self) -> None:
         for provenance, caseset in (("unmerged", "unmoved"), ("default-branch", "undeclared")):
             code, out, err = self.write({"plain": self.all_passed()}, self.NEGATIVE,
                                         provenance=provenance, caseset=caseset)
             self.assertEqual(code, 3, err)
-            self.assertIn(f"provenance={provenance} caseset={caseset} result=REFUSED", out)
+            self.assertIn(f"provenance={provenance} repo=unchecked caseset={caseset} result=REFUSED", out)
         code, out, _ = self.write({"plain": self.one_failing()}, self.NEGATIVE, provenance="unmerged")
         self.assertEqual(code, 1)
         for caseset in ("unmoved", "kept", "declared"):
@@ -488,23 +505,39 @@ class CaseDiff(Case):
 
     BASE = {"satin/a": "sha256:1", "satin/b": "sha256:2", "satin/c": "sha256:3"}
 
-    def diff(self, head: dict[str, str], declared: str = "") -> tuple[int, str, str, str]:
+    def diff(self, head: dict[str, str], declared: str = "", changes: str = "") -> tuple[int, str, str, str]:
         run = Path(tempfile.mkdtemp(dir=self.tmp))
         for name, cases in (("base.json", self.BASE), ("head.json", head)):
             (run / name).write_text(json.dumps({"cases": [{"caseId": c, "fileDigest": d}
                                                           for c, d in cases.items()]}))
         code, out, err = self.run_quietly(eest.cmd_case_diff, Namespace(
             base_rev="a" * 40, rev="b" * 40, base_index=str(run / "base.json"),
-            index=str(run / "head.json"), declared=declared, summary=str(run / "diff.md")))
+            index=str(run / "head.json"), declared=declared, declared_changes=changes,
+            summary=str(run / "diff.md")))
         return code, out.strip(), err, (run / "diff.md").read_text()
 
-    def test_a_move_that_keeps_every_case_is_kept(self) -> None:
-        code, out, err, md = self.diff({**self.BASE, "satin/d": "sha256:4", "satin/a": "sha256:9"})
+    def test_a_move_that_only_adds_cases_is_kept(self) -> None:
+        code, out, err, md = self.diff({**self.BASE, "satin/d": "sha256:4"})
         self.assertEqual((code, out), (0, "kept"), err)
-        self.assertIn("0 case(s) removed, 1 added, 1 changed", err)
+        self.assertIn("0 case(s) removed, 1 added, 0 changed", err)
         self.assertIn("added satin/d", err)
-        self.assertIn("changed satin/a", err)
         self.assertIn("- `satin/d`", md)
+
+    def test_changes_under_an_id_must_be_declared_exactly(self) -> None:
+        head = {**self.BASE, "satin/a": "sha256:9", "satin/d": "sha256:4"}
+        code, out, err, md = self.diff(head)
+        self.assertEqual((code, out), (0, "undeclared"), err)
+        self.assertIn("changed satin/a", err)
+        self.assertIn("MEGA_EEST_CHANGED_CASES must list exactly", err)
+        self.assertIn("changed and not declared: satin/a", err)
+        self.assertIn("<summary>Changed (1)</summary>", md)
+        self.assertEqual(self.diff(head, changes="satin/a")[1], "declared")
+        for changes in ("satin/a satin/b", "satin/b"):
+            self.assertEqual(self.diff(head, changes=changes)[1], "undeclared", changes)
+        # A removal and a change, each declared in its own line.
+        both = {"satin/a": "sha256:9", "satin/b": "sha256:2"}
+        self.assertEqual(self.diff(both, declared="satin/c", changes="satin/a")[1], "declared")
+        self.assertEqual(self.diff(both, declared="satin/c satin/a")[1], "undeclared")
 
     def test_removals_must_be_declared_exactly(self) -> None:
         head = {"satin/a": "sha256:1", "satin/b": "sha256:2"}
@@ -513,7 +546,7 @@ class CaseDiff(Case):
             code, out, err, md = self.diff(head, declared)
             self.assertEqual((code, out), (0, "undeclared"), declared)
             self.assertIn("must list exactly the case ids the pin removes", err)
-            self.assertIn("removals: **undeclared**", md)
+            self.assertIn("removals and changes: **undeclared**", md)
         # A declaration left over from an earlier move, with nothing removed now.
         self.assertEqual(self.diff(dict(self.BASE), "satin/c")[1], "undeclared")
 
@@ -662,11 +695,13 @@ class Script(Case):
             self.git("checkout", "-q", "main", cwd=self.suite)
         return rev
 
-    def run_script(self, rev: str | None = None, declared: str | None = None,
+    def run_script(self, rev: str | None = None, declared: str | None = None, changed: str | None = None,
                    **env: str) -> tuple[int, str, str]:
         pin = [f"MEGA_EEST_REPO=file://{self.suite}", f"MEGA_EEST_REV={rev or self.rev}"]
         if declared is not None:
             pin.append(f"MEGA_EEST_REMOVED_CASES={declared}")
+        if changed is not None:
+            pin.append(f"MEGA_EEST_CHANGED_CASES={changed}")
         (self.tree / "scripts" / "mega_eest.env").write_text("\n".join(pin) + "\n")
         run = subprocess.run(
             ["bash", str(self.tree / "scripts" / "mega_eest.sh")], capture_output=True, text=True, timeout=120,
@@ -684,7 +719,7 @@ class Script(Case):
         self.assertEqual(code, 0, err)
         line = self.summary(out)
         self.assertRegex(line, r"^MEGA-EEST rev=[0-9a-f]{40} run=full cases=3 plain=pass:3,.* "
-                               r"instrumented=pass:3,.* provenance=default-branch caseset=unchecked result=pass$")
+                               r"instrumented=pass:3,.* provenance=default-branch repo=unchecked caseset=unchecked result=pass$")
         self.assertEqual(json.loads((self.tree / "target/mega-eest/capabilities.json").read_text()),
                          {"adapter": "fresh"})
 
@@ -753,12 +788,45 @@ class Script(Case):
         code, out, err = self.run_script(rev=draft)
         self.assertEqual(code, 3, err)
         self.assertIn("draft state", err)
-        self.assertRegex(self.summary(out), r" cases=4 .* provenance=unmerged caseset=unchecked result=REFUSED$")
+        self.assertRegex(self.summary(out), r" cases=4 .* provenance=unmerged repo=unchecked caseset=unchecked result=REFUSED$")
         # Once merged, the same pin passes.
         self.git("merge", "-q", "--ff-only", "draft", cwd=self.suite)
         code, out, err = self.run_script(rev=draft)
         self.assertEqual(code, 0, err)
         self.assertIn("provenance=default-branch", self.summary(out))
+
+    def commit_digests(self, digests: dict[str, str]) -> str:
+        """Commit an index whose cases carry the given file digests (the files stay as they are)."""
+        index = json.loads((self.suite / "slice" / "index.json").read_text())
+        for case in index["cases"]:
+            case["fileDigest"] = digests.get(case["caseId"], case["fileDigest"])
+        (self.suite / "slice" / "index.json").write_text(json.dumps(index))
+        self.git("commit", "-qam", "change a case", cwd=self.suite)
+        return self.git("rev-parse", "HEAD", cwd=self.suite)
+
+    def test_a_pin_move_must_declare_the_cases_it_changes(self) -> None:
+        base = self.rev
+        head = self.commit_digests({"satin/b": "sha256:rewritten"})
+        code, out, err = self.run_script(rev=head, MEGA_EEST_BASE_REV=base)
+        self.assertEqual(code, 3, err)
+        self.assertIn("changed and not declared: satin/b", err)
+        self.assertIn("caseset=undeclared result=REFUSED", self.summary(out))
+        self.assertIn("<summary>Changed (1)</summary>", (self.tree / "target/mega-eest/case-diff.md").read_text())
+        (self.tree / "scripts" / "mega_eest.env").write_text("")  # rewritten by run_script
+        code, out, err = self.run_script(rev=head, changed="satin/b", MEGA_EEST_BASE_REV=base)
+        self.assertEqual(code, 0, err)
+        self.assertIn("caseset=declared result=pass", self.summary(out))
+
+    def test_a_pin_move_to_another_repository_is_refused(self) -> None:
+        mirror = self.tmp / "mirror"
+        self.git("clone", "-q", str(self.suite), str(mirror))
+        code, out, err = self.run_script(MEGA_EEST_BASE_REV=self.rev, MEGA_EEST_BASE_REPO=f"file://{mirror}")
+        self.assertEqual(code, 3, err)
+        self.assertIn("MEGA_EEST_REPO moves from", err)
+        self.assertIn("repo=changed", self.summary(out))
+        code, out, err = self.run_script(MEGA_EEST_BASE_REV=self.rev, MEGA_EEST_BASE_REPO=f"file://{self.suite}")
+        self.assertEqual(code, 0, err)
+        self.assertIn("repo=same caseset=unmoved result=pass", self.summary(out))
 
     def test_a_pin_move_must_declare_the_cases_it_removes(self) -> None:
         base = self.rev

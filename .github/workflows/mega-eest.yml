@@ -15,9 +15,10 @@ name: Mega EEST
 # its place, so it is checked too: the pinned commit must be on Mega EEST's default branch (a pin on
 # the branch of a suite change still under review is a draft state, and the gate stays red until
 # the pin moves to the merged commit), and a pull request that moves the pin lists the case ids
-# removed, added and changed relative to its base's pin in the step summary, where any removal
-# fails the gate unless scripts/mega_eest.env's MEGA_EEST_REMOVED_CASES lists exactly the removed
-# ids, a line the reviewer reads in the diff.
+# removed, added and changed relative to its base's pin in the step summary, where any removal or
+# change fails the gate unless scripts/mega_eest.env's MEGA_EEST_REMOVED_CASES and
+# MEGA_EEST_CHANGED_CASES list exactly those ids, lines the reviewer reads in the diff; and a pull
+# request that changes MEGA_EEST_REPO fails it, unless the base has no pin file.
 #
 # A failing case pins a rule of the Satin specification. A pull request that changes that
 # behaviour on purpose, or the mega-evm API the adapter calls, changes Mega EEST first (the case or
@@ -113,6 +114,7 @@ jobs:
           echo "Mega EEST at $rev"
           echo "rev=$rev" >> "$GITHUB_OUTPUT"
           base=""
+          base_repo=""
           if [ "$EVENT" = pull_request ]; then
             if ! git rev-parse --verify -q 'HEAD^2' > /dev/null; then
               echo "::error::HEAD is not the pull request's merge commit, so the base's pin is unknown"
@@ -121,10 +123,12 @@ jobs:
             # A base without the pin file (the pull request that adds the gate) has nothing to compare.
             if git cat-file -e 'HEAD^1:scripts/mega_eest.env' 2> /dev/null; then
               base=$(git show 'HEAD^1:scripts/mega_eest.env' | sed -n 's/^MEGA_EEST_REV=\(.*\)$/\1/p')
+              base_repo=$(git show 'HEAD^1:scripts/mega_eest.env' | sed -n 's/^MEGA_EEST_REPO=\(.*\)$/\1/p')
             fi
           fi
-          echo "the base's pin: ${base:-(none)}"
+          echo "the base's pin: ${base:-(none)} in ${base_repo:-(none)}"
           echo "base=$base" >> "$GITHUB_OUTPUT"
+          echo "base_repo=$base_repo" >> "$GITHUB_OUTPUT"
 
       # The job's cargo cache is the step below: setup-rust-toolchain's own cache handles the
       # workspace's target directory, and this job builds into another.
@@ -155,6 +159,7 @@ jobs:
         env:
           REV: ${{ steps.pin.outputs.rev }}
           MEGA_EEST_BASE_REV: ${{ steps.pin.outputs.base }}
+          MEGA_EEST_BASE_REPO: ${{ steps.pin.outputs.base_repo }}
         run: |
           set -uo pipefail
           start=$SECONDS

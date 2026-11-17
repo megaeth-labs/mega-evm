@@ -17,8 +17,10 @@
 #    suite change still under review, is a draft state: the cases still run, and the script exits 3.
 # 3. When MEGA_EEST_BASE_REV names another commit (a pull request's base pin), compares the two
 #    slices' case sets: the case ids removed, added and changed are listed (and written to
-#    $MEGA_EEST_WORK/case-diff.md), and removed ids must be exactly those scripts/mega_eest.env's
-#    MEGA_EEST_REMOVED_CASES declares, or the script exits 3.
+#    $MEGA_EEST_WORK/case-diff.md), and the removed ids and the ids of cases changed under them
+#    (another file digest) must be exactly those scripts/mega_eest.env's MEGA_EEST_REMOVED_CASES and
+#    MEGA_EEST_CHANGED_CASES declare, or the script exits 3. When MEGA_EEST_BASE_REPO names the
+#    base's repository, a pin file that names another one exits 3 too.
 # 4. Builds the suite's `mega-fixture` CLI, and its revm adapter against this checkout: the adapter
 #    is written out as a workspace of its own ($MEGA_EEST_WORK/adapter-revm, by scripts/mega_eest.py)
 #    whose mega-evm is a path dependency on crates/mega-evm here, whose other crates take their
@@ -49,7 +51,8 @@
 #
 #   MEGA-EEST rev=<commit> run=<full|partial> cases=<n> <mode>=pass:<n>,fail:<n>,unsupported:<n>,error:<n> ...
 #     [parity=<identical|N-differ>] negative=<...> provenance=<default-branch|unmerged|unchecked>
-#     caseset=<unmoved|kept|declared|undeclared|unchecked> result=<pass|FAIL|INCOMPLETE|REFUSED>
+#     repo=<same|changed|unchecked> caseset=<unmoved|kept|declared|undeclared|unchecked>
+#     result=<pass|FAIL|INCOMPLETE|REFUSED>
 #
 # `run=full` is both modes, which the gate requires; `run=partial` is one, which the mutation gate
 # runs (plain). A run that stops before the reports are read prints
@@ -66,8 +69,9 @@
 #      check, a report missing or incomplete, cases that are not the index, a case the adapter does
 #      not support, no mode, a wrong expectation not run or passing, or one that failed elsewhere
 #      while every gating case passed (result=INCOMPLETE)
-#   3  the cases passed, but the pin is refused: not on Mega EEST's default branch, or it removes
-#      cases scripts/mega_eest.env does not declare (result=REFUSED)
+#   3  the cases passed, but the pin is refused: not on Mega EEST's default branch, in another
+#      repository than the base's, or it removes or changes cases scripts/mega_eest.env does not
+#      declare (result=REFUSED)
 #
 # Environment:
 #   MEGA_EEST_DIR         a Mega EEST checkout at the pin to use instead of fetching one
@@ -77,6 +81,7 @@
 #   MEGA_EEST_MODES       the modes to consume in (default "plain instrumented"); at least one
 #   MEGA_EEST_JOBS        cases run at once (default: the number of CPUs)
 #   MEGA_EEST_BASE_REV    the pin to compare the case set with (CI: the pull request base's pin)
+#   MEGA_EEST_BASE_REPO   the repository the base's pin file names (CI: when the base has the file)
 #   MEGA_EEST_SKIP_PROVENANCE=1
 #                         skips step 2 (provenance=unchecked): for the mutation gate's runs, which
 #                         its warm-up already checked, and the coverage report; never the gate
@@ -165,6 +170,7 @@ REPO=$(read_pin MEGA_EEST_REPO)
 REV=$(read_pin MEGA_EEST_REV)
 [[ "$REV" =~ ^[0-9a-f]{40}$ ]] || die "$PIN_FILE: MEGA_EEST_REV is '$REV', not a full commit hash"
 DECLARED_REMOVALS=$(read_optional MEGA_EEST_REMOVED_CASES)
+DECLARED_CHANGES=$(read_optional MEGA_EEST_CHANGED_CASES)
 
 # The paths of a checkout that decide what runs: a change to any of them is a different suite.
 SUITE_PATHS=(slice specs adapters crates Cargo.toml Cargo.lock)
@@ -209,19 +215,20 @@ at_commit() {
     fi
 }
 
-# A shallow fetch of commit $2 into a fresh checkout at $1. One retry: a fetch that fails twice is
-# a network failure or a commit the repository does not have, and either stops the run.
+# A shallow fetch of commit $2 into a fresh checkout at $1, from repository $3 (the pin's by
+# default). One retry: a fetch that fails twice is a network failure or a commit the repository does
+# not have, and either stops the run.
 fetch_commit() {
-    local dir=$1 rev=$2
+    local dir=$1 rev=$2 repo=${3:-$REPO}
     rm -rf "$dir"
     mkdir -p "$dir"
     git -C "$dir" init -q
-    git -C "$dir" remote add origin "$REPO"
+    git -C "$dir" remote add origin "$repo"
     if ! git -C "$dir" fetch -q --depth 1 origin "$rev"; then
         log "the fetch failed; retrying once"
         sleep 5
         git -C "$dir" fetch -q --depth 1 origin "$rev" \
-            || die "cannot fetch $rev from $REPO: the repository has no such commit, or the network failed"
+            || die "cannot fetch $rev from $repo: the repository has no such commit, or the network failed"
     fi
     git -C "$dir" -c advice.detachedHead=false checkout -q FETCH_HEAD
     at_commit "$dir" "$rev" || die "the fetched checkout of $rev $PIN_PROBLEM"
@@ -274,25 +281,40 @@ else
     fi
 fi
 
+# The repository against the base's, when it is given: the default branch the provenance check
+# reads is the pin repository's own, so a change of repository is a change of what is trusted.
+REPO_STATE=unchecked
+if [ -n "${MEGA_EEST_BASE_REPO:-}" ]; then
+    if [ "$MEGA_EEST_BASE_REPO" = "$REPO" ]; then
+        REPO_STATE=same
+    else
+        REPO_STATE=changed
+        log "error: MEGA_EEST_REPO moves from $MEGA_EEST_BASE_REPO to $REPO; the suite's repository is" \
+            "not changed in a pull request that runs this gate"
+    fi
+fi
+
 # The case set against the base's pin, when one is given.
 CASESET=unchecked
 if [ -n "${MEGA_EEST_BASE_REV:-}" ]; then
     STAGE=case-diff
     BASE_REV=$MEGA_EEST_BASE_REV
     [[ "$BASE_REV" =~ ^[0-9a-f]{40}$ ]] || die "MEGA_EEST_BASE_REV is '$BASE_REV', not a full commit hash"
-    if [ "$BASE_REV" = "$REV" ]; then
+    if [ "$BASE_REV" = "$REV" ] && [ "$REPO_STATE" != changed ]; then
         CASESET=unmoved
-        [ -z "$DECLARED_REMOVALS" ] \
-            || log "warning: the pin did not move, and MEGA_EEST_REMOVED_CASES still declares removals; clear it"
+        [ -z "$DECLARED_REMOVALS$DECLARED_CHANGES" ] \
+            || log "warning: the pin did not move, and MEGA_EEST_REMOVED_CASES or MEGA_EEST_CHANGED_CASES" \
+                "still declares cases; clear them"
     else
         BASE="$WORK/base-src"
         if ! { [ -d "$BASE/.git" ] && at_commit "$BASE" "$BASE_REV"; }; then
             log "fetching the base's pin $BASE_REV"
-            fetch_commit "$BASE" "$BASE_REV"
+            fetch_commit "$BASE" "$BASE_REV" "${MEGA_EEST_BASE_REPO:-$REPO}"
         fi
         CASESET=$(python3 "$HELPER" case-diff --base-rev "$BASE_REV" --rev "$REV" \
             --base-index "$BASE/slice/index.json" --index "$SUITE/slice/index.json" \
-            --declared "$DECLARED_REMOVALS" --summary "$WORK/case-diff.md") \
+            --declared "$DECLARED_REMOVALS" --declared-changes "$DECLARED_CHANGES" \
+            --summary "$WORK/case-diff.md") \
             || die "cannot compare the case sets of $BASE_REV and $REV"
     fi
 fi
@@ -360,7 +382,7 @@ log "consuming slice/negative, the wrong expectation ($(elapsed))"
 STAGE=check
 status=0
 summary=$(python3 "$HELPER" check --suite "$SUITE" --work "$WORK" --modes "$MODE_WORDS" --rev "$REV" \
-    --provenance "$PROVENANCE" --caseset "$CASESET") || status=$?
+    --provenance "$PROVENANCE" --repo "$REPO_STATE" --caseset "$CASESET") || status=$?
 log "done in $(elapsed); logs and reports in $WORK"
 case "$status:$summary" in
     "0:MEGA-EEST "*" result=pass" | "1:MEGA-EEST "*" result=FAIL" | "2:MEGA-EEST "*" result=INCOMPLETE" \
@@ -372,7 +394,7 @@ case "$status" in
     1) log "a case that fails pins behaviour of the Satin specification: fix the change, or, when it" \
         "changes that behaviour on purpose, change the case in Mega EEST first and move the pin" \
         "(AGENTS.md, the Mega EEST gate)" ;;
-    3) log "the cases passed, but the pin is refused (provenance=$PROVENANCE caseset=$CASESET)" ;;
+    3) log "the cases passed, but the pin is refused (provenance=$PROVENANCE repo=$REPO_STATE caseset=$CASESET)" ;;
 esac
 FINISHED=1
 exit "$status"
