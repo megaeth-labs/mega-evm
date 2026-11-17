@@ -24,7 +24,7 @@ use mega_evm::{
     LimitCheck, LimitKind, MegaLimitExceeded, LOG_BASE_SIZE, WRITE_RECORD_SIZE,
 };
 use revm::{
-    bytecode::opcode::{CALL, GAS, POP, PUSH0, TIMESTAMP},
+    bytecode::opcode::{CALL, GAS, POP, PUSH0, REVERT, TIMESTAMP},
     interpreter::{
         interpreter::EthInterpreter, CallInputs, CallOutcome, CreateInputs, CreateOutcome,
         InstructionResult,
@@ -405,6 +405,45 @@ fn test_a_refusal_after_the_creations_charges_gives_the_reservoir_back() {
         outcome.gas.reservoir_remaining,
         reference.gas.reservoir_remaining + account_share() + create_share()
     );
+}
+
+/// The call gets back what its creation did not spend, the same way whether the creation
+/// succeeds or reverts: the transaction spends the overhead, the `CREATE` opcode's regular gas,
+/// what the call kept of the creation's start, and the creation's `gasUsed`, and nothing else,
+/// below and above the execution cap.
+#[test]
+fn test_the_unspent_forward_comes_back_on_success_and_revert_alike() {
+    let succeeding = Deployment::new(deploying(&runtime(1)));
+    let reverting = Deployment::new(Bytes::from_static(&[PUSH0, PUSH0, REVERT]));
+    let new_account = entry(GasId::new_account_state_gas());
+    for gas_limit in GAS_LIMITS {
+        let success = limited(&succeeding, gas_limit, EvmTxRuntimeLimits::no_limits());
+        let [total, ..] =
+            beyond(&success, &reference(succeeding.call_data(LARGE_OVERRIDE), gas_limit));
+        assert_eq!(
+            total,
+            KEYLESS_DEPLOY_OVERHEAD_GAS +
+                create_regular(deploying(&runtime(1)).len()) +
+                new_account +
+                entry(GasId::create_state_gas()) +
+                2 * record() +
+                returned(&success).gasUsed,
+            "success at {gas_limit}",
+        );
+
+        let revert = limited(&reverting, gas_limit, EvmTxRuntimeLimits::no_limits());
+        let [total, ..] =
+            beyond(&revert, &reference(reverting.call_data(LARGE_OVERRIDE), gas_limit));
+        assert_eq!(
+            total,
+            KEYLESS_DEPLOY_OVERHEAD_GAS +
+                create_regular(3) +
+                new_account +
+                record() +
+                returned(&revert).gasUsed,
+            "revert at {gas_limit}",
+        );
+    }
 }
 
 /* ---------- the stop, as a column of the matrix ---------- */

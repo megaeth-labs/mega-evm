@@ -7,15 +7,31 @@
 //! overhead alone.
 
 use alloy_primitives::{Bytes, U256};
-use alloy_sol_types::SolCall;
-use mega_evm::system::keyless::{
-    IKeylessDeploy, KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_OVERHEAD_GAS,
+use alloy_sol_types::{SolCall, SolError};
+use mega_evm::{
+    system::keyless::{
+        IKeylessDeploy, KeylessDeployError, KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_OVERHEAD_GAS,
+    },
+    EvmTxRuntimeLimits,
 };
-use revm::context::result::ExecutionResult;
+use revm::{
+    bytecode::opcode::{CALL, CALLCODE, DELEGATECALL, STATICCALL},
+    context::result::ExecutionResult,
+};
 
-use crate::common::{body_history, call_tx, revert_data, run, system_db};
+use super::{beyond, reference, refusal, run_with, GAS_LIMITS};
+use crate::common::{
+    body_history, call_tx, calls_with, output, revert_data, run, split_outcome, system_db,
+    with_contract, CONTRACT,
+};
+
+/// No runtime limit.
+fn no_limits() -> EvmTxRuntimeLimits {
+    EvmTxRuntimeLimits::no_limits()
+}
 
 const KEYLESS_DEPLOY: [u8; 4] = IKeylessDeploy::keylessDeployCall::SELECTOR;
+const NOT_INTERCEPTED: [u8; 4] = IKeylessDeploy::NotIntercepted::SELECTOR;
 
 /// The calldata of a `keylessDeploy` call carrying `transaction` bytes.
 fn keyless_deploy(transaction: &[u8]) -> Bytes {
@@ -34,6 +50,42 @@ fn unknown_selector(data: &Bytes) -> Bytes {
     let mut data = data.to_vec();
     data[0] ^= 0xff;
     Bytes::from(data)
+}
+
+/// A dispatched `keylessDeploy` transaction pays the fixed overhead, then is refused by the
+/// rules: bytes that do not decode as a signed transaction are `MalformedEncoding()`. The
+/// deployed bytecode does not run, and the overhead is all the refusal keeps.
+#[test]
+fn test_a_keyless_deploy_transaction_pays_the_overhead() {
+    let data = keyless_deploy(b"a transaction");
+    for gas_limit in GAS_LIMITS {
+        let dispatched = run_with(system_db(), data.clone(), gas_limit, no_limits());
+        assert_eq!(refusal(&dispatched), KeylessDeployError::MalformedEncoding);
+        let [total, regular, ..] = beyond(&dispatched, &reference(data.clone(), gas_limit));
+        assert_eq!([total, regular], [KEYLESS_DEPLOY_OVERHEAD_GAS; 2], "at {gas_limit}");
+    }
+}
+
+/// A call a contract makes is not dispatched, whatever its selector: only a transaction
+/// deploys. The deployed bytecode runs and reverts with `NotIntercepted()`, and no overhead is
+/// charged.
+#[test]
+fn test_a_call_from_a_contract_is_not_dispatched() {
+    let data = keyless_deploy(b"a transaction");
+    for scheme in [CALL, STATICCALL, CALLCODE, DELEGATECALL] {
+        let code = calls_with(scheme, KEYLESS_DEPLOY_ADDRESS, &data, 0);
+        let result = run(with_contract(code), call_tx(CONTRACT, [], U256::ZERO));
+        let outcome = output(&result);
+        let (status, returned) = split_outcome(&outcome);
+        assert!(!status, "scheme {scheme:#x}");
+        assert_eq!(returned, NOT_INTERCEPTED, "scheme {scheme:#x}");
+        // The transaction's body is its only history: what it spent beside it is less than the
+        // overhead.
+        assert!(
+            result.result.gas().total_gas_spent() - body_history(0) < KEYLESS_DEPLOY_OVERHEAD_GAS,
+            "scheme {scheme:#x} paid the overhead of a dispatch that did not happen",
+        );
+    }
 }
 
 /// A selector the contract does not know, and an input too short to hold one, are not
@@ -82,6 +134,113 @@ fn test_a_call_that_cannot_pay_the_overhead_runs_out_of_gas() {
         result.result,
     );
     assert_eq!(result.result.tx_gas_used(), gas_limit, "an out-of-gas frame spends what it had",);
+}
+
+/// A call is recognised only once its arguments decode as `(bytes, uint256)`: a payload too short
+/// to hold them, an offset that points past the data, and a length that runs past it are not
+/// dispatched. The deployed bytecode runs and its decoder reverts with empty data, and the
+/// overhead is not charged.
+#[test]
+fn test_arguments_that_do_not_decode_are_not_dispatched() {
+    let selector = KEYLESS_DEPLOY.to_vec();
+    let word = |value: u64| U256::from(value).to_be_bytes::<32>().to_vec();
+    let well_formed = keyless_deploy(b"a transaction").to_vec();
+
+    let mut offset_past_the_data = selector.clone();
+    offset_past_the_data.extend(word(0x1000));
+    offset_past_the_data.extend(word(1_000_000));
+    let mut length_past_the_data = selector.clone();
+    length_past_the_data.extend(word(0x40));
+    length_past_the_data.extend(word(1_000_000));
+    length_past_the_data.extend(word(32));
+    let cases = [
+        ("short", [selector.clone(), vec![0_u8; 16]].concat()),
+        ("selector alone", selector),
+        ("offset past the data", offset_past_the_data),
+        ("length past the data", length_past_the_data),
+        ("cut inside the bytes", well_formed[..well_formed.len() - 40].to_vec()),
+    ];
+    for (name, input) in cases {
+        let data = Bytes::from(input);
+        for gas_limit in GAS_LIMITS {
+            let outcome = run_with(system_db(), data.clone(), gas_limit, no_limits());
+            let ExecutionResult::Revert { output, .. } = &outcome.result else {
+                panic!("{name}: the bytecode did not revert: {:?}", outcome.result);
+            };
+            assert!(output.is_empty(), "{name}: the bytecode's decoder reverts with empty data");
+            let [total, regular, ..] = beyond(&outcome, &reference(data.clone(), gas_limit));
+            assert!(
+                total < KEYLESS_DEPLOY_OVERHEAD_GAS && regular < KEYLESS_DEPLOY_OVERHEAD_GAS,
+                "{name} at {gas_limit}: paid {total} beyond a plain call, an overhead it does not \
+                 owe",
+            );
+        }
+    }
+}
+
+/// The calldata of a `keylessDeploy` call: the selector and `words` as 32-byte words, then
+/// `tail` as it is.
+fn raw_call(words: &[u64], tail: &[u8]) -> Bytes {
+    let mut data = KEYLESS_DEPLOY.to_vec();
+    for word in words {
+        data.extend(U256::from(*word).to_be_bytes::<32>());
+    }
+    data.extend(tail);
+    Bytes::from(data)
+}
+
+/// A call is recognised exactly when the contract's own calldata decoder for `(bytes, uint256)`
+/// accepts its arguments, and that decoder asks for no padding and no canonical offset: the
+/// padding of the bytes' tail cut off, an offset that points at the head's second word, which is
+/// then read as the length, and an offset of zero are all recognised. Each pays the overhead and
+/// reaches the rule that refuses a payload that is no signed transaction.
+#[test]
+fn test_arguments_the_contracts_decoder_accepts_are_dispatched() {
+    let cases = [
+        // offset 0x40, gas limit, length 5, five bytes and none of the 27 bytes of padding
+        ("the tail's padding cut off", raw_call(&[0x40, 1_000_000, 5], &[0xab; 5])),
+        // offset 0x20 points at the second head word (3), which is read as the length of the
+        // three bytes after the head
+        ("an offset at the second head word", raw_call(&[0x20, 3], &[0xab; 3])),
+        // offset zero points at the first head word (0), read as an empty payload
+        ("an offset of zero", raw_call(&[0, 1_000_000], &[])),
+    ];
+    for (name, data) in cases {
+        for gas_limit in GAS_LIMITS {
+            let dispatched = run_with(system_db(), data.clone(), gas_limit, no_limits());
+            assert_eq!(
+                refusal(&dispatched),
+                KeylessDeployError::MalformedEncoding,
+                "{name} at {gas_limit}",
+            );
+            let [total, regular, ..] = beyond(&dispatched, &reference(data.clone(), gas_limit));
+            assert_eq!(
+                [total, regular],
+                [KEYLESS_DEPLOY_OVERHEAD_GAS; 2],
+                "{name} at {gas_limit}: recognised, so the overhead is charged",
+            );
+        }
+    }
+}
+
+/// The first of those cases one byte short of the declared length is refused by the same
+/// decoder: the call is not recognised, pays no overhead, and the bytecode reverts with empty
+/// data.
+#[test]
+fn test_a_payload_one_byte_short_of_its_declared_length_is_not_dispatched() {
+    let data = raw_call(&[0x40, 1_000_000, 5], &[0xab; 4]);
+    for gas_limit in GAS_LIMITS {
+        let outcome = run_with(system_db(), data.clone(), gas_limit, no_limits());
+        let ExecutionResult::Revert { output, .. } = &outcome.result else {
+            panic!("the bytecode did not revert: {:?}", outcome.result);
+        };
+        assert!(output.is_empty(), "the bytecode's decoder reverts with empty data");
+        let [total, regular, ..] = beyond(&outcome, &reference(data.clone(), gas_limit));
+        assert!(
+            total < KEYLESS_DEPLOY_OVERHEAD_GAS && regular < KEYLESS_DEPLOY_OVERHEAD_GAS,
+            "at {gas_limit}: paid {total} beyond a plain call, an overhead it does not owe",
+        );
+    }
 }
 
 /// A call that carries value and whose arguments do not decode is not dispatched either: the
