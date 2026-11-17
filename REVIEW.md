@@ -99,7 +99,7 @@ Defer to the baseline for everything not listed here; the rules below take prece
 ## Test gates
 
 These checks guard every change to the Satin engine.
-`lint`, `test`, `no-std`, `require-label` and `Mega EEST gate` are the required checks on `satin`; the rest inform the review, and the reviewer reads them.
+`lint`, `test`, `no-std` and `require-label` are the required checks on `satin`, and `Mega EEST gate` becomes one once an administrator adds it to the branch rule; the rest inform the review, and the reviewer reads them.
 
 ### The op-revm baseline
 
@@ -146,13 +146,17 @@ These checks guard every change to the Satin engine.
 
 - Mega EEST is the conformance suite both Satin implementations share: state-transition cases, each pinned to rules of the Satin specification, run on an implementation through an adapter.
   `.github/workflows/mega-eest.yml` runs `scripts/mega_eest.sh`, which consumes every gating case of the suite at the commit `scripts/mega_eest.env` pins (`MEGA_EEST_REV`), plain and instrumented, through the suite's revm adapter built against the pull request's own mega-evm, `[patch]` blocks and `Cargo.lock` (AGENTS.md, Test Gates, has how).
-- The `Mega EEST gate` job always runs and is a required check; a pull request that changes documentation alone skips the run and passes it.
-  The step summary has the summary line (`MEGA-EEST rev=… cases=… plain=pass:…,fail:…,unsupported:…,error:… instrumented=… parity=… negative=… result=…`) and the run's time; a failing run uploads its reports.
+- The `Mega EEST gate` job always runs, and becomes a required check once an administrator adds it to the `satin` branch rule; a pull request that changes documentation alone skips the run and passes it.
+  The step summary has the summary line (`MEGA-EEST rev=… run=full cases=… plain=pass:…,fail:…,unsupported:…,error:… instrumented=… parity=… negative=… provenance=… caseset=… result=…`), the run's time and exit, and, when the pull request moves the pin, the case ids it removes, adds and changes; a failing run uploads its reports.
+  The script's exit says what failed: 1 the cases (a verdict), 2 no verdict (a fetch, a build, a report; the log names the step), 3 the pin refused; the job also requires the line of the full run of a pin on the suite's default branch.
+  The suite's deliberately wrong expectation is a control: with every gating case passing it must fail where it records, and with gating cases failing it need only have run and not passed (`negative=fail-elsewhere`), since a change of behaviour can move where it first differs; a control that passed or did not run is never a verdict.
 - A case that fails is a change of behaviour the specification pins.
   A pull request that makes it on purpose, or that changes the mega-evm API the suite's adapter calls (the adapter then no longer builds, and the gate says so), changes Mega EEST first: the case, derived from the changed rule, or the adapter, in a pull request there.
-  It then moves `MEGA_EEST_REV` to that Mega EEST commit, in the same mega-evm pull request, so the gate runs the suite that pull request needs; until the Mega EEST change merges, the pin may name its branch's commit, which the fetch reaches by its hash, and it moves to the merged commit before the mega-evm pull request merges.
+  It then moves `MEGA_EEST_REV` to that Mega EEST commit, in the same mega-evm pull request, so the gate runs the suite that pull request needs.
+  While the Mega EEST change is under review, the pin may name its branch's commit as a draft state only: the cases run and show in the log, but the gate fails (`provenance=unmerged`, exit 3) until the pin moves to the commit merged on the suite's default branch, which it must before the mega-evm pull request merges.
   Locally, a Mega EEST checkout at that commit is used with `MEGA_EEST_DIR=<checkout> scripts/mega_eest.sh` once the pin names it.
-- Moving the pin is a one-line change and is reviewed as one: the suite's own history between the two commits says which cases and which adapter code moved.
+- Moving the pin is a one-line change and is reviewed as one: the step summary lists the case ids it removes, adds and changes relative to the base's pin, and the suite's own history between the two commits says why.
+  A removal fails the gate unless the same pull request lists exactly the removed ids in `MEGA_EEST_REMOVED_CASES` in `scripts/mega_eest.env`, so every behaviour the suite stops pinning is a line the reviewer reads in the diff; a move that removes nothing leaves that line empty.
 - The coverage report and the mutation gate count the suite too: `scripts/coverage_mega_evm.sh` merges its run into the report Codecov receives, and the cargo-mutants gate runs a mutant the tests miss against it (Mutation testing, below).
 
 ### Byte-price grid
@@ -194,10 +198,15 @@ These checks guard every change to the Satin engine.
   Reference point, the pull request that brought the Satin skeleton: 115 mutants, 49 caught, 0 survived, 1 suppressed, 65 unviable, in 7m41s on CI and 4m12s on a 15-core laptop with `JOBS=8`.
   That population is the diff against `a8f8c7c9`, the last commit of the legacy core, and it is reproduced by `scripts/mutation_test.sh diff a8f8c7c9` followed by `python3 scripts/mutation_gate.py report --results target/mutants/mutants.out --recheck target/mutants/recheck/mutants.out --suppressions mutants/suppressions.toml`.
   Take the numbers from that pair, not from `cargo mutants` on its own: the driver turns the function-scoped suppressions into `--exclude-re` before generation, and the gate filters the line-scoped ones after the run, so the bare command reports a different population and a different survivor count.
-- A mutant the tests miss is run once more against the Mega EEST suite, with mega-evm's ignored `mega_eest` test as the only test, which runs `scripts/mega_eest.sh` (plain) on the mutated tree; one a Mega EEST case catches counts as caught, and the report says how many the suite decided.
-  The suite is fetched and its adapter built on the unmutated tree first, which must pass; a warm-up or a run that fails as a run is recorded in its results, which the gate refuses.
-  The pass costs nothing while the tests catch every mutant, and about one adapter build and one run of the suite per mutant they miss.
-- The job is bounded to 330 minutes.
+- A mutant the tests miss is run once more against the Mega EEST suite, with mega-evm's ignored `mega_eest` test as the only test, which runs `scripts/mega_eest.sh` in plain mode only on the mutated tree; one a Mega EEST case catches counts as caught, and the report says how many the suite decided.
+  The kill counts only on the suite's own verdict in that mutant's log (`MEGA-EEST … result=FAIL`): a run that failed before its cases ran (a build, a fetch) fails the test too, and the gate then refuses the results as unscorable rather than counting a kill.
+  The suite is fetched and its adapter built on the unmutated tree first, which must pass; a warm-up or a run that fails as a run, or that the budget stops, is recorded in its results, which the gate refuses.
+  The mutants run one at a time, each with the machine's parallelism for the cases.
+  The pass costs nothing while the tests catch every mutant; otherwise the warm-up, cargo-mutants' baseline, one copy of `./target` and, per mutant, two incremental builds of mega-evm and one plain run of the cases (about three minutes on a 4-vCPU runner, estimated, not measured), plus any struct-field mutant in the run's scope (`mutants/README.md` has the details).
+- The job is bounded to 330 minutes, and the driver's own budget (`MUTANTS_BUDGET`, 300 minutes) stops the run before that, so a run that cannot finish still scores and uploads what it tested; the driver's `MUTANTS-STATUS` line says how far it got, and the gate (`report --status`) fails anything but a complete run.
+  The driver builds the tests once before the mutants (the warm build) and CI builds incrementally (`CARGO_INCREMENTAL=1`), so each mutant recompiles only what its mutation changed.
+  The nightly full run is four shards (`scripts/mutation_test.sh full --shard k/4`), merged against the full inventory (`mutation_gate.py merge`, and `merge-runs` for their re-checks and Mega EEST runs) and scored as a full run.
+  A line suppression is anchored to one mutant (`file`, `line`, `column` and its text); one whose mutant moves gates it again, and the hygiene job names where its text went.
   Shard a series whose diff lists more than 1,000 mutants (`cargo mutants --list --in-diff <diff> --package mega-evm`): at the reference rate that is about an hour, and the rate falls as the test suite grows.
   Run shard `k` of `n` with `MUTANTS_SHARD=k/n OUT_DIR=target/mutants-k scripts/mutation_test.sh diff <base>` and gate each shard with `scripts/mutation_gate.py report`; the pull request that first needs it adds a shard matrix to the job, and every shard must pass.
 - The gate has a second scope, for its own infrastructure: `.cargo/mutants-infra.toml` and `scripts/mutation_test.sh infra` mutate the scenario runner (`crates/mega-evm/src/test_utils/scenario.rs`) against `mega-evm`'s tests.
