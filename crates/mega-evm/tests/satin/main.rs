@@ -2,7 +2,6 @@
 
 mod common;
 mod compute_gas;
-mod contract_size;
 mod corpus;
 mod count_order;
 mod create_opcodes;

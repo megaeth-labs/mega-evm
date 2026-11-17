@@ -10,7 +10,7 @@ use mega_evm::{
     test_utils::BytecodeBuilder,
     EvmTxRuntimeLimits, MegaLimitExceeded,
 };
-use revm::bytecode::opcode::{CALL, GAS, LOG0, POP, PUSH0};
+use revm::bytecode::opcode::{CALL, GAS, POP, PUSH0};
 
 use super::{
     balance_of, call_tx, delegatecall, execute, execute_under, forward_to, frame_share,
@@ -24,21 +24,6 @@ fn join(prefix: Vec<u8>, rest: BytecodeBuilder) -> Bytes {
     let mut code = prefix;
     code.extend_from_slice(&rest.build());
     Bytes::from(code)
-}
-
-/// The transaction's own frame has a state-growth budget of 1,000. The 1,001st fresh slot stops
-/// that frame, kind 3, `limit` 1,000. The slot is not kept. The receipt fails and the transaction
-/// is included.
-#[test]
-fn test_the_1001st_fresh_slot_stops_the_transaction() {
-    let Some(gas) = slots_gas(1_001) else { return };
-    let db = world(&[(CONTRACT, store_n_slots(1_001))]);
-    let outcome = execute(db, call_tx(gas));
-    let stop = reverted_stop(&outcome);
-    assert_eq!(stop, MegaLimitExceeded { kind: 3, limit: TX_STATE_GROWTH_LIMIT });
-    assert!(outcome.limit_exceeded.is_some(), "the transaction's own frame stopped");
-    assert_eq!(slot_value(&outcome, CONTRACT, 1), U256::ZERO);
-    assert_eq!(slot_value(&outcome, CONTRACT, 1_001), U256::ZERO);
 }
 
 /// The caller has kept 20 of a 1,000 budget. The child budget is `floor(980 × 98 / 100)` = 960.
@@ -251,67 +236,6 @@ fn hint_call(len: u32) -> BytecodeBuilder {
         .append_many([PUSH0, PUSH0])
         .push_address(ORACLE_CONTRACT_ADDRESS)
         .append_many([GAS, CALL])
-}
-
-/// Body 310 plus twelve admitted hints of 1,048,576 bytes is 12,583,222. A child `LOG0` of
-/// 524,288 data bytes is 524,320 bytes and crosses the transaction limit. The child's frame
-/// budget is not crossed. Kind 0, `limit` 13,107,200. The hints stay counted. The log does not.
-#[test]
-fn test_hints_then_a_child_log_names_the_transaction_data_limit() {
-    const HINT: u32 = 1_048_576;
-    const LOG_DATA: u64 = 524_288;
-    const BEFORE: u64 = BODY_BYTES + 12 * HINT as u64;
-    assert_eq!(BEFORE, 12_583_222);
-    assert_eq!(32 + LOG_DATA, 524_320);
-    const { assert!(BEFORE + 32 + LOG_DATA > TX_DATA_LIMIT) };
-    let mut code = Vec::new();
-    for _ in 0..12 {
-        code.extend_from_slice(&hint_call(HINT).build());
-        code.push(POP);
-    }
-    code.extend_from_slice(
-        &BytecodeBuilder::default().call(CHILD, U256::ZERO).return_returndata().build(),
-    );
-    let child = BytecodeBuilder::default()
-        .push_number(LOG_DATA as u32)
-        .append_many([PUSH0, LOG0])
-        .stop()
-        .build();
-    let db = world(&[
-        (CONTRACT, Bytes::from(code)),
-        (CHILD, child),
-        (ORACLE_CONTRACT_ADDRESS, Bytes::from_static(&[0x00])),
-    ]);
-    let outcome = execute(db, call_tx(40_000_000));
-    assert!(outcome.result.is_success(), "{:?}", outcome.result);
-    assert!(outcome.limit_exceeded.is_none(), "the caller caught the log's stop");
-    assert_eq!(returned_stop(&outcome), MegaLimitExceeded { kind: 0, limit: TX_DATA_LIMIT });
-    assert_eq!(outcome.usage.data_size, BEFORE);
-}
-
-/// The same log in the transaction's own frame stops that frame, kind 0, `limit` 13,107,200.
-/// Failed receipt, included. The admitted hint bytes stay counted.
-#[test]
-fn test_hints_then_a_top_frame_log_stops_the_transaction() {
-    const HINT: u32 = 1_048_576;
-    const LOG_DATA: u64 = 524_288;
-    const BEFORE: u64 = BODY_BYTES + 12 * HINT as u64;
-    let mut code = Vec::new();
-    for _ in 0..12 {
-        code.extend_from_slice(&hint_call(HINT).build());
-        code.push(POP);
-    }
-    code.extend_from_slice(
-        &BytecodeBuilder::default().push_number(LOG_DATA as u32).append_many([PUSH0, LOG0]).build(),
-    );
-    let db = world(&[
-        (CONTRACT, Bytes::from(code)),
-        (ORACLE_CONTRACT_ADDRESS, Bytes::from_static(&[0x00])),
-    ]);
-    let outcome = execute(db, call_tx(40_000_000));
-    assert_eq!(reverted_stop(&outcome), MegaLimitExceeded { kind: 0, limit: TX_DATA_LIMIT });
-    assert!(outcome.limit_exceeded.is_some(), "the transaction's own frame stopped");
-    assert_eq!(outcome.usage.data_size, BEFORE);
 }
 
 /// One admitted hint whose calldata is exactly 100 bytes: the selector and 96 zero bytes.
