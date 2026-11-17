@@ -222,12 +222,13 @@ Each change is stated here in plain words with its reason; the specification has
 ## Running the checks
 
 Commands are in [`AGENTS.md`, "Build & Development Commands"](../../../AGENTS.md#build--development-commands) and the gates in [`AGENTS.md`, "Test Gates"](../../../AGENTS.md#test-gates).
-Four notes that are easy to miss:
+Five notes that are easy to miss:
 
 - the `mega-evme` tests run with `--manifest-path bin/mega-evme/Cargo.toml`, not `-p`;
 - run the suite with `MEGA_SATIN_CPSB` and `MEGA_SATIN_CPHB` unset, or the tests that pin the spec's byte prices skip;
 - after any test change, run `scripts/price_grid.sh --pr`;
-- the execution-spec gate needs Ethereum's fixture releases, at the versions `.github/workflows/exec-spec-satin.yml` downloads.
+- the execution-spec gate needs Ethereum's fixture releases, at the versions `.github/workflows/exec-spec-satin.yml` downloads;
+- the Mega EEST gate (`scripts/mega_eest.sh`) fetches the suite at the commit `scripts/mega_eest.env` pins, or reads a checkout at that commit from `MEGA_EEST_DIR`, and fetches the suite's history to check the pin is on its default branch; it exits 0 pass, 1 cases failed, 2 no verdict, 3 the pin refused.
 
 Evidence that a change alters no result: `state-test --json-digest` at two commits, detached, over both fixture releases, in equivalence mode, in Satin mode and in Satin mode under tighter limits (the `--limit-*` options), each sorted and compared byte for byte, plus the gates and the byte-price grid.
 The digest hashes each transaction's whole outcome, its gas by ledger and its usage counts included, so it catches a shift between ledgers that `--json-outcome` does not.
