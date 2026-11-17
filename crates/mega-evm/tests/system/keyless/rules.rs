@@ -182,6 +182,31 @@ fn signed_above_the_account() -> u64 {
     500_000 + entry(GasId::new_account_state_gas())
 }
 
+/// The length of the init code the forwarding tests deploy: a one-byte runtime.
+fn one_byte_init_len() -> usize {
+    deploying(&runtime(1)).len()
+}
+
+/// Rule 2 again, once the call has paid for the creation's start: the override is capped to what
+/// the call has left, and the capped gas must still cover the signed gas limit. A relayer that
+/// sizes its transaction below that is refused, with the capped figure.
+///
+/// Below the execution cap only: above it the transaction's frame is forwarded the cap itself
+/// and the reservoir pays the call's state and history charges, so no gas limit leaves the
+/// call this little. The refusal above the cap is
+/// `limits::test_a_refusal_after_the_charges_gives_the_reservoir_back`.
+#[test]
+fn test_a_forward_capped_below_the_signed_gas_limit_is_refused() {
+    let deployment = Deployment::signed(0, 500_000, U256::ZERO, deploying(&runtime(1)));
+    let gas_limit = gas_limit_forwarding(&deployment, one_byte_init_len(), 499_999);
+    let outcome = submit(db_for(&deployment, U256::ONE), &deployment.tx, LARGE_OVERRIDE, gas_limit);
+    assert_eq!(
+        refusal(&outcome),
+        KeylessDeployError::GasLimitTooLow { tx_gas_limit: 500_000, provided_gas_limit: 499_999 },
+    );
+    assert_nothing_written(&outcome, &deployment, 0);
+}
+
 /// Rule 3: the signer is recovered from the signature. `r` above the curve order recovers
 /// nothing.
 #[test]
@@ -875,6 +900,57 @@ fn test_keyless_deploy_balance_exactly_sufficient() {
         assert_eq!(balance(deployment.signer), Some(U256::ZERO));
         assert_eq!(balance(deployment.address), Some(U256::from(10)));
     }
+}
+
+/// A call that cannot pay for the signer's account runs out of gas before the creation starts:
+/// no nonce is bumped and nothing is deployed.
+///
+/// Below the execution cap only: above it the transaction's frame is forwarded the cap itself,
+/// and the reservoir pays the state charges, so no gas limit leaves the call this little.
+#[test]
+fn test_a_call_that_cannot_pay_the_signers_account_runs_out_of_gas() {
+    // An account that costs nothing is one any call can pay for.
+    if state_is_free() {
+        return;
+    }
+    let deployment = small();
+    let reference = reference(deployment.call_data(LARGE_OVERRIDE), GAS_LIMITS[0]);
+    let intrinsic = reference.result.gas().total_gas_spent();
+    // One short of the account, once the overhead is paid.
+    let short = entry(GasId::new_account_state_gas()) - 1;
+    let gas_limit = intrinsic + KEYLESS_DEPLOY_OVERHEAD_GAS + short;
+    let outcome = submit(system_db(), &deployment.tx, LARGE_OVERRIDE, gas_limit);
+    assert!(matches!(outcome.result, ExecutionResult::Halt { .. }), "{:?}", outcome.result);
+    assert_nothing_written(&outcome, &deployment, 0);
+    assert_eq!(outcome.gas.state, 0, "the halt takes the charges back");
+}
+
+/// A call refused after it paid for the creation's start — the forward capped below the signed
+/// gas limit — keeps none of its state and history: no account was added, so neither the signer's
+/// account nor the created one is charged, the refusal writes nothing, and no record is kept. The
+/// regular gas the `CREATE` opcode charged stays spent, as the overhead does.
+///
+/// Below the execution cap only: above it the transaction's frame is forwarded the cap itself
+/// and the reservoir pays the call's state and history charges, so no gas limit leaves the
+/// call this little. The refusal above the cap is
+/// `limits::test_a_refusal_after_the_charges_gives_the_reservoir_back`.
+#[test]
+fn test_a_call_refused_after_its_charges_keeps_their_regular_gas_alone() {
+    // An account that costs nothing takes nothing from the forward.
+    if state_is_free() {
+        return;
+    }
+    let signed = signed_above_the_account();
+    let deployment = Deployment::signed(0, signed, U256::ZERO, deploying(&runtime(1)));
+    // Enough for everything but the signer's account, which the empty signer adds.
+    let gas_limit = gas_limit_forwarding(&deployment, one_byte_init_len(), signed);
+    let outcome = submit(system_db(), &deployment.tx, LARGE_OVERRIDE, gas_limit);
+    assert!(matches!(refusal(&outcome), KeylessDeployError::GasLimitTooLow { .. }));
+    let [total, regular, state, history_gas, _] =
+        beyond(&outcome, &reference(deployment.call_data(LARGE_OVERRIDE), gas_limit));
+    let kept = KEYLESS_DEPLOY_OVERHEAD_GAS + create_regular(one_byte_init_len());
+    assert_eq!([total, regular, state, history_gas], [kept, kept, 0, 0]);
+    assert_nothing_written(&outcome, &deployment, 0);
 }
 
 /// The signer's account is charged exactly when its nonce is spent: a refused call does neither,
