@@ -378,12 +378,9 @@ class Check(Case):
         ):
             code, out, err = self.write({"plain": self.one_failing()}, negative)
             self.assert_no_verdict(code, out, err, reason)
-        for index_negative in ([], None):
-            run = self.write({"plain": self.all_passed()}, self.NEGATIVE, index_negative=index_negative) \
-                if index_negative is not None else None
-            if run:
-                self.assert_no_verdict(*run, "lists no wrong expectation")
-                self.assertIn("negative=none", run[1])
+        run = self.write({"plain": self.all_passed()}, self.NEGATIVE, index_negative=[])
+        self.assert_no_verdict(*run, "lists no wrong expectation")
+        self.assertIn("negative=none", run[1])
 
     def test_a_refused_pin_exits_3_and_failing_cases_still_exit_1(self) -> None:
         for provenance, caseset in (("unmerged", "unmoved"), ("default-branch", "undeclared")):
@@ -699,6 +696,14 @@ class Script(Case):
             self.assertIn("stage=fetch result=INCOMPLETE", self.summary(out))
             self.git("update-index", flag.replace("--", "--no-"), "slice/index.json", cwd=self.suite)
         self.assertEqual(self.run_script(MEGA_EEST_DIR=str(self.suite))[0], 0)
+
+    def test_a_checkout_git_cannot_read_is_refused(self) -> None:
+        # HEAD still resolves, but `git status` fails and prints nothing, which is not clean.
+        (self.suite / ".git" / "index").write_bytes(b"not an index")
+        code, out, err = self.run_script(MEGA_EEST_DIR=str(self.suite), MEGA_EEST_SKIP_PROVENANCE="1")
+        self.assertEqual(code, 2, err)
+        self.assertIn("cannot be read by git status", err)
+        self.assertIn("stage=fetch result=INCOMPLETE", self.summary(out))
 
     def test_a_pin_off_the_default_branch_is_refused(self) -> None:
         draft = self.commit_cases(["satin/a", "satin/b", "satin/c", "satin/d"], branch="draft")
