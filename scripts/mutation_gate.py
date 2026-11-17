@@ -28,19 +28,57 @@ Subcommands:
         Consumed by scripts/mutation_test.sh to run those mutants against the
         Mega EEST suite.
 
+  progress    --results <mutants.out dir>
+        Print `expected=<n|unknown> outcomes=<n>`: how many mutants the run
+        planned (unknown before cargo-mutants wrote its plan) and how many have
+        an outcome. Used by scripts/mutation_test.sh for its status line.
+
+  merge       --inventory <file> --out <dir> <shard dir>...
+        Combine the results of a run split into shards (cargo mutants --shard)
+        into <dir>/mutants.out and <dir>/status, counted against <inventory>
+        (`cargo mutants --list` of the whole run). Each <shard dir> holds one
+        shard's mutants.out/ and status; pass one per shard, including shards
+        that may have uploaded nothing. The merged mutants.out keeps the
+        contract below: `mutants.json` is the inventory, `outcomes.json` every
+        shard's outcomes and baselines, with an `end_time` only when every
+        shard finished and the run is complete; the outcome lists are written
+        beside it. Every shard's own status is folded into the merged status
+        and named in the report: a shard whose budget ran out makes the run
+        partial, one that failed its baseline makes it baseline-failed, and one
+        that errored, left no status or uploaded nothing makes it error. Every
+        shard outcome is kept. An outcome the inventory does not plan, a second
+        outcome for one mutant, or shard plans that do not add up to the
+        inventory mean the shards and the inventory disagree on the mutant set:
+        status mismatch. Only complete passes.
+
+  merge-runs  --out <mutants.out dir> <mutants.out dir>...
+        Combine the shards' follow-up runs (the re-checks of timed-out mutants,
+        the Mega EEST runs of missed ones) into one record the report reads as
+        --recheck or --mega-eest: their selections and outcomes together, each
+        mutant's log copied beside them, an `end_time` only when every one
+        finished, and the abnormal-exit note of any one. Directories that do
+        not exist are skipped; with none, nothing is written.
+
   report      --results <mutants.out dir> [--recheck <mutants.out dir>]
-              [--mega-eest <mutants.out dir>]
+              [--mega-eest <mutants.out dir>] [--status <file>] [--scope diff|full]
               [--suppressions <toml>] [--comment <path>] [--summary <path>]
         Read the run outcomes, take the re-check's outcome for a mutant that
         timed out and the Mega EEST run's outcome for a mutant the tests
-        missed, apply line-scoped suppressions, compute the mutation score,
+        missed, apply line-scoped suppressions (each anchored to one mutant's
+        file:line:col and text), compute the mutation score,
         write a Markdown report, and exit non-zero if any unsuppressed survivor
         or timeout remains (the "no new survivors" gate). Exits 2, with a
-        report saying why, when the results cannot be scored.
+        report saying why, when the results cannot be scored. With --status
+        (the driver's MUTANTS-STATUS line), a run that did not test every
+        planned mutant also fails: what it did test is still reported, read
+        without the completeness checks below. --scope says what the run
+        covered, for the report's wording: `diff` (the default) for a PR's
+        changed lines, `full` for every mutant of the crate (the nightly runs).
 
   orphans     --suppressions <toml> --universe <file>
-        Flag suppressions that match no live mutant, and a locator-less line
-        suppression that matches more than one.
+        Flag suppressions that match no live mutant: a function pattern that
+        matches no mutant name, a line entry whose anchor (file, line, column
+        and text) is no mutant's, with the locations its text has moved to.
 
 The results a run leaves are read fail-closed, on the contract cargo-mutants 27
 keeps and scripts/umutate.py keeps with it. Before it tests anything the
@@ -63,15 +101,21 @@ this script does not know, and results holding the `run-failed.txt` that
 scripts/mutation_test.sh writes into them when the run that wrote them exited
 abnormally, whatever else they hold.
 
-The gate is intended to run diff-scoped (cargo mutants --in-diff), so every
-mutant it sees lives on a line the PR changed; an unsuppressed survivor there is
-a test gap the PR introduced.
+A line suppression names one mutant: its `file`, `line` and `column`, and its
+exact `mutant` text without the `file:line:col: ` prefix. The same text anywhere
+else (a new `&&` in the function, or the reviewed one after the code above it
+moved) stays gated; an entry without a well-formed anchor is refused (exit 2).
+
+The PR gate runs diff-scoped (cargo mutants --in-diff), so every mutant it sees
+lives on a line the PR changed; an unsuppressed survivor there is a test gap the
+PR introduced.
 """
 from __future__ import annotations
 
 import argparse
 import json
 import re
+import shutil
 import sys
 from collections import Counter
 
@@ -115,14 +159,61 @@ MUTANT_SUMMARIES = {
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
 
+# A mutant line as both engines write it: `file:line:col: text`.
+LOCATOR = re.compile(r"^(?P<file>[^:]+):(?P<line>\d+):(?P<col>\d+): (?P<text>.+)$")
+
+Anchor = tuple[str, int, int, str]
+
+
+class SuppressionError(Exception):
+    """suppressions.toml has an entry the gate cannot apply safely."""
+
+
+def mutant_anchor(line: str) -> Anchor | None:
+    """(file, line, column, text) of a mutant line; None if it has no locator."""
+    m = LOCATOR.match(ANSI.sub("", line))
+    return (m["file"], int(m["line"]), int(m["col"]), m["text"]) if m else None
+
+
+def entry_anchor(e: dict) -> Anchor:
+    return (e["file"], e["line"], e["column"], e["mutant"].strip())
+
+
+def check_line_entry(e: dict) -> str | None:
+    """Why a line suppression cannot be applied, or None if it is well formed.
+
+    A line entry names one mutant: its file, line and column, and its exact text.
+    Matching on the text alone would also cover the same mutation anywhere else in
+    the function, including code added after the review."""
+    def positive(v: object) -> bool:
+        return isinstance(v, int) and not isinstance(v, bool) and v > 0
+    text = e.get("mutant")
+    if not isinstance(text, str) or not text.strip():
+        return "no `mutant` text"
+    if LOCATOR.match(text.strip()):
+        return "`mutant` carries a `file:line:col:` prefix; put the location in `line` and `column`"
+    if not isinstance(e.get("file"), str) or not e["file"]:
+        return "no `file`"
+    if not (positive(e.get("line")) and positive(e.get("column"))):
+        return "no `line` and `column` (positive integers) anchoring it to one mutant"
+    return None
+
+
 def load_suppressions(path: Path) -> tuple[list[dict], list[dict]]:
-    """Return (function_scoped, line_scoped) suppression entries."""
+    """Return (function_scoped, line_scoped) suppression entries.
+
+    Raises SuppressionError if a line entry is not anchored to one mutant."""
     if not path or not path.exists():
         return [], []
     data = tomllib.loads(path.read_text())
     entries = data.get("suppress", [])
     func = [e for e in entries if e.get("kind") == "function"]
     line = [e for e in entries if e.get("kind") == "line"]
+    bad = [f'{e.get("file", "?")}: "{str(e.get("mutant", ""))[:90]}": {why}'
+           for e in line if (why := check_line_entry(e))]
+    if bad:
+        raise SuppressionError(f"{len(bad)} line suppression(s) in {path} cannot be applied:\n"
+                               + "\n".join(f"  - {b}" for b in bad))
     return func, line
 
 
@@ -133,7 +224,7 @@ def cmd_exclude_re(args: argparse.Namespace) -> int:
         if not pattern:
             print(f"suppression for {e.get('file', '?')} missing 'pattern'", file=sys.stderr)
             return 1
-        # Emitted as two lines so `mapfile` in the driver yields separate argv items.
+        # Two lines per pair: the driver reads one argument per line.
         print("--exclude-re")
         print(pattern)
     return 0
@@ -296,6 +387,282 @@ def load_run(results: Path) -> Run:
     return run
 
 
+def load_tested(results: Path) -> Run:
+    """What a run that did not finish tested, without the completeness checks of load_run:
+    its outcomes.json if it wrote one, else its outcome lists, else nothing."""
+    run = Run()
+    outcomes_path = results / "outcomes.json"
+    if outcomes_path.exists():
+        try:
+            outcomes = json.loads(outcomes_path.read_text())["outcomes"]
+        except (json.JSONDecodeError, KeyError, TypeError) as err:
+            raise ResultsError(f"{outcomes_path} is not a mutation run's outcomes: {err!r}") from err
+        for outcome in outcomes:
+            if not isinstance(outcome, dict) or not isinstance(outcome.get("scenario"), dict):
+                continue
+            kind = MUTANT_SUMMARIES.get(outcome.get("summary"))
+            name = (outcome["scenario"].get("Mutant") or {}).get("name")
+            if kind and isinstance(name, str):
+                getattr(run, kind).append(name)
+        return run
+    for kind in MUTANT_SUMMARIES.values():
+        getattr(run, kind).extend(read_lines(results / f"{kind}.txt"))
+    return run
+
+
+# One file per cargo-mutants outcome; every tested mutant lands in exactly one.
+OUTCOME_FILES = ("caught.txt", "missed.txt", "timeout.txt", "unviable.txt")
+
+
+def progress(results: Path) -> tuple[int | None, int]:
+    """Return (planned mutants or None if no plan was written, mutants with an outcome).
+
+    The outcomes are counted in outcomes.json, which cargo-mutants rewrites after every
+    outcome, or, without one, in the outcome lists."""
+    plan = results / "mutants.json"
+    expected = len(json.loads(plan.read_text())) if plan.exists() else None
+    record = results / "outcomes.json"
+    if record.exists():
+        outcomes = json.loads(record.read_text()).get("outcomes", [])
+        return expected, sum(1 for o in outcomes if isinstance(o, dict) and outcome_name(o))
+    return expected, sum(len(read_lines(results / name)) for name in OUTCOME_FILES)
+
+
+def cmd_progress(args: argparse.Namespace) -> int:
+    expected, outcomes = progress(Path(args.results))
+    print(f"expected={'unknown' if expected is None else expected} outcomes={outcomes}")
+    return 0
+
+
+def read_status(path: Path) -> dict[str, str] | None:
+    """Parse the driver's `MUTANTS-STATUS key=value ...` line; None if absent."""
+    if not path.exists():
+        return None
+    for line in reversed(path.read_text().splitlines()):
+        if line.startswith("MUTANTS-STATUS "):
+            return dict(f.split("=", 1) for f in line.split()[1:] if "=" in f)
+    return None
+
+
+# Why a shard (or a single run) did not test all of its mutants, by status.
+# `no-status` and `no-artifact` are recorded by `merge` for a shard that left no
+# status line or no directory at all.
+SHARD_CAUSES = {
+    "partial": "its time budget ran out",
+    "not-started": "its time budget ran out before it tested any mutant",
+    "followup-stopped": "its time budget ran out in the re-check of a timed-out mutant or the "
+                        "Mega EEST run of a missed one",
+    "baseline-failed": "the unmutated tree failed to build or to pass its tests",
+    "error": "the run itself failed",
+    "no-status": "it ended without a status line (cancelled, killed by the job timeout, "
+                 "or crashed)",
+    "no-artifact": "it uploaded no results",
+}
+BUDGET_STATES = ("partial", "not-started", "followup-stopped")
+
+
+def incomplete_note(status: dict[str, str]) -> str:
+    """Describe a run that did not test every planned mutant."""
+    state, expected, outcomes = status.get("status"), status.get("expected"), status.get("outcomes")
+    tail = " The results below cover only the tested mutants, and an incomplete run never passes."
+    # A merged run names each shard that did not complete.
+    merged = "shards" in status
+    shard_states = [s for s in status.get("shards", "").split(",") if s]
+    problems = [(i, s) for i, s in enumerate(shard_states) if s != "complete"]
+    listed = "".join(f"\n- shard {i}: `{s}` — {SHARD_CAUSES.get(s, 'see its log')}"
+                     for i, s in problems)
+    if merged and not shard_states:
+        return f"**Incomplete run** — no shard results were found ({expected} planned).{tail}"
+    if state == "mismatch":
+        why = []
+        if status.get("unplanned", "0") != "0":
+            why.append(f"{status['unplanned']} shard outcome(s) are for mutants the inventory "
+                       f"does not list")
+        if status.get("duplicated", "0") != "0":
+            why.append(f"{status['duplicated']} mutant(s) have more than one outcome")
+        planned = status.get("shards-planned", "unknown")
+        if planned not in ("unknown", expected):
+            why.append(f"the shards planned {planned} mutants")
+        return (f"**Shards and inventory disagree** — the inventory lists {expected} mutants, "
+                f"{outcomes} of them have an outcome, and {'; '.join(why)}. The shards did not "
+                f"test the inventory's mutant set, so this run never passes. Every shard outcome "
+                f"is still reported below; `unplanned.txt` in the run artifacts lists the "
+                f"outcomes that do not fit the inventory.{listed}")
+    budget_only = all(s in BUDGET_STATES for _, s in problems)
+    if state == "partial" and budget_only:
+        return (f"**Incomplete run** — the time budget ran out after {outcomes} of {expected} "
+                f"planned mutants; the rest were not tested.{tail}{listed}")
+    if state == "not-started" and budget_only:
+        return ("**Incomplete run** — the time budget ran out before any mutant was tested "
+                f"({expected} planned). Nothing below is a result, and an incomplete run "
+                f"never passes.{listed}")
+    if state == "followup-stopped" and budget_only:
+        return (f"**Incomplete run** — the {outcomes} planned mutants were tested, and the time "
+                f"budget ran out in the re-check of a timed-out mutant or the Mega EEST run of a "
+                f"missed one, so those are not decided.{tail}{listed}")
+    if problems:
+        return (f"**Incomplete run** — {outcomes} of {expected} planned mutants were tested; "
+                f"these shards did not complete:{listed}\n\n{tail.strip()}")
+    cause = SHARD_CAUSES.get(state or "", "see the run log")
+    return (f"**Run did not complete** (status `{state}`: {cause}; {outcomes} of {expected} "
+            f"mutants tested).{tail}")
+
+
+def read_record(results: Path) -> tuple[list[dict], list[str], object, bool]:
+    """A results directory's outcomes, its selection, its end_time, and whether its run
+    exited abnormally; no outcomes for a directory without outcomes.json."""
+    failed = (results / RUN_FAILED_NOTE).exists()
+    path = results / "outcomes.json"
+    if not path.exists():
+        return [], read_selection(results) or [], None, failed
+    data = json.loads(path.read_text())
+    outcomes = [o for o in data.get("outcomes", []) if isinstance(o, dict)]
+    return outcomes, read_selection(results) or [], data.get("end_time"), failed
+
+
+def outcome_name(outcome: dict) -> str | None:
+    scenario = outcome.get("scenario")
+    if not isinstance(scenario, dict):
+        return None
+    name = (scenario.get("Mutant") or {}).get("name")
+    return name if isinstance(name, str) else None
+
+
+def write_record(out: Path, outcomes: list[dict], selection: list[str], end_time: object) -> None:
+    """Write a record in cargo-mutants' contract, with the outcome lists beside it."""
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "mutants.json").write_text(json.dumps([{"name": m} for m in selection]))
+    (out / "outcomes.json").write_text(json.dumps({"outcomes": outcomes, "end_time": end_time}))
+    lists: dict[str, list[str]] = {f"{kind}.txt": [] for kind in MUTANT_SUMMARIES.values()}
+    for o in outcomes:
+        kind, name = MUTANT_SUMMARIES.get(o.get("summary")), outcome_name(o)
+        if kind and name:
+            lists[f"{kind}.txt"].append(name)
+    for file, items in lists.items():
+        (out / file).write_text("".join(f"{m}\n" for m in items))
+
+
+def copy_logs(source: Path, out: Path, prefix: str, outcomes: list[dict]) -> list[dict]:
+    """Copy each outcome's log to `out/log/<prefix>-<name>` and point the outcome at the copy."""
+    copied = []
+    for o in outcomes:
+        o = dict(o)
+        log = o.get("log_path")
+        if isinstance(log, str) and (source / log).is_file():
+            target = Path("log") / f"{prefix}-{Path(log).name}"
+            (out / target).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source / log, out / target)
+            o["log_path"] = str(target)
+        copied.append(o)
+    return copied
+
+
+def cmd_merge(args: argparse.Namespace) -> int:
+    inventory = [ANSI.sub("", m) for m in read_lines(Path(args.inventory))]
+    if not inventory:
+        print(f"ERROR: empty mutant inventory at {args.inventory}", file=sys.stderr)
+        return 2
+    planned = Counter(inventory)
+    out = Path(args.out)
+    results = out / "mutants.out"
+    # Every shard outcome goes into the merged record, planned or not: a survivor
+    # must never be dropped on the way to the report.
+    outcomes: list[dict] = []
+    seen: Counter[str] = Counter()
+    # Each shard's state, and its own plan (`expected`); the plans must add up to
+    # the inventory.
+    shard_states: list[str] = []
+    shard_plans: list[int | None] = []
+    finished = True
+    print("| shard | status |")
+    print("|---|---|")
+    for i, shard in enumerate(map(Path, args.shards)):
+        status = read_status(shard / "status")
+        if not shard.is_dir():
+            shard_states.append("no-artifact")
+        else:
+            shard_states.append((status or {}).get("status", "no-status"))
+        line = " ".join(f"{k}={v}" for k, v in status.items()) if status else shard_states[-1]
+        print(f"| `{shard}` | {line} |")
+        plan = (status or {}).get("expected", "")
+        shard_plans.append(int(plan) if plan.isdigit() else None)
+        shard_outcomes, _, end_time, _ = read_record(shard / "mutants.out")
+        if shard_outcomes and not end_time:
+            finished = False
+        for o in copy_logs(shard / "mutants.out", results, f"shard{i}", shard_outcomes):
+            outcomes.append(o)
+            name = outcome_name(o)
+            if name is not None:
+                seen[name] += 1
+    # The shards and the inventory must describe the same mutant set. An outcome
+    # for a mutant the inventory does not plan, more outcomes for a mutant than the
+    # inventory plans, or shard plans that do not add up to the inventory show they
+    # do not: completeness is measured against the inventory, so it proves nothing
+    # then, and the run cannot pass.
+    unplanned = [m for m in seen if m not in planned]
+    duplicated = [m for m in seen if m in planned and seen[m] > planned[m]]
+    plans_known = bool(shard_plans) and None not in shard_plans
+    shards_planned = sum(p for p in shard_plans if p is not None) if plans_known else None
+    expected = len(inventory)
+    tested = sum(min(n, planned[m]) for m, n in seen.items() if m in planned)
+    # The most specific cause wins: a mismatch, then a failed baseline, then any
+    # other shard failure. A shortfall that only budget-stopped shards explain is
+    # partial or not-started, as for a single run.
+    if unplanned or duplicated or (plans_known and shards_planned != expected):
+        state = "mismatch"
+    elif "baseline-failed" in shard_states:
+        state = "baseline-failed"
+    elif any(s not in ("complete", *BUDGET_STATES) for s in shard_states):
+        state = "error"
+    elif tested == expected and "followup-stopped" in shard_states:
+        state = "followup-stopped"
+    else:
+        state = "complete" if tested == expected else "partial" if tested else "not-started"
+    # The merged record says it finished only when every shard's did and the run is complete;
+    # the report reads anything else as what was tested, under the status's note.
+    write_record(results, outcomes, inventory, "merged" if state == "complete" and finished else None)
+    (out / "unplanned.txt").write_text("".join(f"{m}\n" for m in unplanned + duplicated))
+    line = (f"MUTANTS-STATUS status={state} expected={expected} outcomes={tested} "
+            f"unplanned={len(unplanned)} duplicated={len(duplicated)} "
+            f"shards-planned={'unknown' if shards_planned is None else shards_planned} "
+            f"shards={','.join(shard_states)}")
+    (out / "status").write_text(line + "\n")
+    found = sum(s != "no-artifact" for s in shard_states)
+    print(f"\n{len(args.shards)} shard(s), {found} with results.\n")
+    for title, items in (("Not in the inventory", unplanned), ("More than one outcome", duplicated)):
+        if items:
+            print(f"{title} ({len(items)}):\n")
+            print("".join(f"- `{m}`\n" for m in items[:MAX_SURVIVORS_SHOWN]))
+    print(line)
+    return 0
+
+
+def cmd_merge_runs(args: argparse.Namespace) -> int:
+    out = Path(args.out)
+    present = [Path(d) for d in args.runs if Path(d).is_dir()]
+    if not present:
+        print(f"no runs to merge into {out}", file=sys.stderr)
+        return 0
+    outcomes: list[dict] = []
+    selection: list[str] = []
+    finished = True
+    failed: list[str] = []
+    for i, run in enumerate(present):
+        run_outcomes, run_selection, end_time, run_failed = read_record(run)
+        if run_failed:
+            failed.append(f"{run}: {(run / RUN_FAILED_NOTE).read_text().strip()}")
+        if not end_time:
+            finished = False
+        selection += run_selection
+        outcomes += copy_logs(run, out, f"run{i}", run_outcomes)
+    write_record(out, outcomes, selection, "merged" if finished else None)
+    if failed:
+        (out / RUN_FAILED_NOTE).write_text("; ".join(failed) + "\n")
+    print(f"merged {len(present)} run(s) into {out}: {len(selection)} mutant(s) selected, "
+          f"{'all finished' if finished else 'not all finished'}", file=sys.stderr)
+    return 0
+
+
 def cmd_note_empty(args: argparse.Namespace) -> int:
     results = Path(args.results)
     if results.exists():
@@ -316,45 +683,16 @@ def cmd_note_empty(args: argparse.Namespace) -> int:
     return 0
 
 
-def line_suppressions(path: str | None) -> list[dict]:
-    """The line-scoped suppression entries, or none when no file is given."""
+def suppressed_anchors(path: str | None) -> set[Anchor]:
+    """The mutants the line suppressions name, by anchor; none when no file is given."""
     if not path:
-        return []
-    _, line_supp = load_suppressions(Path(path))
-    return line_supp
+        return set()
+    _, line = load_suppressions(Path(path))
+    return {entry_anchor(e) for e in line}
 
 
-def suppressed_names(path: str | None) -> set[str]:
-    """The mutants line-scoped suppressions name.
-
-    A line suppression matches either the bare mutation text (`mutant` written
-    without a locator) or the full `file:line:col: text` line. The latter lets
-    two mutants that share identical source text be suppressed independently.
-    A bare text that is the body of more than one mutant fails the gate.
-    """
-    return {e["mutant"].strip() for e in line_suppressions(path) if "mutant" in e}
-
-
-def locatorless_matching_several(entries: list[dict], mutants: list[str]) -> list[str]:
-    """Locator-less line suppressions whose text is the body of more than one mutant.
-
-    A bare `mutant` matches every mutant with that text. Two of them have to be
-    named with their `file:line:col` locators, or one suppression hides both.
-    """
-    counts = Counter(mutant_body(name) for name in mutants)
-    found: list[str] = []
-    for entry in entries:
-        text = str(entry.get("mutant", "")).strip()
-        # A locator is `file:line:col: text`; the bare text has no `: `.
-        if not text or ": " in text:
-            continue
-        if counts[text] > 1 and text not in found:
-            found.append(text)
-    return found
-
-
-def is_suppressed(name: str, supp: set[str]) -> bool:
-    return name in supp or mutant_body(name) in supp
+def is_suppressed(name: str, anchors: set[Anchor]) -> bool:
+    return mutant_anchor(name) in anchors
 
 
 def cmd_timeout_re(args: argparse.Namespace) -> int:
@@ -364,7 +702,7 @@ def cmd_timeout_re(args: argparse.Namespace) -> int:
         # Nothing to re-check; the gate reports why the results cannot be scored.
         print(f"no timed-out mutants to re-check: {err}", file=sys.stderr)
         return 0
-    supp = suppressed_names(args.suppressions)
+    supp = suppressed_anchors(args.suppressions)
     for name in run.timeout:
         if is_suppressed(name, supp):
             continue
@@ -386,7 +724,7 @@ def cmd_missed_re(args: argparse.Namespace) -> int:
     missed = list(run.missed)
     if recheck is not None:
         missed += [name for name in run.timeout if name in set(recheck.missed)]
-    supp = suppressed_names(args.suppressions)
+    supp = suppressed_anchors(args.suppressions)
     for name in missed:
         if is_suppressed(name, supp):
             continue
@@ -406,38 +744,46 @@ def write_report(report: str, args: argparse.Namespace) -> None:
 
 def cmd_report(args: argparse.Namespace) -> int:
     results = Path(args.results)
+    full = getattr(args, "scope", "diff") == "full"
+    title = "## 🧬 Mutation testing (full run)" if full else "## 🧬 Mutation testing"
+
+    # The driver's status says whether the run tested every planned mutant. A
+    # stopped run must never pass, even when everything it tested was caught; what
+    # it did test is still reported, read without the completeness checks.
+    note = None
+    status_path = getattr(args, "status", None)
+    if status_path:
+        run_status = read_status(Path(status_path))
+        if run_status is None:
+            print(f"ERROR: no MUTANTS-STATUS line in {status_path}: the mutation run did not "
+                  f"finish — refusing to report a passing gate.", file=sys.stderr)
+            return 2
+        if run_status.get("status") != "complete":
+            note = incomplete_note(run_status)
+
     try:
-        run = load_run(results)
+        anchors = suppressed_anchors(args.suppressions)
+    except SuppressionError as err:
+        print(f"ERROR: {err}", file=sys.stderr)
+        return 2
+
+    try:
+        run = load_tested(results) if note else load_run(results)
         recheck = None
-        if run.timeout and args.recheck and Path(args.recheck).exists():
+        if not note and run.timeout and args.recheck and Path(args.recheck).exists():
             recheck = load_run(Path(args.recheck))
     except ResultsError as err:
         write_report(
-            "## 🧬 Mutation testing — ❌ FAIL\n\n"
+            f"{title} — ❌ FAIL\n\n"
             f"**The results cannot be scored:** {err}.\n",
             args,
         )
         return 2
 
-    if run.nothing_to_test is not None:
-        note = f"**Nothing to test**: {run.nothing_to_test}"
-        write_report(f"## 🧬 Mutation testing — ✅ PASS\n\n{note}.\n", args)
+    if run.nothing_to_test is not None and note is None:
+        nothing = f"**Nothing to test**: {run.nothing_to_test}"
+        write_report(f"{title} — ✅ PASS\n\n{nothing}.\n", args)
         return 0
-
-    line_supp = line_suppressions(args.suppressions)
-    ambiguous = locatorless_matching_several(
-        line_supp, [*run.caught, *run.missed, *run.timeout, *run.unviable]
-    )
-    if ambiguous:
-        listed = "\n".join(f"- `{text}`" for text in ambiguous)
-        write_report(
-            "## 🧬 Mutation testing — ❌ FAIL\n\n"
-            "A locator-less line suppression matches more than one mutant.\n"
-            "Name each with its `file:line:col` locator.\n\n"
-            f"{listed}\n",
-            args,
-        )
-        return 1
 
     caught, missed, timeout = list(run.caught), list(run.missed), []
     rechecked: dict[str, list[str]] = {"caught": [], "missed": [], "timeout": [], "absent": []}
@@ -460,7 +806,7 @@ def cmd_report(args: argparse.Namespace) -> int:
     # A mutant the tests missed was run once more against the Mega EEST suite; one it catches is
     # caught, one it times out on is inconclusive, and the rest stay survivors. Its results speak
     # for those mutants alone, as a re-check's speak for the timeouts.
-    mega_eest_dir = getattr(args, "mega_eest", None)
+    mega_eest_dir = None if note else getattr(args, "mega_eest", None)
     against_eest: dict[str, list[str]] = {"caught": [], "missed": [], "timeout": [], "absent": []}
     eest = None
     if missed and mega_eest_dir and Path(mega_eest_dir).exists():
@@ -468,7 +814,7 @@ def cmd_report(args: argparse.Namespace) -> int:
             eest = load_run(Path(mega_eest_dir))
         except ResultsError as err:
             write_report(
-                "## 🧬 Mutation testing — ❌ FAIL\n\n"
+                f"{title} — ❌ FAIL\n\n"
                 f"**The Mega EEST run of the mutants the tests missed cannot be scored:** {err}.\n",
                 args,
             )
@@ -489,12 +835,10 @@ def cmd_report(args: argparse.Namespace) -> int:
                 against_eest["missed" if verdict else "absent"].append(name)
         missed = remaining
 
-    supp = {e["mutant"].strip() for e in line_supp if "mutant" in e}
-
     def partition(items: list[str]) -> tuple[list[str], list[str]]:
         sup, real = [], []
         for m in items:
-            (sup if is_suppressed(m, supp) else real).append(m)
+            (sup if is_suppressed(m, anchors) else real).append(m)
         return sup, real
 
     suppressed, real_survivors = partition(missed)
@@ -507,7 +851,7 @@ def cmd_report(args: argparse.Namespace) -> int:
     scored = viable - len(suppressed)  # equivalents/dead-code excluded from denominator
     killed = len(caught)
     score = (killed / scored * 100.0) if scored else 100.0
-    gate_pass = not real_survivors and not real_timeouts
+    gate_pass = not real_survivors and not real_timeouts and note is None
 
     # ---- Markdown report (PR comment + step summary) ----
     status = "✅ PASS" if gate_pass else "❌ FAIL"
@@ -515,16 +859,18 @@ def cmd_report(args: argparse.Namespace) -> int:
     # No viable mutants and nothing inconclusive (every mutant unviable, or every
     # timeout suppressed). Reporting "100% (0/0)" reads like a real result and
     # confuses readers — say plainly that nothing was tested.
-    if viable == 0 and not real_timeouts:
-        note = "**Nothing to test** — no viable mutant"
-        note += f" ({len(run.unviable)} unviable, {len(timeout)} timed out)"
-        write_report(f"## 🧬 Mutation testing — ✅ PASS\n\n{note}.\n", args)
+    if viable == 0 and not real_timeouts and note is None:
+        nothing = "**Nothing to test** — no viable mutant"
+        nothing += f" ({len(run.unviable)} unviable, {len(timeout)} timed out)"
+        write_report(f"{title} — ✅ PASS\n\n{nothing}.\n", args)
         return 0
 
+    label = "Full-run mutation score" if full else "Diff mutation score"
     md = [
-        f"## 🧬 Mutation testing — {status}",
+        f"{title} — {status}",
         "",
-        f"**Diff mutation score: {score:.1f}%** ({killed}/{scored} viable mutants killed)",
+        *([note, ""] if note else []),
+        f"**{label}: {score:.1f}%** ({killed}/{scored} viable mutants killed)",
         "",
         f"- caught: {len(caught)}",
         f"- survived (real gaps): **{len(real_survivors)}**",
@@ -581,8 +927,9 @@ def cmd_report(args: argparse.Namespace) -> int:
         )
     if real_survivors or real_timeouts:
         md += ["", "_Tip: run `/improve-mutation-score` to triage and fix these._"]
-    else:
-        md.append("No new test gaps introduced by this change. 🎉")
+    elif note is None:
+        md.append("Every viable mutant was caught or suppressed. 🎉" if full
+                  else "No new test gaps introduced by this change. 🎉")
     write_report("\n".join(md) + "\n", args)
 
     return 0 if gate_pass else 1
@@ -594,20 +941,20 @@ def cmd_orphans(args: argparse.Namespace) -> int:
     `--universe` is a file of mutant lines (`file:line:col: text`) covering the
     whole crate, assembled from BOTH engines (cargo-mutants `--list` and
     `umutate.py plan`). A function suppression's regex `pattern` must match at
-    least one mutant name; a line suppression's `mutant` must match one mutant
-    (bare body or full locator line). Otherwise the suppression is an orphan and
-    should be removed or updated."""
+    least one mutant name; a line suppression must match the mutant at its
+    anchor (file, line, column and text). Otherwise the suppression is stale and
+    should be removed or re-anchored; for a line entry whose text now sits
+    elsewhere in its file, the new locations are listed."""
     func, line = load_suppressions(Path(args.suppressions))
     # Strip ANSI color codes defensively: `cargo mutants --list` colorizes its
     # output when CARGO_TERM_COLOR=always (as CI sets), which would otherwise make
     # every exact line-suppression "match nothing" and fail the check spuriously.
-    ansi = re.compile(r"\x1b\[[0-9;]*m")
-    universe = [ansi.sub("", m) for m in read_lines(Path(args.universe))]
+    universe = [ANSI.sub("", m) for m in read_lines(Path(args.universe))]
     if not universe:
         print(f"ERROR: empty mutant universe at {args.universe}", file=sys.stderr)
         return 2
     bodies = {mutant_body(m) for m in universe}
-    full = set(universe)
+    anchors = {a for a in map(mutant_anchor, universe) if a}
 
     orphans: list[str] = []
     for e in func:
@@ -622,24 +969,21 @@ def cmd_orphans(args: argparse.Namespace) -> int:
         if not any(rx.search(b) for b in bodies):
             orphans.append(f'[function] {e.get("file", "?")}: pattern "{pat}"')
     for e in line:
-        m = e.get("mutant", "").strip()
-        if m and m not in bodies and m not in full:
-            orphans.append(f'[line] {e.get("file", "?")}: "{m[:90]}"')
-    ambiguous = locatorless_matching_several(line, universe)
+        anchor = entry_anchor(e)
+        if anchor in anchors:
+            continue
+        file, ln, col, text = anchor
+        moved = sorted((a[1], a[2]) for a in anchors if a[0] == file and a[3] == text)
+        hint = f" — the text is now at {', '.join(f'{l}:{c}' for l, c in moved)}" if moved else ""
+        orphans.append(f'[line] {file}:{ln}:{col}: "{text[:90]}"{hint}')
 
     total = len(func) + len(line)
-    if ambiguous:
-        print(f"❌ {len(ambiguous)} locator-less line suppression(s) each match more than one mutant.")
-        print("Name each with its file:line:col locator:")
-        for text in ambiguous:
-            print(f'  - "{text[:90]}"')
     if orphans:
         print(f"❌ {len(orphans)}/{total} suppressions are stale (no live mutant matches).")
-        print("Remove or update these — a suppression that matches nothing is a "
-              "silent blind spot:")
+        print("Remove or re-anchor these — a suppression that matches nothing is a "
+              "silent blind spot, and a moved one no longer suppresses its mutant:")
         for o in orphans:
             print(f"  - {o}")
-    if orphans or ambiguous:
         return 1
     print(f"✅ all {total} suppressions match a live mutant.")
     return 0
@@ -669,6 +1013,22 @@ def main() -> int:
     pm.add_argument("--suppressions", default=None)
     pm.set_defaults(func=cmd_missed_re)
 
+    pp = sub.add_parser("progress", help="count planned and tested mutants")
+    pp.add_argument("--results", required=True)
+    pp.set_defaults(func=cmd_progress)
+
+    pg = sub.add_parser("merge", help="combine sharded results against the full inventory")
+    pg.add_argument("--inventory", required=True,
+                    help="file of all mutant lines of the run (cargo mutants --list)")
+    pg.add_argument("--out", required=True)
+    pg.add_argument("shards", nargs="*", help="one directory per shard: mutants.out/ + status")
+    pg.set_defaults(func=cmd_merge)
+
+    pf = sub.add_parser("merge-runs", help="combine the shards' re-check or Mega EEST runs")
+    pf.add_argument("--out", required=True)
+    pf.add_argument("runs", nargs="*", help="one mutants.out directory per shard")
+    pf.set_defaults(func=cmd_merge_runs)
+
     pr = sub.add_parser("report")
     pr.add_argument("--results", required=True)
     pr.add_argument("--recheck", default=None,
@@ -676,6 +1036,10 @@ def main() -> int:
     pr.add_argument("--mega-eest", default=None,
                     help="results of running the mutants the tests missed against Mega EEST")
     pr.add_argument("--suppressions", default=None)
+    pr.add_argument("--status", default=None,
+                    help="the driver's status file; fail unless it says complete")
+    pr.add_argument("--scope", choices=("diff", "full"), default="diff",
+                    help="what the run covered: a PR's changed lines, or every mutant")
     pr.add_argument("--comment", default=None, help="write Markdown report here")
     pr.add_argument("--summary", default=None, help="append report here (GITHUB_STEP_SUMMARY)")
     pr.set_defaults(func=cmd_report)
@@ -687,7 +1051,11 @@ def main() -> int:
     po.set_defaults(func=cmd_orphans)
 
     args = p.parse_args()
-    return args.func(args)
+    try:
+        return args.func(args)
+    except SuppressionError as err:
+        print(f"ERROR: {err}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

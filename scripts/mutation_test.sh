@@ -3,14 +3,32 @@
 #
 # Subcommands:
 #   diff  <base-ref>   Mutate only lines changed vs <base-ref> (PR gate mode).
-#   full               Mutate the whole mega-evm crate (nightly mode; slow).
+#   full  [args...]    Mutate the whole mega-evm crate (nightly mode; slow).
+#                      Extra arguments go to cargo-mutants (e.g. `-f <file>`,
+#                      `--shard k/n`).
 #   file  <glob>       Mutate files matching <glob> (local iteration).
-#   infra              Mutate the test gates' own infrastructure (see INFRA_FILES below).
+#   infra [args...]    Mutate the test gates' own infrastructure (see INFRA_FILES below).
+#   list  [--all] [args...]
+#                      Print the mutants `full` would test, one per line, without
+#                      building or testing anything (`cargo mutants --list`).
+#                      Extra arguments go to cargo-mutants, as for `full`. With
+#                      --all, include the mutants of function-scoped suppressions,
+#                      which the runs exclude.
+#   changed <base-ref> Print mutate=true if `diff <base-ref>` would build, and
+#                      mutate=false if it would find no mutatable change. CI uses
+#                      it to decide whether to restore and save the build cache.
 #
 # `diff`, `full` and `file` run the production scope of .cargo/mutants.toml, which excludes test
 # helpers as noise. `infra` runs the second scope, .cargo/mutants-infra.toml: the scenario runner
 # is helper code by that rule, but the benches and later tests rest on it, so it is mutated on its
 # own.
+#
+# Every run first builds the unmutated tests into ./target (the warm build), which
+# cargo-mutants' `copy_target` copies into each scratch build directory; with
+# incremental compilation on (CARGO_INCREMENTAL=1, which CI sets: the toolchain
+# action turns it off), the copy carries mega-evm's incremental state too, so each
+# mutant build recompiles only what its mutation changed. A diff with no mutatable
+# change skips the warm build, since nothing will be built.
 #
 # Results land in $OUT_DIR/mutants.out/ (missed.txt, caught.txt, outcomes.json).
 # When cargo-mutants has nothing to mutate and writes no results, which it does
@@ -18,11 +36,38 @@
 # instead. A mutant that timed out is re-run once, alone, into
 # $OUT_DIR/recheck/mutants.out/; a re-check that exits abnormally has its exit
 # recorded there, in run-failed.txt, and the gate refuses it. Run
-# scripts/mutation_gate.py afterwards to score + gate the run, passing both.
+# scripts/mutation_gate.py afterwards to score + gate the run, passing both and
+# the status file below.
+#
+# Time budget: MUTANTS_BUDGET=<seconds>, counted from this script's start, bounds
+# the warm build, cargo-mutants and the re-check together (unset: no limit;
+# needs GNU timeout). When it runs out, the running phase gets SIGINT, so
+# cargo-mutants stops its in-flight mutants and keeps every outcome it has
+# recorded; it gets SIGKILL if it is still running MUTANTS_GRACE seconds later.
+# A re-check the budget stops has that recorded in its results
+# (run-failed.txt). The script then exits 0 with what was tested, so the caller
+# can still score and upload it.
+#
+# The last line printed, also written to $OUT_DIR/status, is
+#   MUTANTS-STATUS status=<status> expected=<n|unknown> outcomes=<n>
+# expected: mutants planned (unknown if the run stopped before cargo-mutants
+# planned them); outcomes: mutants with an outcome; status is one of
+#   complete          every planned mutant has an outcome, and no follow-up run
+#                     was stopped;
+#   partial           the budget ran out after some mutants were tested;
+#   not-started       the budget ran out before any mutant was tested;
+#   followup-stopped  every planned mutant was tested, and the budget ran out in
+#                     the re-check of a timed-out one;
+#   baseline-failed   the unmutated tree failed to build or to pass its tests;
+#   error             the run itself failed (bad arguments, an internal error).
+# Only baseline-failed and error exit non-zero. `mutation_gate.py report --status`
+# fails the gate on anything but complete.
 #
 # MUTANTS_SHARD=k/n runs only shard k (0-based) of n of whichever mutant set the
 # subcommand selects (cargo-mutants' own --shard), for a diff too large for one
-# job; give each shard its own OUT_DIR and gate each one. See REVIEW.md.
+# job; give each shard its own OUT_DIR and gate each one. See REVIEW.md. The
+# nightly full run passes `--shard k/n` to `full` instead, and
+# `mutation_gate.py merge` scores the shards together.
 #
 # In the production scope (diff, full, file), a mutant the tests missed — in
 # the run, or in the re-check of one that timed out — is run once more against
@@ -53,10 +98,6 @@ OUT_DIR="${OUT_DIR:-$ROOT_DIR/target/mutants}"
 
 cd "$ROOT_DIR"
 
-# Clear the results before anything that can fail, so a run that stops early
-# leaves nothing behind for the gate to mistake for its results.
-rm -rf "$OUT_DIR"
-
 SUPPRESS="${SUPPRESS:-$ROOT_DIR/mutants/suppressions.toml}"
 # The files cargo-mutants can mutate: the crate's Rust sources, at any depth. The
 # `:(glob)` magic lets `**/` match no directory, so the files at the top of src/
@@ -66,6 +107,8 @@ SRC_PATHSPEC=':(glob)crates/mega-evm/src/**/*.rs'
 JOBS="${JOBS:-$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || getconf _NPROCESSORS_ONLN)}"
 PKG_ARGS=(--package mega-evm)
 CONFIG_ARGS=()
+BUDGET="${MUTANTS_BUDGET:-}"
+GRACE="${MUTANTS_GRACE:-120}"
 
 # The test gates' own executable logic: the scenario runner's transaction conversion and its
 # execute/commit loop.
@@ -73,38 +116,165 @@ INFRA_FILES=(
     crates/mega-evm/src/test_utils/scenario.rs
 )
 
-if ! cargo mutants --version >/dev/null 2>&1; then
-    echo "cargo-mutants is required. Install with 'cargo install cargo-mutants --locked'." >&2
-    exit 1
+cmd="${1:-}"
+shift || true
+
+# The diff `diff` mutates: only the crate's Rust sources are mutatable, so a PR
+# that touches only tests/, Cargo.toml or a module guide under src/ has nothing
+# to mutate.
+mutatable_diff() {
+    git diff --no-color "$1"...HEAD -- "$SRC_PATHSPEC"
+}
+
+if [[ "$cmd" == changed ]]; then
+    base="${1:?usage: mutation_test.sh changed <base-ref>}"
+    # Read the diff into a variable: piping it into `grep -q` would fail the
+    # pipeline under pipefail when grep exits early.
+    changes="$(mutatable_diff "$base")"
+    if [[ -n "$changes" ]]; then echo "mutate=true"; else echo "mutate=false"; fi
+    exit 0
 fi
 
+require_cargo_mutants() {
+    if ! cargo mutants --version >/dev/null 2>&1; then
+        echo "cargo-mutants is required. Install with 'cargo install cargo-mutants --locked'." >&2
+        exit 1
+    fi
+}
+
 # Function-scoped suppressions become --exclude-re so they are never generated
-# (saves build/test time). Line-scoped suppressions are filtered later by the gate.
-# Capture into a variable first: `mapfile < <(...)` would mask a non-zero exit
-# from the helper (a malformed suppressions.toml), letting the run continue
-# without the function-scoped excludes.
-if ! exclude_re_output="$(python3 "$ROOT_DIR/scripts/mutation_gate.py" exclude-re --suppressions "$SUPPRESS")"; then
-    echo "failed to parse function suppressions from $SUPPRESS" >&2
-    exit 1
-fi
+# (saves build/test time), unless called with "all"; line-scoped suppressions are
+# filtered later by the gate. Capture into a variable first: `mapfile < <(...)`
+# would mask a non-zero exit from the helper (a malformed suppressions.toml),
+# letting the run continue without the function-scoped excludes.
 EXCLUDE_ARGS=()
-[[ -n "$exclude_re_output" ]] && mapfile -t EXCLUDE_ARGS <<< "$exclude_re_output"
+load_excludes() {
+    local exclude_re_output
+    EXCLUDE_ARGS=()
+    [[ "${1:-}" != all ]] || return 0
+    if ! exclude_re_output="$(python3 "$ROOT_DIR/scripts/mutation_gate.py" exclude-re --suppressions "$SUPPRESS")"; then
+        echo "failed to read the suppressions in $SUPPRESS" >&2
+        exit 1
+    fi
+    [[ -n "$exclude_re_output" ]] && mapfile -t EXCLUDE_ARGS <<< "$exclude_re_output"
+    return 0
+}
+
+if [[ "$cmd" == list ]]; then
+    scope=""
+    if [[ "${1:-}" == --all ]]; then
+        scope=all
+        shift
+    fi
+    require_cargo_mutants
+    load_excludes "$scope"
+    # --colors never: CI forces CARGO_TERM_COLOR=always, and colour codes in the
+    # list would break the exact matching against it.
+    exec cargo mutants --list --colors never "${PKG_ARGS[@]}" "${EXCLUDE_ARGS[@]}" "$@"
+fi
+
+# A listing (`infra --list`, which the suppression-hygiene job reads) writes no
+# results and has no status.
+LISTING=""
+[[ " $* " == *" --list "* ]] && LISTING=1
 
 SHARD_ARGS=()
 [[ -n "${MUTANTS_SHARD:-}" ]] && SHARD_ARGS=(--shard "$MUTANTS_SHARD")
 
 # cargo-mutants exit codes (https://mutants.rs/exit-codes.html): 0 = all caught,
 # 2 = missed mutants, 3 = timeouts. Those three are normal run outcomes that the
-# gate (scripts/mutation_gate.py) is responsible for scoring, so swallow them and
-# let the gate be the single source of truth for pass/fail. Everything else
-# (1 usage, 4 baseline broken, 5/6 bad --in-diff, 70 internal) is a real failure
-# of the run itself and must abort.
+# gate (scripts/mutation_gate.py) is responsible for scoring. 4 means the unmutated
+# tree failed its tests. Everything else (1 usage, 5/6 bad --in-diff, 70 internal)
+# is a real failure of the run itself.
 run_outcome() {
     case "$1" in
         0 | 2 | 3) return 0 ;;
         *) return "$1" ;;
     esac
 }
+
+# How the run ended, classified into a status by `finish`: ran, stopped (by the
+# budget), baseline-failed. Any other exit, including one `set -e` forces, reports
+# status=error. FOLLOWUP_STOPPED is set when the budget stopped a follow-up run.
+RESULT=""
+FOLLOWUP_STOPPED=""
+# Set once this run has cleared the previous results; until then there is
+# nothing of this run's to count.
+CLEARED=""
+
+# shellcheck disable=SC2329 # the EXIT trap below runs it
+finish() {
+    local rc=$? status=error expected=unknown outcomes=0 counts
+    if [[ -n "$CLEARED" ]] && counts="$(python3 "$ROOT_DIR/scripts/mutation_gate.py" progress --results "$OUT_DIR/mutants.out")"; then
+        expected="${counts#expected=}"
+        expected="${expected%% *}"
+        outcomes="${counts##*outcomes=}"
+    fi
+    case "$RESULT" in
+        ran)
+            # cargo-mutants exits 0 without an output directory when no mutant
+            # intersects the diff: nothing was planned.
+            [[ "$expected" == unknown ]] && expected=0
+            [[ "$expected" == "$outcomes" ]] && status=complete
+            ;;
+        stopped)
+            if [[ "$expected" == "$outcomes" ]]; then
+                status=complete
+            elif ((outcomes > 0)); then
+                status=partial
+            else
+                status=not-started
+            fi
+            ;;
+        baseline-failed) status=baseline-failed ;;
+    esac
+    [[ "$status" == complete && -n "$FOLLOWUP_STOPPED" ]] && status=followup-stopped
+    local line="MUTANTS-STATUS status=$status expected=$expected outcomes=$outcomes"
+    mkdir -p "$OUT_DIR"
+    echo "$line" > "$OUT_DIR/status"
+    echo
+    echo "$line"
+    if [[ "$status" == error || "$status" == baseline-failed ]] && ((rc == 0)); then
+        exit 1
+    fi
+}
+
+# Run "$@" within what is left of MUTANTS_BUDGET. Returns 124 if the budget
+# stopped it (or had already run out), otherwise the command's exit status.
+TIMEOUT=""
+run_bounded() {
+    [[ -n "$BUDGET" ]] || {
+        "$@"
+        return
+    }
+    local left=$((BUDGET - SECONDS)) rc=0
+    ((left > 0)) || return 124
+    # GNU timeout signals the command's whole process group. cargo-mutants runs
+    # its cargo and test processes in their own groups and stops them itself.
+    "$TIMEOUT" --signal=INT --kill-after="$GRACE" "$left" "$@" || rc=$?
+    # 124: stopped by SIGINT; 137: killed after the grace period.
+    if ((rc == 137 && SECONDS >= BUDGET)); then rc=124; fi
+    return "$rc"
+}
+if [[ -n "$BUDGET" ]]; then
+    TIMEOUT="$(command -v timeout || command -v gtimeout || true)"
+    if [[ -z "$TIMEOUT" ]]; then
+        echo "MUTANTS_BUDGET needs GNU timeout (coreutils)." >&2
+        exit 1
+    fi
+fi
+
+require_cargo_mutants
+load_excludes
+
+if [[ -z "$LISTING" ]]; then
+    trap finish EXIT
+    # Clear the previous run's results before anything that can fail, so a run that
+    # stops early leaves nothing behind for the gate to mistake for its results.
+    rm -rf "$OUT_DIR"
+    mkdir -p "$OUT_DIR"
+    CLEARED=1
+fi
 
 # The arguments that scope the first run (an `--in-diff` file, a `-f` glob): the
 # re-check and the Mega EEST run take them too. cargo-mutants 27.1.0 adds a
@@ -114,10 +284,11 @@ run_outcome() {
 # outcomes there the gate does not read.
 SCOPE_ARGS=()
 
+# WARM=0 skips the warm build: a diff with no mutatable change builds nothing.
+WARM=1
+
 run_mutants() {
     SCOPE_ARGS=("$@")
-    rm -rf "$OUT_DIR"
-    mkdir -p "$(dirname "$OUT_DIR")" # cargo-mutants creates OUT_DIR itself but not its parents
     # --no-shuffle: test mutants in deterministic source order so runs are
     #   reproducible and comparable (recommended by https://mutants.rs/pr-diff.html).
     # -vV: verbose progress + version banner, for diagnosable CI logs.
@@ -132,20 +303,57 @@ run_mutants() {
         "${SHARD_ARGS[@]}"
         "$@"
     )
-    # A listing writes no results: there is nothing to record or re-check.
-    if [[ " $* " == *" --list "* ]]; then
+    # A listing writes no results: there is nothing to build, record or re-check.
+    if [[ -n "$LISTING" ]]; then
         cargo mutants "${args[@]}"
         return
     fi
     local rc=0
-    cargo mutants "${args[@]}" 2>&1 | tee "$OUT_DIR.log" || rc=$?
-    run_outcome "$rc" || return
+    if [[ "$WARM" == 1 ]]; then
+        # Build the unmutated tests into ./target. `copy_target` copies it into every
+        # scratch build directory, so the mutant builds reuse the compiled dependencies
+        # and, with incremental compilation, the compiled mega-evm too.
+        echo "Warm build (CARGO_INCREMENTAL=${CARGO_INCREMENTAL-unset}, budget ${BUDGET:-none}s)"
+        run_bounded cargo nextest run "${PKG_ARGS[@]}" --all-features --no-run || rc=$?
+        case "$rc" in
+            0) ;;
+            124) RESULT=stopped && return 0 ;;
+            *) RESULT=baseline-failed && return "$rc" ;;
+        esac
+    fi
+    run_bounded cargo mutants "${args[@]}" 2>&1 | tee "$OUT_DIR.log" || rc=$?
+    case "$rc" in
+        0 | 2 | 3) RESULT=ran ;;
+        124)
+            RESULT=stopped
+            return 0
+            ;;
+        4) RESULT=baseline-failed && return "$rc" ;;
+        *) return "$rc" ;;
+    esac
     python3 "$ROOT_DIR/scripts/mutation_gate.py" note-empty \
         --log "$OUT_DIR.log" --results "$OUT_DIR/mutants.out"
     recheck_timeouts
     # The infrastructure scope mutates the scenario runner, which the suite's adapter never runs.
     if [[ ${#CONFIG_ARGS[@]} -eq 0 && "${MUTANTS_MEGA_EEST:-1}" != 0 ]]; then
         run_missed_against_mega_eest
+    fi
+}
+
+# A follow-up run that did not finish as a run proves nothing by the files it
+# left, which can look like a finished run's: its exit, or the budget that
+# stopped it, goes into its results, which the gate then refuses to score, saying
+# why, rather than the job ending here without a report.
+record_failed_followup() {
+    local results=$1 rc=$2 what=$3
+    mkdir -p "$results"
+    if [[ "$rc" == 124 ]]; then
+        FOLLOWUP_STOPPED=1
+        echo "$what was stopped by MUTANTS_BUDGET" >&2
+        echo "stopped by MUTANTS_BUDGET (${BUDGET}s)" > "$results/run-failed.txt"
+    else
+        echo "$what failed (exit $rc)" >&2
+        echo "cargo-mutants exited $rc" > "$results/run-failed.txt"
     fi
 }
 
@@ -166,7 +374,7 @@ recheck_timeouts() {
     mapfile -t re_args <<< "$re_output"
     echo "Re-checking $((${#re_args[@]} / 2)) timed-out mutant(s) one at a time" >&2
     local rc=0
-    cargo mutants \
+    run_bounded cargo mutants \
         "${CONFIG_ARGS[@]}" \
         "${PKG_ARGS[@]}" \
         --jobs 1 \
@@ -175,14 +383,9 @@ recheck_timeouts() {
         -vV \
         "${SCOPE_ARGS[@]}" \
         "${re_args[@]}" 2>&1 | tee "$OUT_DIR/recheck.log" || rc=$?
-    # A re-check that fails as a run proves nothing by the files it left, which
-    # can look like a finished run's. Its exit goes into its results, which the
-    # gate then refuses to score, saying why, rather than the job ending here
-    # without a report.
     if ! run_outcome "$rc"; then
-        echo "the re-check of the timed-out mutants failed (exit $rc); see $OUT_DIR/recheck.log" >&2
-        mkdir -p "$OUT_DIR/recheck/mutants.out"
-        echo "cargo-mutants exited $rc" > "$OUT_DIR/recheck/mutants.out/run-failed.txt"
+        record_failed_followup "$OUT_DIR/recheck/mutants.out" "$rc" \
+            "the re-check of the timed-out mutants (see $OUT_DIR/recheck.log)"
     fi
 }
 
@@ -240,19 +443,16 @@ run_missed_against_mega_eest() {
     fi
 }
 
-cmd="${1:-}"
-shift || true
 case "$cmd" in
     diff)
         base="${1:?usage: mutation_test.sh diff <base-ref>}"
         diff_file="$OUT_DIR.diff"
         mkdir -p "$(dirname "$diff_file")"
-        # Only the crate's Rust sources are mutatable; scoping the diff to them
-        # avoids a non-empty diff (and a wasted run) when a PR touches only tests/,
-        # Cargo.toml or a module guide under src/. An empty diff still goes to
-        # cargo-mutants, which says it has nothing to mutate, so the gate passes on
-        # its word rather than on missing results.
-        git diff --no-color "$base"...HEAD -- "$SRC_PATHSPEC" > "$diff_file"
+        mutatable_diff "$base" > "$diff_file"
+        # An empty diff still goes to cargo-mutants, which says it has nothing to
+        # mutate, so the gate passes on its word rather than on missing results; it
+        # builds nothing, so the warm build is skipped.
+        [[ -s "$diff_file" ]] || WARM=0
         run_mutants --in-diff "$diff_file"
         ;;
     full)
@@ -269,11 +469,16 @@ case "$cmd" in
         run_mutants "${FILE_ARGS[@]}" "$@"
         ;;
     *)
-        echo "usage: mutation_test.sh {diff <base-ref>|full|file <glob>|infra}" >&2
+        echo "usage: mutation_test.sh {diff <base-ref>|full [args...]|file <glob>|infra [args...]|list [--all] [args...]|changed <base-ref>}" >&2
         exit 2
         ;;
 esac
 
+[[ -n "$LISTING" ]] && exit 0
+if [[ "$RESULT" == stopped ]]; then
+    echo
+    echo "MUTANTS_BUDGET (${BUDGET}s) ran out; the results cover only the mutants tested so far."
+fi
 echo
 echo "Mutation results written to $OUT_DIR/mutants.out/"
-echo "Score + gate with: python3 scripts/mutation_gate.py report --results $OUT_DIR/mutants.out --recheck $OUT_DIR/recheck/mutants.out --mega-eest $OUT_DIR/mega-eest/mutants.out"
+echo "Score + gate with: python3 scripts/mutation_gate.py report --results $OUT_DIR/mutants.out --recheck $OUT_DIR/recheck/mutants.out --mega-eest $OUT_DIR/mega-eest/mutants.out --status $OUT_DIR/status"

@@ -200,7 +200,10 @@ These checks guard every change to the Satin engine.
 - A mutant the tests miss is run once more against the Mega EEST suite, with mega-evm's ignored `mega_eest` test as the only test, which runs `scripts/mega_eest.sh` (plain) on the mutated tree; one a Mega EEST case catches counts as caught, and the report says how many the suite decided.
   The suite is fetched and its adapter built on the unmutated tree first, which must pass; a warm-up or a run that fails as a run is recorded in its results, which the gate refuses.
   The pass costs nothing while the tests catch every mutant, and about one adapter build and one run of the suite per mutant they miss.
-- The job is bounded to 330 minutes.
+- The job is bounded to 330 minutes, and the driver's own budget (`MUTANTS_BUDGET`, 300 minutes) stops the run before that, so a run that cannot finish still scores and uploads what it tested; the driver's `MUTANTS-STATUS` line says how far it got, and the gate (`report --status`) fails anything but a complete run.
+  The driver builds the tests once before the mutants (the warm build) and CI builds incrementally (`CARGO_INCREMENTAL=1`), so each mutant recompiles only what its mutation changed.
+  The nightly full run is four shards (`scripts/mutation_test.sh full --shard k/4`), merged against the full inventory (`mutation_gate.py merge`, and `merge-runs` for their re-checks and Mega EEST runs) and scored as a full run.
+  A line suppression is anchored to one mutant (`file`, `line`, `column` and its text); one whose mutant moves gates it again, and the hygiene job names where its text went.
   Shard a series whose diff lists more than 1,000 mutants (`cargo mutants --list --in-diff <diff> --package mega-evm`): at the reference rate that is about an hour, and the rate falls as the test suite grows.
   Run shard `k` of `n` with `MUTANTS_SHARD=k/n OUT_DIR=target/mutants-k scripts/mutation_test.sh diff <base>` and gate each shard with `scripts/mutation_gate.py report`; the pull request that first needs it adds a shard matrix to the job, and every shard must pass.
 - The gate has a second scope, for its own infrastructure: `.cargo/mutants-infra.toml` and `scripts/mutation_test.sh infra` mutate the scenario runner (`crates/mega-evm/src/test_utils/scenario.rs`) against `mega-evm`'s tests.
