@@ -92,6 +92,9 @@ const CALL_ORACLE_THEN_FAIL: Address = address!("1000000000000000000000000000000
 const WRITE_THEN_FAIL: Address = address!("100000000000000000000000000000000000000b");
 /// `SSTORE(0, 1)`, for the call a `_one` entry point's journal holds before the failing one.
 const WRITE_KEPT_SLOT: Address = address!("100000000000000000000000000000000000000c");
+/// Contract that `CALL`s `WRITE_THEN_FAIL`, so the error is raised while its own frame is still on
+/// the frame stack.
+const CALL_WRITE_THEN_FAIL: Address = address!("100000000000000000000000000000000000000d");
 /// An account whose read fails with an error once the test arms it, for a transaction that
 /// must fail without panicking.
 const FAILING_ACCOUNT: Address = address!("cccccccccccccccccccccccccccccccccccccccc");
@@ -250,6 +253,7 @@ fn database() -> PanickingDatabase {
             .stop()
             .build(),
     );
+    db.set_account_code(CALL_WRITE_THEN_FAIL, call_code(WRITE_THEN_FAIL));
     PanickingDatabase {
         inner: ErrorInjectingDatabase::new(db),
         panic_on_account: PANICKING_ACCOUNT,
@@ -1056,6 +1060,36 @@ fn test_error_path_clears_a_stashed_context_error_without_inspector() {
 #[test]
 fn test_error_path_clears_a_stashed_context_error_with_inspector() {
     assert_error_path_clears_a_stashed_context_error(true);
+}
+
+/// A database error raised inside a child frame is taken when the child's result is handed back
+/// to its caller, so the run ends in `catch_error` with the caller's frame still on the frame
+/// stack. The error path resets the stack cursor: left on that frame, it would make the next
+/// transaction's first frame a child of the failed transaction's caller.
+fn assert_error_path_resets_the_frame_stack(inspect: bool) {
+    let mut state = State::builder().with_database(database()).build();
+    let mut executor = new_executor_with(&mut state, MegaSpecId::REX6, inspect);
+
+    executor.evm.db_mut().database.inner.fail_on_account = Some(FAILING_ACCOUNT);
+    let failing_tx = legacy_tx(PANICKING_SENDER, 0, CALL_WRITE_THEN_FAIL, Bytes::new());
+    executor.execute_mega_transaction(&failing_tx).expect_err("the read in the callee fails");
+    executor.evm.db_mut().database.inner.fail_on_account = None;
+
+    let next_tx = next_tx(RETURN_MSIZE);
+    let outcome = executor
+        .execute_mega_transaction(&next_tx)
+        .unwrap_or_else(|err| panic!("next tx fails with {err:?} (inspect: {inspect})"));
+    assert_same_outcome(&outcome, &reference_outcome(MegaSpecId::REX6, &next_tx));
+}
+
+#[test]
+fn test_error_path_resets_the_frame_stack_without_inspector() {
+    assert_error_path_resets_the_frame_stack(false);
+}
+
+#[test]
+fn test_error_path_resets_the_frame_stack_with_inspector() {
+    assert_error_path_resets_the_frame_stack(true);
 }
 
 /// Panic recovery clears the whole journal, including successful transactions accumulated with
