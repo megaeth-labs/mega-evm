@@ -282,6 +282,7 @@ jobs:
         run: |
           python3 scripts/mutation_gate.py report \
             --results target/umutate \
+            --title "Spec-gate mutation" \
             --suppressions mutants/suppressions.toml \
             --comment spec-gate-report.md \
             --summary "$GITHUB_STEP_SUMMARY"
@@ -363,12 +364,17 @@ jobs:
             --files "crates/mega-evm/src/${{ matrix.subsystem }}/*" \
             --output "target/umutate/${{ matrix.subsystem }}"
       - name: Score (informational)
+        # --informational exits 0 on survivors, timeouts and an incomplete run.
+        # A scorer error (results or suppressions it cannot read) fails the
+        # step, as it fails the full run, rather than leave an empty summary.
         run: |
           python3 scripts/mutation_gate.py report \
             --results "target/umutate/${{ matrix.subsystem }}" \
             --scope full \
+            --title "Spec-gate sweep (${{ matrix.subsystem }})" \
+            --informational \
             --suppressions mutants/suppressions.toml \
-            --summary "$GITHUB_STEP_SUMMARY" || true
+            --summary "$GITHUB_STEP_SUMMARY"
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4

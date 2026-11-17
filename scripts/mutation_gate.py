@@ -29,6 +29,7 @@ Subcommands:
 
   report      --results <mutants.out dir> [--suppressions <toml>]
               [--status <file>] [--scope diff|full]
+              [--title <name>] [--informational]
               [--comment <path>] [--summary <path>]
         Read the run outcomes, apply line-scoped suppressions (each anchored to
         one mutant's file:line:col and text), compute the
@@ -39,6 +40,16 @@ Subcommands:
         --scope says what the run covered, for the report's wording: `diff`
         (the default) for a PR's changed lines, `full` for every mutant of a
         crate or subsystem (the nightly runs).
+        --title names the report in its heading, for a run that is not the
+        cargo-mutants gate (`Mutation testing`) or full run (`Mutation testing
+        (full run)`, the default with --scope full); a titled full-scope report
+        labels its score `Mutation score`, not `Full-run mutation score`. An
+        empty title is refused (exit 2).
+        --informational is for a run that must not fail its job: the heading
+        says what the run found (survivors, timeouts, an incomplete run) instead
+        of PASS/FAIL, the note on an incomplete run does not say it fails, and
+        the exit code is 0. Results that cannot be read and suppressions that
+        cannot be applied still exit 2.
 
 The PR gate runs diff-scoped (cargo mutants --in-diff), so every mutant it sees
 lives on a line the PR changed; an unsuppressed survivor there is a test gap the
@@ -185,10 +196,14 @@ SHARD_CAUSES = {
 BUDGET_STATES = ("partial", "not-started")
 
 
-def incomplete_note(status: dict[str, str]) -> str:
-    """Describe a run that did not test every planned mutant."""
+def incomplete_note(status: dict[str, str], informational: bool = False) -> str:
+    """Describe a run that did not test every planned mutant.
+
+    A gate's note says the run never passes; an informational report's does not,
+    since it passes or fails nothing."""
     state, expected, outcomes = status.get("status"), status.get("expected"), status.get("outcomes")
-    tail = " The results below cover only the tested mutants, and an incomplete run never passes."
+    never = "" if informational else ", and an incomplete run never passes"
+    tail = f" The results below cover only the tested mutants{never}."
     # A merged run names each shard that did not complete.
     merged = "shards" in status
     shard_states = [s for s in status.get("shards", "").split(",") if s]
@@ -207,19 +222,19 @@ def incomplete_note(status: dict[str, str]) -> str:
         planned = status.get("shards-planned", "unknown")
         if planned not in ("unknown", expected):
             why.append(f"the shards planned {planned} mutants")
+        never_passes = "" if informational else ", so this run never passes"
         return (f"**Shards and inventory disagree** — the inventory lists {expected} mutants, "
                 f"{outcomes} of them have an outcome, and {'; '.join(why)}. The shards did not "
-                f"test the inventory's mutant set, so this run never passes. Every shard outcome "
-                f"is still reported below; `unplanned.txt` in the run artifacts lists the "
-                f"outcomes that do not fit the inventory.{listed}")
+                f"test the inventory's mutant set{never_passes}. Every shard outcome is still reported "
+                f"below; `unplanned.txt` in the run artifacts lists the outcomes that do not "
+                f"fit the inventory.{listed}")
     budget_only = all(s in BUDGET_STATES for _, s in problems)
     if state == "partial" and budget_only:
         return (f"**Incomplete run** — the time budget ran out after {outcomes} of {expected} "
                 f"planned mutants; the rest were not tested.{tail}{listed}")
     if state == "not-started" and budget_only:
         return ("**Incomplete run** — the time budget ran out before any mutant was tested "
-                f"({expected} planned). Nothing below is a result, and an incomplete run "
-                f"never passes.{listed}")
+                f"({expected} planned). Nothing below is a result{never}.{listed}")
     if problems:
         return (f"**Incomplete run** — {outcomes} of {expected} planned mutants were tested; "
                 f"these shards did not complete:{listed}\n\n{tail.strip()}")
@@ -313,10 +328,31 @@ def emit(report: str, args: argparse.Namespace) -> None:
     print(report)
 
 
+def verdict(args: argparse.Namespace, survivors: int = 0, timeouts: int = 0,
+            incomplete: bool = False) -> str:
+    """The verdict in the report's heading, from what the run found.
+
+    A gate passes when it found nothing: no unsuppressed survivor or timeout, and
+    a complete run. An informational run neither passes nor fails, so it says
+    what it found."""
+    found_any = bool(survivors or timeouts or incomplete)
+    if not args.informational:
+        return "❌ FAIL" if found_any else "✅ PASS"
+    if not found_any:
+        return "✅ no survivors"
+    found = [f"{survivors} survivor{'s' if survivors != 1 else ''}"] if survivors else []
+    found += [f"{timeouts} timed out"] if timeouts else []
+    found += ["incomplete run"] if incomplete else []
+    return f"⚠️ {', '.join(found)} (informational; does not fail the run)"
+
+
 def cmd_report(args: argparse.Namespace) -> int:
     results = Path(args.results)
     full = args.scope == "full"
-    title = "## 🧬 Mutation testing (full run)" if full else "## 🧬 Mutation testing"
+    name = args.title or ("Mutation testing (full run)" if full else "Mutation testing")
+    title = f"## 🧬 {name}"
+    # An informational run reports what it found and never fails; a gate fails.
+    fail_code = 0 if args.informational else 1
 
     # The driver's status says whether the run tested every planned mutant. A
     # stopped run must never pass, even when everything it tested was caught.
@@ -328,7 +364,7 @@ def cmd_report(args: argparse.Namespace) -> int:
                   f"finish — refusing to report a passing gate.", file=sys.stderr)
             return 2
         if run_status.get("status") != "complete":
-            note = incomplete_note(run_status)
+            note = incomplete_note(run_status, args.informational)
 
     # Guard against a silent pass when the run produced no results. We must tell
     # apart two cases that both leave the outcome lists empty:
@@ -339,8 +375,8 @@ def cmd_report(args: argparse.Namespace) -> int:
     #     report a 100% pass here is the whole point.
     if not results.exists():
         if note:
-            emit(f"{title} — ❌ FAIL\n\n{note}\n", args)
-            return 1
+            emit(f"{title} — {verdict(args, incomplete=True)}\n\n{note}\n", args)
+            return fail_code
         report = f"{title}\n\nNo results at "
         report += f"`{results}` — nothing was mutated (e.g. no mutatable changes).\n"
         emit(report, args)
@@ -360,8 +396,8 @@ def cmd_report(args: argparse.Namespace) -> int:
     unviable = read_lines(results / "unviable.txt")
     timeout = read_lines(results / "timeout.txt")
     if note and not (missed or caught or unviable or timeout):
-        emit(f"{title} — ❌ FAIL\n\n{note}\n", args)
-        return 1
+        emit(f"{title} — {verdict(args, incomplete=True)}\n\n{note}\n", args)
+        return fail_code
 
     _, line_supp = load_suppressions(Path(args.suppressions)) if args.suppressions else ([], [])
     # A line suppression matches one mutant: the same file, line, column and text.
@@ -388,7 +424,7 @@ def cmd_report(args: argparse.Namespace) -> int:
     gate_pass = not real_survivors and not real_timeouts and note is None
 
     # ---- Markdown report (PR comment + step summary) ----
-    status = "✅ PASS" if gate_pass else "❌ FAIL"
+    status = verdict(args, len(real_survivors), len(real_timeouts), note is not None)
 
     # No viable mutants and nothing inconclusive (typical diff run whose changed
     # lines contain nothing mutatable). Reporting "100% (0/0)" reads like a real
@@ -399,10 +435,12 @@ def cmd_report(args: argparse.Namespace) -> int:
             nothing += f" ({len(unviable)} unviable, {len(timeout)} timed out)"
         elif not full:
             nothing += " on the changed lines"
-        emit(f"{title} — ✅ PASS\n\n{nothing}.\n", args)
+        emit(f"{title} — {verdict(args)}\n\n{nothing}.\n", args)
         return 0
 
-    label = "Full-run mutation score" if full else "Diff mutation score"
+    # `Full-run` names the cargo-mutants full run, the untitled full-scope report.
+    label = ("Diff mutation score" if not full
+             else "Mutation score" if args.title else "Full-run mutation score")
     md = [
         f"{title} — {status}",
         "",
@@ -451,7 +489,7 @@ def cmd_report(args: argparse.Namespace) -> int:
                   else "No new test gaps introduced by this change. 🎉")
     emit("\n".join(md) + "\n", args)
 
-    return 0 if gate_pass else 1
+    return 0 if gate_pass else fail_code
 
 
 def cmd_orphans(args: argparse.Namespace) -> int:
@@ -509,6 +547,13 @@ def cmd_orphans(args: argparse.Namespace) -> int:
     return 0
 
 
+def report_title(value: str) -> str:
+    """`--title`: an empty name would fall back to a cargo-mutants heading."""
+    if not value.strip():
+        raise argparse.ArgumentTypeError("must not be empty")
+    return value
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -535,6 +580,12 @@ def main() -> int:
                     help="the driver's status file; fail unless it says complete")
     pr.add_argument("--scope", choices=("diff", "full"), default="diff",
                     help="what the run covered: a PR's changed lines, or every mutant")
+    pr.add_argument("--title", default=None, type=report_title,
+                    help="the report's name in its heading, not empty (default: `Mutation "
+                         "testing`, with `(full run)` for --scope full)")
+    pr.add_argument("--informational", action="store_true",
+                    help="say what the run found instead of PASS/FAIL, and exit 0 "
+                         "(2 still means the results could not be read)")
     pr.add_argument("--comment", default=None, help="write Markdown report here")
     pr.add_argument("--summary", default=None, help="append report here (GITHUB_STEP_SUMMARY)")
     pr.set_defaults(func=cmd_report)

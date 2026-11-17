@@ -172,3 +172,6 @@ python3 scripts/umutate.py run --packs spec-gate --diff origin/main --output tar
 
 Spec-gate equivalents (e.g. a gate guarding a state no test exercises — expect a meaningful rate) go in the **same** `suppressions.toml`, as `kind = "line"` entries anchored like any other (spec-gate mutants sit at column 1 of their line), whose text starts with the pack name.
 The PR gate runs diff-scoped (instant on PRs that touch no gate lines); the full crate sweep runs on a nightly schedule (the `spec-gate-sweep` job in `.github/workflows/mutation.yml`).
+Both name themselves in their reports (`mutation_gate.py report --title`), so that neither is read as a cargo-mutants report: the PR gate's is titled `Spec-gate mutation`, and the sweep's `Spec-gate sweep (<subsystem>)`.
+The sweep is informational (`--informational`): its heading gives the number of survivors instead of PASS/FAIL, and survivors do not fail the job.
+A scorer error, such as a `suppressions.toml` entry it cannot apply, does fail it, as it fails the full run.
