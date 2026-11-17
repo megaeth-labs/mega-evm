@@ -210,7 +210,8 @@ jobs:
   # ── gate self-test: the scorer's and the driver's own tests ────────────────
   # The gate reads a run fail-closed; its tests hold every way a run can leave
   # results that say nothing to a failure, and the driver's refusal of an old
-  # bash. Seconds long, so it runs on every PR.
+  # bash. Every scripts/test_*.py runs here, the Mega EEST gate's helper's
+  # (scripts/test_mega_eest.py) among them. Seconds long, so it runs on every PR.
   gate-selftest:
     name: mutation gate self-test
     runs-on: ubuntu-24.04
