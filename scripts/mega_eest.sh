@@ -96,7 +96,9 @@ REV=$(read_pin MEGA_EEST_REV)
 # The paths of a checkout that decide what runs: a change to any of them is a different suite.
 SUITE_PATHS=(slice specs adapters crates Cargo.toml Cargo.lock)
 
-# Whether the checkout $1 is the pinned commit with those paths as committed.
+# Whether the checkout $1 is the pinned commit with those paths as committed. Git takes no optional
+# lock for it: several runs may read one checkout at once (the mutation gate's build directories).
+export GIT_OPTIONAL_LOCKS=0
 at_pin() {
     [ "$(git -C "$1" rev-parse HEAD 2> /dev/null)" = "$REV" ] \
         && [ -z "$(git -C "$1" status --porcelain --untracked-files=all -- "${SUITE_PATHS[@]}")" ]

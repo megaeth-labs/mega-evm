@@ -675,6 +675,7 @@ case "$(basename "$out")" in
     mega-eest) run=mega-eest ;;
 esac
 echo "$argv" > "$FAKE_RUNS/$run.argv"
+echo "dir=${MEGA_EEST_DIR-unset} modes=${MEGA_EEST_MODES-unset} work=${MEGA_EEST_WORK-unset}" > "$FAKE_RUNS/$run.env"
 if [ -d "$FAKE_RUNS/$run" ]; then
     mkdir -p "$out/mutants.out"
     cp -R "$FAKE_RUNS/$run/." "$out/mutants.out/"
@@ -775,9 +776,14 @@ class DriverMegaEest(GateCase):
         return code, text, runs, results
 
     def test_a_missed_mutant_runs_against_mega_eest_alone(self) -> None:
-        code, text, runs, _ = self.drive(eest=outcomes_json(mutant(MISSED, "CaughtMutant")))
+        work = self.tmp / "eest-work"
+        code, text, runs, _ = self.drive(eest=outcomes_json(mutant(MISSED, "CaughtMutant")),
+                                         env={"MEGA_EEST_WORK": str(work)})
         self.assertEqual(code, 0, text)
         self.assertEqual((runs / "warmup.modes").read_text(), "plain\n")
+        # Every build directory reads the warm-up's checkout and works in its own directory.
+        self.assertEqual((runs / "mega-eest.env").read_text(),
+                         f"dir={work}/src modes=plain work=unset\n")
         argv = (runs / "mega-eest.argv").read_text().strip()
         self.assertIn("--cargo-arg=--test --cargo-arg=mega_eest", argv)
         # The first run's scope, which keeps cargo-mutants' unfiltered struct-field mutants to it.

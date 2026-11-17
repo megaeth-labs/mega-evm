@@ -216,7 +216,12 @@ run_missed_against_mega_eest() {
         echo "scripts/mega_eest.sh exited $rc on the unmutated tree" > "$results/run-failed.txt"
         return 0
     fi
-    MEGA_EEST_DIR="$ROOT_DIR/target/mega-eest/src" MEGA_EEST_MODES=plain cargo mutants \
+    # Every build directory reads the checkout the warm-up used, and writes its adapter workspace,
+    # logs and build in its own target directory: a work or target directory set for the warm-up
+    # would be shared by builds running at once.
+    env -u MEGA_EEST_WORK -u MEGA_EEST_TARGET_DIR \
+        MEGA_EEST_DIR="${MEGA_EEST_DIR:-${MEGA_EEST_WORK:-$ROOT_DIR/target/mega-eest}/src}" \
+        MEGA_EEST_MODES=plain cargo mutants \
         "${PKG_ARGS[@]}" \
         --jobs "$JOBS" \
         --output "$OUT_DIR/mega-eest" \
