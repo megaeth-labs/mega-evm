@@ -40,12 +40,12 @@
 # the status file below.
 #
 # Time budget: MUTANTS_BUDGET=<seconds>, counted from this script's start, bounds
-# the warm build, cargo-mutants and the re-check together (unset: no limit;
-# needs GNU timeout). When it runs out, the running phase gets SIGINT, so
+# the warm build, cargo-mutants, the re-check and the Mega EEST pass together
+# (unset: no limit; needs GNU timeout). When it runs out, the running phase gets SIGINT, so
 # cargo-mutants stops its in-flight mutants and keeps every outcome it has
 # recorded; it gets SIGKILL if it is still running MUTANTS_GRACE seconds later.
-# A re-check the budget stops has that recorded in its results
-# (run-failed.txt). The script then exits 0 with what was tested, so the caller
+# A follow-up run (the re-check, the Mega EEST pass) the budget stops has that
+# recorded in its results (run-failed.txt), and the status says so. The script then exits 0 with what was tested, so the caller
 # can still score and upload it.
 #
 # The last line printed, also written to $OUT_DIR/status, is
@@ -57,7 +57,7 @@
 #   partial           the budget ran out after some mutants were tested;
 #   not-started       the budget ran out before any mutant was tested;
 #   followup-stopped  every planned mutant was tested, and the budget ran out in
-#                     the re-check of a timed-out one;
+#                     the re-check of a timed-out one or the Mega EEST pass;
 #   baseline-failed   the unmutated tree failed to build or to pass its tests;
 #   error             the run itself failed (bad arguments, an internal error).
 # Only baseline-failed and error exit non-zero. `mutation_gate.py report --status`
@@ -75,10 +75,15 @@
 # command is mega-evm's ignored `mega_eest` test alone, which runs
 # scripts/mega_eest.sh (plain mode) on the mutated tree, so a mutant that only a
 # Mega EEST case catches counts as caught. Pass that directory to the gate as
-# --mega-eest. The suite is fetched and its adapter built once, on the unmutated
-# tree, before the run; one that fails there has its exit recorded in those
-# results (run-failed.txt), which the gate refuses. MUTANTS_MEGA_EEST=0 skips
-# the pass, and the gate then counts those mutants as survivors.
+# --mega-eest. The gate counts such a kill only when the mutant's log holds the
+# suite's own verdict that cases failed (its `MEGA-EEST ... result=FAIL` line),
+# so a run that failed before it reached the cases (a build, a fetch) is no
+# kill: the gate refuses the results instead. The suite is fetched and its
+# adapter built once, on the unmutated tree, before the run, and the mutants
+# then run one at a time (--jobs 1), each using the machine's parallelism for
+# the suite's cases; a warm-up that fails has its exit recorded in those results
+# (run-failed.txt), which the gate refuses. MUTANTS_MEGA_EEST=0 skips the pass,
+# and the gate then counts those mutants as survivors.
 
 # Bash 5 or newer: the driver relies on mapfile and on expanding empty arrays
 # under `set -u`, which bash 3.2 (macOS's /bin/bash) does not have. Written in
@@ -410,10 +415,16 @@ run_missed_against_mega_eest() {
     local results="$OUT_DIR/mega-eest/mutants.out"
     echo "Running $((${#re_args[@]} / 2)) mutant(s) the tests missed against Mega EEST" >&2
     local rc=0
-    # MEGA_EEST_SCRIPT stands in for the script in the driver's own tests.
-    MEGA_EEST_MODES=plain "${MEGA_EEST_SCRIPT:-$ROOT_DIR/scripts/mega_eest.sh}" \
+    # MEGA_EEST_SCRIPT stands in for the script in the driver's own tests. The warm-up checks the
+    # pin's provenance; no case set is compared here, the Mega EEST gate does that. It counts
+    # against the budget, as the whole pass does.
+    run_bounded env -u MEGA_EEST_BASE_REV MEGA_EEST_MODES=plain \
+        "${MEGA_EEST_SCRIPT:-$ROOT_DIR/scripts/mega_eest.sh}" \
         > "$OUT_DIR/mega-eest-warmup.log" 2>&1 || rc=$?
-    if [[ $rc -ne 0 ]]; then
+    if [[ $rc -eq 124 ]]; then
+        record_failed_followup "$results" "$rc" "the Mega EEST warm-up (see $OUT_DIR/mega-eest-warmup.log)"
+        return 0
+    elif [[ $rc -ne 0 ]]; then
         echo "Mega EEST does not pass on the unmutated tree (exit $rc); see $OUT_DIR/mega-eest-warmup.log" >&2
         mkdir -p "$results"
         echo "scripts/mega_eest.sh exited $rc on the unmutated tree" > "$results/run-failed.txt"
@@ -421,12 +432,22 @@ run_missed_against_mega_eest() {
     fi
     # Every build directory reads the checkout the warm-up used, and writes its adapter workspace,
     # logs and build in its own target directory: a work or target directory set for the warm-up
-    # would be shared by builds running at once.
-    env -u MEGA_EEST_WORK -u MEGA_EEST_TARGET_DIR \
+    # would be shared by builds running at once. The warm-up checked the pin's provenance, so the
+    # runs do not fetch the suite's history again. Each build directory starts from the warm
+    # target, the warm-up's adapter build included, and builds incrementally; the script runs
+    # the adapter its own build reports, so the warm-up's unmutated binary in the copy is never
+    # what runs.
+    #
+    # One mutant at a time (--jobs 1), each running the suite's cases with the machine's whole
+    # parallelism, as the baseline did: mutants run side by side would each build mega-evm and run
+    # the cases on the same cores, against a timeout the baseline set alone. On a 4-vCPU runner a
+    # mutant is about three minutes (an incremental build of mega-evm for the test and again for
+    # the adapter, and the 930 plain cases), estimated from local runs, not measured there.
+    run_bounded env -u MEGA_EEST_WORK -u MEGA_EEST_TARGET_DIR -u MEGA_EEST_BASE_REV \
         MEGA_EEST_DIR="${MEGA_EEST_DIR:-${MEGA_EEST_WORK:-$ROOT_DIR/target/mega-eest}/src}" \
-        MEGA_EEST_MODES=plain cargo mutants \
+        MEGA_EEST_MODES=plain MEGA_EEST_SKIP_PROVENANCE=1 cargo mutants \
         "${PKG_ARGS[@]}" \
-        --jobs "$JOBS" \
+        --jobs 1 \
         --output "$OUT_DIR/mega-eest" \
         --no-shuffle \
         -vV \
@@ -435,11 +456,10 @@ run_missed_against_mega_eest() {
         "${SCOPE_ARGS[@]}" \
         "${re_args[@]}" \
         -- --run-ignored only 2>&1 | tee "$OUT_DIR/mega-eest.log" || rc=$?
-    # As for the re-check: a run that fails as a run proves nothing by the files it left.
+    # As for the re-check: a run that fails as a run, or that the budget stops, proves nothing by
+    # the files it left.
     if ! run_outcome "$rc"; then
-        echo "the Mega EEST run of the missed mutants failed (exit $rc); see $OUT_DIR/mega-eest.log" >&2
-        mkdir -p "$results"
-        echo "cargo-mutants exited $rc" > "$results/run-failed.txt"
+        record_failed_followup "$results" "$rc" "the Mega EEST run of the missed mutants (see $OUT_DIR/mega-eest.log)"
     fi
 }
 

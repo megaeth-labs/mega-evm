@@ -64,7 +64,9 @@ Subcommands:
               [--suppressions <toml>] [--comment <path>] [--summary <path>]
         Read the run outcomes, take the re-check's outcome for a mutant that
         timed out and the Mega EEST run's outcome for a mutant the tests
-        missed, apply line-scoped suppressions (each anchored to one mutant's
+        missed (a kill there only with the suite's `result=FAIL` summary line
+        in that mutant's log; a caught outcome without it makes the results
+        unscorable), apply line-scoped suppressions (each anchored to one mutant's
         file:line:col and text), compute the mutation score,
         write a Markdown report, and exit non-zero if any unsuppressed survivor
         or timeout remains (the "no new survivors" gate). Exits 2, with a
@@ -256,6 +258,8 @@ class Run:
     unviable: list[str] = field(default_factory=list)
     # Set when the run tested nothing: the producer's own word for it.
     nothing_to_test: str | None = None
+    # Each mutant's log, relative to the results directory, as the outcome names it.
+    logs: dict[str, str] = field(default_factory=dict)
 
 
 def nothing_to_mutate(line: str) -> bool:
@@ -361,6 +365,8 @@ def load_run(results: Path) -> Run:
                 f"({', '.join(MUTANT_SUMMARIES)})"
             )
         getattr(run, kind).append(name)
+        if isinstance(outcome.get("log_path"), str):
+            run.logs[name] = outcome["log_path"]
 
     selected = read_selection(results)
     if selected is None:
@@ -711,6 +717,40 @@ def cmd_timeout_re(args: argparse.Namespace) -> int:
     return 0
 
 
+# The summary line scripts/mega_eest.sh prints, as the mega_eest test prints it again into a
+# mutant's log; its `result` says whether the suite ran to a verdict.
+MEGA_EEST_SUMMARY = re.compile(r"MEGA-EEST rev=[0-9a-f]{40} [^\n]*")
+MEGA_EEST_MODE_COUNTS = re.compile(
+    r"\b(?:plain|instrumented)=pass:\d+,fail:(\d+),unsupported:\d+,error:(\d+)\b")
+
+
+def mega_eest_kill_unproven(results: Path, log_path: str | None) -> str | None:
+    """Why a mutant the Mega EEST run reports caught is not shown to be caught; None when it is.
+
+    The run's test fails on any failure of the suite's script, a build or a fetch that never
+    reached a case included, and cargo-mutants records each as caught alike. Only the script's
+    summary line tells them apart: a kill is a log whose summary lines all say `result=FAIL`, a
+    complete run of the suite's cases with a case that failed or erred, or plain and instrumented
+    observations that differ.
+    """
+    if not log_path:
+        return "its outcome names no log"
+    path = results / log_path
+    if not path.is_file():
+        return f"its log {log_path} is missing"
+    lines = MEGA_EEST_SUMMARY.findall(ANSI.sub("", path.read_text(errors="replace")))
+    if not lines:
+        return "its log holds no Mega EEST summary line, so the suite never reached its cases"
+    found = {m.group(1) if (m := re.search(r" result=(\w+)", line)) else "none" for line in lines}
+    if found != {"FAIL"}:
+        return (f"its log's Mega EEST summary says result={'/'.join(sorted(found))}, not FAIL: "
+                f"the suite reached no verdict on it")
+    counts = MEGA_EEST_MODE_COUNTS.findall(lines[-1])
+    if not any(int(failed) + int(erred) for failed, erred in counts) and "-differ" not in lines[-1]:
+        return "its log's Mega EEST summary shows no failing case"
+    return None
+
+
 def cmd_missed_re(args: argparse.Namespace) -> int:
     try:
         run = load_run(Path(args.results))
@@ -821,6 +861,20 @@ def cmd_report(args: argparse.Namespace) -> int:
             return 2
     if eest is not None:
         verdicts = {n: k for k in ("caught", "missed", "timeout", "unviable") for n in getattr(eest, k)}
+        # A kill counts only on the suite's own verdict in the mutant's log: a run that failed
+        # before it reached the cases says nothing of the mutant, and fails the gate unscored.
+        unproven = [(name, why) for name in missed if verdicts.get(name) == "caught"
+                    if (why := mega_eest_kill_unproven(Path(mega_eest_dir), eest.logs.get(name)))]
+        if unproven:
+            listed = "\n".join(f"- `{name}`: {why}" for name, why in unproven[:MAX_SURVIVORS_SHOWN])
+            write_report(
+                f"{title} — ❌ FAIL\n\n"
+                f"**The Mega EEST run of the mutants the tests missed cannot be scored:** "
+                f"{len(unproven)} mutant(s) recorded as caught without the suite's verdict that "
+                f"cases failed.\n\n{listed}\n",
+                args,
+            )
+            return 2
         remaining = []
         for name in missed:
             verdict = verdicts.get(name)
