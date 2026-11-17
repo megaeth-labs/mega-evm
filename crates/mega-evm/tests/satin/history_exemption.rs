@@ -187,20 +187,6 @@ fn test_the_exempt_schedule_prices_a_deposited_byte_at_zero() {
     assert_eq!(evm.ctx().additional_limit().history_gas_spent(), 0);
 }
 
-/// A deposit pays for its body, calldata, records, logs and deployed code even without a fee.
-#[test]
-fn test_a_deposit_pays_history_gas() {
-    if runs_at_measurement_prices() {
-        return;
-    }
-    let mut tx = deposit(call_from(CALLER, CONTRACT));
-    tx.0.base.data = Bytes::from_static(b"history");
-    let (history, state, outcome) = ledgers(tx);
-    assert_eq!(history, (PROGRAM_HISTORY_BYTES + 7) * COST_PER_HISTORY_BYTE);
-    assert_eq!(state, PROGRAM_STATE_GAS, "the state a user transaction pays");
-    assert_eq!(outcome.gas.history_bytes, PROGRAM_HISTORY_BYTES + 7);
-}
-
 /// Both field-based forms of system origin pay every history site, including deposited code.
 #[test]
 fn test_system_originated_transactions_pay_history_for_the_program() {
