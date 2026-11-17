@@ -880,6 +880,36 @@ fn test_a_transfer_to_an_account_that_exists_charges_no_state_gas() {
     );
 }
 
+/// A `SELFDESTRUCT` pays for a beneficiary's leaf only when it has a balance to move and the
+/// beneficiary does not exist yet. Neither half alone adds state, so neither is charged, however
+/// crowded the beneficiary's bucket is.
+#[test]
+fn test_a_selfdestruct_that_adds_no_account_charges_no_state_gas() {
+    const FUNDED: Address = address!("0000000000000000000000000000000000c00007");
+
+    assert_charges_no_state_gas(
+        "a SELFDESTRUCT with nothing to move",
+        |envs, m| crowded_account(envs, EMPTY, m),
+        || {
+            // The contract holds no balance, so the beneficiary receives nothing and is not
+            // created.
+            let db = MemoryDatabase::default()
+                .account_balance(CALLER, U256::from(10u64.pow(18)))
+                .account_code(CONTRACT, selfdestruct_to(EMPTY).build());
+            (db, call_contract())
+        },
+    );
+
+    assert_charges_no_state_gas(
+        "a SELFDESTRUCT to an account that exists",
+        |envs, m| crowded_account(envs, FUNDED, m),
+        || {
+            let db = db(selfdestruct_to(FUNDED).build()).account_balance(FUNDED, U256::from(1));
+            (db, call_contract())
+        },
+    );
+}
+
 /* The remaining creation sites. */
 
 /// `CREATE2` reaches its deployment address by hashing rather than by nonce, and is priced in
