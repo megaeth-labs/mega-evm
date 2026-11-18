@@ -308,6 +308,18 @@ fn test_keyless_deploy_not_pre_eip155() {
     }
 }
 
+/// The transaction must be signed at nonce 0: the deploy address is the signer's first.
+#[test]
+fn test_keyless_deploy_non_zero_tx_nonce() {
+    for gas_limit in GAS_LIMITS {
+        let deployment =
+            Deployment::signed(1, SIGNED_GAS_LIMIT, U256::ZERO, deploying(&runtime(1)));
+        let outcome = submit(system_db(), &deployment.tx, LARGE_OVERRIDE, gas_limit);
+        assert_eq!(refusal(&outcome), KeylessDeployError::NonZeroTxNonce { tx_nonce: 1 });
+        assert_nothing_written(&outcome, &deployment, 0);
+    }
+}
+
 /// Rule 8: the init code is within the initcode size limit the spec fixes.
 #[test]
 fn test_init_code_over_the_limit_is_refused() {
@@ -339,6 +351,18 @@ fn test_init_code_at_the_limit_is_admitted() {
             matches!(failure(&outcome), KeylessDeployError::EmptyCodeDeployed { .. }),
             "at {gas_limit}",
         );
+    }
+}
+
+/// Rule 4: the signer's nonce is at most 1.
+#[test]
+fn test_keyless_deploy_signer_nonce_too_high() {
+    for gas_limit in GAS_LIMITS {
+        let deployment = small();
+        let db = system_db().account_nonce(deployment.signer, 2);
+        let outcome = submit(db, &deployment.tx, LARGE_OVERRIDE, gas_limit);
+        assert_eq!(refusal(&outcome), KeylessDeployError::SignerNonceTooHigh { signer_nonce: 2 });
+        assert_nothing_written(&outcome, &deployment, 2);
     }
 }
 
@@ -574,6 +598,18 @@ fn test_a_signer_that_sends_its_failing_deployment_ends_at_nonce_one() {
         assert_eq!(outcome.usage.write_records, 0, "at {gas_limit}");
         let reference = reference(deployment.call_data(LARGE_OVERRIDE), gas_limit);
         assert_eq!(outcome.usage.data_size, reference.usage.data_size, "at {gas_limit}");
+    }
+}
+
+/// Rule 9: the signer has no code — EIP-3607 for a sender that is not the transaction's.
+#[test]
+fn test_a_signer_with_code_is_refused() {
+    for gas_limit in GAS_LIMITS {
+        let deployment = small();
+        let db = system_db().account_code(deployment.signer, Bytes::from_static(&[0x00]));
+        let outcome = submit(db, &deployment.tx, LARGE_OVERRIDE, gas_limit);
+        assert_eq!(refusal(&outcome), KeylessDeployError::SignerHasCode);
+        assert_nothing_written(&outcome, &deployment, 0);
     }
 }
 

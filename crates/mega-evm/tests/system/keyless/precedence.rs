@@ -14,7 +14,6 @@
 //! bytecode and reverted with empty data. A call whose arguments do not decode is no deployment
 //! at all, with or without value, and runs the bytecode as the legacy engine did.
 
-use alloy_sol_types::SolError;
 use mega_evm::{
     system::keyless::{decode_error_result, KEYLESS_DEPLOY_OVERHEAD_GAS},
     test_utils::MemoryDatabase,
@@ -92,19 +91,6 @@ fn too_low(provided: u64) -> Answer {
         tx_gas_limit: signed_gas(),
         provided_gas_limit: provided,
     })
-}
-
-#[test]
-fn test_decode_gas_limit_too_low_preserves_both_limits() {
-    let bytes = IKeylessDeploy::GasLimitTooLow { txGasLimit: 100_000, providedGasLimit: 99_999 }
-        .abi_encode();
-    assert_eq!(
-        decode_error_result(&bytes),
-        Some(KeylessDeployError::GasLimitTooLow {
-            tx_gas_limit: 100_000,
-            provided_gas_limit: 99_999,
-        }),
-    );
 }
 
 /// Pairs of failing rules that do not depend on the call's gas, at both gas limits: the rule the
