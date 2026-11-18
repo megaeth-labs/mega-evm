@@ -639,6 +639,7 @@ line = 1774
 column = 1
 mutant = "spec-gate let gas_remaining_before = match (&action, ctx.spec.is_enabled(MegaSpecId::MINI_REX)) { -> let gas_remaining_before = match (&action, ctx.spec.is_enabled(MegaSpecId::EQUIVALENCE)) {"
 justification = "Unobservable in the window: the inspected-return path reads gas into the same local snapshot and passes it to the same `after_frame_run`, which returns before reading it in the alias window (execution.rs:509). Neither the normal nor the intercepted callback can observe the snapshot."
+reviewer = "RealiCZ (cz)"
 
 # --- crates/mega-evm/src/evm/execution.rs:1586 ---
 
@@ -650,6 +651,7 @@ line = 1586
 column = 1
 mutant = "spec-gate if self.ctx_ref().spec.is_enabled(MegaSpecId::REX4) { -> if self.ctx_ref().spec.is_enabled(MegaSpecId::REX3) {"
 justification = "Reachable check, unobservable state: this line clears a volatile-access disable on frame return. A disable is created only by `AccessControlInterceptor::handle_disable` (system/intercept.rs:357), whose `ACTIVATION_SPEC` is `MegaSpecId::REX4` (system/intercept.rs:340), and the tx-start reset sets the depth to `None`. At REX3 `disable_depth` is therefore always `None`, so `enable_access_if_returning` has nothing to clear; a normal REX3 transaction cannot build the state this clears. Producing one by calling the public `disable_access` from a callback is outside this proof."
+reviewer = "RealiCZ (cz)"
 
 # --- crates/mega-evm/src/evm/execution.rs:1539 ---
 
@@ -661,6 +663,7 @@ line = 1539
 column = 1
 mutant = "spec-gate let gas_remaining_before = match (&action, context.spec.is_enabled(MegaSpecId::MINI_REX)) { -> let gas_remaining_before = match (&action, context.spec.is_enabled(MegaSpecId::EQUIVALENCE)) {"
 justification = "Unobservable in the window: the value recorded here is a local snapshot consumed only by `after_frame_run` (execution.rs:1557). In the alias window that consumer returns before reading it (`!is_enabled(MINI_REX)` at execution.rs:509), and `process_next_action` never receives the snapshot."
+reviewer = "RealiCZ (cz)"
 
 # --- crates/mega-evm/src/evm/host.rs:639 ---
 
@@ -672,6 +675,7 @@ line = 639
 column = 1
 mutant = "spec-gate debug_assert!(self.spec.is_enabled(MegaSpecId::REX)); -> debug_assert!(self.spec.is_enabled(MegaSpecId::MINI_REX));"
 justification = "`debug_assert!` only: the assertion's own gate is `REX`, not `MINI_REX`. `create_contract_storage_gas` is reached from instructions.rs:2616-2621 and evm/execution.rs:815-822, both of which select `new_account_storage_gas` under `MINI_REX`, so the `REX` paths keep calling it; the REX6-only path at :2718 satisfies the original assertion as well. Compiled out in release."
+reviewer = "RealiCZ (cz)"
 
 # --- crates/mega-evm/src/evm/host.rs:602 ---
 
@@ -683,6 +687,7 @@ line = 602
 column = 1
 mutant = "spec-gate debug_assert!(self.spec.is_enabled(MegaSpecId::MINI_REX)); -> debug_assert!(self.spec.is_enabled(MegaSpecId::EQUIVALENCE));"
 justification = "`debug_assert!` only. `additional_limit()` is called from the instruction tables and from the intrinsic accounting at evm/execution.rs:744-752, both guarded by the same spec gate; relaxing the assert removes a debug-time invariant and is compiled out in release."
+reviewer = "RealiCZ (cz)"
 
 # --- crates/mega-evm/src/evm/host.rs:608 ---
 
@@ -694,6 +699,7 @@ line = 608
 column = 1
 mutant = "spec-gate debug_assert!(self.spec.is_enabled(MegaSpecId::MINI_REX)); -> debug_assert!(self.spec.is_enabled(MegaSpecId::EQUIVALENCE));"
 justification = "`debug_assert!` only: SSTORE enters at instructions.rs:927 and the helper is called at :2862, and the alias window installs the stock handler (instructions.rs:203). Relaxing the assert removes a debug-time invariant and is compiled out in release."
+reviewer = "RealiCZ (cz)"
 
 # --- crates/mega-evm/src/evm/host.rs:625 ---
 
@@ -705,6 +711,7 @@ line = 625
 column = 1
 mutant = "spec-gate debug_assert!(self.spec.is_enabled(MegaSpecId::MINI_REX)); -> debug_assert!(self.spec.is_enabled(MegaSpecId::EQUIVALENCE));"
 justification = "`debug_assert!` only. Besides the instruction tables, the helper is called from top-level CREATE and empty-account transfer validation at evm/execution.rs:747, :821 and :844, all under the same spec gate. Relaxing the assert is compiled out in release."
+reviewer = "RealiCZ (cz)"
 
 # --- crates/mega-evm/src/evm/instructions.rs:3083 ---
 
@@ -716,6 +723,7 @@ line = 3083
 column = 1
 mutant = "spec-gate .is_enabled(MegaSpecId::REX5) && -> .is_enabled(MegaSpecId::REX4) &&"
 justification = "The gate is evaluated on MINI_REX/MINI_REX_2 CALLCODE, but its true branch is the CALL_STIPEND subtraction, and that branch is unreachable there: the wrapped handler is installed only by the mini_rex table (instructions.rs:201-203, CALLCODE assignment at :1015); from `mod rex` the entry is `forward_gas_ext::call_code` (:305) and from REX4 `volatile_data_ext::call_code` (:418); `mod rex5` inherits rex4's table (:467). On the specs that reach this line `is_enabled(REX4)`, `is_enabled(REX5)` and `is_enabled(REX6)` are all false, so `stipend_from_revm` stays 0. The macro's DELEGATECALL and STATICCALL schemes cannot satisfy the value condition at :3084 either."
+reviewer = "RealiCZ (cz)"
 
 # --- crates/mega-evm/src/evm/instructions.rs:3083 ---
 
@@ -727,3 +735,4 @@ line = 3083
 column = 1
 mutant = "spec-gate .is_enabled(MegaSpecId::REX5) && -> .is_enabled(MegaSpecId::REX6) &&"
 justification = "The gate is evaluated on MINI_REX/MINI_REX_2 CALLCODE, but its true branch is the CALL_STIPEND subtraction, and that branch is unreachable there: the wrapped handler is installed only by the mini_rex table (instructions.rs:201-203, CALLCODE assignment at :1015); from `mod rex` the entry is `forward_gas_ext::call_code` (:305) and from REX4 `volatile_data_ext::call_code` (:418); `mod rex5` inherits rex4's table (:467). On the specs that reach this line `is_enabled(REX4)`, `is_enabled(REX5)` and `is_enabled(REX6)` are all false, so `stipend_from_revm` stays 0. The macro's DELEGATECALL and STATICCALL schemes cannot satisfy the value condition at :3084 either."
+reviewer = "RealiCZ (cz)"
