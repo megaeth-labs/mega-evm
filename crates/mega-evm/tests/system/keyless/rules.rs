@@ -214,6 +214,8 @@ fn test_a_keyless_halt_omits_the_unread_deploy_code_hash() {
     let gas_limit =
         intrinsic + KEYLESS_DEPLOY_OVERHEAD_GAS + crate::common::account_state_gas() - 1;
     let outcome = submit(system_db(), &deployment.tx, LARGE_OVERRIDE, gas_limit);
+    // A failed signer-account charge must leave the signer nonce unspent.
+    assert_eq!(nonce(&outcome, deployment.signer), 0);
     assert_eq!(code_hash(&outcome, deployment.address), None);
 }
 
