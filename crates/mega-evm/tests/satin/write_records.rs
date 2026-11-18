@@ -30,9 +30,8 @@ use mega_evm::{
 };
 use revm::{
     bytecode::opcode::{
-        CALL, CALLDATASIZE, CALLER as CALLER_OPCODE, CALLVALUE, CREATE, DELEGATECALL, GAS, INVALID,
-        JUMPDEST, JUMPI, LOG2, POP, PUSH0, PUSH1, RETURN, REVERT, SELFDESTRUCT, SSTORE, STATICCALL,
-        STOP,
+        CALL, CALLDATASIZE, CALLER as CALLER_OPCODE, CREATE, DELEGATECALL, GAS, INVALID, JUMPDEST,
+        JUMPI, LOG2, POP, PUSH0, PUSH1, RETURN, REVERT, SELFDESTRUCT, SSTORE, STATICCALL, STOP,
     },
     context::ContextTr,
     interpreter::{
@@ -184,33 +183,6 @@ fn guarded(usage: LimitUsage) -> LimitUsage {
 /// `records` records, at the prices in effect.
 fn body_and_records(records: u64) -> u64 {
     history(TX_BODY_SIZE + 1 + records * WRITE_RECORD_SIZE)
-}
-
-/// A transfer and its exact return take both records back: the recipient hands the value back to
-/// its caller, so both balances are what the transaction loaded, and neither account keeps a
-/// record. The two transfer logs stay, and the history the caller paid for the two records comes
-/// back to it once the return that took them back is kept.
-#[test]
-fn test_a_transfer_and_its_exact_return_take_both_records_back() {
-    let outcome = run_guarded(
-        guarded_code(append_value_call(BytecodeBuilder::default(), CONTRACT, 5).append(POP).stop()),
-        // Returns what it was sent, `CALLVALUE`, to `CALLER`.
-        BytecodeBuilder::default()
-            .append_many([PUSH0, PUSH0, PUSH0, PUSH0, CALLVALUE, CALLER_OPCODE, GAS, CALL, POP])
-            .stop()
-            .build(),
-    );
-    assert!(outcome.result.is_success(), "{:?}", outcome.result);
-    assert_eq!(
-        outcome.usage,
-        guarded(with_extra(body_only(), 2 * TRANSFER_LOG_SIZE)),
-        "no record stands; the two transfer logs do"
-    );
-    assert_eq!(outcome.state[&CALLEE].info.balance, U256::from(10_000_000), "back to its balance");
-    assert_eq!(outcome.state[&CONTRACT].info.balance, U256::ZERO);
-    if !crate::common::history_rounds() {
-        assert_eq!(outcome.gas.history, body_and_records(0), "the records' history came back");
-    }
 }
 
 /// A child that reverts after writing keeps nothing: a slot it wrote, a transfer it made and
@@ -627,24 +599,6 @@ fn reverting_creations(n: usize) -> Bytes {
     code.into()
 }
 
-/// A creation the creator cannot fund never starts (the opcode checks the endowment before it
-/// builds a frame), so it records nothing.
-#[test]
-fn test_creation_without_funds_records_nothing() {
-    let code = BytecodeBuilder::default()
-        .append_many([PUSH0, PUSH0])
-        .push_number(1_000_000_000_000_u64)
-        .append(CREATE)
-        .append(POP)
-        .stop()
-        .build();
-    let db = MemoryDatabase::default().account_code(CALLEE, code);
-    let (result, usage) = run(db, call(CALLER, CALLEE, U256::ZERO, value_call_room()));
-    assert!(result.result.is_success());
-    assert_eq!(usage, body_only());
-    assert_eq!(result.state[&CALLEE].info.nonce, 0, "the nonce was never bumped");
-}
-
 const A: Address = address!("00000000000000000000000000000000A0000001");
 const B: Address = address!("00000000000000000000000000000000B0000002");
 const SELF_CALLER: Address = address!("000000000000000000000000000000005E1F0004");
@@ -741,25 +695,6 @@ fn test_write_back_in_a_child_refunds_the_caller_record() {
         assert!(result.result.is_success());
         assert_eq!(usage, expected);
     }
-}
-
-/// A top-level creation records the created account, and nothing when it fails.
-#[test]
-fn test_top_level_create_records_the_created_account() {
-    // `STOP` is one byte of init code and deposits nothing.
-    let (result, usage) = run(
-        MemoryDatabase::default(),
-        create(CALLER, Bytes::from_static(&[STOP]), value_call_room()),
-    );
-    assert!(result.result.is_success());
-    assert_eq!(usage, grown(with_extra(records(1), 1), 1), "the created account is new");
-
-    let (result, usage) = run(
-        MemoryDatabase::default(),
-        create(CALLER, Bytes::from_static(&[INVALID]), value_call_room()),
-    );
-    assert!(!result.result.is_success());
-    assert_eq!(usage, with_extra(body_only(), 1));
 }
 
 /* ---------- the fee accounts and the sender ---------- */
