@@ -662,7 +662,7 @@ column = 1
 mutant = "spec-gate let gas_remaining_before = match (&action, context.spec.is_enabled(MegaSpecId::MINI_REX)) { -> let gas_remaining_before = match (&action, context.spec.is_enabled(MegaSpecId::EQUIVALENCE)) {"
 justification = "Unobservable in the window: the value recorded here is a local snapshot consumed only by `after_frame_run` (execution.rs:1557). In the alias window that consumer returns before reading it (`!is_enabled(MINI_REX)` at execution.rs:509), and `process_next_action` never receives the snapshot."
 
-# --- crates/mega-evm/src/evm/host.rs:442 ---
+# --- crates/mega-evm/src/evm/host.rs:639 ---
 
 [[suppress]]
 kind = "line"
@@ -671,7 +671,7 @@ file = "crates/mega-evm/src/evm/host.rs"
 line = 639
 column = 1
 mutant = "spec-gate debug_assert!(self.spec.is_enabled(MegaSpecId::REX)); -> debug_assert!(self.spec.is_enabled(MegaSpecId::MINI_REX));"
-justification = "`debug_assert!` only: `create_contract_storage_gas` is reached from instructions.rs:2616-2621 and evm/execution.rs:815-822, which select `new_account_storage_gas` under MINI_REX, and the REX6-only path at :2718 satisfies the original assertion too. Compiled out in release."
+justification = "`debug_assert!` only: the assertion's own gate is `REX`, not `MINI_REX`. `create_contract_storage_gas` is reached from instructions.rs:2616-2621 and evm/execution.rs:815-822, both of which select `new_account_storage_gas` under `MINI_REX`, so the `REX` paths keep calling it; the REX6-only path at :2718 satisfies the original assertion as well. Compiled out in release."
 
 # --- crates/mega-evm/src/evm/host.rs:602 ---
 

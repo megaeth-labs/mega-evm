@@ -48,8 +48,9 @@ fn build_evm<DB: revm::Database + core::fmt::Debug>(
 }
 
 /// CALLEE writes a slot, calls INNER (which writes a slot and emits LOG0), then CREATEs a
-/// one-byte contract. Covers the frame-entry, frame-return, storage-gas, code-deposit and
-/// volatile-access paths in a single transaction.
+/// one-byte contract. Covers the frame-entry, frame-return, storage-gas and volatile-access
+/// paths in a single transaction. The CREATE deploys an initcode of a single `STOP` byte, so the
+/// deployed runtime code is empty and this scenario does not exercise a non-zero code deposit.
 fn scenario_db() -> MemoryDatabase {
     // INNER writes a slot, emits LOG0 and returns the 32-byte word 0x2a.
     let inner_code = BytecodeBuilder::default()

@@ -6,6 +6,12 @@
 //! the latched limit verdict and the dynamic storage-gas cache still hold the previous spec's
 //! state. These tests pin what the alias window must do with that state, so a gate that is
 //! flipped one rung cannot quietly act on it.
+//!
+//! Carrying a context across the change is only a way to build a distinguishable state here; it is
+//! not a promise that the trackers, the latched verdict or the storage-gas cache are meant to
+//! survive a fork in production. If `with_cfg`'s reuse semantics change, revisit the bucket-set
+//! assertion and the halt-reason assertion first: they are the two that read state a fresh context
+//! would not have.
 
 use std::{cell::Cell, rc::Rc};
 
