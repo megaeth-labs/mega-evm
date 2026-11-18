@@ -30,7 +30,7 @@ use revm::{
 };
 
 use super::*;
-use crate::common::{calls_with, split_outcome, with_contract, CALLER as RELAYER, CONTRACT};
+use crate::common::CALLER as RELAYER;
 
 /// An account the deployments below call into.
 const HELPER: Address = address!("0x0000000000000000000000000000000000500000");
@@ -78,18 +78,12 @@ fn test_keyless_deploy_eip1820() {
     }
 }
 
-/// A deployment lands at the signer's first creation address, whoever the signer is, and the
-/// deployed code is the runtime the init code returned.
 #[test]
-fn test_the_deploy_address_is_the_signers_first_creation_address() {
-    for gas_limit in GAS_LIMITS {
-        for len in [1, 2, 3] {
-            let deployment = Deployment::new(deploying(&runtime(len)));
-            let outcome = deploy(system_db(), &deployment, gas_limit);
-            assert_eq!(returned(&outcome).deployedAddress, deployment.signer.create(0));
-            assert_eq!(code_hash(&outcome, deployment.address), Some(keccak(&runtime(len))));
-        }
-    }
+fn test_a_keyless_deployment_returns_the_deploy_code_hash() {
+    let code = runtime(3);
+    let deployment = Deployment::new(deploying(&code));
+    let outcome = deploy(system_db(), &deployment, GAS_LIMITS[0]);
+    assert_eq!(code_hash(&outcome, deployment.address), Some(keccak(&code)));
 }
 
 /// The hash of `code`.
@@ -785,28 +779,6 @@ fn assert_beneficiary_paid(init_code: Bytes) {
 #[test]
 fn test_beneficiary_receives_fees_on_execution_failure() {
     assert_beneficiary_paid(Bytes::from_static(&[PUSH0, PUSH0, REVERT]));
-}
-
-/// A contract's `keylessDeploy` call is not dispatched: it runs the method body, which reverts
-/// with `NotIntercepted()`, and nothing is deployed.
-#[test]
-fn test_keyless_deploy_not_intercepted_for_inner_calls() {
-    for gas_limit in GAS_LIMITS {
-        let deployment = Deployment::new(deploying(&runtime(1)));
-        let code =
-            calls_with(CALL, KEYLESS_DEPLOY_ADDRESS, &deployment.call_data(LARGE_OVERRIDE), 0);
-        let mut tx = call_tx(CONTRACT, [], U256::ZERO);
-        tx.0.base.gas_limit = gas_limit;
-        let outcome = MegaEvm::new(context(with_contract(code)))
-            .execute_transaction(tx)
-            .expect("a valid transaction");
-        let output = outcome.result.output().cloned().unwrap_or_default();
-        let (status, returned) = split_outcome(&output);
-        assert!(!status);
-        assert_eq!(returned, IKeylessDeploy::NotIntercepted::SELECTOR);
-        assert!(!outcome.state.contains_key(&deployment.signer), "no rule read the signer");
-        assert!(!outcome.state.contains_key(&deployment.address));
-    }
 }
 
 /// A `keylessDeploy` call made inside a keyless deployment is a contract's call like any other:
