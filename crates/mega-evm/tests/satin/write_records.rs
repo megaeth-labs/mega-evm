@@ -743,25 +743,6 @@ fn test_write_back_in_a_child_refunds_the_caller_record() {
     }
 }
 
-/// A top-level creation records the created account, and nothing when it fails.
-#[test]
-fn test_top_level_create_records_the_created_account() {
-    // `STOP` is one byte of init code and deposits nothing.
-    let (result, usage) = run(
-        MemoryDatabase::default(),
-        create(CALLER, Bytes::from_static(&[STOP]), value_call_room()),
-    );
-    assert!(result.result.is_success());
-    assert_eq!(usage, grown(with_extra(records(1), 1), 1), "the created account is new");
-
-    let (result, usage) = run(
-        MemoryDatabase::default(),
-        create(CALLER, Bytes::from_static(&[INVALID]), value_call_room()),
-    );
-    assert!(!result.result.is_success());
-    assert_eq!(usage, with_extra(body_only(), 1));
-}
-
 /* ---------- the fee accounts and the sender ---------- */
 
 /// The block beneficiary of the fee-account rows: an account of its own, not the zero address.

@@ -3,7 +3,10 @@
 
 use std::collections::BTreeSet;
 
-use mega_evm::system::keyless::IKeylessDeploy::IKeylessDeployErrors;
+use alloy_sol_types::SolError;
+use mega_evm::system::keyless::{
+    decode_error_result, IKeylessDeploy, IKeylessDeploy::IKeylessDeployErrors, KeylessDeployError,
+};
 
 /// The `KeylessDeploy` spec page.
 const KEYLESS_DEPLOY_MD: &str =
@@ -28,4 +31,17 @@ fn test_the_interface_declares_exactly_the_documented_errors() {
     let declared: BTreeSet<&str> = IKeylessDeployErrors::SIGNATURES.iter().copied().collect();
     assert_eq!(declared.len(), IKeylessDeployErrors::SIGNATURES.len(), "a signature repeats");
     assert_eq!(declared, documented_errors());
+}
+
+#[test]
+fn test_decode_gas_limit_too_low_preserves_both_limits() {
+    let bytes = IKeylessDeploy::GasLimitTooLow { txGasLimit: 100_000, providedGasLimit: 99_999 }
+        .abi_encode();
+    assert_eq!(
+        decode_error_result(&bytes),
+        Some(KeylessDeployError::GasLimitTooLow {
+            tx_gas_limit: 100_000,
+            provided_gas_limit: 99_999,
+        }),
+    );
 }

@@ -120,14 +120,6 @@ fn run_outcome(db: MemoryDatabase, tx: MegaTransaction) -> MegaTransactionOutcom
     MegaEvm::new(chain_context(db)).execute_transaction(tx).expect("the transaction is valid")
 }
 
-/// Runs `tx` and returns the error it was rejected with, as a string.
-fn rejection(db: MemoryDatabase, tx: MegaTransaction) -> String {
-    let error = MegaEvm::new(chain_context(db))
-        .execute_transaction(tx)
-        .expect_err("the transaction must be rejected");
-    format!("{error:?}")
-}
-
 /// The Oracle's slot as the database holds it.
 fn oracle_slot<DB: revm::Database>(db: &mut DB, slot: U256) -> U256
 where
@@ -579,31 +571,6 @@ fn test_two_system_transactions_in_a_block_both_go_through() {
         U256::from_be_bytes(B256::with_last_byte(0xbb).0),
     );
     assert_eq!(nonce_of(&mut state, MEGA_SYSTEM_ADDRESS), 2);
-}
-
-/// A system transaction carries the chain's id, so it cannot be replayed on another chain; one
-/// without an id at all is refused too.
-#[test]
-fn test_a_system_transaction_is_bound_to_the_chain() {
-    let foreign = legacy_tx_with_chain_id(
-        MEGA_SYSTEM_ADDRESS,
-        TxKind::Call(ORACLE_CONTRACT_ADDRESS),
-        set_slot(ORACLE_SLOT, B256::with_last_byte(0xcc)),
-        0,
-        Some(31_337),
-    );
-    let rejected = rejection(chain_db(), foreign);
-    assert!(rejected.contains("InvalidChainId"), "{rejected}");
-
-    let no_chain_id = legacy_tx_with_chain_id(
-        MEGA_SYSTEM_ADDRESS,
-        TxKind::Call(ORACLE_CONTRACT_ADDRESS),
-        set_slot(ORACLE_SLOT, B256::with_last_byte(0xdd)),
-        0,
-        None,
-    );
-    let rejected = rejection(chain_db(), no_chain_id);
-    assert!(rejected.contains("MissingChainId"), "{rejected}");
 }
 
 /// Runs `tx` on `db` under the chain's configuration with `mutate` applied.

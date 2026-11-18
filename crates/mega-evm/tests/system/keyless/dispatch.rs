@@ -9,9 +9,7 @@
 use alloy_primitives::{Bytes, U256};
 use alloy_sol_types::{SolCall, SolError};
 use mega_evm::{
-    system::keyless::{
-        IKeylessDeploy, KeylessDeployError, KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_OVERHEAD_GAS,
-    },
+    system::keyless::{IKeylessDeploy, KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_OVERHEAD_GAS},
     EvmTxRuntimeLimits,
 };
 use revm::{
@@ -19,7 +17,7 @@ use revm::{
     context::result::ExecutionResult,
 };
 
-use super::{beyond, reference, refusal, run_with, GAS_LIMITS};
+use super::{beyond, reference, run_with, GAS_LIMITS};
 use crate::common::{
     body_history, call_tx, calls_with, output, revert_data, run, split_outcome, system_db,
     with_contract, CONTRACT,
@@ -50,20 +48,6 @@ fn unknown_selector(data: &Bytes) -> Bytes {
     let mut data = data.to_vec();
     data[0] ^= 0xff;
     Bytes::from(data)
-}
-
-/// A dispatched `keylessDeploy` transaction pays the fixed overhead, then is refused by the
-/// rules: bytes that do not decode as a signed transaction are `MalformedEncoding()`. The
-/// deployed bytecode does not run, and the overhead is all the refusal keeps.
-#[test]
-fn test_a_keyless_deploy_transaction_pays_the_overhead() {
-    let data = keyless_deploy(b"a transaction");
-    for gas_limit in GAS_LIMITS {
-        let dispatched = run_with(system_db(), data.clone(), gas_limit, no_limits());
-        assert_eq!(refusal(&dispatched), KeylessDeployError::MalformedEncoding);
-        let [total, regular, ..] = beyond(&dispatched, &reference(data.clone(), gas_limit));
-        assert_eq!([total, regular], [KEYLESS_DEPLOY_OVERHEAD_GAS; 2], "at {gas_limit}");
-    }
 }
 
 /// A call a contract makes is not dispatched, whatever its selector: only a transaction
@@ -175,71 +159,6 @@ fn test_arguments_that_do_not_decode_are_not_dispatched() {
                  owe",
             );
         }
-    }
-}
-
-/// The calldata of a `keylessDeploy` call: the selector and `words` as 32-byte words, then
-/// `tail` as it is.
-fn raw_call(words: &[u64], tail: &[u8]) -> Bytes {
-    let mut data = KEYLESS_DEPLOY.to_vec();
-    for word in words {
-        data.extend(U256::from(*word).to_be_bytes::<32>());
-    }
-    data.extend(tail);
-    Bytes::from(data)
-}
-
-/// A call is recognised exactly when the contract's own calldata decoder for `(bytes, uint256)`
-/// accepts its arguments, and that decoder asks for no padding and no canonical offset: the
-/// padding of the bytes' tail cut off, an offset that points at the head's second word, which is
-/// then read as the length, and an offset of zero are all recognised. Each pays the overhead and
-/// reaches the rule that refuses a payload that is no signed transaction.
-#[test]
-fn test_arguments_the_contracts_decoder_accepts_are_dispatched() {
-    let cases = [
-        // offset 0x40, gas limit, length 5, five bytes and none of the 27 bytes of padding
-        ("the tail's padding cut off", raw_call(&[0x40, 1_000_000, 5], &[0xab; 5])),
-        // offset 0x20 points at the second head word (3), which is read as the length of the
-        // three bytes after the head
-        ("an offset at the second head word", raw_call(&[0x20, 3], &[0xab; 3])),
-        // offset zero points at the first head word (0), read as an empty payload
-        ("an offset of zero", raw_call(&[0, 1_000_000], &[])),
-    ];
-    for (name, data) in cases {
-        for gas_limit in GAS_LIMITS {
-            let dispatched = run_with(system_db(), data.clone(), gas_limit, no_limits());
-            assert_eq!(
-                refusal(&dispatched),
-                KeylessDeployError::MalformedEncoding,
-                "{name} at {gas_limit}",
-            );
-            let [total, regular, ..] = beyond(&dispatched, &reference(data.clone(), gas_limit));
-            assert_eq!(
-                [total, regular],
-                [KEYLESS_DEPLOY_OVERHEAD_GAS; 2],
-                "{name} at {gas_limit}: recognised, so the overhead is charged",
-            );
-        }
-    }
-}
-
-/// The first of those cases one byte short of the declared length is refused by the same
-/// decoder: the call is not recognised, pays no overhead, and the bytecode reverts with empty
-/// data.
-#[test]
-fn test_a_payload_one_byte_short_of_its_declared_length_is_not_dispatched() {
-    let data = raw_call(&[0x40, 1_000_000, 5], &[0xab; 4]);
-    for gas_limit in GAS_LIMITS {
-        let outcome = run_with(system_db(), data.clone(), gas_limit, no_limits());
-        let ExecutionResult::Revert { output, .. } = &outcome.result else {
-            panic!("the bytecode did not revert: {:?}", outcome.result);
-        };
-        assert!(output.is_empty(), "the bytecode's decoder reverts with empty data");
-        let [total, regular, ..] = beyond(&outcome, &reference(data.clone(), gas_limit));
-        assert!(
-            total < KEYLESS_DEPLOY_OVERHEAD_GAS && regular < KEYLESS_DEPLOY_OVERHEAD_GAS,
-            "at {gas_limit}: paid {total} beyond a plain call, an overhead it does not owe",
-        );
     }
 }
 

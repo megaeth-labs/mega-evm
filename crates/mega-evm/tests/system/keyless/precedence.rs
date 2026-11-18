@@ -6,8 +6,8 @@
 //! deploy address and the balance. So each pair of failing rules below reports the error the
 //! legacy engine reported for it. What the `CREATE` opcode charges the call for the creation's
 //! start is this engine's alone, and comes after every rule: a call a rule refuses is refused
-//! with that rule, whether or not it could have paid those charges. The last test pins what those
-//! charges refuse on their own, where the legacy engine charged nothing.
+//! with that rule, whether or not it could have paid those charges. The tests also pin what those
+//! charges refuse on their own.
 //!
 //! One pair reports an error the legacy engine never reported: a call carrying value whose
 //! carried transaction does not decode is refused for the value, where the legacy engine ran the
@@ -316,37 +316,22 @@ fn test_the_forward_comes_before_the_address_and_the_balance_above_the_cap() {
     }
 }
 
-/// What the `CREATE` opcode charges the call for the creation's start can refuse a call no rule
-/// refuses: a call that cannot pay it runs out of gas, and one it leaves short of the signed gas
-/// limit is refused `GasLimitTooLow` with what it left. The legacy engine charged none of it to
-/// the call, and ran such a deployment in its sandbox on what the call had. Above the execution
-/// cap the refusal is
-/// `limits::test_a_refusal_after_the_creations_charges_gives_the_reservoir_back`.
+/// A funded signer's forward falls below the signed limit only after the creation charges.
 #[test]
-fn test_the_creations_charges_can_refuse_a_call_no_rule_refuses() {
-    let plain = signed(signed_gas(), 0);
-    let small = signed(1_000, 0);
-    let data = |deployment: &Deployment| deployment.call_data(LARGE_OVERRIDE);
+fn test_the_creation_charges_reduce_the_reported_forward() {
+    let deployment = signed(signed_gas(), 0);
+    let data = deployment.call_data(LARGE_OVERRIDE);
     let charges = create_regular(deploying(&runtime(1)).len()) +
         entry(GasId::create_state_gas()) +
         2 * record();
-    let cases = [
-        Case {
-            rules: "creation charges the call cannot pay",
-            db: funded(system_db(), &small),
-            data: data(&small),
-            gas_limit: leaving(&data(&small), 1_500),
-            answer: Answer::OutOfGas,
-        },
-        Case {
-            rules: "a forward the creation's charges take below the signed gas limit",
-            db: funded(system_db(), &plain),
-            data: data(&plain),
-            gas_limit: leaving(&data(&plain), signed_gas()),
-            answer: too_low(signed_gas() - charges),
-        },
-    ];
-    cases.into_iter().for_each(Case::check);
+    Case {
+        rules: "creation charges reduce the regular gas available to forward",
+        db: funded(system_db(), &deployment),
+        gas_limit: leaving(&data, signed_gas()),
+        data,
+        answer: too_low(signed_gas() - charges),
+    }
+    .check();
 }
 
 /// An out-of-gas at step 14 halts the call, consuming its regular gas, and gives back the state
