@@ -3,7 +3,7 @@
 
 use alloy_evm::Evm;
 use alloy_primitives::{address, Address, Bytes, U256};
-use alloy_sol_types::SolCall;
+use alloy_sol_types::{SolCall, SolError};
 use mega_evm::{
     system::{
         storage_slots::CURRENT_SYSTEM_ADDRESS, IMegaAccessControl, IMegaLimitControl, IOracle,
@@ -171,6 +171,28 @@ fn test_a_database_error_reading_the_registry_fails_the_transaction() {
     db.fail_on_storage = Some((SEQUENCER_REGISTRY_ADDRESS, CURRENT_SYSTEM_ADDRESS));
     let error = database_error(db);
     assert!(format!("{error}").contains("injected storage() error"), "{error}");
+}
+
+/// The value policy is the interceptor's, not the account's: a value-bearing transaction to a
+/// control contract is refused with `NonZeroTransfer()` before any value moves.
+#[test]
+fn test_a_value_bearing_transaction_is_refused_before_the_value_moves() {
+    let db = system_db();
+    let mut tx = call_tx(LIMIT_CONTROL_ADDRESS, REMAINING_COMPUTE_GAS, U256::from(1));
+    tx.0.base.caller = crate::common::CALLER;
+    let result = run(db, tx);
+
+    let revm::context::result::ExecutionResult::Revert { output, .. } = &result.result else {
+        panic!("the transaction did not revert: {:?}", result.result);
+    };
+    assert_eq!(output[..], IMegaLimitControl::NonZeroTransfer::SELECTOR);
+    assert!(
+        result
+            .state
+            .get(&LIMIT_CONTROL_ADDRESS)
+            .is_none_or(|account| account.info.balance.is_zero()),
+        "the refused value stayed with its sender",
+    );
 }
 
 /// A `STATICCALL` to a system contract from inside a static frame is intercepted too: nothing
