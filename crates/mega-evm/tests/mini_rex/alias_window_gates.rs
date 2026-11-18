@@ -51,13 +51,22 @@ fn build_evm<DB: revm::Database + core::fmt::Debug>(
 /// one-byte contract. Covers the frame-entry, frame-return, storage-gas, code-deposit and
 /// volatile-access paths in a single transaction.
 fn scenario_db() -> MemoryDatabase {
+    // INNER writes a slot, emits LOG0 and returns the 32-byte word 0x2a.
     let inner_code = BytecodeBuilder::default()
         .sstore(U256::from(1), U256::from(2))
         .push_number(0u64)
         .push_number(0u64)
         .append(LOG0)
-        .stop()
+        .push_number(0x2au64)
+        .push_number(0u64)
+        .append(MSTORE)
+        .push_number(32u64)
+        .push_number(0u64)
+        .append(RETURN)
         .build();
+    // CALLEE writes a slot, calls INNER and stores the call's success flag at word 0, then
+    // CREATEs a contract and stores the returned address at word 32, returning both words. The
+    // success flag and the address therefore reach the caller instead of being discarded.
     let callee_code = BytecodeBuilder::default()
         .sstore(U256::from(3), U256::from(4))
         .push_number(0u64)
@@ -68,13 +77,17 @@ fn scenario_db() -> MemoryDatabase {
         .push_address(INNER)
         .push_number(100_000u64)
         .append(CALL)
-        .append(POP)
+        .push_number(0u64)
+        .append(MSTORE)
         .push_number(1u64)
         .push_number(0u64)
         .push_number(0u64)
         .append(CREATE)
-        .append(POP)
-        .stop()
+        .push_number(32u64)
+        .append(MSTORE)
+        .push_number(64u64)
+        .push_number(0u64)
+        .append(RETURN)
         .build();
 
     MemoryDatabase::default()
@@ -98,13 +111,13 @@ fn scenario_tx() -> MegaTransaction {
 }
 
 /// `(success, gas used, output length)` for the scenario transaction at `spec`.
-fn observe(spec: MegaSpecId) -> (bool, u64, usize) {
+fn observe(spec: MegaSpecId) -> (bool, u64, Vec<u8>) {
     let mut evm = build_evm(scenario_db(), spec);
     let result = alloy_evm::Evm::transact_raw(&mut evm, scenario_tx()).expect("tx must execute");
     (
         result.result.is_success(),
         result.result.tx_gas_used(),
-        result.result.output().map(|out| out.len()).unwrap_or(0),
+        result.result.output().map(|out| out.to_vec()).unwrap_or_default(),
     )
 }
 
@@ -120,6 +133,21 @@ fn test_mini_rex_1_window_matches_equivalence_observation() {
         "the MiniRex1 window must observe exactly what EQUIVALENCE observes"
     );
     assert!(at_window.0, "scenario transaction must succeed in the window");
+    assert_eq!(
+        at_window.2.len(),
+        64,
+        "the callee must return the call flag and the created address"
+    );
+    assert_eq!(
+        U256::from_be_slice(&at_window.2[..32]),
+        U256::from(1u64),
+        "the nested call must report success to the caller"
+    );
+    assert_ne!(
+        U256::from_be_slice(&at_window.2[32..]),
+        U256::ZERO,
+        "the CREATE must report a deployed address to the caller"
+    );
 }
 
 /// No metered dimension may move in the window: the stock table installs no wrapper that feeds
