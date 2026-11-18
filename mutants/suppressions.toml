@@ -612,3 +612,193 @@ column = 49
 mutant = "replace && with || in apply_sandbox_state_journaled_inner"
 justification = "Equivalent: on equal code hashes, || adds only two copies: a parent that already has code receives the same-hash (identical) bytecode, and an empty-hash parent has None or empty code replaced by the sandbox's empty bytecode, the Some(Bytecode::default()) revm stores itself on any code load of an empty-hash account, so no read, gas cost, result or committed state changes."
 reviewer = "RealiCZ (cz)"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# spec-gate survivors from the nightly sweep (run 44009245120, main cdcce16d).
+#
+# Every entry below is a gate the sweep flipped that execution cannot distinguish. The two
+# reasons used are: the mutated branch cannot be reached at the spec where the flip takes
+# effect, or it runs but cannot change anything the chain can observe. The MiniRex1 alias
+# window on mainnet (block/chain.rs:38-39) does execute these code paths with the gate off,
+# so the window's observable behaviour is pinned by tests/mini_rex/alias_window_gates.rs;
+# these entries cover the branches inside that window that remain unobservable.
+#
+# The sibling survivor at sandbox/execution.rs:603 is closed by a test instead
+# (test_rex5_sandbox_balance_precheck_ignores_gas_price).
+# ─────────────────────────────────────────────────────────────────────────────
+
+# --- crates/mega-evm/src/evm/context.rs:692 ---
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/evm/context.rs"
+line = 692
+column = 1
+mutant = "spec-gate if self.spec.is_enabled(MegaSpecId::MINI_REX) { -> if self.spec.is_enabled(MegaSpecId::EQUIVALENCE) {"
+justification = "Unobservable in the MiniRex1 window (gate off, mutant turns it on): `on_new_block` only refreshes the cached dynamic storage-gas price. Its readers \u2014 `sstore_set_storage_gas`, `new_account_storage_gas`, `create_contract_storage_gas` \u2014 are reached exclusively through the mini_rex+ instruction tables, and `MINI_REX_1` installs revm's stock mainnet table (instructions.rs:201-203). Nothing reads the refreshed price in this window, and the calculator's field is not part of any execution output."
+reviewer = "RealiCZ"
+
+# --- crates/mega-evm/src/evm/execution.rs:427 ---
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/evm/execution.rs"
+line = 427
+column = 1
+mutant = "spec-gate if ctx.spec.is_enabled(MegaSpecId::MINI_REX) { -> if ctx.spec.is_enabled(MegaSpecId::EQUIVALENCE) {"
+justification = "Unobservable in the window: `before_frame_run` answers `Some` only when a metered dimension already exceeded its limit. The stock table installs no wrapper and `after_frame_run` returns before charging anything (`!is_enabled(MINI_REX)` at execution.rs:509 in the unmutated tree), so every counter stays 0 and the call returns `None` \u2014 the same value the unmutated `None` arm yields."
+reviewer = "RealiCZ"
+
+# --- crates/mega-evm/src/evm/execution.rs:1680 ---
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/evm/execution.rs"
+line = 1680
+column = 1
+mutant = "spec-gate let is_mini_rex_enabled = ctx.spec.is_enabled(MegaSpecId::MINI_REX); -> let is_mini_rex_enabled = ctx.spec.is_enabled(MegaSpecId::EQUIVALENCE);"
+justification = "Unobservable: the flag only orders the additional-limit check against the call-depth check for inspector-intercepted frames, and in the window no limit can be exceeded (counters stay 0), so both orders select the same error. Block replay drives the executor without an inspector, so that intercepted branch is not taken on chain at all."
+reviewer = "RealiCZ"
+
+# --- crates/mega-evm/src/evm/execution.rs:1774 ---
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/evm/execution.rs"
+line = 1774
+column = 1
+mutant = "spec-gate let gas_remaining_before = match (&action, ctx.spec.is_enabled(MegaSpecId::MINI_REX)) { -> let gas_remaining_before = match (&action, ctx.spec.is_enabled(MegaSpecId::EQUIVALENCE)) {"
+justification = "Unobservable in the window: same recording as execution.rs:1539 on the inspected path; its only consumer is `after_frame_run`, which returns before reading it (`!is_enabled(MINI_REX)` at execution.rs:509)."
+reviewer = "RealiCZ"
+
+# --- crates/mega-evm/src/evm/execution.rs:509 ---
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/evm/execution.rs"
+line = 509
+column = 1
+mutant = "spec-gate if !ctx.spec.is_enabled(MegaSpecId::MINI_REX) { -> if !ctx.spec.is_enabled(MegaSpecId::EQUIVALENCE) {"
+justification = "Unobservable in the window: the mutant lets the after-frame accounting run, but it only accumulates counters and compares them against `EvmTxRuntimeLimits::from_spec(MINI_REX_1)`. No wrapper feeds those counters in the window (stock table, instructions.rs:201-203), so every increment is zero and no comparison trips: no halt, no extra gas, no state change. The counters are otherwise read only by gates that are themselves off in this window."
+reviewer = "RealiCZ"
+
+# --- crates/mega-evm/src/evm/execution.rs:1586 ---
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/evm/execution.rs"
+line = 1586
+column = 1
+mutant = "spec-gate if self.ctx_ref().spec.is_enabled(MegaSpecId::REX4) { -> if self.ctx_ref().spec.is_enabled(MegaSpecId::REX3) {"
+justification = "Unreachable at REX3: a volatile-access disable can only be created by `AccessControlInterceptor::handle_disable` (system/intercept.rs:357), whose `ACTIVATION_SPEC` is `MegaSpecId::REX4` (system/intercept.rs:340). At REX3 `disable_depth` is therefore always `None` and `enable_access_if_returning` has nothing to clear."
+reviewer = "RealiCZ"
+
+# --- crates/mega-evm/src/evm/execution.rs:1068 ---
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/evm/execution.rs"
+line = 1068
+column = 1
+mutant = "spec-gate let is_mini_rex = evm.ctx().spec.is_enabled(MegaSpecId::MINI_REX); -> let is_mini_rex = evm.ctx().spec.is_enabled(MegaSpecId::EQUIVALENCE);"
+justification = "Unobservable in the window: `before_frame_return_result::<true>` records the frame's consumption and applies the compute-gas clamp only when the tracker holds a compute limit that has been exceeded. In the window the tracker holds no measured compute gas (no wrapper runs), so the extra `<true>` pass records zero and clamps nothing."
+reviewer = "RealiCZ"
+
+# --- crates/mega-evm/src/evm/execution.rs:1102 ---
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/evm/execution.rs"
+line = 1102
+column = 1
+mutant = "spec-gate .is_enabled(MegaSpecId::MINI_REX) -> .is_enabled(MegaSpecId::EQUIVALENCE)"
+justification = "Unobservable in the window: the attached info comes from `get_volatile_data_info()`, which is `Some` only after a volatile access was marked. Marks are produced solely by the REX4+ `disableVolatileDataAccess` path (`AccessControlInterceptor::ACTIVATION_SPEC` = REX4, system/intercept.rs:340), which the window's stock table never reaches, so both sides attach `None`."
+reviewer = "RealiCZ"
+
+# --- crates/mega-evm/src/evm/execution.rs:1539 ---
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/evm/execution.rs"
+line = 1539
+column = 1
+mutant = "spec-gate let gas_remaining_before = match (&action, context.spec.is_enabled(MegaSpecId::MINI_REX)) { -> let gas_remaining_before = match (&action, context.spec.is_enabled(MegaSpecId::EQUIVALENCE)) {"
+justification = "Unobservable in the window: the recorded value has exactly one consumer, `after_frame_run`, and that consumer returns immediately in the window (`!is_enabled(MINI_REX)` at execution.rs:509 in the unmutated tree). Recording `Some(remaining)` instead of `None` therefore produces a value nothing reads."
+reviewer = "RealiCZ"
+
+# --- crates/mega-evm/src/evm/host.rs:442 ---
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/evm/host.rs"
+line = 442
+column = 1
+mutant = "spec-gate self.spec.is_enabled(MegaSpecId::MINI_REX) && address == ORACLE_CONTRACT_ADDRESS, -> self.spec.is_enabled(MegaSpecId::EQUIVALENCE) && address == ORACLE_CONTRACT_ADDRESS,"
+justification = "debug_assert! only: the condition is a debug self-check on `oracle_sload`'s oracle-address predicate. `debug_assert!` is compiled out in release, so relaxing it cannot change behaviour the chain can observe; it only removes a debug-time invariant."
+reviewer = "RealiCZ"
+
+# --- crates/mega-evm/src/evm/host.rs:639 ---
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/evm/host.rs"
+line = 639
+column = 1
+mutant = "spec-gate debug_assert!(self.spec.is_enabled(MegaSpecId::REX)); -> debug_assert!(self.spec.is_enabled(MegaSpecId::MINI_REX));"
+justification = "debug_assert! only: `create_contract_storage_gas` is called only from the REX+ CREATE paths; asserting MINI_REX instead of REX relaxes a debug-time invariant that is compiled out in release, so execution behaviour is unchanged."
+reviewer = "RealiCZ"
+
+# --- crates/mega-evm/src/evm/host.rs:602 ---
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/evm/host.rs"
+line = 602
+column = 1
+mutant = "spec-gate debug_assert!(self.spec.is_enabled(MegaSpecId::MINI_REX)); -> debug_assert!(self.spec.is_enabled(MegaSpecId::EQUIVALENCE));"
+justification = "debug_assert! only: `additional_limit()` is reached only from the mini_rex+ instruction tables, so the assertion is a debug-time invariant. `debug_assert!` is compiled out in release; relaxing it cannot change execution behaviour."
+reviewer = "RealiCZ"
+
+# --- crates/mega-evm/src/evm/host.rs:608 ---
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/evm/host.rs"
+line = 608
+column = 1
+mutant = "spec-gate debug_assert!(self.spec.is_enabled(MegaSpecId::MINI_REX)); -> debug_assert!(self.spec.is_enabled(MegaSpecId::EQUIVALENCE));"
+justification = "debug_assert! only: `sstore_set_storage_gas` is installed only by the mini_rex+ tables; the assertion is a debug-time invariant, compiled out in release. Relaxing it cannot change execution behaviour."
+reviewer = "RealiCZ"
+
+# --- crates/mega-evm/src/evm/host.rs:625 ---
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/evm/host.rs"
+line = 625
+column = 1
+mutant = "spec-gate debug_assert!(self.spec.is_enabled(MegaSpecId::MINI_REX)); -> debug_assert!(self.spec.is_enabled(MegaSpecId::EQUIVALENCE));"
+justification = "debug_assert! only: `new_account_storage_gas` is installed only by the mini_rex+ tables; the assertion is a debug-time invariant, compiled out in release. Relaxing it cannot change execution behaviour."
+reviewer = "RealiCZ"
+
+# --- crates/mega-evm/src/evm/instructions.rs:3083 ---
+[[suppress]]
+kind = "line"
+category = "dead"
+file = "crates/mega-evm/src/evm/instructions.rs"
+line = 3083
+column = 1
+mutant = "spec-gate .is_enabled(MegaSpecId::REX5) && -> .is_enabled(MegaSpecId::REX4) &&"
+justification = "Unreachable: `compute_gas_ext::call_code` is installed only by the mini_rex tables (instructions.rs:201-203 selects them for MINI_REX/MINI_REX_2; the CALLCODE assignment is instructions.rs:1015). From `mod rex` on, CALLCODE is replaced by `forward_gas_ext::call_code` (instructions.rs:305) and at REX4 by `volatile_data_ext::call_code` (instructions.rs:418); `mod rex5` inherits rex4's table (instructions.rs:467). The only specs that reach this line have behaviour <= MINI_REX, where `is_enabled(REX4)`, `is_enabled(REX5)` and `is_enabled(REX6)` are all false, so the mutant keeps `stipend_from_revm` at 0 exactly as the original does."
+reviewer = "RealiCZ"
+
+# --- crates/mega-evm/src/evm/instructions.rs:3083 ---
+[[suppress]]
+kind = "line"
+category = "dead"
+file = "crates/mega-evm/src/evm/instructions.rs"
+line = 3083
+column = 1
+mutant = "spec-gate .is_enabled(MegaSpecId::REX5) && -> .is_enabled(MegaSpecId::REX6) &&"
+justification = "Unreachable: `compute_gas_ext::call_code` is installed only by the mini_rex tables (instructions.rs:201-203 selects them for MINI_REX/MINI_REX_2; the CALLCODE assignment is instructions.rs:1015). From `mod rex` on, CALLCODE is replaced by `forward_gas_ext::call_code` (instructions.rs:305) and at REX4 by `volatile_data_ext::call_code` (instructions.rs:418); `mod rex5` inherits rex4's table (instructions.rs:467). The only specs that reach this line have behaviour <= MINI_REX, where `is_enabled(REX4)`, `is_enabled(REX5)` and `is_enabled(REX6)` are all false, so the mutant keeps `stipend_from_revm` at 0 exactly as the original does."
+reviewer = "RealiCZ"

@@ -1,6 +1,7 @@
 //! Tests for `MiniRex` hardfork features.
 
 mod access_beneficiary_balance;
+mod alias_window_gates;
 mod block_env_access_tracking;
 mod block_env_gas_limit;
 mod compute_gas_limit;
