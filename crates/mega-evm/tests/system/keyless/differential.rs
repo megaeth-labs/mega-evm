@@ -959,7 +959,6 @@ impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for Recorder {
             address: None,
             charged_create_state_gas: inputs.charged_create_state_gas(),
             charged_state_gas_address: inputs.charged_state_gas_address(),
-            charged_start: Default::default(),
             start_mark: Default::default(),
         })
     }

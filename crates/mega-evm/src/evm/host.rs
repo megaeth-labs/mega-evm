@@ -400,13 +400,14 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
     /// it. The frame's share of the caller's reservoir is taken out of the reservoir the charge
     /// left and named on the start ([`FrameStart::reservoir`]), so the frame, or the answer revm
     /// gives in its place, inherits it, and the caller keeps the rest while the frame runs. revm
-    /// adds what the frame leaves of it to what the caller kept when it returns. Nothing is
-    /// declared on the start for the fork to carry. An opcode that starts no frame — a creation the
-    /// balance, the nonce or the depth refuses, an out-of-gas before the forward — never calls
-    /// it, and makes no records; with EIP-8037 off, such a creation calls it without the address
-    /// it would take, which makes none either. A start revm then refuses — a value the caller
-    /// cannot fund, a frame past the call-stack limit — makes no records, and the charge comes
-    /// back when it returns, as does what a frame that ran did not keep.
+    /// puts what the frame leaves of it in place of the caller's reservoir when it returns, and
+    /// the settlement adds back what the caller kept ([`frame_settle`](Self::frame_settle)). An
+    /// opcode that starts no frame — a creation the balance, the nonce or the depth refuses, an
+    /// out-of-gas before the forward — never calls it, and makes no records; with EIP-8037 off,
+    /// such a creation calls it without the address it would take, which makes none either. A
+    /// start revm then refuses — a value the caller cannot fund, a frame past the call-stack
+    /// limit — makes no records, and the charge comes back when it returns, as does what a
+    /// frame that ran did not keep.
     ///
     /// A charge the caller cannot pay, or a price that does not fit in a `u64`, fails the opcode
     /// with an out-of-gas and starts no frame, even where revm would have refused the start. The
@@ -468,6 +469,14 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
     /// none. It is given back as history, as it was charged, once revm's own settlement of the
     /// frame is made, its upfront state-gas refund included.
     ///
+    /// revm's settlement put the reservoir the frame handed back in place of the caller's, once it
+    /// unwound the caller's outstanding spill; a child's caller gets back here the reservoir it
+    /// held while the child ran (`held_reservoir`), the part it kept at the start, on top. The
+    /// caller then holds what it kept and what the child handed back, whatever the order of this
+    /// and the refunds, which read the spill and their own amount, never the reservoir. The
+    /// transaction's gas holds a copy of the reservoir its frame was given, which revm's
+    /// settlement replaced, so nothing is added back to it.
+    ///
     /// The transaction's start ends the transaction: when its frame halted, giving the charge back
     /// burns every regular gas the transaction's gas holds, what the refill credited and what
     /// revm's settlement left alike, as revm's settlement burns a halted transaction's after each
@@ -479,6 +488,9 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
     #[inline]
     fn frame_settle(&mut self, settle: &FrameSettle, gas: &mut GasTracker) {
         self.inner.frame_settle(settle, gas);
+        if settle.depth != 0 {
+            gas.set_reservoir(gas.reservoir().saturating_add(settle.held_reservoir));
+        }
         let refund = self.additional_limit.ledger_mut().settle(&settle.into());
         if refund != 0 {
             gas.refill_history(refund);

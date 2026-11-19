@@ -186,8 +186,8 @@ pub(crate) fn start<DB: Database, ExtEnvs: ExternalEnvTypes>(
         }
     };
     // The creation's shares of the call's reservoir and budgets are taken out of the call, and its
-    // start charge parked, as a `CREATE` opcode's are: the creation's return adds what it left of
-    // the reservoir back to what the call kept, and its settlement what it left of its budgets.
+    // start charge parked, as a `CREATE` opcode's are: the creation's settlement gives the call
+    // what it left of the reservoir on top of what the call kept, and what it left of its budgets.
     let reservoir = ctx.forward_start(gas.tracker_mut(), deployment.on_frame_record_charge, 0);
     let mut create = CreateInputs::new(
         deployment.signer,

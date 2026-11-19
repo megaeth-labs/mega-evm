@@ -70,9 +70,6 @@ fn call_frame_init(depth: usize) -> FrameInit {
             is_static: false,
             reservoir: RESERVOIR,
             charged_new_account_state_gas: false,
-            charged_start: Default::default(),
-            pool_shares: revm::interpreter::PoolAmounts::UNLIMITED,
-            history_allowance: 0,
         })),
     }
 }
@@ -521,9 +518,8 @@ fn test_a_keyless_call_below_the_overhead_runs_out_of_gas() {
     let (ctx, _, _, frames) = EvmTr::all_mut(&mut evm);
     let caller_frame = frames.get();
     let before = *caller_frame.interpreter.gas.tracker();
-    // The call's opcode took the reservoir the answer carries out of the caller, which the answer's
-    // return adds back to what the caller kept.
-    caller_frame.interpreter.gas.tracker_mut().forward_reservoir(result.gas().reservoir());
+    // The call's opcode handed the answer a copy of the caller's reservoir, which the answer's
+    // return puts back in its place.
     caller_frame.return_result::<_, EVMError<Infallible>>(ctx, result).unwrap();
     let after = caller_frame.interpreter.gas.tracker();
     assert_eq!(after.remaining(), before.remaining(), "a halt hands none of its gas back");

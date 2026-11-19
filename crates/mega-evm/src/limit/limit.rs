@@ -1,11 +1,9 @@
 //! The per-transaction state of the common execution layer.
 
 use alloy_primitives::Bytes;
-use revm::{
-    context_interface::cfg::gas::{PoolAmounts, PoolId},
-    handler::FrameResult,
-    interpreter::InstructionResult,
-};
+use revm::{handler::FrameResult, interpreter::InstructionResult};
+
+use super::{PoolAmounts, PoolId};
 
 #[cfg(not(feature = "std"))]
 use alloc as std;

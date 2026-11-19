@@ -23,7 +23,7 @@ use revm::{
     interpreter::{
         instructions::gas_table_spec, interpreter::EthInterpreter, interpreter_types::LoopControl,
         CallInputs, CallOutcome, Gas, InstructionResult, Interpreter, InterpreterAction,
-        InterpreterResult, PoolId,
+        InterpreterResult,
     },
     primitives::hardfork::SpecId,
     Database, Inspector,
@@ -328,8 +328,8 @@ enum AnswerGas {
     Untouched,
     /// `Gas::new` of the call's gas limit, as Foundry answers a cheatcode: no reservoir.
     Fresh,
-    /// Fresh regular gas carrying the pools of the untouched gas after a state and a history
-    /// charge: charges the frame, which never ran, did not make.
+    /// Fresh regular gas carrying the reservoir and the state and history figures of the untouched
+    /// gas after a state and a history charge: charges the frame, which never ran, did not make.
     Charged,
 }
 
@@ -356,10 +356,6 @@ impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for AnswersB {
                     gas.set_state_gas_spent(charged.state_gas_spent());
                     gas.set_state_gas_spilled(charged.state_gas_spilled());
                     gas.set_history_gas_spent(charged.history_gas_spent());
-                    for pool in PoolId::ALL {
-                        gas.set_pool_remaining(pool, charged.pool_remaining(pool));
-                        gas.set_pool_spent(pool, charged.pool_spent(pool));
-                    }
                     gas
                 }
             };

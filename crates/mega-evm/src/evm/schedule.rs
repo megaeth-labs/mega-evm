@@ -14,15 +14,15 @@
 //!    what its caller has left, Rex6's rule, in place of EIP-150's 63/64
 //!    ([`FORWARD_REDUCTION_QUOTIENT`], the fork's `GasId::call_stipend_reduction`).
 //!
-//! What else a frame start takes from its caller is the engine's, not the schedule's, and the
-//! schedule keeps Amsterdam's entries for it, which take nothing: the share of its caller's pools —
-//! data size, KV updates, state growth — and of its caller's EIP-8037 reservoir a frame starts
-//! with, all but [`FRAME_KEPT_PERCENT`] of what the caller has left, and the history allowance a
-//! value-transferring call gives the frame, `HISTORY_ALLOWANCE_BYTES` at the cost per history
-//! byte, are decided where the start is made (`MegaContext::forward_start`) and kept on the
-//! engine's start ledger. A pool's share is `floor(remaining × 98 / 100)`, and the reservoir's
-//! `remaining − remaining × 2 / 100`, so a caller keeps nothing of a reservoir below 50; the
-//! transaction's own frame and a system call's outermost frame take the whole reservoir.
+//! What else a frame start takes from its caller is the engine's, not the schedule's, and is in no
+//! entry of it: the share of its caller's pools — data size, KV updates, state growth — and of its
+//! caller's EIP-8037 reservoir a frame starts with, all but [`FRAME_KEPT_PERCENT`] of what the
+//! caller has left, and the history allowance a value-transferring call gives the frame,
+//! `HISTORY_ALLOWANCE_BYTES` at the cost per history byte, are decided where the start is made
+//! (`MegaContext::forward_start`) and kept on the engine's start ledger. A pool's share is
+//! `floor(remaining × 98 / 100)`, and the reservoir's `remaining − remaining × 2 / 100`, so a
+//! caller keeps nothing of a reservoir below 50; the transaction's own frame and a system call's
+//! outermost frame take the whole reservoir.
 //!
 //! Every regular-gas price is Amsterdam's, so state creation is split between the two dimensions
 //! as Amsterdam splits it: the regular part is the access and write work EIP-8038 prices, and the
@@ -155,11 +155,7 @@ mod tests {
         constants::{
             ACCOUNT_STATE_GAS, COST_PER_HISTORY_BYTE, COST_PER_STATE_BYTE, SLOT_STATE_GAS,
         },
-        evm::{
-            history::HISTORY_ALLOWANCE_BYTES,
-            prices::{runs_at_measurement_prices, BytePrice},
-        },
-        limit::{DATA_SIZE_POOL, KV_UPDATE_POOL, STATE_GROWTH_POOL},
+        evm::prices::{runs_at_measurement_prices, BytePrice},
     };
 
     fn osaka() -> GasParams {
@@ -272,29 +268,6 @@ mod tests {
                 assert_eq!(exempt.get(other), satin.get(other), "{} must not move", other.name());
             }
         }
-    }
-
-    /// The schedule takes nothing at a frame start beyond the regular gas it forwards: it keeps
-    /// none of a caller's pools or reservoir from the frame and gives a value call's frame no
-    /// history allowance, as upstream's, so revm forwards every pool and the reservoir whole and
-    /// grants nothing. The engine takes the shares and grants the allowance itself, by
-    /// [`FRAME_KEPT_PERCENT`], 2, and `HISTORY_ALLOWANCE_BYTES`, 160.
-    #[test]
-    fn test_the_schedule_leaves_a_starts_shares_and_allowance_to_the_engine() {
-        let satin = satin_gas_params();
-        for id in [DATA_SIZE_POOL, KV_UPDATE_POOL, STATE_GROWTH_POOL] {
-            assert_eq!(satin.get(GasId::pool_kept_percent(id)), 0);
-            for pool in [0, 1, 49, 50, 99, 9_690, u64::MAX] {
-                assert_eq!(satin.pool_forward_share(id, pool), pool, "{pool}: the whole pool");
-            }
-        }
-        assert_eq!(satin.get(GasId::reservoir_kept_percent()), 0);
-        for reservoir in [0, 1, 49, 50, 99, 1_000, u64::MAX] {
-            assert_eq!(satin.reservoir_forward_share(reservoir), reservoir, "{reservoir}");
-        }
-        assert_eq!(satin.get(GasId::call_history_allowance()), 0);
-        assert_eq!(FRAME_KEPT_PERCENT, 2);
-        assert_eq!(HISTORY_ALLOWANCE_BYTES, 160);
     }
 
     /// A call or creation forwards at most `remaining − remaining × 2 / 100` of its caller's
