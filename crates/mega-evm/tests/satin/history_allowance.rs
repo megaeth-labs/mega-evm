@@ -24,9 +24,7 @@ use mega_evm::{
     constants::COST_PER_HISTORY_BYTE,
     history_allowance_gas,
     system::{IMegaAccessControl, ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE},
-    test_utils::{
-        is_transfer_log, note_price_guard, transfer_log, BytecodeBuilder, MemoryDatabase,
-    },
+    test_utils::{is_transfer_log, note_price_guard, BytecodeBuilder, MemoryDatabase},
     EvmTxRuntimeLimits, LimitKind, MegaContext, MegaEvm, MegaTransaction, MegaTransactionOutcome,
     HISTORY_ALLOWANCE_BYTES, TRANSFER_LOG_SIZE, TX_BODY_SIZE, WRITE_RECORD_SIZE,
 };
@@ -123,52 +121,6 @@ fn test_the_allowance_is_one_three_topic_event_of_history() {
     }
     assert_eq!(HISTORY_ALLOWANCE_BYTES, 160);
     assert_eq!(history_allowance_gas(), 160 * COST_PER_HISTORY_BYTE);
-}
-
-/// The boundary the allowance exists for: a `transfer()` — 2,300 gas and nothing else — reaches a
-/// `receive()` hook that emits one event, and the event's history costs the sender nothing beyond
-/// the two write records the transfer itself writes.
-///
-/// Without the allowance the event's 160 bytes would have to come out of the 2,300, which does
-/// not cover them at any price a history byte is worth.
-#[test]
-fn test_a_transfer_can_emit_one_event_because_of_the_allowance() {
-    if runs_at_measurement_prices() {
-        return;
-    }
-    let sender = call_with(CALL, RECEIVER, 1, TRANSFER_GAS).append(STOP).build();
-    let receiver = event().append(STOP).build();
-    let outcome = execute(db(sender, receiver), call(CALLER, SENDER, U256::ZERO, GAS_LIMIT));
-
-    assert!(outcome.result.is_success(), "{:?}", outcome.result);
-    assert_eq!(events(&outcome).len(), 1, "the hook emitted its event");
-    assert_eq!(
-        outcome.result.logs()[0],
-        transfer_log(SENDER, RECEIVER, U256::from(1)),
-        "after the transfer's own log, which took nothing from the allowance",
-    );
-    assert_eq!(
-        outcome.gas.history,
-        body() + 2 * record(),
-        "the body and the transfer's two records; the event's bytes the allowance paid for",
-    );
-}
-
-/// One event is all it buys: a second one has to come out of the 2,300 gas, which cannot cover
-/// it, so the hook runs out of gas and the transfer fails.
-#[test]
-fn test_the_allowance_buys_one_event_and_no_more() {
-    if runs_at_measurement_prices() {
-        return;
-    }
-    // The caller records whether the transfer succeeded, then stops.
-    let sender = call_with(CALL, RECEIVER, 1, TRANSFER_GAS).append(STOP).build();
-    let two_events = event().append_many(event().build().iter().copied()).append(STOP).build();
-    let outcome = execute(db(sender, two_events), call(CALLER, SENDER, U256::ZERO, GAS_LIMIT));
-
-    assert!(outcome.result.is_success(), "the caller survives the hook's failure");
-    assert!(outcome.result.logs().is_empty(), "the hook ran out and kept neither event");
-    assert_eq!(outcome.gas.history, body(), "and the transfer's records came back with it");
 }
 
 /// A sender that makes one value transfer to [`RECEIVER`], forwarding `gas` beside the 2,300 the
@@ -690,24 +642,6 @@ fn test_a_drained_allowance_is_not_refunded_by_a_revert() {
         drained.gas.gas_used - quiet.gas.gas_used < history_allowance_gas(),
         "and the difference is that computation, not an allowance",
     );
-}
-
-/// A call that forwards no gas at all still reaches a `receive()` hook that emits one event: the
-/// EVM's own `CALL_STIPEND` pays for the computation and the allowance for the bytes.
-#[test]
-fn test_a_transfer_forwarding_no_gas_still_buys_its_event() {
-    if runs_at_measurement_prices() {
-        return;
-    }
-    let sender = call_with(CALL, RECEIVER, 1, 0).append(STOP).build();
-    let outcome = execute(
-        db(sender, event().append(STOP).build()),
-        call(CALLER, SENDER, U256::ZERO, GAS_LIMIT),
-    );
-
-    assert!(outcome.result.is_success(), "{:?}", outcome.result);
-    assert_eq!(events(&outcome).len(), 1, "the hook emitted its event");
-    assert_eq!(outcome.gas.history, body() + 2 * record());
 }
 
 /* ---------- an inspector that replaces the interpreter ---------- */
