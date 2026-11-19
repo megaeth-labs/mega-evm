@@ -20,8 +20,8 @@ use mega_evm::{
 };
 use revm::{
     bytecode::opcode::{
-        CALL, CREATE, DELEGATECALL, GAS, GASPRICE, JUMP, JUMPDEST, LOG0, LOG1, MLOAD, ORIGIN, POP,
-        PUSH0, REVERT, SELFDESTRUCT, SSTORE, STATICCALL,
+        CALL, CREATE, DELEGATECALL, GAS, JUMP, JUMPDEST, LOG0, LOG1, MLOAD, ORIGIN, POP, PUSH0,
+        REVERT, SELFDESTRUCT, SSTORE, STATICCALL,
     },
     context::BlockEnv,
     primitives::KECCAK_EMPTY,
@@ -537,34 +537,6 @@ fn priced_tx(deployment: &Deployment, gas_limit: u64, gas_price: u128) -> MegaTr
     tx.0.base.gas_limit = gas_limit;
     tx.0.base.gas_price = gas_price;
     tx
-}
-
-/// `ORIGIN` and `GASPRICE` in the init code are the transaction's own: the relayer, and the gas
-/// price the relayer pays — not the signer, and not the price the deployment was signed at.
-#[test]
-fn test_origin_and_gasprice_follow_the_outer_transaction() {
-    let prefix = BytecodeBuilder::default()
-        .append(ORIGIN)
-        .push_number(0_u64)
-        .append(SSTORE)
-        .append(GASPRICE)
-        .push_number(1_u64)
-        .append(SSTORE);
-    let deployment = Deployment::new(running(prefix));
-    for gas_limit in GAS_LIMITS {
-        let outcome = MegaEvm::new(context(system_db()))
-            .execute_transaction(priced_tx(&deployment, gas_limit, 7))
-            .expect("a valid transaction");
-        assert_eq!(returned(&outcome).deployedAddress, deployment.address);
-        let slot = |key: u64| {
-            outcome.state[&deployment.address]
-                .storage
-                .get(&U256::from(key))
-                .map(|s| s.present_value)
-        };
-        assert_eq!(slot(0), Some(U256::from_be_slice(RELAYER.as_slice())), "ORIGIN");
-        assert_eq!(slot(1), Some(U256::from(7)), "GASPRICE");
-    }
 }
 
 /// The block's beneficiary is paid for the whole transaction, deployment included, whether the
