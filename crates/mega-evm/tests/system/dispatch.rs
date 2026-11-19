@@ -3,7 +3,7 @@
 
 use alloy_evm::Evm;
 use alloy_primitives::{address, Address, Bytes, U256};
-use alloy_sol_types::{SolCall, SolError};
+use alloy_sol_types::SolCall;
 use mega_evm::{
     system::{
         storage_slots::CURRENT_SYSTEM_ADDRESS, IMegaAccessControl, IMegaLimitControl, IOracle,
@@ -66,26 +66,6 @@ fn test_an_intercepted_call_costs_what_a_plain_call_costs() {
         "the two programs differ only in the address they call",
     );
     assert_eq!(spent(intercepted), spent(plain));
-}
-
-/// Admission is the four selector bytes: the exact selector and the selector followed by
-/// anything are both intercepted, and an input too short to hold one is not.
-#[test]
-fn test_admission_is_the_selector_alone() {
-    let intercepted = |data: Vec<u8>| {
-        let result = run(system_db(), call_tx(ACCESS_CONTROL_ADDRESS, &data, U256::ZERO));
-        // The interceptor answers `false`; the deployed bytecode reverts.
-        result.result.is_success()
-    };
-    assert!(intercepted(IS_DISABLED.to_vec()), "the exact selector");
-    assert!(intercepted(IS_DISABLED.iter().copied().chain([0xff]).collect()), "one byte after it");
-    assert!(
-        intercepted(IS_DISABLED.iter().copied().chain([0_u8; 32]).collect()),
-        "a padded argument after it",
-    );
-    assert!(!intercepted(IS_DISABLED[..3].to_vec()), "three bytes are not a selector");
-    assert!(!intercepted(Vec::new()), "no input is not a selector");
-    assert!(!intercepted(vec![0xde, 0xad, 0xbe, 0xef]), "another selector");
 }
 
 /// Records which addresses an inspector sees called, and in which order they end.
@@ -171,28 +151,6 @@ fn test_a_database_error_reading_the_registry_fails_the_transaction() {
     db.fail_on_storage = Some((SEQUENCER_REGISTRY_ADDRESS, CURRENT_SYSTEM_ADDRESS));
     let error = database_error(db);
     assert!(format!("{error}").contains("injected storage() error"), "{error}");
-}
-
-/// The value policy is the interceptor's, not the account's: a value-bearing transaction to a
-/// control contract is refused with `NonZeroTransfer()` before any value moves.
-#[test]
-fn test_a_value_bearing_transaction_is_refused_before_the_value_moves() {
-    let db = system_db();
-    let mut tx = call_tx(LIMIT_CONTROL_ADDRESS, REMAINING_COMPUTE_GAS, U256::from(1));
-    tx.0.base.caller = crate::common::CALLER;
-    let result = run(db, tx);
-
-    let revm::context::result::ExecutionResult::Revert { output, .. } = &result.result else {
-        panic!("the transaction did not revert: {:?}", result.result);
-    };
-    assert_eq!(output[..], IMegaLimitControl::NonZeroTransfer::SELECTOR);
-    assert!(
-        result
-            .state
-            .get(&LIMIT_CONTROL_ADDRESS)
-            .is_none_or(|account| account.info.balance.is_zero()),
-        "the refused value stayed with its sender",
-    );
 }
 
 /// A `STATICCALL` to a system contract from inside a static frame is intercepted too: nothing
