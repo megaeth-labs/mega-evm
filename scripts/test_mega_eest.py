@@ -264,7 +264,8 @@ class Check(Case):
     """The run reports decide the result, and its exit code says whether it is a verdict."""
 
     CASES = [("satin/a", "sha256:1"), ("satin/b", "sha256:2")]
-    NEGATIVE = [{"caseId": "satin/negative/wrong", "status": "fail", "path": "/expected/x"}]
+    NEGATIVE = [{"caseId": "satin/negative/wrong", "file": "negative/wrong.json",
+                 "status": "fail", "path": "/expected/x"}]
     INDEX_NEGATIVE = [{"caseId": "satin/negative/wrong", "file": "negative/wrong.json",
                        "wrongAt": "/expected/x"}]
     ORACLE_CONTROL = {"caseId": "satin/negative/oracle", "file": "negative/oracle.json",
@@ -273,7 +274,7 @@ class Check(Case):
     def write(self, reports: dict[str, list[dict] | None], negative: list[dict] | None = None,
               exits: dict[str, int] | None = None, *, modes: str | None = None,
               index_negative: list[dict] | None = None, provenance: str = "unchecked",
-              caseset: str = "unchecked") -> tuple[int, str, str]:
+              repo: str = "unchecked", caseset: str = "unchecked") -> tuple[int, str, str]:
         # A fresh pair for every call: a test may write several runs.
         run = Path(tempfile.mkdtemp(dir=self.tmp))
         suite, work = run / "suite", run / "work"
@@ -288,11 +289,15 @@ class Check(Case):
                 (work / f"{mode}.json").write_text(json.dumps({"cases": cases}))
             default = 1 if cases and any(c["status"] != "pass" for c in cases) else 0
             (work / f"{mode}.exit").write_text(f"{(exits or {}).get(mode, default)}\n")
-        if negative is not None:
-            (work / "negative.json").write_text(json.dumps({"cases": negative}))
+            if negative is not None:
+                controls = [{**c, "file": str(suite / "slice" / c["file"])} if "file" in c else c
+                            for c in negative]
+                (work / f"negative-{mode}.json").write_text(json.dumps({"cases": controls}))
+                control_exit = 1 if any(c["status"] != "pass" for c in controls) else 0
+                (work / f"negative-{mode}.exit").write_text(f"{control_exit}\n")
         return self.run_quietly(eest.cmd_check, Namespace(
             suite=str(suite), work=str(work), modes=" ".join(reports) if modes is None else modes,
-            rev="f" * 40, provenance=provenance, caseset=caseset))
+            rev="f" * 40, provenance=provenance, repo=repo, caseset=caseset))
 
     @staticmethod
     def case(case_id: str, digest: str, status: str = "pass", observations: str = "sha256:o") -> dict:
@@ -335,10 +340,23 @@ class Check(Case):
 
     def test_observations_that_differ_between_modes_are_a_verdict(self) -> None:
         other = [self.case("satin/a", "sha256:1"), self.case("satin/b", "sha256:2", observations="sha256:other")]
-        code, out, err = self.write({"plain": self.all_passed(), "instrumented": other}, self.NEGATIVE)
+        code, out, err = self.write({"plain": self.all_passed(), "instrumented": other},
+                                    self.control("fail", "/expected/y"))
         self.assertEqual(code, 1, err)
         self.assertIn("parity=1-differ", out)
+        self.assertIn("negative=fail-elsewhere", out)
         self.assertIn("result=FAIL", out)
+
+    def test_a_passing_case_without_a_digest_is_incomplete_before_parity(self) -> None:
+        for modes, control, verdict in (("plain instrumented", self.control("fail", "/expected/y"), "not-caught"),
+                                        ("instrumented", self.NEGATIVE, "fail-as-recorded")):
+            with self.subTest(modes=modes):
+                reports = {mode: self.all_passed() for mode in modes.split()}
+                del reports["instrumented"][1]["observationsDigest"]
+                run = self.write(reports, control)
+                self.assert_no_verdict(*run, "instrumented: passed case satin/b has no observation digest")
+                self.assertNotIn(" parity=", run[1])
+                self.assertIn(f"negative={verdict}", run[1])
 
     def assert_no_verdict(self, code: int, out: str, err: str, reason: str) -> None:
         self.assertEqual(code, 2, (out, err))
@@ -384,7 +402,7 @@ class Check(Case):
 
     @staticmethod
     def control(status: str, path: str | None = None) -> list[dict]:
-        case = {"caseId": "satin/negative/wrong", "status": status}
+        case = {"caseId": "satin/negative/wrong", "file": "negative/wrong.json", "status": status}
         if path is not None:
             case["path"] = path
         return [case]
@@ -403,7 +421,7 @@ class Check(Case):
         for control, reason in ((self.control("pass"), "gating cases failed, and it did not fail"),
                                 (self.control("unsupported"), "gating cases failed, and it did not fail"),
                                 ([], "not consumed"),
-                                (None, "no report of the negative controls")):
+                                (None, "negative controls: no report")):
             code, out, err = self.write({"plain": self.one_failing()}, control)
             self.assert_no_verdict(code, out, err, reason)
 
@@ -411,7 +429,7 @@ class Check(Case):
         for control, reason in ((self.control("fail", "/expected/y"), "so it must match the recorded failure"),
                                 (self.control("error"), "so it must match the recorded failure"),
                                 (self.control("pass"), "so it must match the recorded failure"),
-                                (None, "no report of the negative controls")):
+                                (None, "negative controls: no report")):
             code, out, err = self.write({"plain": self.all_passed()}, control)
             self.assert_no_verdict(code, out, err, reason)
             self.assertNotIn("negative=fail-as-recorded", out)
@@ -421,6 +439,7 @@ class Check(Case):
 
     def test_passing_cases_accept_both_recorded_control_forms(self) -> None:
         oracle = {"caseId": self.ORACLE_CONTROL["caseId"], "status": "error",
+                  "file": "negative/oracle.json",
                   "message": self.ORACLE_CONTROL["error"]}
         code, out, err = self.write({"plain": self.all_passed()}, [*self.NEGATIVE, oracle],
                                     index_negative=[*self.INDEX_NEGATIVE, self.ORACLE_CONTROL])
@@ -432,7 +451,7 @@ class Check(Case):
         for result in ({"status": "error", "message": self.ORACLE_CONTROL["error"] + " (retry)"},
                        {"status": "fail", "path": "/expected/x", "message": self.ORACLE_CONTROL["error"]}):
             with self.subTest(result=result):
-                oracle = {"caseId": self.ORACLE_CONTROL["caseId"], **result}
+                oracle = {"caseId": self.ORACLE_CONTROL["caseId"], "file": "negative/oracle.json", **result}
                 code, out, err = self.write({"plain": self.all_passed()}, [*self.NEGATIVE, oracle],
                                             index_negative=[*self.INDEX_NEGATIVE, self.ORACLE_CONTROL])
                 self.assert_no_verdict(code, out, err, "so it must match the recorded failure")
@@ -442,7 +461,8 @@ class Check(Case):
         entry = self.INDEX_NEGATIVE[0]
         common = {k: entry[k] for k in ("caseId", "file")}
         for malformed in (common, {**entry, "error": "an error"}, {**entry, "extra": "unexpected"},
-                          {**entry, "wrongAt": None}):
+                          {**entry, "wrongAt": None}, {**entry, "file": "/wrong.json"},
+                          {**entry, "file": "../wrong.json"}):
             with self.subTest(entry=malformed):
                 code, out, err = self.write({"plain": self.one_failing()}, self.NEGATIVE,
                                             index_negative=[malformed])
@@ -451,6 +471,7 @@ class Check(Case):
 
     def test_failing_cases_accept_an_error_control_that_errs_differently(self) -> None:
         oracle = {"caseId": self.ORACLE_CONTROL["caseId"], "status": "error",
+                  "file": "negative/oracle.json",
                   "message": "a different adapter error"}
         code, out, err = self.write({"plain": self.one_failing()}, [*self.NEGATIVE, oracle],
                                     index_negative=[*self.INDEX_NEGATIVE, self.ORACLE_CONTROL])
@@ -459,7 +480,7 @@ class Check(Case):
         self.assertTrue(out.strip().endswith("result=FAIL"), out)
 
     def test_failing_cases_with_an_error_control_that_passes_are_no_verdict(self) -> None:
-        oracle = {"caseId": self.ORACLE_CONTROL["caseId"], "status": "pass"}
+        oracle = {"caseId": self.ORACLE_CONTROL["caseId"], "file": "negative/oracle.json", "status": "pass"}
         code, out, err = self.write({"plain": self.one_failing()}, [*self.NEGATIVE, oracle],
                                     index_negative=[*self.INDEX_NEGATIVE, self.ORACLE_CONTROL])
         self.assert_no_verdict(code, out, err, "gating cases failed, and it did not fail")
@@ -472,23 +493,22 @@ class Check(Case):
                 self.assert_no_verdict(code, out, err, "negative control report has extra or repeated case IDs")
                 self.assertIn("negative=not-caught", out)
 
+    def test_a_control_report_must_name_the_indexed_file(self) -> None:
+        index_negative = [{**self.INDEX_NEGATIVE[0], "file": "negative/other.json"}]
+        for gating, control in ((self.all_passed(), self.NEGATIVE),
+                                (self.one_failing(), self.control("error"))):
+            with self.subTest(gating=gating):
+                run = self.write({"plain": gating}, control, index_negative=index_negative)
+                self.assert_no_verdict(*run, "expected fixture negative/other.json")
+                self.assertIn("negative=not-caught", run[1])
+
     def test_a_changed_repository_is_refused(self) -> None:
-        run = Path(tempfile.mkdtemp(dir=self.tmp))
-        (run / "suite" / "slice").mkdir(parents=True)
-        (run / "work").mkdir()
-        (run / "suite" / "slice" / "index.json").write_text(json.dumps({
-            "cases": [{"caseId": c, "fileDigest": d} for c, d in self.CASES],
-            "negative": self.INDEX_NEGATIVE}))
-        (run / "work" / "plain.json").write_text(json.dumps({"cases": self.all_passed()}))
-        (run / "work" / "plain.exit").write_text("0\n")
-        (run / "work" / "negative.json").write_text(json.dumps({"cases": self.NEGATIVE}))
         for provenance, repo, want in (("default-branch", "changed", 3), ("default-branch", "stale", 3),
                                        ("default-branch", "moved", 0), ("unchecked", "moved", 3),
                                        ("default-branch", "same", 0), ("unchecked", "same", 0),
                                        ("default-branch", "unchecked", 0)):
-            code, out, err = self.run_quietly(eest.cmd_check, Namespace(
-                suite=str(run / "suite"), work=str(run / "work"), modes="plain", rev="f" * 40,
-                provenance=provenance, repo=repo, caseset="kept"))
+            code, out, err = self.write({"plain": self.all_passed()}, self.NEGATIVE,
+                                        provenance=provenance, repo=repo, caseset="kept")
             self.assertEqual(code, want, (provenance, repo, err))
             self.assertIn(f"provenance={provenance} repo={repo} caseset=kept", out)
 
@@ -717,7 +737,12 @@ assert args[0] == "consume"
 adapter, report, path = args[args.index("--adapter") + 1], args[args.index("--report") + 1], Path(args[-1])
 index = json.loads((path.parent / "index.json").read_text())
 if path.name == "negative":
-    cases = [{"caseId": n["caseId"], "fileDigest": "sha256:n", "status": "fail",
+    status = "fail"
+    if "--instrumented" in args:
+        status = os.environ.get("FAKE_INSTRUMENTED_CONTROL", status)
+        if status == "no-report":
+            sys.exit(2)
+    cases = [{"caseId": n["caseId"], "file": str(path / "wrong.json"), "fileDigest": "sha256:n", "status": status,
               "path": os.environ.get("FAKE_CONTROL_PATH") or n["wrongAt"]} for n in index["negative"]]
 else:
     failing = subprocess.run([adapter, "verdict"], capture_output=True, text=True).stdout.strip() == "fail"
@@ -727,6 +752,8 @@ else:
 Path(report).write_text(json.dumps({"cases": cases}))
 passed = sum(c["status"] == "pass" for c in cases)
 print(f"CONSUME adapter=fake cases={len(cases)} pass={passed} fail={len(cases) - passed} unsupported=0 error=0")
+if path.name == "negative" and "--instrumented" in args and "FAKE_INSTRUMENTED_CONTROL_EXIT" in os.environ:
+    sys.exit(int(os.environ["FAKE_INSTRUMENTED_CONTROL_EXIT"]))
 sys.exit(0 if passed == len(cases) else 1)
 """
 
@@ -838,6 +865,27 @@ class Script(Case):
         code, out, err = self.run_script(FAKE_VERDICT="fail", MEGA_EEST_MODES="plain")
         self.assertEqual(code, 1, err)
         self.assertRegex(self.summary(out), r" run=partial cases=3 plain=pass:0,fail:3,.* result=FAIL$")
+
+    def test_every_requested_mode_needs_a_failing_control(self) -> None:
+        for modes in ("plain instrumented", "instrumented"):
+            for gating in ("pass", "fail"):
+                for control in ("no-report", "unsupported", "pass"):
+                    with self.subTest(modes=modes, gating=gating, control=control):
+                        code, out, err = self.run_script(MEGA_EEST_MODES=modes, FAKE_VERDICT=gating,
+                                                         FAKE_INSTRUMENTED_CONTROL=control)
+                        self.assertEqual(code, 2, (out, err))
+                        self.assertRegex(self.summary(out), r" result=INCOMPLETE$")
+                        self.assertIn("instrumented: negative control", err)
+
+    def test_a_control_report_cannot_mask_the_consumer_exit(self) -> None:
+        for gating in ("pass", "fail"):
+            for exit_code in (0, 2, 101):
+                with self.subTest(gating=gating, exit_code=exit_code):
+                    code, out, err = self.run_script(FAKE_VERDICT=gating,
+                                                     FAKE_INSTRUMENTED_CONTROL_EXIT=str(exit_code))
+                    self.assertEqual(code, 2, (out, err))
+                    self.assertRegex(self.summary(out), r" negative=not-caught .* result=INCOMPLETE$")
+                    self.assertIn(f"instrumented: negative controls: `mega-fixture consume` exited {exit_code}", err)
 
     def test_failing_cases_that_move_the_control_are_still_exit_1(self) -> None:
         # A change that fails the cases can also move where the control first differs.

@@ -38,14 +38,16 @@
 #    build runs --locked on that lock.
 #    Cargo runs from this checkout's root, so the toolchain is its rust-toolchain.toml and the
 #    configuration its .cargo/config.toml.
-# 5. Consumes every gating case (slice/cases) with `mega-fixture consume` in each mode of
-#    $MEGA_EEST_MODES, plain and --instrumented by default, and the suite's negative controls
-#    (slice/negative).
-# 6. Decides (scripts/mega_eest.py check): in each mode the cases consumed are exactly the slice's
-#    index and every one passed, with identical plain and instrumented observations. When every
-#    gating case passed, each indexed negative control must fail at its `wrongAt` path or report
-#    status `error` with its exact `error` message, according to its index entry. When gating cases
-#    failed, each control must have run and reported a failure or an error.
+# 5. Consumes every gating case (slice/cases) and negative control (slice/negative) with
+#    `mega-fixture consume` in each mode of $MEGA_EEST_MODES, plain and --instrumented by default.
+#    It saves each control run's report, log and exit as negative-<mode>.{json,log,exit}.
+# 6. Uses scripts/mega_eest.py check to decide. Each mode's gating report must match the slice's
+#    index, and each passing case needs an observation digest before plain and instrumented
+#    observations can be compared. Each control report must match the indexed case IDs and
+#    fixture paths, relative to slice, and its consumer must have exited 1. When every gating
+#    case passed and the observations agree, each control must fail at its indexed `wrongAt`
+#    path or report status `error` with its exact indexed `error` message. A gating failure or an
+#    observation difference allows each control to report any failure or error.
 #    A failure prints the case id, the first differing path and both values, and the rules the
 #    case pins.
 #
@@ -56,7 +58,7 @@
 #     repo=<same|moved|changed|stale|unchecked> caseset=<unmoved|kept|declared|undeclared|unchecked>
 #     result=<pass|FAIL|INCOMPLETE|REFUSED>
 #
-# `negative=fail-as-recorded` means every control matched its own expectation.
+# `negative=fail-as-recorded` means every control matched its own expectation in every mode run.
 # `fail-elsewhere` means each control failed or erred and at least one differed during a failing run.
 # `not-caught` means the report did not meet the conditions for a verdict.
 # `none`, `invalid-index` and `no-report` identify missing controls, malformed entries and a missing report.
@@ -70,12 +72,12 @@
 #      the pin's checks passed or were skipped (result=pass)
 #   1  the cases failed: every mode ran to a complete report of exactly the slice's cases, a case
 #      failed or erred or plain and instrumented observations differ, and every negative control
-#      failed or erred (result=FAIL). The only exit that is a verdict
-#      on this tree.
+#      failed or erred in every mode (result=FAIL). The only exit that is a verdict on this tree.
 #   2  no verdict: anything that kept the run from one, a fetch, a build, the resolution, the lock
 #      check, a report missing or incomplete, cases that are not the index, a case the adapter does
-#      not support, no mode, missing or malformed controls, a control not run or passing, or
-#      a control that did not match the index while every gating case passed (result=INCOMPLETE)
+#      not support, a passing case without an observation digest, no mode, missing or malformed
+#      controls, a control consumer exit other than 1, or a control outcome that does not satisfy
+#      the gate (result=INCOMPLETE)
 #   3  the cases passed, but the pin is refused: not on Mega EEST's default branch, in another
 #      repository than the base's without a declared move, with a stale move declaration, or it
 #      removes or changes cases scripts/mega_eest.env does not declare (result=REFUSED; the log
@@ -388,7 +390,7 @@ printf '%s\n' "$ADAPTER" > "$WORK/adapter.path"
 "$ADAPTER" capabilities > "$WORK/capabilities.json" || die "the adapter does not report its capabilities"
 
 STAGE=consume
-rm -f "$WORK"/plain.* "$WORK"/instrumented.* "$WORK"/negative.*
+rm -f "$WORK"/plain.* "$WORK"/instrumented.* "$WORK"/negative.* "$WORK"/negative-{plain,instrumented}.*
 for mode in $MODE_WORDS; do
     flag=()
     [ "$mode" = instrumented ] && flag=(--instrumented)
@@ -398,10 +400,13 @@ for mode in $MODE_WORDS; do
         --report "$WORK/$mode.json" "$SUITE/slice/cases" > "$WORK/$mode.log" || rc=$?
     echo "$rc" > "$WORK/$mode.exit"
     grep '^CONSUME ' "$WORK/$mode.log" >&2 || log "$mode: no CONSUME line; see $WORK/$mode.log"
+
+    log "consuming slice/negative, $mode ($(elapsed))"
+    rc=0
+    "$CLI" consume --adapter "$ADAPTER" ${flag[@]+"${flag[@]}"} --specs "$SUITE/specs" \
+        --report "$WORK/negative-$mode.json" "$SUITE/slice/negative" > "$WORK/negative-$mode.log" || rc=$?
+    echo "$rc" > "$WORK/negative-$mode.exit"
 done
-log "consuming slice/negative, the negative controls ($(elapsed))"
-"$CLI" consume --adapter "$ADAPTER" --specs "$SUITE/specs" --report "$WORK/negative.json" \
-    "$SUITE/slice/negative" > "$WORK/negative.log" || true
 
 # The checker prints the summary line and exits with the code it names; anything else, a crash
 # included, is no verdict.
