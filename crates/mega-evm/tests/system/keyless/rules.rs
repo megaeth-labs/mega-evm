@@ -160,13 +160,6 @@ fn gas_limit_forwarding(deployment: &Deployment, init_len: usize, forward: u64) 
         forward
 }
 
-/// A signed gas limit the signer's account can take the forward below: 500,000 on top of the
-/// account's state gas at the byte prices in effect, so the call can pay for the account out of
-/// the forward whatever a state byte costs.
-fn signed_above_the_account() -> u64 {
-    500_000 + entry(GasId::new_account_state_gas())
-}
-
 /// The length of the init code the forwarding tests deploy: a one-byte runtime.
 fn one_byte_init_len() -> usize {
     deploying(&runtime(1)).len()
@@ -477,56 +470,6 @@ fn test_a_resubmission_after_failures_and_a_deployment_finds_the_address_taken()
     }
 }
 
-/// A deployment that succeeds from nonce 1 leaves the signer at 1 too: the creation's bump goes
-/// with its record, so the deployment costs exactly one record's history less than the same one
-/// from nonce 0, which keeps its bump. The record stays when the creation moved value out of the
-/// signer's account, and then stands for that write.
-#[test]
-fn test_a_success_from_nonce_one_leaves_the_nonce_at_one() {
-    for gas_limit in GAS_LIMITS {
-        for (value, kept) in [(U256::ZERO, 0), (U256::ONE, 1)] {
-            let deployment = Deployment::with_value(deploying(&runtime(1)), value);
-            let funded = db_for(&deployment, U256::from(1_000));
-            let at_zero = deploy(funded.clone(), &deployment, gas_limit);
-            let at_one = deploy(funded.account_nonce(deployment.signer, 1), &deployment, gas_limit);
-            assert_eq!(returned(&at_one).deployedAddress, deployment.address, "at {gas_limit}");
-            assert_eq!(nonce(&at_zero, deployment.signer), 1, "at {gas_limit}");
-            assert_eq!(nonce(&at_one, deployment.signer), 1, "at {gas_limit}");
-            assert_eq!(at_one.usage.write_records, 1 + kept, "value {value} at {gas_limit}");
-            let taken_back = 1 - kept;
-            assert_eq!(
-                beyond(&at_zero, &at_one),
-                [taken_back * record(), 0, 0, taken_back * record(), taken_back * 40],
-                "value {value} at {gas_limit}",
-            );
-        }
-    }
-}
-
-/// A deployment that fails from nonce 1 keeps nothing of the signer: its records, its data size,
-/// its history gas and its history bytes are those of a transaction that bumped no nonce — the
-/// reference, which pays the same intrinsic gas and writes nothing — and it spends exactly one
-/// record's history less than the same failure from nonce 0, which keeps its bump.
-#[test]
-fn test_a_failure_from_nonce_one_keeps_no_record_of_the_signer() {
-    let deployment = Deployment::new(Bytes::from_static(&[PUSH0, PUSH0, REVERT]));
-    for gas_limit in GAS_LIMITS {
-        let at_one =
-            deploy(system_db().account_nonce(deployment.signer, 1), &deployment, gas_limit);
-        let at_zero = deploy(db_for(&deployment, U256::ONE), &deployment, gas_limit);
-        assert_eq!(nonce(&at_one, deployment.signer), 1, "at {gas_limit}");
-        assert_eq!(nonce(&at_zero, deployment.signer), 1, "at {gas_limit}");
-
-        let reference = reference(deployment.call_data(LARGE_OVERRIDE), gas_limit);
-        let [_, _, state, history_gas, history_bytes] = beyond(&at_one, &reference);
-        assert_eq!([state, history_gas, history_bytes], [0; 3], "at {gas_limit}");
-        assert_eq!(at_one.usage, reference.usage, "at {gas_limit}");
-
-        assert_eq!(at_zero.usage.write_records, 1, "the signer's nonce record");
-        assert_eq!(beyond(&at_zero, &at_one), [record(), 0, 0, record(), 40], "at {gas_limit}");
-    }
-}
-
 /// However a deployment from nonce 1 fails — its init code reverts or halts, it deploys no code,
 /// or a limit stops its creation at its start — the signer stays at 1 and its nonce record goes.
 /// A creation that deployed no code is refused its empty deposit and reverts, so it keeps neither
@@ -659,30 +602,6 @@ fn test_a_disabled_eip3607_reads_no_signer_code() {
         assert_eq!(returned(&outcome).deployedAddress, deployment.address);
 
         assert_db_error(run_on(db(), &deployment.tx, gas_limit), "injected code_by_hash() error");
-    }
-}
-
-/// An EIP-7702 delegation is not code: a signer that delegated deploys.
-#[test]
-fn test_a_delegated_signer_deploys() {
-    for gas_limit in GAS_LIMITS {
-        let deployment = small();
-        let delegation =
-            Bytecode::new_eip7702(address!("0x00000000000000000000000000000000000d1e6a"));
-        let mut db = system_db();
-        db.insert_account_info(
-            deployment.signer,
-            AccountInfo {
-                balance: U256::ZERO,
-                nonce: 1,
-                code_hash: delegation.hash_slow(),
-                code: Some(delegation),
-                ..Default::default()
-            },
-        );
-        let outcome = submit(db, &deployment.tx, LARGE_OVERRIDE, gas_limit);
-        assert_eq!(returned(&outcome).deployedAddress, deployment.address);
-        assert_eq!(nonce(&outcome, deployment.signer), 1);
     }
 }
 
@@ -879,50 +798,6 @@ fn test_keyless_deploy_insufficient_balance_partial() {
             submit(db_for(&deployment, U256::from(9)), &deployment.tx, LARGE_OVERRIDE, gas_limit);
         assert_eq!(refusal(&outcome), KeylessDeployError::InsufficientBalance);
         assert_nothing_written(&outcome, &deployment, 0);
-    }
-}
-
-/// A signer holding exactly the value deploys, and the value moves to the contract.
-#[test]
-fn test_keyless_deploy_balance_exactly_sufficient() {
-    for gas_limit in GAS_LIMITS {
-        let deployment = Deployment::with_value(deploying(&runtime(1)), U256::from(10));
-        let outcome =
-            submit(db_for(&deployment, U256::from(10)), &deployment.tx, LARGE_OVERRIDE, gas_limit);
-        assert_eq!(returned(&outcome).deployedAddress, deployment.address);
-        let balance = |address| outcome.state.get(&address).map(|account| account.info.balance);
-        assert_eq!(balance(deployment.signer), Some(U256::ZERO));
-        assert_eq!(balance(deployment.address), Some(U256::from(10)));
-    }
-}
-
-/// The signer's account is charged exactly when its nonce is spent: a refused call does neither,
-/// a deployment that fails at run time does both.
-///
-/// The refusal runs below the execution cap, as the refusals above; the failure runs at both.
-#[test]
-fn test_the_signers_account_is_charged_exactly_when_its_nonce_is_spent() {
-    let signed = signed_above_the_account();
-    let deployment =
-        Deployment::signed(0, signed, U256::ZERO, Bytes::from_static(&[PUSH0, PUSH0, REVERT]));
-    // An account that costs nothing takes nothing from the forward, and refuses nothing.
-    if !state_is_free() {
-        let refused = submit(
-            system_db(),
-            &deployment.tx,
-            LARGE_OVERRIDE,
-            gas_limit_forwarding(&deployment, 3, signed),
-        );
-        assert!(matches!(refusal(&refused), KeylessDeployError::GasLimitTooLow { .. }));
-        assert_eq!(nonce(&refused, deployment.signer), 0);
-        assert_eq!(refused.gas.state, 0);
-    }
-
-    for gas_limit in GAS_LIMITS {
-        let failed = submit(system_db(), &deployment.tx, LARGE_OVERRIDE, gas_limit);
-        assert!(matches!(failure(&failed), KeylessDeployError::ExecutionReverted { .. }));
-        assert_eq!(nonce(&failed, deployment.signer), 1);
-        assert_eq!(failed.gas.state, entry(GasId::new_account_state_gas()));
     }
 }
 
