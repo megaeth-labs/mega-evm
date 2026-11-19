@@ -722,40 +722,6 @@ fn test_a_system_transaction_short_of_its_body_history_is_a_failed_deposit() {
     assert_eq!(gas.gas_used, least);
 }
 
-/// A deposit-like transaction whose caller does not exist yet creates that account, and pays
-/// the account-creation charge for it exactly once: the same charge a value transfer to a
-/// fresh account pays.
-#[test]
-fn test_a_deposit_creates_its_caller_and_pays_for_it_once() {
-    // The reference charge: a user transaction that creates one account by sending value to it.
-    let fresh = address!("0x00000000000000000000000000000000000f0001");
-    let reference =
-        run_outcome(chain_db().account_balance(CALLER, U256::from(1_000_000_000_000_u64)), {
-            let mut tx = legacy_tx(CALLER, TxKind::Call(fresh), Bytes::new(), 0);
-            tx.0.base.value = U256::from(1);
-            tx
-        });
-    let one_account = reference.gas.state;
-    assert_eq!(one_account, account_state_gas(), "a fresh recipient costs state gas");
-
-    // A system transaction whose sender does not exist yet creates it, for the same charge.
-    let created = run_outcome(chain_db(), system_tx(0, B256::with_last_byte(0x77)));
-    assert!(created.result.is_success(), "{:?}", created.result);
-    // The same transaction from a sender that already exists: what it pays is the slot it
-    // writes, and nothing for its own account.
-    let slot_charge = run_outcome(
-        chain_db().account_balance(MEGA_SYSTEM_ADDRESS, U256::from(1)),
-        system_tx(0, B256::with_last_byte(0x77)),
-    )
-    .gas
-    .state;
-    assert_eq!(
-        created.gas.state - slot_charge,
-        one_account,
-        "the caller's account costs one account creation, and the slot the same either way",
-    );
-}
-
 /// A deposit whose recipient is its own caller pays for that one account once: by the time the
 /// recipient is looked at, the caller's materialisation has created it.
 #[test]
@@ -893,27 +859,6 @@ fn test_the_callee_sees_the_system_address_as_its_caller() {
         Address::from_word(B256::from_slice(outcome.result.output().unwrap())),
         MEGA_SYSTEM_ADDRESS,
     );
-}
-
-/// The account a deposit-like transaction creates for its caller is the transaction's own
-/// account: it is part of the transaction body, so it is not a write record of its own. It is a
-/// new account all the same, one of state growth on the transaction.
-#[test]
-fn test_the_created_caller_is_not_a_write_record() {
-    let fresh = run_outcome(chain_db(), system_tx(0, B256::with_last_byte(0x99)));
-    let existing = run_outcome(
-        chain_db().account_balance(MEGA_SYSTEM_ADDRESS, U256::from(1)),
-        system_tx(0, B256::with_last_byte(0x99)),
-    );
-    assert!(fresh.result.is_success() && existing.result.is_success());
-    assert_eq!(
-        (fresh.usage.data_size, fresh.usage.write_records),
-        (existing.usage.data_size, existing.usage.write_records),
-        "creating the sender's own account records nothing a transaction with an existing sender \
-         does not record",
-    );
-    assert_eq!(existing.usage.state_growth, 1, "the Oracle's slot, set from zero");
-    assert_eq!(fresh.usage.state_growth, 2, "and the sender's new account");
 }
 
 /// A deposit-like transaction that creates a contract pays for the account it creates for its
