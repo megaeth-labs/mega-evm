@@ -1,6 +1,7 @@
 use std::time::Instant;
 
 use alloy_consensus::{BlockHeader, Transaction as _};
+use alloy_eips::BlockId;
 use alloy_primitives::{B256, U256};
 use alloy_provider::Provider;
 use alloy_rpc_types_eth::Block;
@@ -432,14 +433,22 @@ impl Cmd {
             self.limits_override.as_ref().map(|limits| satin_limits(Some(limits))).transpose()?;
         debug!(chain_id = ctx.chain_id, spec = %MegaSpecId::SATIN, "Chain configuration");
 
-        info!(fork_block = ctx.parent_block.header.number(), "Forking state from parent block",);
-        let mut database = EvmeState::new_forked(
+        // Bind pre-state reads to the verified parent hash with `requireCanonical: true`
+        // (EIP-1898) rather than its height: if a reorg occurs or a load-balanced endpoint serves
+        // a different fork after the headers were verified, the node refuses the stale hash
+        // instead of silently returning another parent's state.
+        let parent_block_id = BlockId::hash_canonical(ctx.parent_block.hash());
+        info!(
+            fork_block = ctx.parent_block.header.number(),
+            fork_block_hash = %ctx.parent_block.hash(),
+            "Forking state from verified parent block",
+        );
+        let mut database = EvmeState::new_forked_at(
             provider.clone(),
-            Some(ctx.parent_block.header.number()),
+            parent_block_id,
             Default::default(),
             Default::default(),
-        )
-        .await?;
+        )?;
 
         let block_env = retrieve_block_env(&ctx.block)?;
         trace!(?block_env, "Block environment built");

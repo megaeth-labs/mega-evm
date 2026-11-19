@@ -2,6 +2,7 @@
 
 use std::{collections::BTreeMap, path::PathBuf, str::FromStr};
 
+use alloy_eips::BlockId;
 use alloy_network::Network;
 use alloy_primitives::{Address, BlockNumber, Bytes, B256, U256};
 use alloy_provider::Provider;
@@ -820,8 +821,19 @@ where
             BlockNumber::from(latest_block)
         };
 
-        // Create AlloyDB with the provider and block number
-        let alloy_db = AlloyDB::new(provider, block_num.into());
+        Self::new_forked_at(provider, block_num.into(), prestate, block_hashes)
+    }
+
+    /// Create a new forked state bound to an explicit EIP-1898 [`BlockId`] (number or hash),
+    /// with optional prestate overrides and block hash overrides.
+    pub fn new_forked_at(
+        provider: P,
+        block_id: BlockId,
+        prestate: EvmState,
+        block_hashes: HashMap<u64, B256>,
+    ) -> Result<Self> {
+        // Create AlloyDB with the provider and block selector
+        let alloy_db = AlloyDB::new(provider, block_id);
 
         // Wrap the AlloyDB for synchronous access with the runtime
         let wrapped_db =

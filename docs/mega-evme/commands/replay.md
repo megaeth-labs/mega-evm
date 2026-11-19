@@ -10,8 +10,9 @@ In offline mode (`--rpc.replay-file`), all data is served from a local fixture c
 
 A Satin transaction replay requires a mined transaction in a block after genesis.
 Pending transactions have no canonical block context and are refused.
-Before reading the parent state, replay checks that the fetched parent has the preceding block number and the hash named by the transaction's block.
-A mismatch aborts the replay; retry with a consistent RPC endpoint or recording.
+Before reading the parent state, replay checks that the fetched parent has the preceding block number and the hash named by the transaction's block, and then issues pre-state reads (`eth_getBalance`, `eth_getCode`, `eth_getStorageAt`, `eth_getTransactionCount`) against that verified parent hash using EIP-1898 (`{"blockHash": ..., "requireCanonical": true}`) rather than by block number.
+A header mismatch or non-canonical parent aborts the replay; retry with a consistent RPC endpoint or recording.
+Because Satin pre-state reads are keyed by the EIP-1898 parent block hash instead of block number, per-endpoint cache entries (`--rpc.cache-dir`) and `--rpc.capture-file` / `--rpc.replay-file` keys differ from height-keyed captures; Satin replay files captured before this change must be re-captured.
 
 With `--block`, `replay` re-executes whole blocks instead and compares every receipt with the chain's; see [Replaying Whole Blocks](#replaying-whole-blocks).
 

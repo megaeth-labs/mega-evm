@@ -67,7 +67,17 @@ impl Recording {
 
     fn result(&self, method: &str, params: &[Value]) -> Result<Value, String> {
         let block_arg = |i: usize| params.get(i).and_then(Value::as_str).unwrap_or_default();
-        let at_parent = |i: usize| block_arg(i) == format!("0x{:x}", BLOCK - 1);
+        let at_parent_number = |i: usize| block_arg(i) == format!("0x{:x}", BLOCK - 1);
+        let at_parent_hash = |i: usize| {
+            params.get(i) ==
+                Some(&json!({
+                    "blockHash": self.block.block["parentHash"],
+                    "requireCanonical": true,
+                }))
+        };
+        // The legacy 1.7.1 engine queries state by parent number; Satin binds state to the
+        // verified canonical parent hash (EIP-1898).
+        let at_parent_state = |i: usize| at_parent_number(i) || at_parent_hash(i);
         let address = || -> Result<Address, String> {
             serde_json::from_value(params[0].clone()).map_err(|e| e.to_string())
         };
@@ -102,8 +112,8 @@ impl Recording {
                 }
                 Ok(block)
             }
-            "eth_getBlockByNumber" if at_parent(0) => Ok(self.parent()),
-            "eth_getBalance" | "eth_getTransactionCount" | "eth_getCode" if at_parent(1) => {
+            "eth_getBlockByNumber" if at_parent_number(0) => Ok(self.parent()),
+            "eth_getBalance" | "eth_getTransactionCount" | "eth_getCode" if at_parent_state(1) => {
                 let account = self.account(address()?).ok_or("account not recorded")?;
                 Ok(match method {
                     "eth_getBalance" => json!(account.balance),
@@ -118,7 +128,7 @@ impl Recording {
                         .unwrap_or_else(|| "0x".to_string())),
                 })
             }
-            "eth_getStorageAt" if at_parent(2) => {
+            "eth_getStorageAt" if at_parent_state(2) => {
                 let account = self.account(address()?).ok_or("account not recorded")?;
                 let slot: U256 =
                     serde_json::from_value(params[1].clone()).map_err(|e| e.to_string())?;
@@ -767,4 +777,123 @@ async fn test_a_replay_dump_carries_the_code_of_a_predecessors_account() {
         alloy_primitives::hex::encode_prefixed(&storer_code),
         "{summary}"
     );
+}
+
+/// Replay binds pre-state reads to the verified parent block hash (EIP-1898 with
+/// `requireCanonical: true`) rather than its height, so a reorg or inconsistent load-balanced
+/// endpoint serving different state at the parent number cannot silently feed the wrong pre-state.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_replay_reads_prestate_at_parent_hash() {
+    // PUSH0 SLOAD PUSH0 MSTORE PUSH1 0x20 PUSH0 RETURN: returns storage slot 0.
+    let reader = address!("0x8888888888888888888888888888888888888888");
+    let code = vec![0x5f, 0x54, 0x5f, 0x52, 0x60, 0x20, 0x5f, 0xf3];
+    let hash_value = U256::from(0xbeefu64);
+    let height_value = U256::from(0xdeadu64);
+
+    let mut recorded = read_block(fixtures(), BLOCK);
+    recorded
+        .prestate
+        .accounts
+        .insert(PAYER, PreAccount { balance: U256::from(10u128.pow(18)), ..PreAccount::default() });
+    let code_hash = alloy_primitives::keccak256(&code);
+    let codes = HashMap::from_iter([(code_hash, code)]);
+    recorded.prestate.accounts.insert(
+        reader,
+        PreAccount {
+            code_hash: Some(code_hash),
+            storage: BTreeMap::from([(B256::ZERO, hash_value)]),
+            ..Default::default()
+        },
+    );
+    let target = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+    recorded.block["transactions"] = json!([{
+        "type": "0x2",
+        "chainId": "0x10e6",
+        "nonce": "0x0",
+        "gas": "0x4c4b40",
+        "maxFeePerGas": "0xf4240",
+        "maxPriorityFeePerGas": "0x0",
+        "to": reader,
+        "value": "0x0",
+        "accessList": [],
+        "input": "0x",
+        "r": "0x64c0524917585101b7ffb2286d4de676ca987554b33c6f9a37e7ad7508bfbb84",
+        "s": "0xe5199cacc6e07c6a9f8c74d0b06f964ce36dd362199b1c19d866f1a6f52d510",
+        "yParity": "0x1",
+        "v": "0x1",
+        "hash": target,
+        "blockHash": recorded.block["hash"],
+        "blockNumber": recorded.block["number"],
+        "transactionIndex": "0x0",
+        "from": PAYER,
+        "gasPrice": "0xf4240",
+    }]);
+
+    let parent_hash = recorded.block["parentHash"].clone();
+    let expected_selector = json!({
+        "blockHash": parent_hash,
+        "requireCanonical": true,
+    });
+    let parent_height = format!("0x{:x}", BLOCK - 1);
+    let server = Server::with_codes(recorded, None, codes).await;
+
+    // Serve different storage at the parent height (simulating a reorg / split-view RPC).
+    Mock::given(matchers::body_partial_json(json!({
+        "method": "eth_getStorageAt",
+        "params": [reader, U256::ZERO, parent_height],
+    })))
+    .respond_with(move |request: &wiremock::Request| {
+        let body: Value = serde_json::from_slice(&request.body).unwrap();
+        ResponseTemplate::new(200).set_body_json(json!({
+            "jsonrpc": "2.0",
+            "id": body["id"],
+            "result": B256::from(height_value),
+        }))
+    })
+    .with_priority(1)
+    .mount(&server.0)
+    .await;
+
+    let run = run_evme(&[
+        "replay",
+        target,
+        "--rpc",
+        &server.0.uri(),
+        "--rpc.no-cache-file",
+        "--rpc.max-retries",
+        "0",
+        "--override.spec",
+        "Satin",
+        "--json",
+    ]);
+    assert_eq!(run.code, 0, "{}{}", run.stderr, run.stdout);
+    let summary: Value = serde_json::from_str(&run.stdout).unwrap();
+    assert_eq!(summary["success"], true, "{summary}");
+    assert_eq!(
+        summary["output"],
+        json!(B256::from(hash_value)),
+        "replay must observe the state bound to the verified parent hash, not the parent height"
+    );
+
+    let requests = server.0.received_requests().await.unwrap();
+    let mut state_reads = 0usize;
+    for request in &requests {
+        let body: Value = serde_json::from_slice(&request.body).unwrap();
+        let block_param = match body["method"].as_str() {
+            Some("eth_getBalance" | "eth_getTransactionCount" | "eth_getCode") => {
+                Some(&body["params"][1])
+            }
+            Some("eth_getStorageAt") => Some(&body["params"][2]),
+            _ => None,
+        };
+        if let Some(selector) = block_param {
+            state_reads += 1;
+            assert_eq!(
+                selector, &expected_selector,
+                "state read {} must pass EIP-1898 canonical parent hash, got {selector}",
+                body["method"]
+            );
+        }
+    }
+    assert!(state_reads > 0, "expected at least one state RPC read");
 }
