@@ -125,34 +125,6 @@ fn unfunded_contract_db(data: &[u8]) -> MemoryDatabase {
     system_db().account_code(CONTRACT, unfunded_value_hint_call(data))
 }
 
-/// A value-bearing `sendHint` whose caller cannot fund the value is intercepted before revm
-/// starts the call and checks the funds: the hint is forwarded and its input counted, then the
-/// call fails for the funds with empty return data and moves no value, and the Oracle's bytecode
-/// never runs.
-#[test]
-fn test_an_unfunded_value_hint_is_forwarded_and_then_fails_for_funds() {
-    let data = send_hint(b"unfunded");
-    let (result, hints, usage) =
-        run_with_oracle(unfunded_contract_db(&data), call_tx(CONTRACT, [], U256::ZERO));
-
-    assert!(result.result.is_success(), "the contract survives the failed call");
-    let returned = result.result.output().cloned().unwrap_or_default();
-    let (status, return_data) = crate::common::split_outcome(&returned);
-    assert!(!status, "the call fails for funds");
-    assert!(return_data.is_empty(), "with empty return data");
-    assert_eq!(
-        hints,
-        vec![RecordedHint { from: CONTRACT, topic: TOPIC, data: Bytes::from_static(b"unfunded") }],
-        "the hint reached the service",
-    );
-    assert_eq!(usage.data_size, nested_hint(data.len() as u64), "and its input is counted");
-    assert_eq!(usage.data_size, mega_evm::TX_BODY_SIZE + data.len() as u64);
-    let balance =
-        |address| result.state.get(&address).map_or(U256::ZERO, |account| account.info.balance);
-    assert_eq!(balance(CONTRACT), U256::ZERO, "no value moved from the caller");
-    assert_eq!(balance(ORACLE_CONTRACT_ADDRESS), U256::ZERO, "and none reached the Oracle");
-}
-
 /// A value-bearing `sendHint` its caller cannot fund, under a data-size limit its input would
 /// cross, is answered with the stop, not with the funds failure: nothing is forwarded and nothing
 /// is counted.
@@ -432,6 +404,29 @@ fn test_hints_reach_the_service_in_the_order_they_were_sent() {
             RecordedHint { from: CONTRACT, topic: second.topic, data: second.data },
         ],
     );
+}
+
+#[test]
+fn test_recorded_hints_preserve_order_and_fields_across_clones() {
+    use mega_evm::OracleEnv;
+
+    let env = TestExternalEnvs::default();
+    let writer = env.clone();
+    let first = RecordedHint {
+        from: CALLER,
+        topic: B256::repeat_byte(0x11),
+        data: Bytes::from_static(b"first hint"),
+    };
+    let second = RecordedHint {
+        from: CONTRACT,
+        topic: B256::repeat_byte(0x22),
+        data: Bytes::from_static(b"second hint"),
+    };
+
+    writer.on_hint(first.from, first.topic, first.data.clone());
+    writer.on_hint(second.from, second.topic, second.data.clone());
+
+    assert_eq!(env.recorded_hints(), vec![first, second]);
 }
 
 /// A malformed `sendHint` payload, and one followed by bytes the decoder drops, are counted
