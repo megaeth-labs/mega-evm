@@ -625,8 +625,6 @@ reviewer = "RealiCZ (cz)"
 #
 # The sandbox survivor at sandbox/execution.rs:603 is closed by a test
 # (test_rex5_sandbox_balance_precheck_ignores_gas_price).
-#
-# reviewer: left unset; the sign-off is recorded by the reviewer on the pull request.
 # ─────────────────────────────────────────────────────────────────────────────
 
 # --- crates/mega-evm/src/evm/execution.rs:1774 ---
