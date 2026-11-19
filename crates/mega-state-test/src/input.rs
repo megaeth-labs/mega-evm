@@ -402,10 +402,9 @@ mod tests {
 
         // Exercise `open_nonblocking` directly on the FIFO (no pre-open metadata check) to prove
         // the `O_NONBLOCK` open itself returns immediately and `read_with_limit` rejects the fd.
-        let fifo_clone2 = fifo.clone();
         let (tx2, rx2) = mpsc::channel();
         std::thread::spawn(move || {
-            let res = open_nonblocking(&fifo_clone2).and_then(|file| read_with_limit(file, 64));
+            let res = open_nonblocking(&fifo).and_then(|file| read_with_limit(file, 64));
             let _ = tx2.send(res);
         });
         let direct_err = rx2
