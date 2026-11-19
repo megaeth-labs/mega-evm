@@ -728,11 +728,7 @@ where
         self.state.code_by_hash_ref(code_hash)
     }
 
-    fn storage_ref(
-        &self,
-        address: Address,
-        index: U256,
-    ) -> std::result::Result<U256, Self::Error> {
+    fn storage_ref(&self, address: Address, index: U256) -> std::result::Result<U256, Self::Error> {
         self.state.storage_ref(address, index)
     }
 

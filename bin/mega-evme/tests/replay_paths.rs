@@ -635,7 +635,10 @@ async fn test_a_replay_stops_when_a_predecessor_account_cannot_be_read() {
     let output = format!("{}{}", run.stdout, run.stderr);
     assert!(output.contains("Block execution error"), "{output}");
     assert!(output.contains(&MISSING.to_string()), "{output}");
-    assert!(output.contains("-32000") && output.contains("server error message omitted"), "{output}");
+    assert!(
+        output.contains("-32000") && output.contains("server error message omitted"),
+        "{output}"
+    );
     assert!(!output.contains("account not recorded"), "{output}");
 }
 
