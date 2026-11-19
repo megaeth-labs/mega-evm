@@ -29,7 +29,7 @@ use revm::{
 };
 
 use super::*;
-use crate::common::{calls_with, split_outcome, with_contract, CALLER as RELAYER, CONTRACT};
+use crate::common::{calls_with, split_outcome, with_contract, CONTRACT};
 
 /// An account the deployments below call into.
 const HELPER: Address = address!("0x0000000000000000000000000000000000500000");
