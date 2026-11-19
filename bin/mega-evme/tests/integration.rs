@@ -11,6 +11,7 @@ use std::{path::Path, process::Command};
 
 use rstest::rstest;
 use serde::Deserialize;
+use wiremock::{matchers, Mock, MockServer, ResponseTemplate};
 
 /// A test fixture: CLI args + expected JSON output.
 #[derive(Deserialize)]
@@ -336,6 +337,8 @@ fn test_the_rpc_url_userinfo_reaches_no_output() {
         "http://alice:s3cret@127.0.0.1:9/",
         "http://alice:s3c@ret@127.0.0.1:9/",
         "alice:s3cret@127.0.0.1:9",
+        "http://alice:s3cret@127.0.0.1:9/v2/path-secret?key=query-secret#fragment-secret",
+        "http://bad host/path-secret?key=query-secret",
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_mega-evme"))
             .args(["replay", &format!("0x{}", "11".repeat(32)), "--override.spec", "Satin"])
@@ -350,6 +353,169 @@ fn test_the_rpc_url_userinfo_reaches_no_output() {
         assert_eq!(output.status.code(), Some(1), "{url}: {text}");
         assert!(!text.contains("s3c") && !text.contains("ret@"), "{url}: {text}");
         assert!(!text.contains("alice"), "{url}: {text}");
+        for secret in ["path-secret", "query-secret", "fragment-secret"] {
+            assert!(!text.contains(secret), "{url}: {text}");
+        }
+    }
+}
+
+#[test]
+fn test_a_log_file_creation_failure_filters_the_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("\u{1b}[2J\u{202e}missing-parent").join("tool.log");
+    let output = Command::new(env!("CARGO_BIN_EXE_mega-evme"))
+        .env_remove("RUST_LOG")
+        .arg("--log.no-color")
+        .args(["run", "0x00", "--spec", "Satin", "-v"])
+        .arg("--log.file")
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("Failed to create log file") && stderr.contains("tool.log"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains('\u{202e}') && !stderr.contains('\u{1b}'), "{stderr:?}");
+}
+
+/// The CLI must also hide raw response diagnostics and dependency spans, on both log writers.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_rpc_response_errors_hide_credentials_in_stderr_and_log_files() {
+    let server = MockServer::start().await;
+    let url = format!(
+        "{}/v2/(path-secret)?key=query-secret#fragment-secret",
+        server.uri().replacen("http://", "http://alice:userinfo-secret@", 1)
+    );
+    Mock::given(matchers::method("POST"))
+        .respond_with(
+            ResponseTemplate::new(503)
+                .set_body_string(format!("{{\"url\":\"{}\"}}", url.replace('/', "\\/"))),
+        )
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    for to_file in [false, true] {
+        let path = dir.path().join("rpc.log");
+        let before = server.received_requests().await.unwrap().len();
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_mega-evme"));
+        cmd.env("RUST_LOG", "mega_evme=debug,alloy_transport_http=trace,alloy_transport=trace")
+            .args([
+                "--log.no-color",
+                "replay",
+                &format!("0x{}", "11".repeat(32)),
+                "--override.spec",
+                "Satin",
+            ])
+            .args([
+                "--rpc",
+                &url,
+                "--rpc.max-retries",
+                "1",
+                "--rpc.backoff-ms",
+                "1",
+                "--rpc.no-cache-file",
+                "-vvvv",
+            ]);
+        if to_file {
+            cmd.arg("--log.file").arg(&path);
+        }
+        let output = tokio::task::spawn_blocking(move || cmd.output()).await.unwrap().unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        assert_eq!(server.received_requests().await.unwrap().len() - before, 2);
+        let mut text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if to_file {
+            text.push_str(&std::fs::read_to_string(&path).unwrap());
+        }
+        assert!(
+            text.contains("Failed to fetch chain ID") && text.contains("Max retries exceeded"),
+            "{text}"
+        );
+        for secret in ["alice", "userinfo-secret", "path-secret", "query-secret", "fragment-secret"]
+        {
+            assert!(!text.contains(secret), "{text}");
+        }
+    }
+}
+
+/// CLI stderr and `--log.file` must report the JSON-RPC error code with a local diagnostic and
+/// never echo server error text (key value alone, path segment alone, or benign `/rpc` messages).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_rpc_json_error_stderr_and_log_never_echo_server_message() {
+    let cases = [
+        (
+            "/v2/path-secret?key=query-secret",
+            -32000i64,
+            "invalid API key query-secret",
+            &["query-secret", "path-secret", "invalid API key"][..],
+        ),
+        (
+            "/v2/path-secret?key=query-secret",
+            -32001i64,
+            "unknown project path-secret",
+            &["path-secret", "query-secret", "unknown project"][..],
+        ),
+        ("/rpc", -32601i64, "header not found", &["header not found"][..]),
+    ];
+
+    let dir = tempfile::tempdir().unwrap();
+    for (idx, (suffix, code, server_msg, forbidden)) in cases.into_iter().enumerate() {
+        let server = MockServer::start().await;
+        let url = format!("{}{suffix}", server.uri());
+        Mock::given(matchers::method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 0,
+                "error": { "code": code, "message": server_msg, "data": { "raw": server_msg } },
+            })))
+            .mount(&server)
+            .await;
+
+        for to_file in [false, true] {
+            let log_path = dir.path().join(format!("rpc-{idx}-{to_file}.log"));
+            let mut cmd = Command::new(env!("CARGO_BIN_EXE_mega-evme"));
+            cmd.env("RUST_LOG", "mega_evme=debug,alloy_transport_http=trace,alloy_transport=trace")
+                .args([
+                    "--log.no-color",
+                    "replay",
+                    &format!("0x{}", "11".repeat(32)),
+                    "--override.spec",
+                    "Satin",
+                    "--rpc",
+                    &url,
+                    "--rpc.max-retries",
+                    "0",
+                    "--rpc.no-cache-file",
+                    "-vvvv",
+                ]);
+            if to_file {
+                cmd.arg("--log.file").arg(&log_path);
+            }
+            let output = tokio::task::spawn_blocking(move || cmd.output()).await.unwrap().unwrap();
+            assert_eq!(output.status.code(), Some(1));
+            let mut text = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            if to_file {
+                text.push_str(&std::fs::read_to_string(&log_path).unwrap());
+            }
+            assert!(
+                text.contains(&code.to_string()) &&
+                    text.contains("server returned an error response") &&
+                    text.contains("server error message omitted"),
+                "expected error code and local diagnostic in: {text}"
+            );
+            for item in forbidden {
+                assert!(!text.contains(item), "server text {item:?} leaked in: {text}");
+            }
+        }
     }
 }
 

@@ -206,6 +206,7 @@ pub(crate) fn plain_account(account: &Account) -> Result<PlainAccount, String> {
 
 /// The root of a state the fixture writes out, such as its post-state.
 pub(crate) fn fixture_state_root(accounts: &BTreeMap<Address, Account>) -> Result<B256, String> {
+    crate::input::check_state_size(accounts.values().map(|account| account.storage.len()))?;
     let plain = accounts
         .iter()
         .map(|(address, account)| Ok((*address, plain_account(account)?)))
@@ -269,6 +270,7 @@ impl Chain {
         chain_id: u64,
         blob_base_fee_update_fraction: u64,
     ) -> Result<Self, String> {
+        crate::input::check_state_size(pre.values().map(|account| account.storage.len()))?;
         let mut state = CacheState::new();
         for (address, account) in pre {
             let plain = plain_account(account).map_err(|error| format!("{address}: {error}"))?;
@@ -289,6 +291,9 @@ impl Chain {
             let storage = storage.into_iter().filter(|(_, value)| !value.is_zero()).collect();
             state.insert_account_with_storage(address, info, storage);
         }
+        crate::input::check_state_size(
+            state.trie_account().into_iter().map(|(_, account)| account.storage.len()),
+        )?;
         Ok(Self {
             state,
             hashes: BTreeMap::from([genesis]),
@@ -407,6 +412,10 @@ impl Chain {
             }
         }?;
 
+        crate::input::check_state_size(
+            state.cache.trie_account().into_iter().map(|(_, account)| account.storage.len()),
+        )
+        .map_err(|detail| Refusal { names: &[], detail })?;
         let routed_base_fee = self.routed_base_fee +
             U256::from(header.base_fee_per_gas.unwrap_or_default()) * U256::from(gas_used);
         self.state = state.cache;

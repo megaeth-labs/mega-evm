@@ -132,7 +132,7 @@ fn test_a_sample_of_the_fixtures_replays_from_its_witness() {
     let mode: Mode =
         std::env::var("MEGA_STATE_TEST_MODE").map_or(Mode::Satin, |m| m.parse().expect("a mode"));
 
-    let files = find_json_files(&root);
+    let files = find_json_files(&root).expect("fixture discovery succeeds");
     assert!(!files.is_empty(), "no fixtures under {}", root.display());
     let stride = files.len().checked_div(sample).unwrap_or(1).max(1);
     let sampled: Vec<_> =

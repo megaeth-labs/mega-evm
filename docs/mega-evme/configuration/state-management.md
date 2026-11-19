@@ -227,10 +227,15 @@ When using fork mode, `mega-evme` caches RPC responses to avoid redundant networ
 
 These options take effect only when an RPC endpoint is actually contacted: on `run` and `tx` that requires `--fork` (without `--fork` they are accepted but silently ignored); on `replay` they apply to its `--rpc` fetches (an offline `--rpc.replay-file` run contacts no endpoint and does not use them).
 
+On Satin, RPC URL diagnostics show only the scheme, host and port: userinfo, path, query and fragment are hidden.
+Every JSON-RPC error response replaces the server's error message and `data` with a fixed local diagnostic (`server error message omitted`) while keeping the JSON-RPC error code, so server error text is never forwarded.
+This applies to verbose logs and log files as well as stderr.
+
 ### Per-Endpoint Cache Files
 
 Each endpoint of a chain gets its own cache file named `rpc-cache-{chain_id}-{endpoint}.json`.
 `{endpoint}` is a short hash of the URL with any userinfo removed, so the name does not contain the URL.
+The hash still includes the path and query, even though diagnostic output hides them, so endpoints that differ there keep separate cache files.
 A cache populated from one endpoint cannot be loaded for another, including another endpoint of the same chain.
 
 The default cache directory is the platform cache directory:

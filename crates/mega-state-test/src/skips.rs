@@ -67,10 +67,6 @@ pub fn skip_file(path: &str) -> Option<SkipReason> {
         "InitCollisionParis.json" |
         "test_init_collision_create_opcode.json" => Some(SkipReason::CreateCollisionWithStorage),
         "ValueOverflow.json" | "ValueOverflowParis.json" => Some(SkipReason::MalformedValue),
-        "Call50000_sha256.json" |
-        "static_Call50000_sha256.json" |
-        "loopMul.json" |
-        "CALLBlake2f_MaxRounds.json" => Some(SkipReason::Slow),
         _ => None,
     }
 }
@@ -98,7 +94,14 @@ mod tests {
             Some(SkipReason::CreateCollisionWithStorage)
         );
         assert_eq!(skip_file("a/ValueOverflow.json"), Some(SkipReason::MalformedValue));
-        assert_eq!(skip_file("a/loopMul.json"), Some(SkipReason::Slow));
+        for name in [
+            "Call50000_sha256.json",
+            "static_Call50000_sha256.json",
+            "loopMul.json",
+            "CALLBlake2f_MaxRounds.json",
+        ] {
+            assert_eq!(skip_file(name), None);
+        }
         assert_eq!(skip_file("a/xloopMul.json"), None);
         assert_eq!(skip_file("a/loopMul.json.bak"), None);
         assert_eq!(skip_file("osaka/eip7951_p256verify_precompiles/test_valid.json"), None);
