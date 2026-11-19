@@ -149,10 +149,14 @@ These checks guard every change to the Satin engine.
 - The `Mega EEST gate` job always runs, and becomes a required check once an administrator adds it to the `satin` branch rule; a pull request that changes documentation alone skips the run and passes it.
   The step summary has the summary line (`MEGA-EEST rev=… run=full cases=… plain=pass:…,fail:…,unsupported:…,error:… instrumented=… parity=… negative=… provenance=… caseset=… result=…`), the run's time and exit, and, when the pull request moves the pin, the case ids it removes, adds and changes; a failing run uploads its reports.
   The script's exit says what failed: 1 the cases (a verdict), 2 no verdict (a fetch, a build, a report; the log names the step), 3 the pin refused; the job also requires the line of the full run of a pin on the suite's default branch.
-  When all gating cases pass, every negative control must fail at its indexed `wrongAt` path or report status `error` with the exact indexed `error` message.
-  If gating cases fail or their observations differ between modes, every control must still report a failure or an error.
-  The summary shows `negative=fail-as-recorded` when every control matches its index entry and `negative=fail-elsewhere` when the gating run fails and at least one control fails differently.
-  A malformed control entry, a missing control result or a passing control leaves the run without a verdict.
+  Each mode has a negative control report that must contain the indexed case IDs and fixture paths relative to `slice`, with consumer exit 1.
+  A gating or control report with a missing or mismatched mode leaves the run without a verdict.
+  When all gating cases pass and their observations agree, every negative control must fail at its indexed `wrongAt` path or report status `error` with the exact indexed `error` message.
+  If gating cases fail or their observations differ between modes, every control must still report a failure or an error in each mode.
+  The summary shows `negative=fail-as-recorded` when every control matches its index entry in every mode and `negative=fail-elsewhere` when the gating run fails and at least one control fails differently.
+  A passing case without an observation digest leaves the run without a verdict before the modes are compared.
+  A case that errors without an observation digest in either mode counts as a parity difference.
+  A malformed control entry, a missing, unsupported or passing control, a mismatched fixture path or an unexpected consumer exit also leaves the run without a verdict.
 - A case that fails is a change of behaviour the specification pins.
   A pull request that makes it on purpose, or that changes the mega-evm API the suite's adapter calls (the adapter then no longer builds, and the gate says so), changes Mega EEST first: the case, derived from the changed rule, or the adapter, in a pull request there.
   It then moves `MEGA_EEST_REV` to that Mega EEST commit, in the same mega-evm pull request, so the gate runs the suite that pull request needs.

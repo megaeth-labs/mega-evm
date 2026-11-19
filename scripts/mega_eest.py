@@ -46,22 +46,23 @@ Subcommands:
               [--provenance <default-branch|unmerged|unchecked>]
               [--repo <same|moved|changed|stale|unchecked>]
               [--caseset <unmoved|kept|declared|undeclared|unchecked>]
-        Read the run reports `mega-fixture consume` wrote into <dir> (<mode>.json, and
-        negative.json for the suite's negative controls) and decide: in every mode, the
-        cases consumed are exactly the slice's index, by case id and file digest, and every one
-        passed; with both modes, every case's observations are the same bytes plain and
-        instrumented. When every gating case passed, each indexed negative control must fail at
-        its recorded path or report an error with its exact recorded message, according to its
-        index entry. When gating cases failed, each control must have run and reported a failure
-        or an error. Prints the failures (case id, first differing path, both values, the rules the
-        case pins) and one summary line, `MEGA-EEST … result=<result>`, and exits with its code:
+        Read <mode>.json and negative-<mode>.json with their recorded exits for every requested mode.
+        Each report must identify the requested mode. The gating reports must match the slice's
+        index by case ID and file digest. Each passed case must have an observation digest before
+        the modes are compared. If both modes ran and a case errored without observations, its
+        missing digest counts as a parity difference. Each control report must match the indexed
+        case IDs and fixture paths relative to slice, with consumer exit 1.
+        When every gating case passes and observations agree, each negative control must fail at
+        its indexed path or report an error with its exact indexed message. If a gating case
+        fails or the observations differ, a control can report any failure or error.
+        Prints the failures (case ID, first differing path, both values, the rules the case pins)
+        and one summary line, `MEGA-EEST … result=<result>`, and exits with its code:
         0 pass; 1 FAIL, a verdict (complete reports of exactly the index in every mode, a case
         failed or erred, or the modes' observations differ, and every control failed or erred);
         2 INCOMPLETE, no verdict (no mode, a report missing, cases that are not the index, a
-        consume exit its report does not explain, a case the adapter does not support, a case
-        status other than the consumer's four (pass, fail, unsupported, error), a missing or
-        malformed control, a control not run or passing, a control that did not fail as recorded
-        while every gating case passed, or the checker itself failing).
+        consume exit its report does not explain, a passing case with no observation digest,
+        an unsupported case, an unknown case status, a missing or malformed control,
+        an unexpected control consumer exit, an unsatisfied control, or a checker error).
         3 REFUSED means every case passed and the pin has a cause `refusal` names, such as
         `provenance=unmerged`, `repo=changed`, `repo=stale`, a repository move with unchecked
         provenance, or `caseset=undeclared`.
@@ -405,6 +406,16 @@ CASE_STATUSES = ("pass", "fail", "unsupported", "error")
 RESULT_EXIT = {"pass": 0, "FAIL": 1, "INCOMPLETE": 2, "REFUSED": 3}
 
 
+def read_report(path: Path, mode: str, incomplete: list[str]) -> dict | None:
+    report = json.loads(path.read_text())
+    reported_mode = report.get("mode")
+    if reported_mode != mode:
+        incomplete.append(f"{path.name}: expected report mode {canonical(mode)}, "
+                          f"got {canonical(reported_mode)}")
+        return None
+    return report
+
+
 def cmd_check(args: argparse.Namespace) -> int:
     """`check`; no failure of the checker itself can read as a verdict."""
     try:
@@ -418,7 +429,8 @@ def cmd_check(args: argparse.Namespace) -> int:
 def check(args: argparse.Namespace) -> int:
     suite, work = Path(args.suite), Path(args.work)
     modes = list(dict.fromkeys(args.modes.split()))
-    index = json.loads((suite / "slice" / "index.json").read_text())
+    slice_dir = (suite / "slice").absolute()
+    index = json.loads((slice_dir / "index.json").read_text())
     expected = Counter((c["caseId"], c["fileDigest"]) for c in index["cases"])
     total = sum(expected.values())
     run = "full" if {"plain", "instrumented"} <= set(modes) else "partial"
@@ -426,7 +438,7 @@ def check(args: argparse.Namespace) -> int:
     # Why the run reached no verdict; and whether a case failed in a run that did.
     incomplete: list[str] = []
     cases_failed = False
-    observations: dict[str, dict[str, str | None]] = {}
+    observations: dict[str, dict[str, str]] = {}
 
     if not modes:
         incomplete.append("no mode was run")
@@ -445,12 +457,26 @@ def check(args: argparse.Namespace) -> int:
                               f"see {work / (mode + '.log')}")
             summary.append(f"{mode}=no-report")
             continue
-        cases = json.loads(report_path.read_text())["cases"]
+        report = read_report(report_path, mode, incomplete)
+        if report is None:
+            summary.append(f"{mode}=invalid-mode")
+            continue
+        cases = report["cases"]
         statuses = Counter(c["status"] for c in cases)
         got = Counter((c.get("caseId"), c.get("fileDigest")) for c in cases)
         missing, extra = expected - got, got - expected
         not_passed = [c for c in cases if c["status"] != "pass"]
-        observations[mode] = {c.get("caseId"): c.get("observationsDigest") for c in cases}
+        mode_observations = observations[mode] = {}
+        missing_digests = []
+        for case in cases:
+            digest = case.get("observationsDigest")
+            if isinstance(digest, str) and digest:
+                mode_observations[case.get("caseId")] = digest
+            elif case["status"] == "pass":
+                missing_digests.append(case.get("caseId"))
+        if missing_digests:
+            incomplete.append(f"{mode}: passed case {missing_digests[0]} has no observation digest "
+                              f"({len(missing_digests)} passed case(s) without a digest)")
         for c in not_passed[:MAX_SHOWN]:
             line = f"mega-eest: {mode}: {c['status']} {c.get('caseId') or c['file']}"
             if c["status"] == "fail":
@@ -488,69 +514,18 @@ def check(args: argparse.Namespace) -> int:
         summary.append(f"{mode}=" + ",".join(f"{s}:{statuses.get(s, 0)}" for s in CASE_STATUSES)
                        + "".join(f",{k}:{statuses[k]}" for k in sorted(set(statuses) - set(CASE_STATUSES))))
 
-    if {"plain", "instrumented"} <= observations.keys():
+    if not incomplete and {"plain", "instrumented"} <= observations.keys():
         plain, inst = observations["plain"], observations["instrumented"]
-        differ = sorted(k for k in plain.keys() | inst.keys()
-                        if plain.get(k) is None or plain.get(k) != inst.get(k))
+        # An adapter error can leave an indexed case without observations in either mode.
+        differ = sorted({case_id for case_id, _ in expected
+                         if case_id not in plain or plain[case_id] != inst.get(case_id)})
         for case in differ[:MAX_SHOWN]:
             print(f"mega-eest: parity: {case}: plain {plain.get(case)} instrumented {inst.get(case)}",
                   file=sys.stderr)
         summary.append(f"parity={'identical' if not differ else f'{len(differ)}-differ'}")
         cases_failed |= bool(differ)
 
-    # The controls show that the consumer can report a mismatch or an adapter error.
-    # When gating cases failed, a change of behaviour can also change a control's first failure.
-    negative_path = work / "negative.json"
-    controls = index.get("negative", [])
-    control_keys = {"caseId", "file"}
-    if not isinstance(controls, list) or any(
-        not isinstance(control, dict)
-        or control.keys() not in (control_keys | {"wrongAt"}, control_keys | {"error"})
-        or not all(isinstance(value, str) and value for value in control.values())
-        for control in controls
-    ):
-        verdict = "invalid-index"
-        incomplete.append("malformed negative control index: expected caseId, file and exactly one of wrongAt or error")
-    elif len({control["caseId"] for control in controls}) != len(controls):
-        verdict = "invalid-index"
-        incomplete.append("malformed negative control index: repeated case IDs")
-    elif not controls:
-        verdict = "none"
-        incomplete.append("the slice's index lists no negative control")
-    elif not negative_path.exists():
-        verdict = "no-report"
-        incomplete.append("`mega-fixture consume` wrote no report of the negative controls")
-    else:
-        reports = json.loads(negative_path.read_text())["cases"]
-        cases = {report.get("caseId"): report for report in reports}
-        states = set()
-        if len(cases) != len(reports) or cases.keys() - {control["caseId"] for control in controls}:
-            states.add("not-caught")
-            incomplete.append("negative control report has extra or repeated case IDs")
-        for control in controls:
-            case_id = control["caseId"]
-            if "wrongAt" in control:
-                status, field, value = "fail", "path", control["wrongAt"]
-            else:
-                status, field, value = "error", "message", control["error"]
-            report = cases.get(case_id)
-            if report and report["status"] == status and report.get(field) == value:
-                states.add("fail-as-recorded")
-                continue
-            want = f"{status} with {field} {canonical(value)}"
-            seen = (f"{report['status']} with {field} {canonical(report.get(field))}"
-                    if report else "not consumed")
-            if report and report["status"] in ("fail", "error") and cases_failed:
-                states.add("fail-elsewhere")
-                print(f"mega-eest: negative control {case_id} expected {want} ({seen}); "
-                      f"gating cases failed, which can move where it first differs", file=sys.stderr)
-            else:
-                states.add("not-caught")
-                why = ("gating cases failed, and it did not fail" if cases_failed
-                       else "every gating case passed, so it must match the recorded failure")
-                incomplete.append(f"negative control {case_id} expected {want} ({seen}): {why}")
-        verdict = ("not-caught" if "not-caught" in states
-                   else "fail-elsewhere" if "fail-elsewhere" in states else "fail-as-recorded")
+    verdict = check_controls(index.get("negative", []), modes, slice_dir, work, cases_failed, incomplete)
     summary.append(f"negative={verdict}")
     summary.append(f"provenance={args.provenance}")
     repo = getattr(args, "repo", "unchecked")
@@ -570,6 +545,87 @@ def check(args: argparse.Namespace) -> int:
     summary.append(f"result={result}")
     print("MEGA-EEST " + " ".join(summary))
     return RESULT_EXIT[result]
+
+
+def check_controls(controls, modes: list[str], slice_dir: Path, work: Path, cases_failed: bool,
+                   incomplete: list[str]) -> str:
+    """Check that each mode's controls demonstrate mismatch and adapter error reporting."""
+    control_keys = {"caseId", "file"}
+    if not isinstance(controls, list) or any(
+        not isinstance(control, dict)
+        or control.keys() not in (control_keys | {"wrongAt"}, control_keys | {"error"})
+        or not all(isinstance(value, str) and value for value in control.values())
+        for control in controls
+    ):
+        incomplete.append("malformed negative control index: expected caseId, file and exactly one of wrongAt or error")
+        return "invalid-index"
+    indexed_files = {control["caseId"]: Path(control["file"]) for control in controls}
+    if len(indexed_files) != len(controls):
+        incomplete.append("malformed negative control index: repeated case IDs")
+        return "invalid-index"
+    if any(path.is_absolute() or ".." in path.parts for path in indexed_files.values()):
+        incomplete.append("malformed negative control index: each file must be relative to the slice")
+        return "invalid-index"
+    if not controls:
+        incomplete.append("the slice's index lists no negative control")
+        return "none"
+    if not modes:
+        return "no-report"
+
+    states = set()
+    for mode in modes:
+        negative_path = work / f"negative-{mode}.json"
+        exit_path = work / f"negative-{mode}.exit"
+        code = exit_path.read_text().strip() if exit_path.exists() else "?"
+        if not negative_path.exists():
+            states.add("no-report")
+            incomplete.append(f"{mode}: negative controls: no report (exit {code}); "
+                              f"see {negative_path.with_suffix('.log')}")
+            continue
+        # A completed consume with at least one non-passing case exits 1.
+        if code != "1":
+            states.add("not-caught")
+            incomplete.append(f"{mode}: negative controls: `mega-fixture consume` exited {code}; expected 1")
+        control_report = read_report(negative_path, mode, incomplete)
+        if control_report is None:
+            states.add("not-caught")
+            continue
+        reports = control_report["cases"]
+        cases = {report.get("caseId"): report for report in reports}
+        if len(cases) != len(reports) or cases.keys() - indexed_files.keys():
+            states.add("not-caught")
+            incomplete.append(f"{mode}: negative control report has extra or repeated case IDs")
+        for control in controls:
+            case_id = control["caseId"]
+            if "wrongAt" in control:
+                status, field, value = "fail", "path", control["wrongAt"]
+            else:
+                status, field, value = "error", "message", control["error"]
+            report = cases.get(case_id)
+            if report:
+                file = report.get("file")
+                if not isinstance(file, str) or Path(file).absolute() != slice_dir / indexed_files[case_id]:
+                    states.add("not-caught")
+                    incomplete.append(f"{mode}: negative control {case_id} expected fixture {indexed_files[case_id]}, "
+                                      f"reported {canonical(file)}")
+                    continue
+            if report and report["status"] == status and report.get(field) == value:
+                continue
+            want = f"{status} with {field} {canonical(value)}"
+            seen = (f"{report['status']} with {field} {canonical(report.get(field))}"
+                    if report else "not consumed")
+            # A gating failure can also change a control's first failure.
+            if report and report["status"] in ("fail", "error") and cases_failed:
+                states.add("fail-elsewhere")
+                print(f"mega-eest: {mode}: negative control {case_id} expected {want} ({seen}); "
+                      f"gating cases failed, which can move where it first differs", file=sys.stderr)
+            else:
+                states.add("not-caught")
+                why = ("gating cases failed, and it did not fail" if cases_failed
+                       else "every gating case passed, so it must match the recorded failure")
+                incomplete.append(f"{mode}: negative control {case_id} expected {want} ({seen}): {why}")
+    return next((state for state in ("no-report", "not-caught", "fail-elsewhere") if state in states),
+                "fail-as-recorded")
 
 
 # ---- refusal ----------------------------------------------------------------------------------
