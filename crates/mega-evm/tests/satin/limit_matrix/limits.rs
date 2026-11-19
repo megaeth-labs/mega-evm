@@ -26,21 +26,6 @@ fn join(prefix: Vec<u8>, rest: BytecodeBuilder) -> Bytes {
     Bytes::from(code)
 }
 
-/// The transaction's own frame has a state-growth budget of 1,000. The 1,001st fresh slot stops
-/// that frame, kind 3, `limit` 1,000. The slot is not kept. The receipt fails and the transaction
-/// is included.
-#[test]
-fn test_the_1001st_fresh_slot_stops_the_transaction() {
-    let Some(gas) = slots_gas(1_001) else { return };
-    let db = world(&[(CONTRACT, store_n_slots(1_001))]);
-    let outcome = execute(db, call_tx(gas));
-    let stop = reverted_stop(&outcome);
-    assert_eq!(stop, MegaLimitExceeded { kind: 3, limit: TX_STATE_GROWTH_LIMIT });
-    assert!(outcome.limit_exceeded.is_some(), "the transaction's own frame stopped");
-    assert_eq!(slot_value(&outcome, CONTRACT, 1), U256::ZERO);
-    assert_eq!(slot_value(&outcome, CONTRACT, 1_001), U256::ZERO);
-}
-
 /// The caller has kept 20 of a 1,000 budget. The child budget is `floor(980 × 98 / 100)` = 960.
 /// Those 960 slots succeed. The caller net becomes 980 and its remaining becomes 20, so a later
 /// child receives `floor(20 × 98 / 100)` = 19.

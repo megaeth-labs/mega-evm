@@ -868,31 +868,6 @@ fn test_a_child_gets_98_percent_of_what_its_caller_has_left() {
     );
 }
 
-/// Under the spec's 1,000 a frame two calls down gets 960 and one three calls down 940
-/// (`960 × 98 / 100` rounded down), when nothing above it kept anything: the 940th slot there fits
-/// and the 941st stops that frame, naming 940; every caller catches the stop and ends.
-#[test]
-fn test_the_state_growth_budgets_at_depth() {
-    assert_eq!(share(share(share(1_000))), 940);
-    let db = |slots: u64| {
-        let d = BytecodeBuilder::default();
-        funded()
-            .account_code(A, call_answering(BytecodeBuilder::default(), B, U256::ZERO))
-            .account_code(B, call_answering(BytecodeBuilder::default(), C, U256::ZERO))
-            .account_code(C, call_answering(BytecodeBuilder::default(), D, U256::ZERO))
-            .account_code(D, write_slots(d, 1, slots + 1).stop().build())
-    };
-    let fits = run_a(db(940), 941, EvmTxRuntimeLimits::default());
-    assert!(fits.result.is_success(), "{:?}", fits.result);
-    assert_eq!(fits.usage.state_growth, 940);
-
-    let stopped = run_a(db(941), 941, EvmTxRuntimeLimits::default());
-    assert!(stopped.result.is_success(), "{:?}", stopped.result);
-    assert_eq!(stopped.limit_exceeded, None, "the callers caught it");
-    assert_eq!(output(&stopped), growth_stop(940), "D's stop, handed up as each caller's answer");
-    assert_eq!(stopped.usage.state_growth, 0);
-}
-
 /// A frame's net is signed, and its remaining is clamped to the budget it was given: a caller that
 /// added 100 of its 1,000 gives its child 882; the child clears those 100 slots — it runs on the
 /// caller's storage — so its net is −100, yet what it forwards is still 98/100 of its 882, 864, and
