@@ -24,8 +24,10 @@ const REX6_FACTORY_NONCE: u64 = 1;
 /// One predeploy as a state holds it: its address, its account and its storage slots.
 pub type PredeployAccount = (Address, AccountInfo, Vec<(U256, U256)>);
 
-/// The seven predeploys as a chain that ran Rex6 holds them, which is what Satin's activation
-/// block finds on mainnet and testnet, in [`system_contract_specs`] order.
+/// The seven predeploys as a chain that ran Rex6 holds them, which is what Satin's first block
+/// finds on mainnet and testnet, in [`system_contract_specs`] order: every block's deployment of
+/// the six system contracts then only reads them, and the activation block's check of the
+/// EIP-7997 factory finds its code.
 ///
 /// Each holds the code Satin expects. The six `MegaETH` system contracts are at nonce 0, which the
 /// legacy engine never moved; the EIP-7997 factory is at a nonzero nonce, as OP's genesis tooling
@@ -56,8 +58,11 @@ pub fn rex6_predeploys(
 /// [`rex6_predeploys`] or [`MemoryDatabase::sequencer_registry`].
 ///
 /// Test and tool support, not a chain parameter: the legacy forks deploy the registry (Rex5) and
-/// upgrade it to v2.0.0 (Rex6), and Satin neither creates nor seeds it, so a state Satin runs a
-/// block on must already hold it.
+/// upgrade it to v2.0.0 (Rex6). Every Satin block deploys it too: it reads a registry at v2.0.0,
+/// migrates one at 1.0.0 in place, and seeds one where its address holds no code, naming
+/// `MEGA_SYSTEM_ADDRESS` its system address and taking its sequencer, admin and minimum rotation
+/// delay from the schedule's bootstrap values. A state that holds the registry with these roles is
+/// one a chain that ran Rex6 left, which a Satin block only reads.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SequencerRegistryRoles {
     /// The live system address, and the initial one.
@@ -193,9 +198,10 @@ impl MemoryDatabase {
     }
 
     /// Installs the seven predeploys as a chain that ran Rex6 holds them ([`rex6_predeploys`]),
-    /// the `SequencerRegistry` holding `roles` — an address names it in every role. Satin's
-    /// activation block finds what it checks, and a legacy call from the system address to a
-    /// whitelisted contract is a system-address transaction.
+    /// the `SequencerRegistry` holding `roles` — an address names it in every role. Every block's
+    /// deployment of the system contracts only reads them, Satin's activation block finds the
+    /// factory it checks, and a legacy call from the system address to a whitelisted contract is a
+    /// system-address transaction.
     pub fn rex6_predeploys(self, roles: impl Into<SequencerRegistryRoles>) -> Self {
         rex6_predeploys(roles).into_iter().fold(self, Self::install)
     }
@@ -234,10 +240,28 @@ impl revm::Database for MemoryDatabase {
 }
 
 impl revm::DatabaseCommit for MemoryDatabase {
-    delegate! {
-        to self.db {
-            fn commit(&mut self, changes: EvmState);
-        }
+    /// Commits a transaction's state with EIP-161 state clearing, as a node's database does.
+    ///
+    /// revm leaves the removal of a touched empty account to the database at commit, and
+    /// `CacheDB` keeps such an account as an existing empty one. A node's state removes it, so
+    /// a later transaction finds it absent and charges it as a new account. An account created in
+    /// the transaction stays, as under revm's own `State`, and a self-destructed account is
+    /// handled by `CacheDB` as before.
+    fn commit(&mut self, mut changes: EvmState) {
+        changes.retain(|address, account| {
+            let cleared = account.is_touched() &&
+                account.is_empty() &&
+                !account.is_selfdestructed() &&
+                !account.is_created();
+            if cleared {
+                let cached = self.db.cache.accounts.entry(*address).or_default();
+                cached.storage.clear();
+                cached.account_state = AccountState::NotExisting;
+                cached.info = AccountInfo::default();
+            }
+            !cleared
+        });
+        self.db.commit(changes);
     }
 }
 
@@ -354,5 +378,57 @@ mod tests {
         let err = db.block_hash(7).unwrap_err();
         assert!(err.to_string().contains("injected block_hash() error for 7"), "{err}");
         assert_eq!(db.block_hash(1).unwrap(), served);
+    }
+
+    fn touched(info: AccountInfo) -> revm::state::Account {
+        let mut account = revm::state::Account::from(info);
+        account.mark_touch();
+        account
+    }
+
+    #[test]
+    fn test_commit_removes_a_touched_empty_account_and_keeps_the_rest() {
+        use revm::DatabaseCommit;
+        let empty = address!("00000000000000000000000000000000000000e1");
+        let funded = address!("00000000000000000000000000000000000000e2");
+        let destroyed = address!("00000000000000000000000000000000000000e3");
+        let mut db = MemoryDatabase::default()
+            .account_balance(funded, U256::from(5))
+            .account_balance(destroyed, U256::from(7));
+        // An empty account the database holds, and one it holds none for, both touched.
+        db.insert_account_info(empty, AccountInfo::default());
+        db.insert_account_storage(empty, U256::from(1), U256::from(2)).unwrap();
+        let absent = address!("00000000000000000000000000000000000000e4");
+
+        let mut selfdestructed = touched(AccountInfo::from_balance(U256::from(7)));
+        selfdestructed.mark_selfdestruct();
+        let changes: EvmState = [
+            (empty, touched(AccountInfo::default())),
+            (absent, touched(AccountInfo::default())),
+            (funded, touched(AccountInfo::from_balance(U256::from(5)))),
+            (destroyed, selfdestructed),
+        ]
+        .into_iter()
+        .collect();
+        db.commit(changes);
+
+        assert_eq!(db.basic(empty).unwrap(), None, "a touched empty account is removed");
+        assert_eq!(db.storage(empty, U256::from(1)).unwrap(), U256::ZERO, "its storage with it");
+        assert_eq!(db.basic(absent).unwrap(), None, "and one the database held none for");
+        assert_eq!(db.basic(funded).unwrap().expect("kept").balance, U256::from(5));
+        assert_eq!(db.basic(destroyed).unwrap(), None, "a self-destructed account is removed");
+    }
+
+    #[test]
+    fn test_commit_keeps_an_empty_account_created_in_the_transaction() {
+        use revm::DatabaseCommit;
+        let created = address!("00000000000000000000000000000000000000e5");
+        let mut account = touched(AccountInfo::default());
+        account.mark_created();
+        let mut db = MemoryDatabase::default();
+        let mut changes = EvmState::default();
+        changes.insert(created, account);
+        db.commit(changes);
+        assert!(db.basic(created).unwrap().is_some(), "a created account is not cleared");
     }
 }

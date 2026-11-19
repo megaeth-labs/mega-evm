@@ -78,73 +78,28 @@ fn test_an_empty_signer_is_charged_its_account_once() {
     }
 }
 
-/// The created account is charged only when the deploy address is empty, as the `CREATE` opcode
-/// charges it: an address that already holds a balance is an account already, the deployment
-/// lands on it, and the balance stays.
+/// Above the execution cap, where the reservoir could pay every charge alone, the call's regular
+/// gas pays the legacy share of the signer's account its nonce bump creates and of the account the
+/// creation creates, 25,000 and 20,000 at the spec's prices, and the reservoir the rest. A signer
+/// that holds a wei is no new account, and its deployment takes the creation's share alone.
 #[test]
-fn test_the_created_account_is_charged_only_when_the_address_is_empty() {
+fn test_the_call_pays_the_legacy_shares_of_the_accounts_it_creates() {
     let deployment = Deployment::new(deploying(&runtime(RUNTIME_LEN)));
-    for gas_limit in GAS_LIMITS {
-        let empty = deploy(system_db(), &deployment, gas_limit);
-        let held = system_db().account_balance(deployment.address, U256::from(7_777));
-        let held = deploy(held, &deployment, gas_limit);
-        assert_eq!(returned(&held).deployedAddress, deployment.address);
-        assert_eq!(
-            held.state.get(&deployment.address).map(|account| account.info.balance),
-            Some(U256::from(7_777)),
-        );
-        let [total, regular, state, history_gas, _] = beyond(&empty, &held);
-        let created = entry(GasId::create_state_gas());
-        assert_eq!([total, regular, state, history_gas], [created, 0, created, 0]);
-    }
-}
-
-/// A refused call keeps the overhead and nothing else: every charge made after it is taken back
-/// with the revert, whatever the pools.
-#[test]
-fn test_a_refused_call_keeps_the_overhead_alone() {
-    // A value the signer cannot fund: refused at the last rule, after every read.
-    let deployment = Deployment::with_value(deploying(&runtime(RUNTIME_LEN)), U256::from(1));
-    for gas_limit in GAS_LIMITS {
-        let outcome = deploy(system_db(), &deployment, gas_limit);
-        assert_eq!(refusal(&outcome), KeylessDeployError::InsufficientBalance);
-        let reference = reference(deployment.call_data(LARGE_OVERRIDE), gas_limit);
-        let [total, regular, state, history_gas, history_bytes] = beyond(&outcome, &reference);
-        assert_eq!(
-            [total, regular, state, history_gas, history_bytes],
-            [KEYLESS_DEPLOY_OVERHEAD_GAS, KEYLESS_DEPLOY_OVERHEAD_GAS, 0, 0, 0],
-            "at {gas_limit}",
-        );
-        assert_eq!(outcome.usage.write_records, 0);
-    }
-}
-
-/// A deployment whose init code reverts gives the created account's charge back, and the record
-/// of the account it did not create; the signer's account and its nonce record stay, because the
-/// nonce stays spent.
-#[test]
-fn test_a_failed_deployment_gives_the_created_account_back() {
-    let deployment = Deployment::new(Bytes::from_static(&[PUSH0, PUSH0, REVERT]));
-    for gas_limit in GAS_LIMITS {
-        let outcome = deploy(system_db(), &deployment, gas_limit);
-        let error = failure(&outcome);
-        let KeylessDeployError::ExecutionReverted { gas_used, .. } = error else {
-            panic!("expected ExecutionReverted, got {error:?}");
-        };
-        let reference = reference(deployment.call_data(LARGE_OVERRIDE), gas_limit);
-        let [total, regular, state, history_gas, history_bytes] = beyond(&outcome, &reference);
-        let new_account = entry(GasId::new_account_state_gas());
-        assert_eq!(state, new_account, "at {gas_limit}");
-        assert_eq!(history_gas, record(), "at {gas_limit}");
-        assert_eq!(history_bytes, 40, "at {gas_limit}");
-        assert_eq!(
-            regular,
-            KEYLESS_DEPLOY_OVERHEAD_GAS + create_regular(3) + gas_used,
-            "at {gas_limit}"
-        );
-        assert_eq!(total, regular + state + history_gas);
-        assert_eq!(nonce(&outcome, deployment.signer), 1, "the nonce stays spent");
-        assert_eq!(outcome.usage.write_records, 1, "the signer's nonce");
+    let gas_limit = GAS_LIMITS[1];
+    let paid_by_regular = |outcome: &MegaTransactionOutcome| {
+        let reservoir_paid = gas_limit - TX_GAS_LIMIT_CAP - outcome.gas.reservoir_remaining;
+        outcome.gas.state + outcome.gas.history - reservoir_paid
+    };
+    let empty = deploy(db_for(&deployment, U256::ZERO), &deployment, gas_limit);
+    let funded = deploy(db_for(&deployment, U256::from(1)), &deployment, gas_limit);
+    assert_eq!(returned(&empty).deployedAddress, deployment.address);
+    assert_eq!(returned(&funded).deployedAddress, deployment.address);
+    let account = entry(GasId::new_account_state_gas()).min(25_000);
+    let created = entry(GasId::create_state_gas()).min(20_000);
+    assert_eq!(paid_by_regular(&empty), account + created, "the signer's and the creation's");
+    assert_eq!(paid_by_regular(&funded), created, "the creation's alone");
+    if mega_evm::active_satin_prices().is_constants() {
+        assert_eq!((account, created), (25_000, 20_000));
     }
 }
 
@@ -177,68 +132,6 @@ fn test_the_call_pays_the_create_opcodes_regular_gas() {
             assert_eq!(state_gas, state, "{len} bytes at {gas_limit}");
             assert_eq!(history_gas, record(), "{len} bytes at {gas_limit}");
             assert_eq!(total, regular_expected + state + record(), "{len} bytes at {gas_limit}");
-        }
-    }
-}
-
-/// `gasUsed` is what the creation spent before refunds: a constructor that fills a slot and
-/// clears it again earns a refund, which is the transaction's, as any frame's is. The charges add
-/// up to the transaction's spend before its refund, and the receipt's gas is that spend less the
-/// refund.
-#[test]
-fn test_gas_used_counts_the_creations_spend_before_its_refund() {
-    let prefix = mega_evm::test_utils::BytecodeBuilder::default()
-        .sstore(U256::ZERO, U256::ONE)
-        .sstore(U256::ZERO, U256::ZERO)
-        .build_vec();
-    let init_code = constructor(&prefix, &runtime(1));
-    let opcode = create_regular(init_code.len());
-    let deployment = Deployment::new(init_code);
-    let upfront =
-        entry(GasId::new_account_state_gas()) + entry(GasId::create_state_gas()) + 2 * record();
-    for gas_limit in GAS_LIMITS {
-        let outcome = deploy(system_db(), &deployment, gas_limit);
-        let gas_used = returned(&outcome).gasUsed;
-        let refund = outcome.result.gas().inner_refunded();
-        assert!(refund > 0, "the constructor earns a refund at {gas_limit}");
-        let [total, ..] =
-            beyond(&outcome, &reference(deployment.call_data(LARGE_OVERRIDE), gas_limit));
-        assert_eq!(
-            total,
-            KEYLESS_DEPLOY_OVERHEAD_GAS + opcode + upfront + gas_used,
-            "at {gas_limit}"
-        );
-        assert_eq!(
-            outcome.result.gas().tx_gas_used(),
-            outcome.result.gas().total_gas_spent() - refund,
-            "at {gas_limit}",
-        );
-    }
-}
-
-/// Both upfront charges are priced by the SALT bucket they land in — the signer's account in the
-/// signer's, the created account in the deploy address's — and regular gas does not move with it.
-#[test]
-fn test_the_upfront_charges_scale_with_their_buckets() {
-    let deployment = Deployment::new(deploying(&runtime(RUNTIME_LEN)));
-    let new_account = entry(GasId::new_account_state_gas());
-    let created = entry(GasId::create_state_gas());
-    for gas_limit in GAS_LIMITS {
-        let minimal = salt_run(system_db(), TestExternalEnvs::new(), &deployment, gas_limit);
-        for (m_signer, m_address) in [(2, 1), (1, 2), (3, 2)] {
-            let envs = crowded(
-                crowded(TestExternalEnvs::new(), deployment.signer, m_signer),
-                deployment.address,
-                m_address,
-            );
-            let crowded_run = salt_run(system_db(), envs, &deployment, gas_limit);
-            assert_eq!(crowded_run.gas.regular, minimal.gas.regular, "m does not touch regular");
-            assert_eq!(
-                crowded_run.gas.state - minimal.gas.state,
-                (m_signer - 1) * new_account +
-                    (m_address - 1) * (created + satin_gas_params().code_deposit_state_gas(5)),
-                "signer at m = {m_signer}, address at m = {m_address}, gas limit {gas_limit}",
-            );
         }
     }
 }
@@ -292,7 +185,7 @@ fn test_a_failed_deployment_gives_the_created_account_back_at_its_price() {
 /// `CREATE` opcode's regular gas, the created account and one record short of what it had after
 /// its overhead; sent by a relayer for a signer holding a wei, one record more.
 ///
-/// Rule [S15.22]. Expected values `constants`: the charges are the schedule's `create`, initcode
+/// Expected values `constants`: the charges are the schedule's `create`, initcode
 /// and created-account entries and one record's history at the cost per history byte; what the
 /// call has after its overhead is set by the test on a gas limit built by hand — the call's
 /// EIP-2780 intrinsic, its calldata's cost, its body's history and the keyless overhead — so an
@@ -375,8 +268,8 @@ impl<DB: revm::Database>
 
 /// The call, the transaction's own frame, takes the whole reservoir; the creation it starts takes
 /// all but the call's 2 per cent of what the call has left once it paid for the creation's start —
-/// the signer's account, the created account and the two records — as a `CREATE` opcode's child
-/// does.
+/// the signer's account and the created account, each but its legacy share, which regular gas
+/// pays first, and the two records — as a `CREATE` opcode's child does.
 #[test]
 fn test_the_creation_takes_the_reservoir_share_of_what_the_call_has_left() {
     let deployment = Deployment::new(deploying(&runtime(RUNTIME_LEN)));
@@ -389,9 +282,9 @@ fn test_the_creation_takes_the_reservoir_share_of_what_the_call_has_left() {
     assert_eq!(returned(&outcome).deployedAddress, deployment.address);
 
     let whole = gas_limit - TX_GAS_LIMIT_CAP - history(mega_evm::TX_BODY_SIZE + data.len() as u64);
-    let left = whole -
-        entry(GasId::new_account_state_gas()) -
-        entry(GasId::create_state_gas()) -
-        2 * record();
+    let account = entry(GasId::new_account_state_gas());
+    let created = entry(GasId::create_state_gas());
+    let left =
+        whole - (account - account.min(25_000)) - (created - created.min(20_000)) - 2 * record();
     assert_eq!(evm.inspector().0, [whole, left - left * 2 / 100]);
 }

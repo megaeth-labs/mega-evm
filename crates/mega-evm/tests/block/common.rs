@@ -1,9 +1,10 @@
 //! Shared setup of the block-executor tests.
 //!
 //! A block on a chain whose schedule activates Satin at genesis, over an in-memory database holding
-//! the seven predeploys as a chain that ran Rex6 holds them, and no L1 block contract — so the L1
-//! fees, the operator fee and the data-availability footprint scalar all read as zero unless a test
-//! writes them. Satin activates at genesis, so no block of these tests is its activation block.
+//! the seven predeploys as a chain that ran Rex6 holds them, which every block's deployment of the
+//! system contracts then only reads, and no L1 block contract — so the L1 fees, the operator fee
+//! and the data-availability footprint scalar all read as zero unless a test writes them. Satin
+//! activates at genesis, so no block of these tests is its activation block.
 
 use alloy_consensus::{transaction::Recovered, Sealed, Signed, TxLegacy};
 use alloy_eips::{eip2935::HISTORY_STORAGE_ADDRESS, eip4788::BEACON_ROOTS_ADDRESS};
@@ -13,13 +14,13 @@ use alloy_primitives::{address, Address, Bytes, Signature, TxKind, B256, U256};
 use alloy_sol_types::SolCall;
 use mega_evm::{
     system::{
-        system_contract_specs, IOracle, MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS,
-        SEQUENCER_REGISTRY_ADDRESS,
+        IOracle, SequencerRegistryBootstrap, CREATE2_FACTORY_ADDRESS, MEGA_SYSTEM_ADDRESS,
+        ORACLE_CONTRACT_ADDRESS, SEQUENCER_REGISTRY_ADDRESS,
     },
     test_utils::{BytecodeBuilder, MemoryDatabase, SequencerRegistryRoles},
     BlockLimits, EmptyExternalEnv, EvmTxRuntimeLimits, MegaBlockExecutionCtx, MegaBlockExecutor,
-    MegaBlockExecutorFactory, MegaEvm, MegaEvmFactory, MegaHardforkConfig, MegaSpecId,
-    MegaTxEnvelope, ProtocolLimits,
+    MegaBlockExecutorFactory, MegaEvm, MegaEvmFactory, MegaHardfork, MegaHardforkConfig,
+    MegaSpecId, MegaTxEnvelope, ProtocolLimits,
 };
 use op_alloy_consensus::TxDeposit;
 use revm::{
@@ -108,13 +109,61 @@ pub(crate) fn registry_roles() -> SequencerRegistryRoles {
     }
 }
 
-/// A schedule that activates Satin at genesis.
+/// The minimum rotation delay the tests' configuration carries, distinct from the one the
+/// registry of [`database`] holds, so a test can tell a migration's write from what was there.
+pub(crate) const BOOTSTRAP_MIN_ROTATION_DELAY: u64 = 7_200;
+
+/// The `SequencerRegistry`'s bootstrap values the tests' schedules carry, as a configuration that
+/// schedules Satin must: the roles of [`registry_roles`], and [`BOOTSTRAP_MIN_ROTATION_DELAY`].
+pub(crate) fn bootstrap() -> SequencerRegistryBootstrap {
+    SequencerRegistryBootstrap::new(SEQUENCER, ADMIN, BOOTSTRAP_MIN_ROTATION_DELAY)
+}
+
+/// A schedule that activates Satin at genesis, carrying [`bootstrap`].
 ///
 /// Its blocks are held to the spec's limits ([`ProtocolLimits::for_spec`]), which no block this
 /// size reaches but gas detention's caps; a test that holds a block or a transaction to another
 /// limit replaces them ([`executor_with_limits`]).
 pub(crate) fn chain_spec() -> MegaHardforkConfig {
-    MegaHardforkConfig::default().with_all_activated()
+    MegaHardforkConfig::default()
+        .with_all_activated()
+        .with_sequencer_registry_bootstrap(bootstrap())
+}
+
+/// A schedule in which Satin activates at [`BLOCK_TIMESTAMP`], the timestamp of the block
+/// [`evm_env`] describes, so that block is Satin's activation block when its context names a
+/// parent before it ([`activation_ctx`]). It carries [`bootstrap`].
+pub(crate) fn activation_spec() -> MegaHardforkConfig {
+    MegaHardforkConfig::default()
+        .with(MegaHardfork::Satin, alloy_hardforks::ForkCondition::Timestamp(BLOCK_TIMESTAMP))
+        .with_sequencer_registry_bootstrap(bootstrap())
+}
+
+/// The context of the block [`evm_env`] describes as Satin's activation block under
+/// [`activation_spec`]: its parent came one second before the activation, so the block admits
+/// only deposits and checks the EIP-7997 factory.
+pub(crate) fn activation_ctx() -> MegaBlockExecutionCtx {
+    MegaBlockExecutionCtx::new(
+        B256::ZERO,
+        Some(B256::ZERO),
+        Bytes::new(),
+        BlockLimits::no_limits(),
+        Some(BLOCK_TIMESTAMP - 1),
+    )
+}
+
+/// The context of a block that follows the activation block under [`activation_spec`]: its parent
+/// is at [`BLOCK_TIMESTAMP`], where Satin is already active, so the block is an ordinary one that
+/// admits user transactions and does not check the EIP-7997 factory; it deploys the system
+/// contracts, as every block does.
+pub(crate) fn after_activation_ctx() -> MegaBlockExecutionCtx {
+    MegaBlockExecutionCtx::new(
+        B256::ZERO,
+        Some(B256::ZERO),
+        Bytes::new(),
+        BlockLimits::no_limits(),
+        Some(BLOCK_TIMESTAMP),
+    )
 }
 
 /// The loosest limits a block could be held to while a read of volatile data still detains:
@@ -138,7 +187,7 @@ pub(crate) const fn loosest_tx() -> EvmTxRuntimeLimits {
 /// Cancun is active, so the block carries a parent beacon block root; without one the EIP-4788
 /// pre-block call refuses the block.
 pub(crate) fn block_ctx(policy: BlockLimits) -> MegaBlockExecutionCtx {
-    MegaBlockExecutionCtx::new(B256::ZERO, Some(B256::ZERO), Bytes::new(), policy)
+    MegaBlockExecutionCtx::new(B256::ZERO, Some(B256::ZERO), Bytes::new(), policy, None)
 }
 
 /// The context of a block packed under no building policy, as a validator executes one.
@@ -228,9 +277,10 @@ fn build(
 }
 
 /// The one account each of `states` names, in commit order: what each pre-block step committed
-/// is about. A pre-block call names its target, the activation block's check the predeploy it
-/// read, the read of the registry's pending changes and the call that applies them the registry,
-/// and the read of the L1 block info the L1 block contract.
+/// is about. A pre-block call names its target, the activation block's check the factory it
+/// read, a system contract's deployment that contract, the read of the registry's pending changes,
+/// the call that applies them, the registry's deployment and the resolution of the live system
+/// address the registry. No pre-block step reads the L1 block contract.
 ///
 /// # Panics
 ///
@@ -271,15 +321,12 @@ pub(crate) fn eip_calls(states: &[EvmState]) -> Vec<Address> {
         .collect()
 }
 
-/// Whether `state` is the activation block's check of a predeploy: one of the seven accounts
-/// alone, read only, with no slot. The read of the registry's pending changes names the registry
-/// alone too, with the slots it read.
-pub(crate) fn is_predeploy_check(state: &EvmState) -> bool {
+/// Whether `state` is the activation block's check of the EIP-7997 factory: the factory's account
+/// alone, read only, with no slot. No other pre-block step names the factory.
+pub(crate) fn is_factory_check(state: &EvmState) -> bool {
     state.len() == 1 &&
-        system_contract_specs().iter().any(|spec| {
-            state.get(&spec.address).is_some_and(|account| {
-                !account.is_touched() && !account.is_created() && account.storage.is_empty()
-            })
+        state.get(&CREATE2_FACTORY_ADDRESS).is_some_and(|account| {
+            !account.is_touched() && !account.is_created() && account.storage.is_empty()
         })
 }
 
@@ -433,4 +480,56 @@ pub(crate) fn incompressible(len: usize) -> Bytes {
             })
             .collect::<Vec<u8>>(),
     )
+}
+
+/// A database error that is not fatal, as a read an EIP-7928 block access list does not cover
+/// raises: a failed read of a transaction's execution that carries it is a verdict on the block,
+/// an invalid block, rather than an internal error.
+#[derive(Debug)]
+pub(crate) struct NotFatalError(String);
+
+impl core::fmt::Display for NotFatalError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl core::error::Error for NotFatalError {}
+
+impl revm::context::DBErrorMarker for NotFatalError {
+    fn is_fatal(&self) -> bool {
+        false
+    }
+}
+
+/// An [`ErrorInjectingDatabase`](mega_evm::test_utils::ErrorInjectingDatabase) whose refusals are
+/// not fatal. A block runs on it directly: revm's `State` declares every error of the database
+/// below it fatal, so a not-fatal error reaches block execution only from a database it runs on.
+#[derive(Debug)]
+pub(crate) struct NotFatal(pub(crate) mega_evm::test_utils::ErrorInjectingDatabase);
+
+impl revm::Database for NotFatal {
+    type Error = NotFatalError;
+
+    fn basic(&mut self, address: Address) -> Result<Option<revm::state::AccountInfo>, Self::Error> {
+        self.0.basic(address).map_err(|error| NotFatalError(error.to_string()))
+    }
+
+    fn code_by_hash(&mut self, code_hash: B256) -> Result<revm::state::Bytecode, Self::Error> {
+        self.0.code_by_hash(code_hash).map_err(|error| NotFatalError(error.to_string()))
+    }
+
+    fn storage(&mut self, address: Address, index: U256) -> Result<U256, Self::Error> {
+        self.0.storage(address, index).map_err(|error| NotFatalError(error.to_string()))
+    }
+
+    fn block_hash(&mut self, number: u64) -> Result<B256, Self::Error> {
+        self.0.block_hash(number).map_err(|error| NotFatalError(error.to_string()))
+    }
+}
+
+impl revm::DatabaseCommit for NotFatal {
+    fn commit(&mut self, changes: EvmState) {
+        self.0.commit(changes);
+    }
 }

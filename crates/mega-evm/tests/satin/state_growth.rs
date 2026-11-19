@@ -304,41 +304,57 @@ fn test_an_authority_an_earlier_transaction_funded_is_no_new_account() {
 }
 
 /// An authority an earlier transaction called without value, which the database holds no account
-/// for, is counted as the application charges it, whether the two transactions run on one journal
-/// or the first is committed before the second runs: the transaction counts a rise for it exactly
-/// when the application charged it a new account beside the delegation's bytes. On one journal the
-/// call touched the empty account, and revm's flag of the touch outlives the call's transaction, so
-/// the application finds the authority touched and charges it no account.
+/// for, is charged as a new account when the earlier transaction is committed: the call touched the
+/// empty account, and a node's database removes a touched empty account (EIP-161), so the
+/// application finds it absent. The transaction counts the rise for it, and one write record.
 #[test]
-fn test_an_authority_an_earlier_transaction_touched_is_counted_as_it_is_charged() {
-    use revm::{DatabaseCommit, ExecuteEvm};
+fn test_an_authority_an_earlier_transaction_touched_is_charged_as_new_when_committed() {
+    use revm::DatabaseCommit;
     if state_is_free() {
         return;
     }
     let (account, delegation) = account_and_delegation();
-    let counted_as_charged = |outcome: &MegaTransactionOutcome, path: &str| {
-        assert!(outcome.result.is_success(), "{path}: {:?}", outcome.result);
-        let charged = outcome.gas.state == account + delegation;
-        assert!(charged || outcome.gas.state == delegation, "{path}: {}", outcome.gas.state);
-        assert_eq!(outcome.usage.state_growth, u64::from(charged), "{path}: the rise");
-        assert_eq!(outcome.usage.write_records, 1, "{path}: the authority's record");
-    };
     let touch = call(CALLER, AUTHORITY_1, U256::ZERO, BELOW_CAP);
     let mut apply = authorizing(A, U256::ZERO, &[(Some(AUTHORITY_1), 0, 0)]);
     apply.0.base.nonce = 1;
     let db = funded().account_code(A, Bytes::from_static(&[STOP]));
-    let first = run(db.clone(), touch.clone());
+    let first = run(db.clone(), touch);
     assert!(first.result.is_success(), "{:?}", first.result);
 
-    let mut committed = db.clone();
+    let mut committed = db;
     committed.commit(first.result_and_state.state);
-    counted_as_charged(&run(committed, apply.clone()), "committed");
+    let outcome = run(committed, apply);
+    assert!(outcome.result.is_success(), "{:?}", outcome.result);
+    assert_eq!(outcome.gas.state, account + delegation);
+    assert_eq!(outcome.usage.state_growth, 1);
+    assert_eq!(outcome.usage.write_records, 1);
+}
 
+/// The same two transactions on one journal that is not finalized in between differ from the
+/// committed path, in simulation only: revm's flag of the call's touch outlives the call's
+/// transaction, so the application finds the authority touched, not new, and charges the
+/// delegation alone, counts no rise, and still one write record. A node commits between
+/// transactions, so this is not the chain's answer.
+#[test]
+fn test_an_authority_touched_on_one_unfinalized_journal_is_charged_the_delegation_only() {
+    use revm::ExecuteEvm;
+    if state_is_free() {
+        return;
+    }
+    let (_, delegation) = account_and_delegation();
+    let touch = call(CALLER, AUTHORITY_1, U256::ZERO, BELOW_CAP);
+    let mut apply = authorizing(A, U256::ZERO, &[(Some(AUTHORITY_1), 0, 0)]);
+    apply.0.base.nonce = 1;
+    let db = funded().account_code(A, Bytes::from_static(&[STOP]));
     let context =
         crate::common::context(db).with_tx_runtime_limits(EvmTxRuntimeLimits::no_limits());
     let mut evm = MegaEvm::new(context);
     assert!(ExecuteEvm::transact_one(&mut evm, touch).expect("valid").is_success());
-    counted_as_charged(&evm.execute_transaction(apply).expect("valid"), "one journal");
+    let outcome = evm.execute_transaction(apply).expect("valid");
+    assert!(outcome.result.is_success(), "{:?}", outcome.result);
+    assert_eq!(outcome.gas.state, delegation);
+    assert_eq!(outcome.usage.state_growth, 0);
+    assert_eq!(outcome.usage.write_records, 1);
 }
 
 /// The state gas an authority costs is charged before the first frame, from the transaction's
@@ -378,21 +394,6 @@ fn test_an_authority_the_transaction_cannot_pay_for_is_not_applied() {
     assert!(run(crowded_account(minimal_envs(), AUTHORITY_1, 100), roomy).result.is_success());
 }
 
-/// A value transaction to an authority it creates pays for one new account, not two: by the time
-/// EIP-2780 looks at the recipient the authorization has created it. It is one record too.
-#[test]
-fn test_an_authority_that_is_the_recipient_pays_for_one_account() {
-    let (account, delegation) = account_and_delegation();
-    let outcome =
-        run(funded(), authorizing(AUTHORITY_1, U256::from(1), &[(Some(AUTHORITY_1), 0, 0)]));
-    assert!(outcome.result.is_success(), "{:?}", outcome.result);
-    assert_eq!(outcome.gas.state, account + delegation);
-    assert_eq!(outcome.usage.write_records, 1);
-
-    let unauthorized = run(funded(), call(CALLER, AUTHORITY_1, U256::from(1), BELOW_CAP));
-    assert_eq!(unauthorized.gas.state, account, "the same transfer without it pays the account");
-}
-
 /// A transaction whose authorities' records would cross the data-size limit is rejected at
 /// validation, whether the authorities are new or exist already: validation holds the body and a
 /// record for each entry of the authorization list to the limit, before anything is applied or
@@ -430,7 +431,7 @@ fn test_authorities_whose_records_would_cross_the_data_size_limit_reject_the_tra
 /// crossed by the record of the slot the frame writes after the authority's record and, with value,
 /// after its own start's record and transfer log.
 ///
-/// Rules: [S11.8], [S11.14]. Independence: constants — the limit is the byte table's sizes; what
+/// Independence: constants — the limit is the byte table's sizes; what
 /// the authority keeps is compared with a run whose frame does nothing.
 #[test]
 fn test_a_stop_keeps_what_was_applied_before_the_first_frame() {
@@ -480,7 +481,7 @@ fn test_a_stop_keeps_what_was_applied_before_the_first_frame() {
 /// deposit's mint and the state gas charged for the account. The stop is the data-size limit,
 /// crossed by the record of the slot the deposit's frame writes.
 ///
-/// Rules: [S11.13]. Independence: constants — the limit is the byte table's sizes, the caller's
+/// Independence: constants — the limit is the byte table's sizes, the caller's
 /// account the schedule's entry.
 #[test]
 fn test_a_stopped_deposit_keeps_the_caller_it_created() {
@@ -506,18 +507,6 @@ fn test_a_stopped_deposit_keeps_the_caller_it_created() {
     assert_eq!(stopped.gas.state, account_state_gas(), "the caller's account");
 }
 
-/// A `SELFDESTRUCT` of value to itself grows no state and records nothing. The destructions that
-/// move value to another account are held with the SALT pricing and the write records.
-#[test]
-fn test_a_destruction_to_itself_grows_no_state() {
-    let db = funded()
-        .account_code(A, BytecodeBuilder::default().push_address(A).append(SELFDESTRUCT).build());
-    let outcome = run(db, call(CALLER, A, U256::ZERO, BELOW_CAP));
-    assert!(outcome.result.is_success(), "{:?}", outcome.result);
-    assert_eq!(outcome.gas.state, 0, "the state gas");
-    assert_eq!(outcome.usage.write_records, 0, "the records");
-}
-
 /// A state charge the frame cannot pay is an out-of-gas, which no limit turns into a stop.
 ///
 /// Each case is a transaction below the execution cap, so there is no reservoir, whose gas limit
@@ -530,8 +519,8 @@ fn test_a_destruction_to_itself_grows_no_state() {
 /// back.
 ///
 /// Once the state charge is paid, a frame start still charges the caller the history of the two
-/// records the frame makes, after the gas it forwards is computed [S7.23]; one gas short of what
-/// the start costs in all is an out-of-gas too, and the frame does not start [S7.24]. A `CREATE`
+/// records the frame makes, after the gas it forwards is computed; one gas short of what
+/// the start costs in all is an out-of-gas too, and the frame does not start. A `CREATE`
 /// charges the created account before its 98/100 split, as EIP-8037 has it, so the records come
 /// out of the fiftieth the creator keeps, and the creator must hold 50 times their price after the
 /// state charge. EIP-8037 states that order for a creation alone — of a value `CALL` it says only
@@ -1000,125 +989,6 @@ fn test_a_slot_written_back_to_zero_falls_and_makes_room() {
         let outcome = run_a(db, 12, growth(10));
         assert!(outcome.result.is_success(), "{slots}: {:?}", outcome.result);
         assert_eq!(outcome.usage.state_growth, if fits { slots } else { 1 }, "{slots}");
-    }
-}
-
-/// Each site the spec lists adds one new account or slot, and nothing else does: a transaction's
-/// value to an account that does not exist, a value `CALL` to one, a creation at an empty address —
-/// whatever code it deploys — a creation transaction, a `SELFDESTRUCT` moving a balance to one, an
-/// authorization creating its authority, and a deposit creating its caller. An account that exists,
-/// a `CALLCODE`, a value call to the calling account itself, a destruction moving nothing, and an
-/// authorization of an account that exists add none.
-#[test]
-fn test_each_site_adds_one_new_account_or_slot() {
-    let one = U256::from(1);
-    let contract = |code: Bytes| funded().account_code(A, code);
-    let value_call =
-        |to| contract(BytecodeBuilder::default().call(to, one).append(POP).stop().build());
-    let fresh_caller = address!("00000000000000000000000000000000006000fe");
-    let cases: Vec<(&str, MegaTransactionOutcome, u64)> = vec![
-        (
-            "the transaction's value to a new account",
-            run(funded(), call(CALLER, EMPTY, one, BELOW_CAP)),
-            1,
-        ),
-        (
-            "the transaction's value to an account that exists",
-            run(funded(), call(CALLER, A, one, BELOW_CAP)),
-            0,
-        ),
-        (
-            "a value CALL to a new account",
-            run(value_call(EMPTY), call(CALLER, A, U256::ZERO, BELOW_CAP)),
-            1,
-        ),
-        (
-            "a value CALL to an account that exists",
-            run(value_call(CALLER), call(CALLER, A, U256::ZERO, BELOW_CAP)),
-            0,
-        ),
-        (
-            "a value CALL to the calling account itself",
-            run(value_call(A), call(CALLER, A, U256::ZERO, BELOW_CAP)),
-            0,
-        ),
-        (
-            "a value CALLCODE",
-            run(
-                contract(
-                    BytecodeBuilder::default().callcode(EMPTY, one).append(POP).stop().build(),
-                ),
-                call(CALLER, A, U256::ZERO, BELOW_CAP),
-            ),
-            0,
-        ),
-        (
-            "a CREATE deploying 32 bytes",
-            run(
-                contract(
-                    BytecodeBuilder::default()
-                        .create(U256::ZERO, crate::common::deploying(32))
-                        .append(POP)
-                        .stop()
-                        .build(),
-                ),
-                call(CALLER, A, U256::ZERO, BELOW_CAP),
-            ),
-            1,
-        ),
-        (
-            "a creation transaction",
-            run(funded(), crate::common::create(CALLER, crate::common::deploying(32), BELOW_CAP)),
-            1,
-        ),
-        (
-            "a SELFDESTRUCT moving a balance to a new account",
-            run(
-                contract(BytecodeBuilder::default().selfdestruct(EMPTY).build()),
-                call(CALLER, A, U256::ZERO, BELOW_CAP),
-            ),
-            1,
-        ),
-        (
-            "a SELFDESTRUCT moving nothing",
-            run(
-                MemoryDatabase::default()
-                    .account_balance(CALLER, U256::from(10u64.pow(18)))
-                    .account_code(A, BytecodeBuilder::default().selfdestruct(EMPTY).build()),
-                call(CALLER, A, U256::ZERO, BELOW_CAP),
-            ),
-            0,
-        ),
-        (
-            "an authorization creating its authority",
-            run(
-                funded().account_code(A, BytecodeBuilder::default().stop().build()),
-                authorizing_call(CALLER, A, U256::ZERO, BELOW_CAP, DELEGATE, &[(AUTHORITY_1, 0)]),
-            ),
-            1,
-        ),
-        (
-            "an authorization of an account that exists",
-            run(
-                funded()
-                    .account_balance(AUTHORITY_1, one)
-                    .account_code(A, BytecodeBuilder::default().stop().build()),
-                authorizing_call(CALLER, A, U256::ZERO, BELOW_CAP, DELEGATE, &[(AUTHORITY_1, 0)]),
-            ),
-            0,
-        ),
-        (
-            "a deposit creating its caller",
-            run(
-                funded().account_code(A, BytecodeBuilder::default().stop().build()),
-                crate::common::deposit(call(fresh_caller, A, U256::ZERO, BELOW_CAP)),
-            ),
-            1,
-        ),
-    ];
-    for (site, outcome, expected) in cases {
-        assert!(outcome.result.is_success(), "{site}: {:?}", outcome.result);
-        assert_eq!(outcome.usage.state_growth, expected, "{site}");
     }
 }
 

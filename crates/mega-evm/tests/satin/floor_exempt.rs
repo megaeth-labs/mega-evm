@@ -1,10 +1,7 @@
-//! The EIP-7623 calldata floor of a transaction exempt from history gas.
+//! The calldata floor still applies to deposits and system-originated transactions.
 //!
-//! At the spec's prices a transaction that pays history gas pays every byte it carries at 88 gas,
-//! above the floor's 64, so the floor never decides what it uses. A transaction exempt from history
-//! gas — a deposit, and the protocol's own — pays its calldata only at the intrinsic token rate,
-//! four gas a zero byte and sixteen a non-zero one, so once its calldata outweighs what it runs and
-//! the state it adds, its gas used is the floor.
+//! At the spec's prices their history costs more than the floor's per-byte rate. At lower
+//! measurement prices the floor can bind, and is drawn from the whole gas limit.
 //!
 //! The floor's base is the transaction's own EIP-2780 base without its calldata, access-list,
 //! authorization and initcode costs: 12,000 for a transfer to the sender itself, 15,000 for a call
@@ -21,7 +18,7 @@ use mega_evm::{
 };
 use revm::context::TxEnv;
 
-use crate::common::{account_state_gas, context};
+use crate::common::{account_state_gas, body_history, context, history};
 
 /// A depositor whose own code is [`SINK`], so that a transfer to itself runs it.
 const DEPOSITOR: Address = address!("0000000000000000000000000000000000f10000");
@@ -53,7 +50,7 @@ const fn calldata_gas(len: u64) -> u64 {
 /// What a transaction is, as far as the floor and the exemption are concerned.
 #[derive(Clone, Copy, Debug)]
 enum Class {
-    /// A deposit a user's L1 transaction made: history-exempt, priced by bucket.
+    /// A deposit a user's L1 transaction made, priced by bucket.
     UserDeposit,
     /// A Mega System Transaction: a legacy call from the live system address to the Oracle, which
     /// the engine promotes to a deposit.
@@ -91,8 +88,8 @@ impl Shape {
 
     /// What a transaction of this shape carrying `len` bytes spends, by hand: its EIP-2780
     /// intrinsic regular gas — the base, plus EIP-3860's two gas per initcode word for a creation,
-    /// plus the calldata — then [`SINK`], and for a creation the created account's state gas. An
-    /// exempt transaction pays no history gas, so that is all of it.
+    /// plus the calldata — then [`SINK`], and for a creation the created account's state gas.
+    /// History is added separately.
     fn spend(self, len: u64) -> u64 {
         let initcode_words = if self == Self::Creation { len.div_ceil(32) } else { 0 };
         let created_account = if self == Self::Creation { account_state_gas() } else { 0 };
@@ -145,29 +142,13 @@ fn transaction(class: Class, shape: Shape, len: u64, gas_limit: u64) -> MegaTran
 /// 4 × 27) = 1,860 gas more in the floor than in the intrinsic charge, under what [`SINK`] costs.
 const SHORT: u64 = 32;
 
-/// Calldata long enough that the floor binds: 40,000 bytes put 2,560,000 gas in the floor, more
-/// than the intrinsic charge, [`SINK`] and a created account at any byte price the grid reaches
-/// together.
+/// Enough calldata for the floor to bind at low history prices.
 const LONG: u64 = 40_000;
 
-/// An exempt transaction's gas used is the larger of what it spent and its floor, and both are
-/// the spec's figures: the floor is the shape's base — 12,000 for a transfer to the sender itself,
-/// 15,000 for a call without value, 21,000 with value, 24,000 for a creation — plus 64 gas a byte
-/// of calldata, zero or not, a creation's initcode included; the spend is the intrinsic regular
-/// gas, what the transaction ran and the state it added, and no history.
-///
-/// Each case runs with [`SHORT`] calldata, where the spend is above the floor and is the gas used,
-/// and with [`LONG`] calldata, where the floor binds and is the gas used. Each runs below the
-/// execution cap and above it: where the floor binds it is drawn from the whole gas limit, the
-/// reservoir included, so the gas used is the floor at either gas limit. The figure the block
-/// counts on its execution ledger is the regular ledger at least the floor.
-///
-/// Rules: [S4.19], [S4.22], [S4.23], [S5.5], [S7.34], [S7.36], [S7.37], [S5], [S7]. Independence:
-/// independent — the floor's base and rate, the intrinsic costs and the memory the code expands
-/// are written out; the created account's state gas is the schedule's entry at the price in
-/// effect.
+/// Deposits and system-originated transactions report the larger of their total spend and
+/// the calldata floor. Both ledgers include their history at the active byte price.
 #[test]
-fn test_the_floor_of_an_exempt_transaction() {
+fn test_the_floor_of_deposits_and_system_transactions() {
     use Class::{MegaSystemTransaction, SystemDeposit, UserDeposit};
     use Shape::{Call, Creation, SelfTransfer, ValueCall};
 
@@ -185,7 +166,11 @@ fn test_the_floor_of_an_exempt_transaction() {
     ];
     for gas_limit in [10_000_000, TX_GAS_LIMIT_CAP + 100_000_000] {
         for (class, shape) in cases {
-            for (len, binds) in [(SHORT, false), (LONG, true)] {
+            for len in [SHORT, LONG] {
+                let records = u64::from(matches!(shape, Shape::ValueCall | Shape::Creation));
+                let history_gas =
+                    body_history(len) + history(records * mega_evm::WRITE_RECORD_SIZE);
+                let gas_limit = gas_limit + history_gas;
                 let case = format!("{class:?}, {shape:?}, {len} bytes, gas limit {gas_limit}");
                 let tx = transaction(class, shape, len, gas_limit);
                 let outcome = MegaEvm::new(context(db()))
@@ -195,12 +180,16 @@ fn test_the_floor_of_an_exempt_transaction() {
                 let gas = outcome.gas;
 
                 let floor = shape.floor_base() + 64 * len;
-                let spend = shape.spend(len);
+                let spend = shape.spend(len) + history_gas;
                 assert_eq!(gas.floor, floor, "{case}: the floor");
-                assert_eq!(binds, floor > spend, "{case}: whether the floor binds");
-                assert_eq!(gas.history, 0, "{case}: an exempt transaction pays no history");
+                assert_eq!(gas.history, history_gas, "{case}: body and start record");
                 assert_eq!(
-                    gas.regular + gas.state,
+                    gas.history_bytes,
+                    mega_evm::TX_BODY_SIZE + len + records * mega_evm::WRITE_RECORD_SIZE,
+                    "{case}"
+                );
+                assert_eq!(
+                    gas.regular + gas.state + gas.history,
                     spend,
                     "{case}: what it spent, the intrinsic charge, the code and the state"
                 );

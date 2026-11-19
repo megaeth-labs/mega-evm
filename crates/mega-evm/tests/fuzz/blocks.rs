@@ -394,7 +394,8 @@ fn run_block(case: &BlockCase) -> Result<BlockRun, proptest::test_runner::TestCa
     let evm = MegaEvmFactory::new()
         .with_external_env_factory(envs)
         .create_evm(&mut state, EvmEnv::new(cfg, case.block_env()));
-    let ctx = MegaBlockExecutionCtx::new(B256::ZERO, Some(B256::ZERO), Bytes::new(), case.policy());
+    let ctx =
+        MegaBlockExecutionCtx::new(B256::ZERO, Some(B256::ZERO), Bytes::new(), case.policy(), None);
     let mut executor =
         MegaBlockExecutor::new(evm, ctx, case.spec(), OpAlloyReceiptBuilder::default())
             .with_protocol_limits(protocol);

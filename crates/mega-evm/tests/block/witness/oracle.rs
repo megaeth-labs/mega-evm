@@ -1,6 +1,8 @@
 //! Oracle reads, hints and the high-precision timestamp through the harness.
 //!
-//! An oracle read loads the chain's slot, then takes the service's answer over it. The chain's
+//! An oracle read loads the chain's slot, then, in a transaction that is neither a deposit nor a
+//! Mega System Transaction, takes the service's answer over it; a deposit, a Mega System
+//! Transaction and a system call ask the service nothing and take the chain's slot. The chain's
 //! slot is in the record like any slot; the service's answer is not in any database, so a replay
 //! matches only when it is given the answer — the included transactions' own records, in block
 //! order — or when the chain holds it at the read, which is what a node must arrange for a
@@ -71,10 +73,15 @@ fn get_slot_of(slot: U256) -> Bytes {
 }
 
 /// A system transaction writing `value` into `slot` of the Oracle: a legacy call from the live
-/// system address to `setSlot`, which the engine promotes to a deposit. Its gas is regular room
-/// on top of the account the engine creates for its caller and the history its body would pay.
+/// system address to `setSlot`, which the engine promotes to a deposit.
 fn oracle_update(slot: U256, value: U256) -> super::harness::Tx {
-    let input = IOracle::setSlotCall { slot, value: B256::from(value) }.abi_encode();
+    system_transaction(IOracle::setSlotCall { slot, value: B256::from(value) }.abi_encode().into())
+}
+
+/// The system address's first system transaction, calling the Oracle with `input`: a legacy call
+/// from the live system address, which the engine promotes to a deposit. Its gas is regular room
+/// on top of the account the engine creates for its caller and the history its body would pay.
+fn system_transaction(input: Bytes) -> super::harness::Tx {
     let gas =
         1_000_000 + common::new_account_state_gas() + common::body_history(input.len() as u64);
     legacy_from(
@@ -82,7 +89,7 @@ fn oracle_update(slot: U256, value: U256) -> super::harness::Tx {
         0,
         TxKind::Call(ORACLE_CONTRACT_ADDRESS),
         U256::ZERO,
-        input.into(),
+        input,
         gas,
     )
 }
@@ -147,14 +154,14 @@ fn test_an_unanswered_oracle_read_replays() {
     assert_eq!(replay.recorded.record.oracle_reads, vec![OracleRead { slot: SLOT, answer: None }]);
 }
 
-/// A deposit that failed keeps on its outcome the oracle reads its frames made: the failure takes
-/// back everything but the sender's nonce bump and mint, not what the service answered, and a
-/// validator re-executing the deposit makes the same reads. A deposit into a contract that reads
-/// [`SLOT`] through the Oracle and then halts is included as a failed deposit that recorded the
-/// read and its answer; the chain's slot is a key, and the channel replay is answered exactly
-/// from the record.
+/// A deposit asks the oracle service nothing, one that fails included: a deposit into a contract
+/// that reads [`SLOT`] through the Oracle and then halts is included as a failed deposit that
+/// recorded no read, and the service never saw one. The failure takes back everything but the
+/// sender's nonce bump and mint, not what the deposit loaded: the chain's slot is a key, and a
+/// validator re-executing the deposit makes the same read of it, served nothing, with a service
+/// or without one.
 #[test]
-fn test_a_failed_deposits_oracle_read_is_recorded_and_replayed() {
+fn test_a_failed_deposits_oracle_read_asks_nothing_and_replays_without_a_service() {
     let depositor = address!("0x4000000000000000000000000000000000000009");
     let read = get_slot();
     let read_then_halt = BytecodeBuilder::default()
@@ -170,17 +177,19 @@ fn test_a_failed_deposits_oracle_read_is_recorded_and_replayed() {
         SLOT,
         STATE_VALUE,
     );
-    let replay = Case::new("a failed deposit that read the oracle", db)
-        .envs(Envs::new().with_oracle_storage(SLOT, SERVICE_VALUE))
-        .tx(deposit(
-            depositor,
-            TxKind::Call(CONTRACT),
-            1_000_000_000,
-            U256::ZERO,
-            Bytes::new(),
-            1_000_000 + common::new_account_state_gas(),
-        ))
-        .run();
+    let case = || {
+        Case::new("a failed deposit that read the oracle", db.clone())
+            .envs(Envs::new().with_oracle_storage(SLOT, SERVICE_VALUE))
+            .tx(deposit(
+                depositor,
+                TxKind::Call(CONTRACT),
+                1_000_000_000,
+                U256::ZERO,
+                Bytes::new(),
+                1_000_000 + common::new_account_state_gas(),
+            ))
+    };
+    let replay = case().run();
     let run = &replay.recorded;
     assert!(
         matches!(
@@ -190,9 +199,62 @@ fn test_a_failed_deposits_oracle_read_is_recorded_and_replayed() {
         "{:?}",
         run.tx(0).result
     );
-    assert_eq!(run.tx(0).oracle_reads, vec![SLOT_READ], "the read is on the failed deposit");
+    assert!(run.tx(0).oracle_reads.is_empty(), "the failed deposit recorded no read");
+    assert!(run.executed_oracle_reads.is_empty(), "the service saw none");
     assert!(run.keys.slots.contains(&(ORACLE_CONTRACT_ADDRESS, SLOT)), "the chain's slot is a key");
-    assert!(replay.channel.oracle_replayed_exactly, "the replay was answered from the record");
+    assert!(replay.channel.oracle_replayed_exactly, "the replay was served nothing");
+
+    let without = case().replay_channels(run, Oracle::Absent);
+    assert_same_run("a failed deposit's oracle read, no service", run, &without);
+}
+
+/// A deposit and a Mega System Transaction ask the oracle service nothing: each reads [`SLOT`]
+/// through the Oracle and takes the chain's value, over the one the service holds, and records
+/// no read, so the block's only recorded answer is the user transaction's after them. A validator
+/// given that record answers the user's read alone: were the deposit or the system transaction
+/// asked, the first would take the user's answer and the user's read would find none. Without a
+/// service the two take the chain's value as they did, and only the user's read comes out
+/// differently.
+#[test]
+fn test_a_deposit_and_a_system_transaction_leave_the_recorded_answers_to_the_users() {
+    let depositor = address!("0x4000000000000000000000000000000000000009");
+    let case = || {
+        Case::new(
+            "a deposit's, a system transaction's and a user's oracle reads",
+            db().account_storage(ORACLE_CONTRACT_ADDRESS, SLOT, STATE_VALUE),
+        )
+        .envs(Envs::new().with_oracle_storage(SLOT, SERVICE_VALUE))
+        .tx(deposit(
+            depositor,
+            TxKind::Call(ORACLE_CONTRACT_ADDRESS),
+            1_000_000_000,
+            U256::ZERO,
+            get_slot(),
+            gas(36) + common::new_account_state_gas(),
+        ))
+        .tx(system_transaction(get_slot()))
+        .tx(call(0, ORACLE_CONTRACT_ADDRESS, get_slot(), gas(36)))
+    };
+    let replay = case().run();
+    let run = &replay.recorded;
+    for index in 0..3 {
+        assert!(run.tx(index).result.is_success(), "{index}: {:?}", run.tx(index).result);
+    }
+    assert_eq!(returned(run, 0), STATE_VALUE, "the deposit took the chain's value");
+    assert_eq!(returned(run, 1), STATE_VALUE, "so did the system transaction");
+    assert_eq!(returned(run, 2), SERVICE_VALUE, "the user's transaction was answered");
+    assert!(run.tx(0).oracle_reads.is_empty(), "the deposit recorded no read");
+    assert!(run.tx(1).oracle_reads.is_empty(), "nor did the system transaction");
+    assert_eq!(run.tx(2).oracle_reads, vec![SLOT_READ]);
+    assert_eq!(run.executed_oracle_reads, vec![SLOT_READ], "the only read the service saw");
+    assert_eq!(run.included_oracle_reads(), vec![SLOT_READ]);
+    assert!(replay.channel.oracle_replayed_exactly, "the user's answer went to the user's read");
+
+    let without = case().replay_channels(run, Oracle::Absent);
+    assert_eq!(returned(&without, 0), STATE_VALUE);
+    assert_eq!(returned(&without, 1), STATE_VALUE);
+    assert_eq!(returned(&without, 2), STATE_VALUE, "the chain's value stands in for the user's");
+    assert_differs("no service, the user's read", run, &without);
 }
 
 /// The answers a validator replays are the included transactions' own, in block order, not the

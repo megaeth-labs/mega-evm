@@ -274,8 +274,9 @@ fn test_the_contracts_bytecode_never_runs_for_a_dispatched_call() {
     }
 }
 
-/// The dispatch is by address and selector, whatever the address holds: where the state holds no
-/// contract code, the call's frame is built on the contract's own, and the call deploys.
+/// The dispatch is by address, selector and decodable arguments, whatever the address holds: where
+/// the state holds no contract code, the call's frame is built on the contract's own, and the call
+/// deploys.
 #[test]
 fn test_a_call_is_dispatched_where_the_state_holds_no_contract_code() {
     let deployment = Deployment::new(deploying(&runtime(1)));

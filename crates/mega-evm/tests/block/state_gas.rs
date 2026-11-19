@@ -47,9 +47,9 @@ fn writes(nonce: u64, slot: u64, gas_limit: u64) -> Recovered<MegaTxEnvelope> {
     )
 }
 
-/// Above the execution cap the reservoir pays the state gas, and the block counts it all the same:
-/// the ledger is the state gas spent, whichever pool paid it. No limit refuses a transaction for
-/// the state gas the block has spent.
+/// Above the execution cap the reservoir pays the state gas but each slot's legacy share, which
+/// regular gas pays first, and the block counts it all the same: the ledger is the state gas spent,
+/// whichever pool paid it. No limit refuses a transaction for the state gas the block has spent.
 #[test]
 fn test_the_blocks_state_gas_counts_what_the_reservoir_paid() {
     let slot = common::slot_state_gas();
@@ -66,7 +66,10 @@ fn test_the_blocks_state_gas_counts_what_the_reservoir_paid() {
         assert!(outcome.gas.reservoir_remaining > 0, "the reservoir paid it");
         assert_eq!(
             outcome.gas.reservoir_remaining,
-            ABOVE_CAP - TX_GAS_LIMIT_CAP - outcome.gas.state - outcome.gas.history,
+            ABOVE_CAP -
+                TX_GAS_LIMIT_CAP -
+                (outcome.gas.state - slot.min(10_000)) -
+                outcome.gas.history,
         );
         executor.commit_transaction_outcome(outcome).expect("no block limit refuses it");
     }

@@ -30,7 +30,7 @@ use revm::{
 };
 
 use crate::common::{
-    call, context, execute_under, history, runs_at_measurement_prices, slot_state_gas,
+    call, context, execute_under, history, runs_at_measurement_prices, slot_share, slot_state_gas,
 };
 
 const CALLER: Address = address!("0000000000000000000000000000000000200000");
@@ -223,11 +223,25 @@ fn test_stop_refills_the_reservoir_at_any_gas_limit() {
     };
     let small = at(100_000_000);
     let large = at(1_000_000_000);
-    assert_eq!(small.gas.reservoir_remaining, 0, "a limit under the cap has no reservoir");
+    // Every charge the frames made comes back into a reservoir, whichever pool paid it, so the
+    // reservoir ends holding what regular gas paid. The cap stops `D` at its second slot's record,
+    // `C` at its log, and `A` at its second slot's record; `B` succeeds. Below the execution cap
+    // there is no reservoir to begin with: regular gas pays `D`'s two slots and record and every
+    // frame's first slot and record, and of each later slot only its legacy share, the reservoir
+    // a failed child gave back paying the rest.
+    let (slot, record, share) =
+        (slot_state_gas(), history(mega_evm::WRITE_RECORD_SIZE), slot_share());
+    assert_eq!(
+        small.gas.reservoir_remaining,
+        5 * slot + 4 * record + 3 * share,
+        "a limit under the cap: what regular gas paid comes back into the reservoir"
+    );
+    // Above it the reservoir pays everything but the eight slots' legacy shares.
     assert_eq!(
         large.gas.reservoir_remaining,
-        1_000_000_000 - TX_GAS_LIMIT_CAP - body_history(),
-        "all of it back but the body's history, which the stop does not take back",
+        1_000_000_000 - TX_GAS_LIMIT_CAP - body_history() + 8 * share,
+        "all of it back but the body's history, which the stop does not take back, and the legacy \
+         shares regular gas paid on top",
     );
     assert_eq!(small.result.gas().tx_gas_used(), large.result.gas().tx_gas_used());
     assert_eq!(small.result.gas().total_gas_spent(), large.result.gas().total_gas_spent());
@@ -544,7 +558,13 @@ fn test_stop_refills_the_state_gas_drawn_from_the_reservoir() {
 
     let stopped = execute_with(chain(), cap(180), charger(), gas_limit);
     assert_stopped(&stopped.result, LimitKind::DataSize, 180);
-    assert_eq!(stopped.gas.reservoir_remaining, reservoir, "refilled by the stop");
+    // The stop gives every charge back into the reservoir, and with them the legacy shares of the
+    // eight slots the frames wrote before their stops, which regular gas paid.
+    assert_eq!(
+        stopped.gas.reservoir_remaining,
+        reservoir + 8 * slot_share(),
+        "refilled by the stop"
+    );
     assert_eq!(stopped.gas.state, 0);
 }
 

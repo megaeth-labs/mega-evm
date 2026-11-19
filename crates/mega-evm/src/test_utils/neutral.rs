@@ -16,12 +16,6 @@
 //! there as long as `no_limits` leaves it unlimited, which the limit module's own test pins field
 //! by field.
 //!
-//! Every Satin transaction reads the live system address when it is validated, under the neutral
-//! configuration too, which leaves the `SequencerRegistry`'s account and one slot in its returned
-//! state, read-only: an engine that makes no such read returns no such entry, and a comparison
-//! with one takes it out first ([`take_system_address_read`]). A commit skips an account nothing
-//! touched, so the entry parts no committed state.
-//!
 //! Satin's base spec is Osaka, and a configuration cannot take a rule the base spec gates on its
 //! own id away or add one: an Osaka rule stays on under an older fork's fixtures, and an
 //! Amsterdam rule gated on the spec id stays off under Amsterdam's. So only Osaka and the fork
@@ -32,17 +26,12 @@ use alloy_evm::{precompiles::PrecompilesMap, Database};
 use revm::{
     context::CfgEnv,
     context_interface::cfg::GasParams,
-    handler::EvmTr,
     interpreter::instructions::{gas_table_spec, GasTable},
     precompile::{PrecompileSpecId, Precompiles},
     primitives::eip7954,
-    state::{Account, EvmState},
 };
 
-use crate::{
-    system::{storage_slots::CURRENT_SYSTEM_ADDRESS, SEQUENCER_REGISTRY_ADDRESS},
-    EthSpecId, ExternalEnvTypes, MegaEvm, MegaSpecId,
-};
+use crate::{EthSpecId, ExternalEnvTypes, MegaEvm, MegaSpecId};
 
 /// The configuration `fork`'s fixtures run under on Satin's machinery, or `None` for a fork
 /// Satin's Osaka base cannot be configured to.
@@ -117,31 +106,8 @@ pub fn neutralize_evm<DB: Database, INSP, ExtEnvs: ExternalEnvTypes>(
 ) -> Option<()> {
     let (precompiles, gas_table) = (neutral_precompiles(fork)?, neutral_gas_table(fork)?);
     evm.replace_precompile_set(precompiles);
-    let (_, instructions, _, _) = evm.all_mut();
-    *instructions.gas_table_mut() = gas_table;
+    evm.replace_static_gas_table(gas_table);
     Some(())
-}
-
-/// Takes out of a Satin transaction's returned `state` the entry its validation's read of the live
-/// system address left, and answers it: the `SequencerRegistry`'s account and its
-/// `_currentSystemAddress` slot, loaded and never written. What is left is what an engine that
-/// makes no such read returns for the same transaction, op-revm's or Ethereum's.
-///
-/// # Panics
-///
-/// When `state` holds no entry for the registry, or one that is more than the read: the account
-/// touched, another slot loaded, or the slot changed. Each is a difference of its own, which a
-/// comparison must not take out with the read.
-pub fn take_system_address_read(state: &mut EvmState) -> Account {
-    let registry =
-        state.remove(&SEQUENCER_REGISTRY_ADDRESS).expect("every transaction reads the registry");
-    assert!(!registry.is_touched(), "the registry was written, not only read: {registry:?}");
-    assert!(
-        registry.storage.keys().eq([&CURRENT_SYSTEM_ADDRESS]),
-        "the registry holds more than the system address's slot: {registry:?}"
-    );
-    assert!(!registry.storage[&CURRENT_SYSTEM_ADDRESS].is_changed(), "the slot was written");
-    registry
 }
 
 #[cfg(test)]
@@ -151,6 +117,7 @@ mod tests {
     use revm::{
         context::{Cfg, ContextTr},
         database::EmptyDB,
+        handler::EvmTr,
         precompile::kzg_point_evaluation,
         primitives::{eip170, eip3860, eip7825},
     };
@@ -266,8 +233,8 @@ mod tests {
     #[test]
     fn test_neutral_gas_tables() {
         use revm::bytecode::opcode::{EXTCODECOPY, EXTCODESIZE};
-        let mut evm = MegaEvm::new(context(EthSpecId::AMSTERDAM));
-        let satin = *evm.all_mut().1.gas_table();
+        let evm = MegaEvm::new(context(EthSpecId::AMSTERDAM));
+        let satin = evm.static_gas_table();
         assert_eq!(neutral_gas_table(EthSpecId::AMSTERDAM), Some(satin));
 
         let osaka = neutral_gas_table(EthSpecId::OSAKA).expect("a neutral fork");
@@ -280,16 +247,23 @@ mod tests {
     }
 
     /// `neutralize_evm` installs the fork's static prices, and changes nothing for a fork
-    /// without a neutral configuration. That it installs the precompile set is shown by a call
-    /// (`tests/satin/neutral.rs`).
+    /// without a neutral configuration. The opcodes that can read volatile data take theirs in
+    /// their read wrappers, so the instruction table charges none of theirs, before and after.
+    /// That it installs the precompile set is shown by a call (`tests/satin/neutral.rs`).
     #[test]
     fn test_neutralize_evm_installs_the_fork_s_static_prices() {
-        use revm::bytecode::opcode::EXTCODESIZE;
+        use revm::bytecode::opcode::{EXTCODECOPY, EXTCODESIZE};
         let mut evm = MegaEvm::new(context(EthSpecId::OSAKA));
         assert!(neutralize_evm(&mut evm, EthSpecId::PRAGUE).is_none());
-        assert_eq!(evm.all_mut().1.gas_table()[EXTCODESIZE as usize], 200);
+        assert_eq!(evm.static_gas_table()[EXTCODESIZE as usize], 200);
 
         assert!(neutralize_evm(&mut evm, EthSpecId::OSAKA).is_some());
-        assert_eq!(evm.all_mut().1.gas_table()[EXTCODESIZE as usize], 100);
+        let osaka = neutral_gas_table(EthSpecId::OSAKA).expect("a neutral fork");
+        assert_eq!(evm.static_gas_table(), osaka);
+        assert_eq!(evm.static_gas_table()[EXTCODESIZE as usize], 100);
+        for opcode in [EXTCODESIZE, EXTCODECOPY] {
+            assert_eq!(evm.all_mut().1.gas_table()[opcode as usize], 0, "the wrapper's");
+            assert_eq!(evm.ctx().read_static_gas(opcode), 100);
+        }
     }
 }

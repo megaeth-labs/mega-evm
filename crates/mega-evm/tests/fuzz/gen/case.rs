@@ -61,10 +61,14 @@ impl Case {
     /// system address, the fixed accounts with their programs, the delegation, and, for a keyless
     /// deployment, its signer's account and what its deploy address holds.
     ///
-    /// An account that would hold nothing — no balance, nonce, code or slot — is left out, as no
-    /// chain past EIP-161 holds one: revm's EIP-7702 application counts an account its database
-    /// holds as existing, empty or not, where a value transfer counts an empty one as new, so an
-    /// empty account in the pre-state would make the two disagree on a state no chain reaches.
+    /// An account that would hold nothing — no balance, nonce, code or slot — is left out. One that
+    /// holds slots and nothing else is installed, its slots holding zero or not: an account empty
+    /// under EIP-161 whose leaf the state holds, as a genesis allocation can leave one. The sites
+    /// that add an account decide it by two rules: an applied EIP-7702 authority is new only where
+    /// the state holds no account, so this one exists, and every other site counts an account
+    /// empty under EIP-161 as new. The world's `empty_leaves` install more such accounts, with
+    /// nothing in them: the fresh address, the distinct beneficiary and the addresses the
+    /// programs' `CREATE2` ops land on, and the address a creation transaction deploys at.
     pub(crate) fn database(&self) -> MemoryDatabase {
         let mut db = MemoryDatabase::default().rex6_predeploys(SYSTEM_ADDRESS);
         let world = &self.world;
@@ -75,6 +79,28 @@ impl Case {
         let beneficiary_balance = world.beneficiary_balance.wei();
         if !beneficiary_balance.is_zero() {
             db.set_account_balance(Who::Beneficiary.address(), beneficiary_balance);
+        } else if world.empty_leaves.beneficiary {
+            db.insert_account_info(Who::Beneficiary.address(), AccountInfo::default());
+        }
+        if world.empty_leaves.fresh {
+            db.insert_account_info(Who::Fresh.address(), AccountInfo::default());
+        }
+        if world.empty_leaves.created {
+            // The address a creation transaction deploys at, whose init code is the main program.
+            if matches!(self.tx.shape, Shape::Create | Shape::Deposit { create: true, .. }) {
+                let caller = Who::Caller.address();
+                db.insert_account_info(
+                    caller.create(world.nonce_of(caller)),
+                    AccountInfo::default(),
+                );
+            }
+            for (deployer, program) in
+                [(Who::Contract, &self.main), (Who::A, &self.a), (Who::B, &self.b)]
+            {
+                for address in program.create2_addresses(deployer.address()) {
+                    db.insert_account_info(address, AccountInfo::default());
+                }
+            }
         }
         if let Some(delegation) = world.delegation {
             let address = delegation.delegator.address();

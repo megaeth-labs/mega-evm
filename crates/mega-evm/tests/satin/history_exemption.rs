@@ -1,14 +1,5 @@
-//! Who pays no history gas at all: a deposit, a transaction the protocol itself sent, and a
-//! system call.
-//!
-//! What those three append to the chain is the chain carrying its own weight — a deposit the
-//! sequencer relays and that was paid for on L1, the maintenance a system transaction performs,
-//! the calls the protocol makes before a block's transactions — and there is no sender to charge
-//! for it. Every one of them runs the same program as the control transaction below, which pays
-//! for every byte of it.
-//!
-//! The exemption is history's alone. State gas is charged as usual, which each test asserts, so an
-//! exempt transaction cannot grow the state for free.
+//! History gas is charged to every transaction, including deposits and the protocol's own.
+//! Only system calls are exempt; their state gas and resource usage are still counted.
 
 use alloy_evm::Evm;
 use alloy_op_evm::OpTx;
@@ -37,7 +28,9 @@ use revm::{
     ExecuteEvm,
 };
 
-use crate::common::{context, deposit, runs_at_measurement_prices};
+use crate::common::{
+    account_share, context, create_share, deposit, runs_at_measurement_prices, slot_share,
+};
 
 const CALLER: Address = address!("0000000000000000000000000000000000400000");
 const CONTRACT: Address = address!("0000000000000000000000000000000000400001");
@@ -166,9 +159,8 @@ fn test_a_user_transaction_pays_history_for_the_program() {
 /// exemption reaches it too, by handing an exempt transaction a schedule that prices a deposited
 /// byte at zero.
 ///
-/// The program above deploys thirty-two bytes. A user transaction pays for them and a deposit
-/// running the same program pays for nothing at all, so the difference the schedule makes is
-/// visible where a ledger comparison alone would only show two zeroes.
+/// The program deploys thirty-two bytes. Transactions pay for them, and a system call running
+/// the same program pays no history.
 #[test]
 fn test_the_exempt_schedule_prices_a_deposited_byte_at_zero() {
     if runs_at_measurement_prices() {
@@ -190,26 +182,46 @@ fn test_the_exempt_schedule_prices_a_deposited_byte_at_zero() {
         DEPLOYED_BYTES * mega_evm::constants::COST_PER_HISTORY_BYTE,
         "a user transaction pays a history byte per deployed byte",
     );
-    assert_eq!(ledgers(deposit(call_from(CALLER, CONTRACT))).0, 0, "a deposit pays none of it");
+    let mut evm = MegaEvm::new(context(db()));
+    Evm::transact_system_call(&mut evm, CALLER, CONTRACT, Bytes::new()).unwrap();
+    assert_eq!(evm.ctx().additional_limit().history_gas_spent(), 0);
 }
 
-/// A deposit pays no history gas: the bytes it carries were paid for on L1.
+/// Both field-based forms of system origin pay every history site, including deposited code.
 #[test]
-fn test_a_deposit_pays_no_history_gas() {
+fn test_system_originated_transactions_pay_history_for_the_program() {
     if runs_at_measurement_prices() {
         return;
     }
-    let (history, state, outcome) = ledgers(deposit(call_from(CALLER, CONTRACT)));
-    assert_eq!(history, 0, "a deposit pays no history gas");
-    assert!(state > 0, "the exemption is history's alone");
-    assert_eq!(state, PROGRAM_STATE_GAS, "the state a user transaction pays");
-    assert_eq!(outcome.gas.history_bytes, 0);
+    let mut stamped = deposit(call_from(CALLER, CONTRACT));
+    stamped.0.deposit.source_hash = mega_evm::system::MEGA_SYSTEM_TRANSACTION_SOURCE_HASH;
+    let from_system_caller = call_from(mega_evm::SYSTEM_ADDRESS, CONTRACT);
+    for (name, mut tx) in [("source hash", stamped), ("system caller", from_system_caller)] {
+        tx.0.base.data = Bytes::from_static(b"history");
+        let db = db().account_balance(mega_evm::SYSTEM_ADDRESS, U256::from(10u64.pow(18)));
+        let mut evm = MegaEvm::new(context(db));
+
+        let outcome = evm.execute_transaction(tx).expect("the transaction is included");
+
+        assert!(outcome.result.is_success(), "{name}: {:?}", outcome.result);
+        assert!(evm.ctx().is_system_originated(), "{name}");
+        assert_eq!(
+            outcome.gas.history,
+            (PROGRAM_HISTORY_BYTES + 7) * COST_PER_HISTORY_BYTE,
+            "{name}"
+        );
+        assert_eq!(outcome.gas.history_bytes, PROGRAM_HISTORY_BYTES + 7, "{name}");
+        assert_eq!(outcome.gas.state, PROGRAM_STATE_GAS, "{name}");
+        assert!(
+            evm.ctx().bucket_multipliers().cached_buckets().len() == 0,
+            "{name}: minimum bucket without a lookup"
+        );
+    }
 }
 
-/// A transaction from the system address pays no history gas: the protocol is maintaining its own
-/// state, and a resource charge it cannot pay would stop it.
+/// A promoted Mega System Transaction pays for its body, calldata and the Oracle slot it writes.
 #[test]
-fn test_a_system_transaction_pays_no_history_gas() {
+fn test_a_system_transaction_pays_history_gas() {
     if runs_at_measurement_prices() {
         return;
     }
@@ -219,8 +231,9 @@ fn test_a_system_transaction_pays_no_history_gas() {
     let tx = system_tx();
     let outcome =
         MegaEvm::new(context(db())).execute_transaction(tx).expect("the transaction is valid");
-    assert_eq!(outcome.gas.history, 0, "the protocol's own transaction pays no history gas");
-    assert_eq!(outcome.gas.history_bytes, 0, "and appends no history byte, its body included");
+    let bytes = transaction_body_bytes(&system_tx()) + WRITE_RECORD_SIZE;
+    assert_eq!(outcome.gas.history, bytes * COST_PER_HISTORY_BYTE);
+    assert_eq!(outcome.gas.history_bytes, bytes);
     assert!(outcome.result.is_success(), "{:?}", outcome.result);
     assert_eq!(written_oracle_slot(&outcome), Some(ORACLE_VALUE), "it wrote the Oracle's slot");
     assert_eq!(
@@ -230,7 +243,7 @@ fn test_a_system_transaction_pays_no_history_gas() {
             write_records: 1,
             state_growth: 2,
         },
-        "the body and the slot's record are counted, though neither pays history, and the new slot \
+        "the body and the slot's record pay history, and the new slot \
          and the system address's new account are its state growth",
     );
     // The state is charged as usual: the new slot, and the system address's own account, which
@@ -259,22 +272,19 @@ fn test_a_system_call_pays_no_history_gas() {
     assert_eq!(evm.ctx().additional_limit().history_bytes(), 0);
 }
 
-/// The bytes a transaction appended are reported beside its history gas, and they are the bytes
-/// that gas priced: the control reports every byte of the program, each at the price, and an
-/// exempt transaction, which prices none of them, reports none.
-///
-/// Each transaction runs below the execution cap and above it. Above it the reservoir pays the
-/// state gas, which the exemption leaves in place, and no history.
-///
-/// A system call runs at the gas limit its entry point fixes, below the cap.
+/// Every transaction reports its retained history bytes, both below and above the execution
+/// cap. Above the cap its reservoir pays history and state. System calls report no history.
 #[test]
-fn test_an_exempt_transaction_reports_no_history_bytes() {
+fn test_only_a_system_call_reports_no_history_bytes() {
     if runs_at_measurement_prices() {
         return;
     }
     const RESERVOIR: u64 = 100_000_000;
     for gas_limit in [GAS_LIMIT, TX_GAS_LIMIT_CAP + RESERVOIR] {
-        let run = |mut tx: MegaTransaction| {
+        // `shares` is what regular gas paid of the state charges, their legacy shares: the
+        // program's fresh slot, the account its value call creates and the account it creates;
+        // the system transaction's fresh slot in the Oracle.
+        let run = |mut tx: MegaTransaction, shares: u64| {
             tx.0.base.gas_limit = gas_limit;
             let outcome = MegaEvm::new(context(db()))
                 .execute_transaction(tx)
@@ -283,14 +293,15 @@ fn test_an_exempt_transaction_reports_no_history_bytes() {
             if gas_limit > TX_GAS_LIMIT_CAP {
                 assert_eq!(
                     gas.reservoir_remaining,
-                    RESERVOIR - gas.state - gas.history,
-                    "the reservoir paid the state and history ledgers",
+                    RESERVOIR + shares - gas.state - gas.history,
+                    "the reservoir paid the state and history ledgers but the legacy shares",
                 );
             }
             outcome
         };
+        let program_shares = slot_share() + account_share() + create_share();
 
-        let paying = run(call_from(CALLER, CONTRACT)).gas;
+        let paying = run(call_from(CALLER, CONTRACT), program_shares).gas;
         assert!(paying.history_bytes > 0);
         assert_eq!(
             paying.history,
@@ -298,16 +309,23 @@ fn test_an_exempt_transaction_reports_no_history_bytes() {
             "at {gas_limit}: the control pays for every byte it reports",
         );
 
-        let deposit = run(deposit(call_from(CALLER, CONTRACT))).gas;
-        assert_eq!((deposit.history, deposit.history_bytes), (0, 0), "at {gas_limit}: a deposit");
-        assert!(deposit.state > 0, "at {gas_limit}: the exemption is history's alone");
-        let system = run(system_tx());
+        let deposit = run(deposit(call_from(CALLER, CONTRACT)), program_shares).gas;
+        assert_eq!(
+            (deposit.history, deposit.history_bytes),
+            (PROGRAM_HISTORY_BYTES * COST_PER_HISTORY_BYTE, PROGRAM_HISTORY_BYTES),
+            "at {gas_limit}: a deposit"
+        );
+        assert!(deposit.state > 0, "at {gas_limit}: state is charged too");
+        let system = run(system_tx(), slot_share());
         assert!(system.result.is_success(), "at {gas_limit}: {:?}", system.result);
         assert_eq!(written_oracle_slot(&system), Some(ORACLE_VALUE), "at {gas_limit}");
         let system = system.gas;
         assert_eq!(
             (system.history, system.history_bytes),
-            (0, 0),
+            (
+                (transaction_body_bytes(&system_tx()) + WRITE_RECORD_SIZE) * COST_PER_HISTORY_BYTE,
+                transaction_body_bytes(&system_tx()) + WRITE_RECORD_SIZE
+            ),
             "at {gas_limit}: a system transaction",
         );
     }
@@ -326,10 +344,8 @@ fn test_the_exemption_does_not_outlive_its_transaction() {
     }
     let mut evm = MegaEvm::new(context(db()));
 
-    let exempt = evm
-        .execute_transaction(deposit(call_from(CALLER, CONTRACT)))
-        .expect("the deposit is valid");
-    assert_eq!(exempt.gas.history, 0);
+    Evm::transact_system_call(&mut evm, CALLER, CONTRACT, Bytes::new()).unwrap();
+    assert_eq!(evm.ctx().additional_limit().history_gas_spent(), 0);
 
     // Nothing was committed, so the sender's nonce is where it was.
     let paying =
@@ -342,17 +358,16 @@ fn test_the_exemption_does_not_outlive_its_transaction() {
 /// Whether a transaction pays history, and whether it is the protocol's own, are decided when the
 /// transaction is prepared to run, from what it is: a transaction set in the context's hands but
 /// not run yet changes neither. After a user's transaction, a deposit or a system transaction set
-/// in its place still answers as the user's transaction did; after a deposit, a user's transaction
-/// still answers that it pays none; after a system transaction, a user's transaction still answers
-/// that it is the protocol's own. Each answers for itself once it runs.
+/// in its place still answers as the user's transaction did; after a system transaction, a user's
+/// transaction still answers that it is the protocol's own. Each answers for itself once it runs.
 #[test]
 fn test_what_a_transaction_pays_is_decided_when_it_is_prepared() {
     let user = call_from(CALLER, CONTRACT);
     // (case, transaction, pays history, the protocol's own)
     let cases = [
         ("a user's transaction", user.clone(), true, false),
-        ("a user's deposit", deposit(user), false, false),
-        ("a system transaction", system_tx(), false, true),
+        ("a user's deposit", deposit(user), true, false),
+        ("a system transaction", system_tx(), true, true),
     ];
     for (ran, run, pays, own) in cases.clone() {
         for (set, replacement, its_pays, its_own) in cases.clone() {

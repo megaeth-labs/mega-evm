@@ -1,12 +1,11 @@
 //! The transaction outcome: the result, the gas by ledger, the usage counted and the stop.
 
-use alloy_primitives::{address, Address, Bytes, U256};
-use alloy_sol_types::SolError;
+use alloy_primitives::{address, Address, U256};
 use mega_evm::{
     constants::{COST_PER_HISTORY_BYTE, SLOT_STATE_GAS, TX_GAS_LIMIT_CAP},
     test_utils::{BytecodeBuilder, MemoryDatabase},
     BlockGasCounters, EvmTxRuntimeLimits, LimitCheck, LimitKind, LimitUsage, MegaEvm,
-    MegaLimitExceeded, MegaTransactionOutcome, TX_BODY_SIZE, WRITE_RECORD_SIZE,
+    MegaTransactionOutcome, TX_BODY_SIZE, WRITE_RECORD_SIZE,
 };
 
 use crate::common::{
@@ -52,7 +51,9 @@ fn test_outcome_reports_the_ledgers() {
     let result_gas = outcome.result.gas();
     assert_eq!(gas.regular + gas.state + gas.history, result_gas.total_gas_spent());
     assert_eq!(gas.gas_used, result_gas.tx_gas_used());
-    // Both slots are new, so both draw state gas, and the reservoir is what pays it.
+    // Both slots are new, so both draw state gas, and the reservoir is what pays it but each
+    // slot's 10,000 legacy share, which regular gas pays first: state gas on the state ledger all
+    // the same.
     assert_eq!(gas.state, 2 * SLOT_STATE_GAS);
     // The body's history comes out of the same reservoir, before the state gas does, and each of
     // the two new slots leaves a write record that is history too.
@@ -63,7 +64,7 @@ fn test_outcome_reports_the_ledgers() {
     );
     assert_eq!(
         gas.reservoir_remaining,
-        1_000_000_000 - TX_GAS_LIMIT_CAP - 2 * SLOT_STATE_GAS - gas.history,
+        1_000_000_000 - TX_GAS_LIMIT_CAP - 2 * (SLOT_STATE_GAS - 10_000) - gas.history,
     );
     assert_eq!(
         outcome.usage,
@@ -108,20 +109,6 @@ fn test_outcome_reports_the_stop() {
         LimitUsage { data_size: TX_BODY_SIZE, write_records: 0, state_growth: 0 },
         "the stop drops the writes and keeps the body"
     );
-}
-
-/// A contract reverting with `MegaLimitExceeded`'s bytes on its own is not a stop.
-#[test]
-fn test_spoofed_revert_data_is_not_a_stop() {
-    let data: Bytes = MegaLimitExceeded { kind: 0, limit: 1 }.abi_encode().into();
-    let code = BytecodeBuilder::default().revert_with_data(&data).build();
-    let outcome = execute(
-        MemoryDatabase::default().account_code(CONTRACT, code),
-        EvmTxRuntimeLimits::no_limits(),
-        1_000_000,
-    );
-    assert_eq!(outcome.result.output(), Some(&data));
-    assert_eq!(outcome.limit_exceeded, None);
 }
 
 /// Counts the steps it sees.

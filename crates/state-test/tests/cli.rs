@@ -221,12 +221,11 @@ fn test_the_witness_options_print_a_line_per_transaction() {
     let full = lines(&["--json-witness-full"]);
     assert_eq!(full.len(), 1);
     assert_eq!(full[0]["witness"], compact[0]["witness"]);
-    // A transaction rejected for its intrinsic gas read the live system address and nothing else:
-    // every transaction reads it first, from the `SequencerRegistry`, which the pre-state lacks.
-    let registry = "0x6342000000000000000000000000000000000006";
+    // A transaction rejected for its intrinsic gas reads nothing: validation refuses it before it
+    // loads an account, and no transaction reads the `SequencerRegistry` for its classification.
     let reads = &full[0]["reads"];
-    assert_eq!(reads["accounts"], json!({ registry: null }), "{reads}");
-    assert_eq!(reads["storage"][registry].as_object().map(|slots| slots.len()), Some(1));
+    assert_eq!(reads["accounts"], json!({}), "{reads}");
+    assert_eq!(reads["storage"], json!({}), "{reads}");
 
     let both = lines(&["--json-digest", "--json-witness"]);
     assert_eq!(both, [lines(&["--json-digest"])[0].clone(), compact[0].clone()]);

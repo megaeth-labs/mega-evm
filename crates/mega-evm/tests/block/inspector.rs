@@ -95,6 +95,7 @@ fn recording_ctx() -> MegaBlockExecutionCtx {
         Some(B256::repeat_byte(0xcd)),
         Bytes::new(),
         BlockLimits::no_limits(),
+        None,
     )
 }
 

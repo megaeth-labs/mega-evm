@@ -116,16 +116,9 @@ fn funded() -> MemoryDatabase {
 /// Every test calls this last, so a relation that fails stops the test before any snapshot is
 /// compared.
 fn pin(name: &str, traced: &Traced, expected: Ledgers) {
-    pin_given_back(name, traced, expected, 0);
-}
-
-/// [`pin`], for a transaction whose own frame failed after `given_back` of its state and history
-/// gas had spilled onto its regular gas: the failure gives it back after the tracer read the
-/// frame (see `assert_root_frame_settles`).
-fn pin_given_back(name: &str, traced: &Traced, expected: Ledgers, given_back: u64) {
     assert!(SCENARIOS.contains(&name), "{name} is not listed in SCENARIOS");
     assert_ledgers(traced, expected);
-    assert_root_frame_settles(traced, given_back);
+    assert_root_frame_settles(traced);
     assert_eip3155_agrees(traced);
     assert_prestate_covers_reads(traced);
     assert_root_gas_is_the_gas_limit(traced);
@@ -516,8 +509,9 @@ fn test_keyless_deploy_refused() {
     );
     assert_keyless_steps(&traced, false);
     // The call frame paid the signer's account out of its regular gas before the refusal gave it
-    // back.
-    pin_given_back("keyless_refused", &traced, expected, gas::account_state());
+    // back, into the call's reservoir, which the transaction ends with.
+    assert_eq!(traced.outcome.gas.reservoir_remaining, gas::account_state(), "given back");
+    pin("keyless_refused", &traced, expected);
 }
 
 /// A parent that calls [`CHILD`] with all its gas and no value, then, if it resumes, writes a
@@ -573,9 +567,10 @@ fn test_data_size_limit_stops_the_first_frame_at_its_start() {
     // The frame's budget is what the body leaves of the limit: nothing, which its start crosses.
     assert_every_frame_stops(&traced, LimitKind::DataSize, limit - TX_BODY_SIZE, 1);
     assert!(traced.inspector.traces().nodes()[0].trace.steps.is_empty(), "no instruction ran");
-    // The record's history was charged on the transaction's gas before the frame and comes back
-    // after the tracer read the frame, as a failed frame's spill does.
-    pin_given_back("data_size_first_frame_start_stop", &traced, expected, held);
+    // The record's history was charged on the transaction's gas before the frame, out of its
+    // regular gas, and comes back into its reservoir after the tracer read the frame.
+    assert_eq!(traced.outcome.gas.reservoir_remaining, held, "given back");
+    pin("data_size_first_frame_start_stop", &traced, expected);
 }
 
 /// A child's `LOG0` that crosses the transaction's data-size limit and, with it, its own frame
@@ -782,7 +777,9 @@ fn test_reservoir_pays_state_gas() {
     // The reservoir pays the body's history before the first frame, then the slot's state gas and
     // its record's history at the `SSTORE`: it holds them at the prices in effect, with the margin
     // on top. The regular gas below the execution cap pays the rest.
-    let slot = gas::slot_state() + gas::records(1);
+    // Regular gas pays the slot's legacy share before the reservoir.
+    let share = gas::slot_state().min(10_000);
+    let slot = gas::slot_state() - share + gas::records(1);
     let reservoir = ROOM + gas::body(0) + slot;
     let traced = Traced::run(
         funded().account_code(CONTRACT, code),
@@ -792,15 +789,20 @@ fn test_reservoir_pays_state_gas() {
     assert!(traced.outcome.result.is_success(), "{:?}", traced.outcome.result);
     assert_eq!(traced.outcome.gas.state, gas::slot_state());
     // The reservoir paid the body's history before the first frame, then the slot's state gas
-    // and its record's history at the `SSTORE`; what is left goes back to the sender.
+    // but its legacy share and its record's history at the `SSTORE`; what is left goes back to the
+    // sender.
     assert_eq!(
         traced.outcome.gas.reservoir_remaining,
         reservoir - gas::body(0) - slot,
         "the reservoir left"
     );
-    // The opcode tracer shows only the regular part of the `SSTORE`: the rest came out of the
-    // reservoir, which only the EIP-3155 trace shows.
-    assert_eq!(step(&traced, "SSTORE", 1).gas_cost, gas::sstore_fresh_cold(), "the regular part");
+    // The opcode tracer shows only the regular part of the `SSTORE`, its legacy share included:
+    // the rest came out of the reservoir, which only the EIP-3155 trace shows.
+    assert_eq!(
+        step(&traced, "SSTORE", 1).gas_cost,
+        gas::sstore_fresh_cold() + share,
+        "the regular part"
+    );
     let steps = eip3155_steps(&traced);
     let at = |op: &str| {
         let line = steps.iter().find(|line| line["opName"] == op).expect("the step");
@@ -910,16 +912,16 @@ fn test_precompile_child_frame() {
 }
 
 /// A deposit that mints and carries value to a contract which stops. The value is logged; the
-/// mint is not. A deposit pays no history gas.
+/// mint is not. Its body and recipient record pay history.
 #[test]
 fn test_deposit_transaction() {
     let mint = 1_000_u128;
     let value = U256::from(7);
-    // A deposit pays its intrinsic gas and what it ran, here nothing, and no history.
+    // A deposit pays its intrinsic gas, its body and the recipient record.
     let expected = Ledgers {
         regular: gas::call_intrinsic(&[], true),
         state: 0,
-        history: 0,
+        history: gas::history(TX_BODY_SIZE) + gas::history(WRITE_RECORD_SIZE),
         floor: gas::call_floor(&[], true),
     };
     let mut tx = op_transaction(TxEnv {
@@ -938,7 +940,7 @@ fn test_deposit_transaction() {
     );
     assert!(traced.outcome.result.is_success(), "{:?}", traced.outcome.result);
     let history = (traced.outcome.gas.history, traced.outcome.gas.history_bytes);
-    assert_eq!(history, (0, 0), "a deposit pays no history");
+    assert_eq!(history, (expected.history, TX_BODY_SIZE + WRITE_RECORD_SIZE));
     let root = traced.call_frame(true);
     assert_logs(&root.logs, &[transfer_log(CALLER, CONTRACT, value)]);
     assert_log_index_counts_discarded(&traced, &[0]);

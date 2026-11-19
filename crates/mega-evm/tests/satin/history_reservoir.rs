@@ -29,13 +29,13 @@ use mega_evm::{
     LimitUsage, MegaTransactionOutcome, TX_BODY_SIZE, WRITE_RECORD_SIZE,
 };
 use revm::bytecode::opcode::{
-    CALL, CREATE, GAS, INVALID, MSTORE, POP, PUSH0, PUSH1, RETURN, REVERT, STOP,
+    CALL, CREATE, GAS, INVALID, LOG0, MSTORE, POP, PUSH0, PUSH1, RETURN, REVERT, STOP,
 };
 
 use crate::{
     common::{
-        body_history, call, execute, history_is_free, history_rounds, runs_at_measurement_prices,
-        state_is_free,
+        account_share, body_history, call, create_share, execute, history_is_free, history_rounds,
+        runs_at_measurement_prices, state_is_free,
     },
     salt::{crowded_account, minimal_envs, salt_context},
 };
@@ -110,14 +110,19 @@ fn calls_a_refusing_interceptor() -> Bytes {
 }
 
 /// Runs the same transaction above and below the execution cap and holds the two to the same
-/// ledgers: above the cap the reservoir pays what regular gas pays below it, and the reservoir
-/// left over is the gas limit above the cap less the state and history the ledgers report.
+/// ledgers: above the cap the reservoir pays what regular gas pays below it but the legacy shares,
+/// `shares`, which regular gas pays first either way, and the reservoir left over is the gas limit
+/// above the cap less the state and history the ledgers report, the shares excepted. Below the
+/// cap the reservoir holds what the frames were given back, `given_back`: regular gas paid it, and
+/// a give-back goes into a reservoir.
 ///
 /// Returns the above-the-cap outcome, for a case that has more to say about it.
 #[track_caller]
 fn assert_the_reservoir_pays_what_regular_gas_pays(
     name: &str,
     db: impl Fn() -> MemoryDatabase,
+    shares: u64,
+    given_back: u64,
 ) -> MegaTransactionOutcome {
     let above = execute(db(), call(CALLER, CALLEE, U256::ZERO, ABOVE_CAP));
     let below = execute(db(), call(CALLER, CALLEE, U256::ZERO, BELOW_CAP));
@@ -127,11 +132,15 @@ fn assert_the_reservoir_pays_what_regular_gas_pays(
     assert_eq!(above.gas.history, below.gas.history, "{name}: the history ledger");
     assert_eq!(above.gas.state, below.gas.state, "{name}: the state ledger");
     assert_eq!(above.gas.regular, below.gas.regular, "{name}: the regular ledger");
-    assert_eq!(below.gas.reservoir_remaining, 0, "{name}: below the cap there is no reservoir");
+    assert_eq!(
+        below.gas.reservoir_remaining, given_back,
+        "{name}: below the cap the reservoir holds what was given back"
+    );
     assert_eq!(
         above.gas.reservoir_remaining,
-        ABOVE_CAP - TX_GAS_LIMIT_CAP - above.gas.state - above.gas.history,
-        "{name}: the reservoir paid exactly the state and the history the ledgers report",
+        ABOVE_CAP - TX_GAS_LIMIT_CAP + shares - above.gas.state - above.gas.history,
+        "{name}: the reservoir paid exactly the state and the history the ledgers report but the \
+         legacy shares",
     );
     above
 }
@@ -145,9 +154,12 @@ fn test_a_value_call_pays_its_records_out_of_the_reservoir() {
         return;
     }
     let code = transfers_to(CONTRACT);
-    let outcome = assert_the_reservoir_pays_what_regular_gas_pays("a value call", || {
-        funded().account_code(CALLEE, code.clone())
-    });
+    let outcome = assert_the_reservoir_pays_what_regular_gas_pays(
+        "a value call",
+        || funded().account_code(CALLEE, code.clone()),
+        account_share(),
+        0,
+    );
 
     assert!(outcome.result.is_success(), "{:?}", outcome.result);
     assert_eq!(outcome.usage.write_records, 2, "the caller's account and the recipient's");
@@ -163,9 +175,12 @@ fn test_a_nested_creation_pays_its_records_out_of_the_reservoir() {
         return;
     }
     let code = creates();
-    let outcome = assert_the_reservoir_pays_what_regular_gas_pays("a nested creation", || {
-        funded().account_code(CALLEE, code.clone())
-    });
+    let outcome = assert_the_reservoir_pays_what_regular_gas_pays(
+        "a nested creation",
+        || funded().account_code(CALLEE, code.clone()),
+        create_share(),
+        0,
+    );
 
     assert!(outcome.result.is_success(), "{:?}", outcome.result);
     assert_eq!(outcome.usage.write_records, 2, "the created account and the creator's nonce");
@@ -180,12 +195,16 @@ fn test_a_reverting_child_gives_its_records_back_to_the_reservoir() {
         return;
     }
     let code = transfers_to(CONTRACT);
-    let outcome =
-        assert_the_reservoir_pays_what_regular_gas_pays("a value call whose child reverts", || {
+    let outcome = assert_the_reservoir_pays_what_regular_gas_pays(
+        "a value call whose child reverts",
+        || {
             funded()
                 .account_code(CALLEE, code.clone())
                 .account_code(CONTRACT, Bytes::from_static(&[PUSH0, PUSH0, REVERT]))
-        });
+        },
+        0,
+        2 * RECORD,
+    );
 
     assert!(outcome.result.is_success(), "the caller survives its child's revert");
     assert_eq!(
@@ -199,6 +218,42 @@ fn test_a_reverting_child_gives_its_records_back_to_the_reservoir() {
         RESERVOIR - BODY,
         "the transfer's records cost the reservoir nothing in the end",
     );
+}
+
+/// Below the cap, a frame writes a slot that already held a value, which makes its record and
+/// nothing else, calls a child that logs and reverts, catches the revert, and reverts itself. The
+/// child's revert gives its log's history back into the child's reservoir, which returns to the
+/// frame as its reservoir, and the frame's own revert gives its record's history back on top of
+/// that: neither give-back goes into regular gas, so the transaction ends holding both.
+#[test]
+fn test_a_frame_that_reverts_after_catching_a_reverted_log_holds_both_give_backs() {
+    if runs_at_measurement_prices() {
+        return;
+    }
+    let frame = BytecodeBuilder::default()
+        .sstore(U256::from(1), U256::from(2))
+        .call(CONTRACT, U256::ZERO)
+        .append(POP)
+        .revert()
+        .build();
+    let child = BytecodeBuilder::default().append_many([PUSH0, PUSH0, LOG0]).revert().build();
+    let db = funded()
+        .account_code(CALLEE, frame)
+        .account_storage(CALLEE, U256::from(1), U256::from(1))
+        .account_code(CONTRACT, child);
+    let outcome = execute(db, call(CALLER, CALLEE, U256::ZERO, BELOW_CAP));
+
+    assert!(!outcome.result.is_success(), "the frame reverts: {:?}", outcome.result);
+    let log = 32 * CPHB;
+    assert_eq!(log, 2_816, "an empty LOG0's history");
+    assert_eq!(RECORD, 3_520, "a record's history");
+    assert_eq!(outcome.gas.history, BODY, "neither the log nor the record is kept");
+    assert_eq!(
+        outcome.gas.reservoir_remaining,
+        log + RECORD,
+        "the child's give-back returned as reservoir, and the frame's own on top of it",
+    );
+    assert_eq!(outcome.gas.reservoir_remaining, 6_336);
 }
 
 /// A child that halts keeps none of the records its caller paid for either, as one that reverts:
@@ -220,12 +275,16 @@ fn test_a_halting_child_gives_its_records_back_as_a_reverting_one_does() {
         .append(POP)
         .append(STOP)
         .build();
-    let outcome =
-        assert_the_reservoir_pays_what_regular_gas_pays("a value call whose child halts", || {
+    let outcome = assert_the_reservoir_pays_what_regular_gas_pays(
+        "a value call whose child halts",
+        || {
             funded()
                 .account_code(CALLEE, code.clone())
                 .account_code(CONTRACT, Bytes::from_static(&[INVALID]))
-        });
+        },
+        0,
+        2 * RECORD,
+    );
 
     assert!(outcome.result.is_success(), "the caller survives its child's halt");
     assert_eq!(
@@ -259,6 +318,8 @@ fn test_an_intercepted_value_call_gives_its_records_back_once() {
                 .account_balance(ACCESS_CONTROL_ADDRESS, U256::from(1))
                 .account_code(ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE)
         },
+        0,
+        2 * RECORD,
     );
 
     assert!(outcome.result.is_success(), "the caller survives the refusal");
@@ -299,10 +360,10 @@ const ANSWERING: u64 = 2 + 2 + 3 + 3 + 3 + 2;
 const INTRINSIC: u64 = 12_000 + 3_000;
 
 /// The body's history gas is taken from the reservoir first, and only its excess from the regular
-/// budget [S4.4]; a reservoir short of the body is spent to the last gas, one of exactly the body
-/// too, and one a gas larger keeps that gas [S4.7]. A body-only transaction shows it: the first
+/// budget; a reservoir short of the body is spent to the last gas, one of exactly the body
+/// too, and one a gas larger keeps that gas. A body-only transaction shows it: the first
 /// frame's `GAS` is the regular budget — the execution cap less the intrinsic gas, less the
-/// excess the reservoir did not cover, less the `GAS` itself — and not the reservoir [S4.8].
+/// excess the reservoir did not cover, less the `GAS` itself — and not the reservoir.
 ///
 /// Every figure is by hand (`constants`: the execution cap and the body's history at the price in
 /// effect, which is 310 × 88 at the spec's price): the regular ledger is the intrinsic gas and
@@ -356,7 +417,7 @@ fn test_the_body_draws_the_reservoir_first_and_only_its_excess_from_regular_gas(
 /// A transaction above the execution cap that runs out of gas in the runtime gas phase, before its
 /// first frame, keeps its body's history charged, and what the reservoir paid of it with it:
 /// revm rebuilds the transaction's gas from its intrinsic cost on that path, and the body is
-/// intrinsic [S5]. The rest of the regular budget is consumed, and what is left of the reservoir
+/// intrinsic. The rest of the regular budget is consumed, and what is left of the reservoir
 /// returns to the sender.
 ///
 /// The phase runs out here on EIP-2780's charge for the account a value call creates, in a bucket

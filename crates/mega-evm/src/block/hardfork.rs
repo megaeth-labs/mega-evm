@@ -16,7 +16,7 @@ use alloy_op_hardforks::{OpHardfork, OpHardforks};
 use alloy_primitives::{BlockTimestamp, U256};
 use auto_impl::auto_impl;
 
-use crate::MegaSpecId;
+use crate::{system::SequencerRegistryBootstrap, MegaSpecId};
 
 /// The Ethereum forks Satin runs on that a schedule activates by timestamp: every one from the
 /// first after the Merge up to Osaka.
@@ -75,6 +75,19 @@ pub trait MegaHardforks: OpHardforks {
     /// carry it.
     fn mega_fork_activation(&self, fork: MegaHardfork) -> ForkCondition;
 
+    /// The `SequencerRegistry`'s bootstrap values the chain configuration carries, or `None` if it
+    /// carries none.
+    ///
+    /// A Satin block reads them only to deploy the registry: to seed a registry its state does not
+    /// hold, and to give one at version 1.0.0 its minimum rotation delay when it migrates it. A
+    /// schedule that activates Satin must carry them, each non-zero: the genesis parser refuses a
+    /// configuration that does not
+    /// ([`SatinChainConfig::from_genesis_config`](crate::SatinChainConfig::from_genesis_config)),
+    /// and so does [`validate_schedule`](Self::validate_schedule) a schedule built in code. A
+    /// block run on a schedule that skipped validation, needing them and finding none or a zero
+    /// one, cannot be executed, which is the node's fault and no verdict on the block.
+    fn sequencer_registry_bootstrap(&self) -> Option<SequencerRegistryBootstrap>;
+
     /// The latest `MegaETH` fork active at `timestamp`, or `None` before the first one.
     ///
     /// Resolution reads raw activation events and walks [`MegaHardfork::VARIANTS`] from the top,
@@ -124,6 +137,19 @@ pub trait MegaHardforks: OpHardforks {
         }) || self.is_no_user_tx_activation_block(parent_timestamp, block_timestamp)
     }
 
+    /// Whether the answers of [`admits_only_deposits`](Self::admits_only_deposits) and
+    /// [`is_satin_activation_block`](Self::is_satin_activation_block) for a block at
+    /// `block_timestamp` can depend on its parent's timestamp.
+    ///
+    /// They cannot when every fork the schedule activates and the block has is active from
+    /// timestamp 0, or when none is active at the block: a fork activates in a block only if it
+    /// is active at the block and not at its parent, and activation is monotone in the timestamp,
+    /// so the answers are `false` for every parent. Otherwise a caller that does not know the
+    /// parent's timestamp cannot tell whether a fork activates in the block.
+    fn activation_depends_on_parent(&self, block_timestamp: u64) -> bool {
+        self.admits_only_deposits(0, block_timestamp)
+    }
+
     /// Checks that this schedule is one a chain can run, so a configuration mistake is caught
     /// when the chain configuration is loaded rather than at the fork's first block.
     ///
@@ -139,6 +165,12 @@ pub trait MegaHardforks: OpHardforks {
     ///   Jovian, Karst and Osaka do not activate before Satin, is the node's to check: before Satin
     ///   the chain runs its pre-Satin engine, which this crate does not execute.
     ///
+    /// - A schedule that activates Satin carries the `SequencerRegistry`'s bootstrap values
+    ///   ([`sequencer_registry_bootstrap`](Self::sequencer_registry_bootstrap)), none of them zero
+    ///   ([`SequencerRegistryBootstrap::validate`]): a Satin block seeds a registry its state does
+    ///   not hold and migrates one at version 1.0.0 from them, so a schedule without them would
+    ///   load and fail at the first block that needs them.
+    ///
     /// There is no ordering or gap check: a single fork has nothing to be out of order with. The
     /// spec that follows Satin brings the ladder back, and with it those checks.
     fn validate_schedule(&self) -> Result<(), ScheduleError> {
@@ -149,7 +181,8 @@ pub trait MegaHardforks: OpHardforks {
             }
         }
 
-        require_base_forks(self)
+        require_base_forks(self)?;
+        require_registry_bootstrap(self)
     }
 }
 
@@ -187,6 +220,24 @@ fn require_base_forks<H: MegaHardforks + ?Sized>(schedule: &H) -> Result<(), Sch
     Ok(())
 }
 
+/// Refuses a schedule that activates Satin without usable `SequencerRegistry` bootstrap values: the
+/// half of [`validate_schedule`](MegaHardforks::validate_schedule) that holds Satin's one
+/// chain-configuration parameter. A schedule that does not activate Satin needs none.
+fn require_registry_bootstrap<H: MegaHardforks + ?Sized>(
+    schedule: &H,
+) -> Result<(), ScheduleError> {
+    let fork = MegaHardfork::Satin;
+    if !matches!(schedule.mega_fork_activation(fork), ForkCondition::Timestamp(_)) {
+        return Ok(());
+    }
+    let bootstrap = schedule
+        .sequencer_registry_bootstrap()
+        .ok_or(ScheduleError::MissingRegistryBootstrap { fork })?;
+    bootstrap
+        .validate()
+        .map_err(|zero| ScheduleError::ZeroRegistryBootstrapValue { fork, key: zero.key })
+}
+
 /// A schedule a chain cannot run, as [`MegaHardforks::validate_schedule`] reports it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ScheduleError {
@@ -205,6 +256,20 @@ pub enum ScheduleError {
         /// The fork it runs on that is not active then, as [`Hardfork::name`] names it.
         base: &'static str,
     },
+    /// A schedule that activates a fork needing the `SequencerRegistry`'s bootstrap values carries
+    /// none.
+    MissingRegistryBootstrap {
+        /// The scheduled fork.
+        fork: MegaHardfork,
+    },
+    /// A schedule that activates a fork needing the `SequencerRegistry`'s bootstrap values carries
+    /// one of them zero.
+    ZeroRegistryBootstrapValue {
+        /// The scheduled fork.
+        fork: MegaHardfork,
+        /// The chain-configuration key of the zero value.
+        key: &'static str,
+    },
 }
 
 impl fmt::Display for ScheduleError {
@@ -220,6 +285,19 @@ impl fmt::Display for ScheduleError {
                      it runs on is not active"
                 )
             }
+            Self::MissingRegistryBootstrap { fork } => {
+                let [sequencer, admin, delay] = crate::SEQUENCER_REGISTRY_BOOTSTRAP_KEYS;
+                write!(
+                    f,
+                    "hardfork {fork:?} is scheduled, and the schedule carries none of the \
+                     SequencerRegistry's bootstrap values `{sequencer}`, `{admin}` and `{delay}`"
+                )
+            }
+            Self::ZeroRegistryBootstrapValue { fork, key } => write!(
+                f,
+                "hardfork {fork:?} is scheduled, and the SequencerRegistry's bootstrap value \
+                 `{key}` is zero"
+            ),
         }
     }
 }
@@ -247,6 +325,8 @@ impl Clone for ForkEntry {
 #[derive(Debug, Clone)]
 pub struct MegaHardforkConfig {
     entries: Vec<ForkEntry>,
+    /// The `SequencerRegistry`'s bootstrap values, which the schedule carries beside the forks.
+    sequencer_registry_bootstrap: Option<SequencerRegistryBootstrap>,
 }
 
 impl Default for MegaHardforkConfig {
@@ -268,6 +348,7 @@ where
                     condition,
                 })
                 .collect(),
+            sequencer_registry_bootstrap: None,
         }
     }
 }
@@ -321,7 +402,18 @@ impl MegaHardforkConfig {
                 .into_iter()
                 .map(|(fork, condition)| ForkEntry { fork, condition })
                 .collect(),
+            sequencer_registry_bootstrap: None,
         }
+    }
+
+    /// Carries `bootstrap`, the `SequencerRegistry`'s bootstrap values, beside the schedule
+    /// ([`MegaHardforks::sequencer_registry_bootstrap`]).
+    pub const fn with_sequencer_registry_bootstrap(
+        mut self,
+        bootstrap: SequencerRegistryBootstrap,
+    ) -> Self {
+        self.sequencer_registry_bootstrap = Some(bootstrap);
+        self
     }
 
     /// Activates every `MegaETH` fork at timestamp 0.
@@ -378,6 +470,10 @@ impl OpHardforks for MegaHardforkConfig {
 impl MegaHardforks for MegaHardforkConfig {
     fn mega_fork_activation(&self, fork: MegaHardfork) -> ForkCondition {
         self.get(fork).copied().unwrap_or(ForkCondition::Never)
+    }
+
+    fn sequencer_registry_bootstrap(&self) -> Option<SequencerRegistryBootstrap> {
+        self.sequencer_registry_bootstrap
     }
 }
 
@@ -495,6 +591,37 @@ mod tests {
         assert!(config.admits_only_deposits(99, 101), "and the first block after a gap");
         assert!(!config.admits_only_deposits(98, 99), "not before the activation");
         assert!(!config.admits_only_deposits(100, 101), "and not once the parent had it too");
+    }
+
+    /// The answers depend on the parent's timestamp exactly when a fork the schedule activates
+    /// after genesis is active at the block; for any parent the answers are then both possible.
+    /// Otherwise both are `false` whatever the parent.
+    #[test]
+    fn test_the_activation_answers_depend_on_the_parent_only_after_a_late_fork() {
+        let satin_at = |timestamp| {
+            MegaHardforkConfig::default()
+                .with(MegaHardfork::Satin, ForkCondition::Timestamp(timestamp))
+        };
+        let late = satin_at(100);
+        assert!(late.activation_depends_on_parent(100), "active at the block, not at genesis");
+        assert!(late.activation_depends_on_parent(500), "and after a gap");
+        assert!(!late.activation_depends_on_parent(99), "not active at the block yet");
+        assert!(!satin_at(0).activation_depends_on_parent(500), "Satin from genesis");
+        assert!(!MegaHardforkConfig::default().activation_depends_on_parent(500), "no Satin");
+        let jovian_late = satin_at(0).with(OpHardfork::Jovian, ForkCondition::Timestamp(100));
+        assert!(jovian_late.activation_depends_on_parent(100), "an Optimism fork counts too");
+
+        // Whatever the parent, a schedule that does not depend on it answers `false`.
+        for config in [late, satin_at(0), MegaHardforkConfig::default()] {
+            for block in [1, 99, 100, 500] {
+                if !config.activation_depends_on_parent(block) {
+                    for parent in 0..=block {
+                        assert!(!config.admits_only_deposits(parent, block));
+                        assert!(!config.is_satin_activation_block(parent, block));
+                    }
+                }
+            }
+        }
     }
 
     /// Satin's activation block is the block at which Satin is active and at whose parent it is

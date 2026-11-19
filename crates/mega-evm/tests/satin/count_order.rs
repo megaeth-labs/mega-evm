@@ -38,7 +38,7 @@ const GAS_LIMIT: u64 = 100_000_000;
 /// row, where the transaction's limit is crossed too. The row that crosses the frame's budget alone
 /// shows the same budget rule with room left in the transaction.
 ///
-/// Rules: [S10.48], [S10.31], [S10.33], [S10.34], [S10]. Independence: constants — the usages and
+/// Independence: constants — the usages and
 /// budgets are hand arithmetic from `TX_BODY_SIZE`, `WRITE_RECORD_SIZE` and the 98/100 share.
 #[test]
 fn test_a_record_crossing_both_counts_names_the_frame_budget() {

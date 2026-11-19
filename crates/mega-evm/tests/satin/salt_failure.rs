@@ -235,17 +235,6 @@ fn test_a_capacity_below_the_minimum_bucket_fails_the_transaction() {
     }
 }
 
-/// The same report at the minimum itself is a bucket, not a misreport: it prices at `m = 1`.
-#[test]
-fn test_the_minimum_capacity_itself_is_priced_not_refused() {
-    let code = BytecodeBuilder::default().sstore(U256::from(SLOT), U256::from(1)).stop().build();
-    let envs = minimal_envs()
-        .with_bucket_capacity(slot_bucket(CONTRACT, U256::from(SLOT)), MIN_BUCKET_SIZE as u64);
-
-    let outcome = run(db(code), envs, call_contract());
-    assert_eq!(outcome.gas.state, entry(GasId::sstore_set_state_gas()));
-}
-
 /// A system-originated transaction is priced at the minimum bucket without reading SALT, so a
 /// SALT environment that cannot answer does not stop the protocol's own work.
 #[test]

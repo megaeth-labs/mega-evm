@@ -220,7 +220,8 @@ fn test_a_resubmission_in_the_same_block_is_refused() {
     assert_eq!(refused(run, 1), KeylessDeployError::ContractAlreadyExists);
 }
 
-/// A malformed call is refused before any read.
+/// A call whose arguments do not decode is not a deployment: the bytecode runs, and nothing is
+/// read.
 #[test]
 fn test_a_malformed_keyless_call_reads_nothing() {
     let data: Bytes =
@@ -228,6 +229,9 @@ fn test_a_malformed_keyless_call_reads_nothing() {
     let replay =
         Case::new("keyless malformed", db()).tx(call(0, KEYLESS_DEPLOY_ADDRESS, data, GAS)).run();
     let run = &replay.recorded;
-    assert_eq!(refused(run, 0), KeylessDeployError::MalformedEncoding);
+    let ExecutionResult::Revert { output, .. } = &run.tx(0).result else {
+        panic!("the call did not revert: {:?}", run.tx(0).result);
+    };
+    assert!(output.is_empty());
     assert!(run.bucket_ids.is_empty());
 }

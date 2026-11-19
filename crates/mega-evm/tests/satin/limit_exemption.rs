@@ -3,8 +3,8 @@
 //!
 //! The data-size, KV-update and state-growth limits and their frame budgets hold what users do. The
 //! protocol's own work — the maintenance a system transaction performs, the calls the protocol
-//! makes before a block's transactions — must not fail on them, as it pays no history gas for the
-//! same reason. What it uses is counted all the same, and reported.
+//! makes before a block's transactions — must not fail on them. Only system calls are exempt
+//! from history gas. What it uses is counted all the same, and reported.
 //!
 //! A user's deposit is not the protocol's work: it is held to every limit, and so is a user's
 //! transaction that calls a system contract.
@@ -123,7 +123,7 @@ fn test_a_system_transaction_is_held_to_no_limit() {
 /// and the layer reports what it used: its body, three slots' records and the log, in data size,
 /// and the three records in the KV count.
 ///
-/// Rule [S19.5]. Expected values `independent`: the spec's byte table by hand — a body of 310
+/// Expected values `independent`: the spec's byte table by hand — a body of 310
 /// bytes, 40 a record, and a log's 32 bytes of base and its 64 bytes of data.
 #[test]
 fn test_a_system_call_is_held_to_no_limit() {

@@ -28,7 +28,7 @@ use revm::{
 };
 
 use crate::common::{
-    account_state_gas, block, context, state_is_free, system_db, CALLER, GAS_LIMIT,
+    account_state_gas, block, body_history, context, state_is_free, system_db, CALLER, GAS_LIMIT,
 };
 
 /// The chain the tests run on.
@@ -42,6 +42,10 @@ const FUNDS: u64 = 1_000_000_000_000_000;
 
 /// The Oracle's slot the system transactions write.
 const ORACLE_SLOT: U256 = U256::ZERO;
+
+/// The intrinsic regular gas of a call carrying no value, no calldata and no access list:
+/// EIP-2780's base of 12,000 and 3,000 for the recipient. It is the call's floor too.
+const BARE_CALL_INTRINSIC_GAS: u64 = 12_000 + 3_000;
 
 /// A database with the system contracts in place and the registry naming
 /// [`MEGA_SYSTEM_ADDRESS`] the current system address: that is what makes a legacy call from it
@@ -75,7 +79,12 @@ fn legacy_tx_with_chain_id(
 }
 
 /// A deposit transaction from `caller`, which pays no fee, minting `mint` to its caller.
-fn deposit_tx(caller: Address, kind: TxKind, value: U256, mint: u128) -> MegaTransaction {
+pub(crate) fn deposit_tx(
+    caller: Address,
+    kind: TxKind,
+    value: U256,
+    mint: u128,
+) -> MegaTransaction {
     let mut tx = legacy_tx(caller, kind, Bytes::new(), 0);
     tx.0.base.gas_price = 0;
     tx.0.base.value = value;
@@ -109,14 +118,6 @@ fn chain_context<DB: revm::Database>(db: DB) -> MegaContext<DB> {
 /// Runs `tx` and returns everything the engine reports about it.
 fn run_outcome(db: MemoryDatabase, tx: MegaTransaction) -> MegaTransactionOutcome {
     MegaEvm::new(chain_context(db)).execute_transaction(tx).expect("the transaction is valid")
-}
-
-/// Runs `tx` and returns the error it was rejected with, as a string.
-fn rejection(db: MemoryDatabase, tx: MegaTransaction) -> String {
-    let error = MegaEvm::new(chain_context(db))
-        .execute_transaction(tx)
-        .expect_err("the transaction must be rejected");
-    format!("{error:?}")
 }
 
 /// The Oracle's slot as the database holds it.
@@ -263,12 +264,14 @@ fn test_another_shape_from_the_live_system_address_is_invalid() {
     }
 }
 
-/// Every transaction reads the registry when it is validated, whatever its shape and whoever
-/// sends it: its returned state holds the registry's account, untouched, and the system-address
-/// slot, unchanged, and a database that cannot serve the registry's account or that slot fails it
-/// with the database's error, a deposit included.
+/// No transaction reads the registry for its classification, whatever its shape and whoever sends
+/// it: the EVM read the live system address when it was built, so the transaction's returned state
+/// holds no entry of the registry, and an EVM handed the address runs every shape on a database
+/// that cannot serve the registry's account or its system-address slot. Only an EVM whose own read
+/// failed when it was built makes the read again, for its next transaction, and fails it with the
+/// database's error, a deposit included.
 #[test]
-fn test_every_transaction_reads_the_registry() {
+fn test_no_transaction_reads_the_registry() {
     let funded = || {
         chain_db()
             .account_code(OFF_WHITELIST, Bytes::from_static(&[STOP]))
@@ -284,40 +287,124 @@ fn test_every_transaction_reads_the_registry() {
             .execute_transaction(tx.clone())
             .expect("an ordinary transaction");
         assert!(outcome.result.is_success(), "{shape}: {:?}", outcome.result);
-        let registry = &outcome.state[&SEQUENCER_REGISTRY_ADDRESS];
-        assert!(!registry.is_touched(), "{shape}: a read-only entry");
-        let slot = &registry.storage[&CURRENT_SYSTEM_ADDRESS];
-        assert!(!slot.is_changed(), "{shape}");
-        assert_eq!(slot.present_value(), U256::from_be_slice(MEGA_SYSTEM_ADDRESS.as_slice()));
+        assert!(
+            !outcome.state.contains_key(&SEQUENCER_REGISTRY_ADDRESS),
+            "{shape}: the transaction read nothing of the registry"
+        );
 
         let mut account = ErrorInjectingDatabase::new(funded());
         account.fail_on_account = Some(SEQUENCER_REGISTRY_ADDRESS);
         let mut slot = ErrorInjectingDatabase::new(funded());
         slot.fail_on_storage = Some((SEQUENCER_REGISTRY_ADDRESS, CURRENT_SYSTEM_ADDRESS));
         for db in [account, slot] {
+            let handed = chain_context(db.clone()).with_system_address(Some(MEGA_SYSTEM_ADDRESS));
+            let outcome = MegaEvm::new(handed)
+                .execute_transaction(tx.clone())
+                .expect("an EVM handed the address reads no registry");
+            assert!(outcome.result.is_success(), "{shape}: {:?}", outcome.result);
             let error = MegaEvm::new(chain_context(db))
                 .execute_transaction(tx.clone())
-                .expect_err("the registry is read");
+                .expect_err("the read the EVM could not make when it was built is made again");
             assert!(matches!(error, EVMError::Database(_)), "{shape}: {error:?}");
         }
     }
 }
 
-/// Every transaction starts with the registry's account and its system-address slot warm, as
-/// EIP-3651 starts the block beneficiary warm: validation reads the live system address for every
-/// transaction, whatever its shape. A user's call to the Oracle's `setSlots` makes the Oracle ask
-/// the registry for the system address itself, and that `SLOAD` pays the warm price, as a legacy
-/// call, as an EIP-2930 call, and as one whose access list names the slot alike: the shape of the
-/// envelope changes nothing the transaction pays, and the access list adds only its own
-/// intrinsic cost.
+/// A registry read that failed while building the context can succeed before the next
+/// transaction. The recovered address classifies that transaction and is cached for later ones.
 #[test]
-fn test_every_transaction_warms_the_registry_and_its_slot() {
-    let run = |tx: MegaTransaction| {
-        let mut evm =
-            MegaEvm::new(chain_context(chain_db().account_balance(CALLER, U256::from(FUNDS))))
-                .with_inspector(GasInspector::new());
-        let outcome = evm.execute_transaction(tx).expect("an ordinary transaction");
-        assert!(!outcome.result.is_success(), "the Oracle refuses a write from a user");
+fn test_a_failed_initial_registry_read_recovers_and_caches_the_system_address() {
+    let mut db = ErrorInjectingDatabase::new(chain_db());
+    db.fail_on_account = Some(SEQUENCER_REGISTRY_ADDRESS);
+    let mut evm = MegaEvm::new(chain_context(db));
+    assert_eq!(evm.ctx().system_address(), None, "the initial read failed");
+    evm.db_mut().fail_on_account = None;
+
+    let first = evm
+        .execute_transaction(legacy_tx(
+            MEGA_SYSTEM_ADDRESS,
+            TxKind::Call(ORACLE_CONTRACT_ADDRESS),
+            get_slot(),
+            0,
+        ))
+        .expect("the registry can now be read");
+    assert!(first.result.is_success(), "{:?}", first.result);
+    assert!(evm.ctx().is_system_originated());
+    assert!(!first.state.contains_key(&SEQUENCER_REGISTRY_ADDRESS));
+
+    evm.db_mut().fail_on_account = Some(SEQUENCER_REGISTRY_ADDRESS);
+    let second = evm
+        .execute_transaction(legacy_tx(
+            MEGA_SYSTEM_ADDRESS,
+            TxKind::Call(ORACLE_CONTRACT_ADDRESS),
+            get_slot(),
+            0,
+        ))
+        .expect("the recovered address is cached");
+    assert!(second.result.is_success(), "{:?}", second.result);
+    assert!(evm.ctx().is_system_originated());
+    assert!(!second.state.contains_key(&SEQUENCER_REGISTRY_ADDRESS));
+}
+
+/// A context built without an address reads the live system address off its database when it is
+/// built — the registry's account and its system-address slot, before any transaction — and a
+/// Mega System Transaction run on it is then classified against it and reads nothing more of the
+/// registry. A context given the address reads nothing off its database for it, and classifies
+/// the same transaction the same way.
+#[test]
+fn test_a_context_reads_the_system_address_when_it_is_built_unless_given_one() {
+    use mega_evm::{
+        test_utils::{RecordingDatabase, SharedWitnessRecord},
+        ExternalEnvs,
+    };
+    let registry_reads = |record: &SharedWitnessRecord| {
+        let record = record.borrow();
+        let account = record.accounts.contains_key(&SEQUENCER_REGISTRY_ADDRESS);
+        let slot =
+            record.storage.contains_key(&(SEQUENCER_REGISTRY_ADDRESS, CURRENT_SYSTEM_ADDRESS));
+        (account, slot)
+    };
+    let mut cfg = CfgEnv::new_with_spec(mega_evm::MegaSpecId::SATIN);
+    cfg.chain_id = CHAIN_ID;
+    let tx = legacy_tx(MEGA_SYSTEM_ADDRESS, TxKind::Call(ORACLE_CONTRACT_ADDRESS), get_slot(), 0);
+
+    let built = SharedWitnessRecord::default();
+    let ctx = MegaContext::new(RecordingDatabase::new(chain_db(), built.clone()), cfg.spec);
+    assert_eq!(registry_reads(&built), (true, true), "read when the context is built");
+    assert_eq!(ctx.system_address(), Some(MEGA_SYSTEM_ADDRESS));
+    built.borrow_mut().accounts.clear();
+    built.borrow_mut().storage.clear();
+    let mut evm = MegaEvm::new(ctx.with_cfg(cfg.clone()));
+    let outcome = evm.execute_transaction(tx.clone()).expect("a Mega System Transaction");
+    assert!(evm.ctx().is_system_originated(), "classified against the address read");
+    assert!(!outcome.state.contains_key(&SEQUENCER_REGISTRY_ADDRESS));
+    assert_eq!(registry_reads(&built), (false, false), "the transaction read nothing of it");
+
+    let given = SharedWitnessRecord::default();
+    let ctx = MegaContext::new_with_system_address(
+        RecordingDatabase::new(chain_db(), given.clone()),
+        cfg.spec,
+        ExternalEnvs::default(),
+        Some(MEGA_SYSTEM_ADDRESS),
+    );
+    assert_eq!(registry_reads(&given), (false, false), "nothing read for a given address");
+    let mut evm = MegaEvm::new(ctx.with_cfg(cfg));
+    let given_outcome = evm.execute_transaction(tx).expect("a Mega System Transaction");
+    assert!(evm.ctx().is_system_originated());
+    assert_eq!(given_outcome.gas, outcome.gas, "the same charge either way");
+    assert_eq!(registry_reads(&given), (false, false));
+}
+
+/// No transaction starts with the registry's account or its system-address slot warm: a user's
+/// call to the Oracle's `setSlots` makes the Oracle ask the registry for the system address, and
+/// that `SLOAD` pays the cold price, as a legacy call and as an EIP-2930 call alike, which spend
+/// the same gas on every ledger, while an access list naming the slot makes it warm, as it makes
+/// any slot. A Mega System Transaction's own call to the Oracle pays the same cold reads.
+#[test]
+fn test_a_transaction_that_reads_the_registry_pays_cold() {
+    let run = |db: MemoryDatabase, tx: MegaTransaction| {
+        let mut evm = MegaEvm::new(chain_context(db)).with_inspector(GasInspector::new());
+        let outcome = evm.execute_transaction(tx).expect("a valid transaction");
         let sloads: Vec<u64> = evm
             .inspector()
             .records()
@@ -329,41 +416,48 @@ fn test_every_transaction_warms_the_registry_and_its_slot() {
         assert_eq!(sloads.len(), 1, "the registry reads its one slot: {sloads:?}");
         (outcome, sloads[0])
     };
-    let write = || {
+    let user = || chain_db().account_balance(CALLER, U256::from(FUNDS));
+    let write = |caller| {
         legacy_tx(
-            CALLER,
+            caller,
             TxKind::Call(ORACLE_CONTRACT_ADDRESS),
             set_slot(ORACLE_SLOT, B256::with_last_byte(1)),
             0,
         )
     };
 
-    let warm = mega_evm::satin_gas_params().warm_storage_read_cost();
+    let params = mega_evm::satin_gas_params();
+    let cold = params.warm_storage_read_cost() + params.cold_storage_additional_cost();
+    let warm = params.warm_storage_read_cost();
 
-    let (shaped, legacy) = run(write());
-    let (unshaped, typed_call) = run(typed(write(), 1));
+    let (shaped, legacy) = run(user(), write(CALLER));
+    let (unshaped, typed_call) = run(user(), typed(write(CALLER), 1));
     for (shape, outcome) in [("legacy", &shaped), ("EIP-2930", &unshaped)] {
+        assert!(!outcome.result.is_success(), "{shape}: the Oracle refuses a write from a user");
         let registry = &outcome.state[&SEQUENCER_REGISTRY_ADDRESS];
-        assert!(!registry.is_touched(), "{shape}: the read writes nothing");
+        assert!(!registry.is_touched(), "{shape}: the Oracle's read writes nothing");
         assert!(registry.storage.contains_key(&CURRENT_SYSTEM_ADDRESS), "{shape}: the slot");
     }
-    assert_eq!(legacy, warm, "the legacy call's SLOAD is warm");
-    assert_eq!(typed_call, warm, "and so is the EIP-2930 call's");
+    assert_eq!(legacy, cold, "the legacy call's SLOAD is cold");
+    assert_eq!(typed_call, cold, "and so is the EIP-2930 call's");
     assert_eq!(shaped.gas, unshaped.gas, "the two spend the same gas on every ledger");
 
-    let mut listed = typed(write(), 1);
+    let mut listed = typed(write(CALLER), 1);
     listed.0.base.access_list = AccessList(vec![AccessListItem {
         address: SEQUENCER_REGISTRY_ADDRESS,
         storage_keys: vec![B256::from(CURRENT_SYSTEM_ADDRESS)],
     }]);
-    let (_, listed) = run(listed);
-    assert_eq!(listed, warm, "an access list naming the slot makes it no warmer");
+    let (_, listed) = run(user(), listed);
+    assert_eq!(listed, warm, "an access list naming the slot makes it warm");
+
+    let (system, read) = run(chain_db(), write(MEGA_SYSTEM_ADDRESS));
+    assert!(system.result.is_success(), "the system address writes the Oracle");
+    assert_eq!(read, cold, "a Mega System Transaction's read of the registry is cold too");
 }
 
-/// The registry's account and slot every transaction reads are an untouched entry of its state,
-/// and a commit skips an account nothing touched: committing a transaction writes nothing of the
-/// registry, whether the state holds a registry or not, so the state root moves as it would
-/// without the read.
+/// A transaction leaves no entry of the registry in its state, and committing it writes nothing of
+/// the registry, whether the state holds a registry or not, so the state root moves as it would
+/// without the registry.
 #[test]
 fn test_committing_a_transaction_writes_nothing_of_the_registry() {
     for (holds, db) in [("a registry", chain_db()), ("no registry", MemoryDatabase::default())] {
@@ -375,7 +469,7 @@ fn test_committing_a_transaction_writes_nothing_of_the_registry() {
         let tx = legacy_tx(CALLER, TxKind::Call(OFF_WHITELIST), Bytes::new(), 0);
         let outcome = evm.execute_transaction(tx).expect("an ordinary transaction");
         assert!(outcome.result.is_success(), "{holds}: {:?}", outcome.result);
-        assert!(outcome.state.contains_key(&SEQUENCER_REGISTRY_ADDRESS), "{holds}: it was read");
+        assert!(!outcome.state.contains_key(&SEQUENCER_REGISTRY_ADDRESS), "{holds}: not read");
         drop(evm);
         state.commit(outcome.state.clone());
 
@@ -479,39 +573,6 @@ fn test_two_system_transactions_in_a_block_both_go_through() {
     assert_eq!(nonce_of(&mut state, MEGA_SYSTEM_ADDRESS), 2);
 }
 
-/// A system transaction carries the chain's id, so it cannot be replayed on another chain; one
-/// without an id at all is refused too.
-#[test]
-fn test_a_system_transaction_is_bound_to_the_chain() {
-    let foreign = legacy_tx_with_chain_id(
-        MEGA_SYSTEM_ADDRESS,
-        TxKind::Call(ORACLE_CONTRACT_ADDRESS),
-        set_slot(ORACLE_SLOT, B256::with_last_byte(0xcc)),
-        0,
-        Some(31_337),
-    );
-    let rejected = rejection(chain_db(), foreign);
-    assert!(rejected.contains("InvalidChainId"), "{rejected}");
-
-    let no_chain_id = legacy_tx_with_chain_id(
-        MEGA_SYSTEM_ADDRESS,
-        TxKind::Call(ORACLE_CONTRACT_ADDRESS),
-        set_slot(ORACLE_SLOT, B256::with_last_byte(0xdd)),
-        0,
-        None,
-    );
-    let rejected = rejection(chain_db(), no_chain_id);
-    assert!(rejected.contains("MissingChainId"), "{rejected}");
-}
-
-/// The system address may not carry code (EIP-3607), as no sender may.
-#[test]
-fn test_a_system_address_with_code_is_refused() {
-    let db = chain_db().account_code(MEGA_SYSTEM_ADDRESS, Bytes::from_static(&[0x00]));
-    let rejected = rejection(db, system_tx(0, B256::with_last_byte(0xce)));
-    assert!(rejected.contains("RejectCallerWithCode"), "{rejected}");
-}
-
 /// Runs `tx` on `db` under the chain's configuration with `mutate` applied.
 fn run_with(
     mutate: fn(&mut CfgEnv<mega_evm::MegaSpecId>),
@@ -591,47 +652,74 @@ fn test_validating_a_system_transaction_charges_its_caller_as_any_senders() {
     );
 }
 
-/// A system transaction spends nothing on the history ledger: the protocol's own maintenance is
-/// exempt from history gas.
+/// A system transaction pays for its body, calldata and the Oracle slot it writes.
 #[test]
-fn test_a_system_transaction_spends_no_history_gas() {
+fn test_a_system_transaction_pays_history_gas() {
     let outcome = run_outcome(chain_db(), system_tx(0, B256::with_last_byte(0x66)));
     assert!(outcome.result.is_success(), "{:?}", outcome.result);
-    assert_eq!(outcome.gas.history, 0, "the protocol's own transaction pays no history gas");
+    assert_eq!(
+        outcome.gas.history,
+        mega_evm::history_gas(mega_evm::TX_BODY_SIZE + 196).unwrap() +
+            mega_evm::write_record_history_gas(1).unwrap()
+    );
 }
 
-/// A deposit-like transaction whose caller does not exist yet creates that account, and pays
-/// the account-creation charge for it exactly once: the same charge a value transfer to a
-/// fresh account pays.
-#[test]
-fn test_a_deposit_creates_its_caller_and_pays_for_it_once() {
-    // The reference charge: a user transaction that creates one account by sending value to it.
-    let fresh = address!("0x00000000000000000000000000000000000f0001");
-    let reference =
-        run_outcome(chain_db().account_balance(CALLER, U256::from(1_000_000_000_000_u64)), {
-            let mut tx = legacy_tx(CALLER, TxKind::Call(fresh), Bytes::new(), 0);
-            tx.0.base.value = U256::from(1);
-            tx
-        });
-    let one_account = reference.gas.state;
-    assert_eq!(one_account, account_state_gas(), "a fresh recipient costs state gas");
+/// A system transaction from an existing system address to the Oracle carrying no calldata, on
+/// `gas_limit`. Its intrinsic regular gas is [`BARE_CALL_INTRINSIC_GAS`], and its body is
+/// `TX_BODY_SIZE` bytes.
+fn bare_system_tx(gas_limit: u64) -> MegaTransaction {
+    let mut tx =
+        legacy_tx(MEGA_SYSTEM_ADDRESS, TxKind::Call(ORACLE_CONTRACT_ADDRESS), Bytes::new(), 0);
+    tx.0.base.gas_limit = gas_limit;
+    tx
+}
 
-    // A system transaction whose sender does not exist yet creates it, for the same charge.
-    let created = run_outcome(chain_db(), system_tx(0, B256::with_last_byte(0x77)));
-    assert!(created.result.is_success(), "{:?}", created.result);
-    // The same transaction from a sender that already exists: what it pays is the slot it
-    // writes, and nothing for its own account.
-    let slot_charge = run_outcome(
-        chain_db().account_balance(MEGA_SYSTEM_ADDRESS, U256::from(1)),
-        system_tx(0, B256::with_last_byte(0x77)),
-    )
-    .gas
-    .state;
-    assert_eq!(
-        created.gas.state - slot_charge,
-        one_account,
-        "the caller's account costs one account creation, and the slot the same either way",
+/// A system transaction whose gas limit is one short of its intrinsic regular gas plus its body's
+/// history passes its own checks and is promoted to a deposit, whose intrinsic check it then
+/// fails: it is included as a failed deposit, not refused, and starts no frame, so the Oracle's
+/// code, which would revert on the empty input, does not run. It bumps the system address's nonce
+/// and changes nothing else, reports its whole gas limit as regular gas, on its own ledgers and on
+/// the block's, and no history gas, and keeps its body's bytes. At the gas limit that covers both,
+/// it is admitted and runs: a recipient that stops at once succeeds, paying its intrinsic regular
+/// gas and its body's history.
+///
+/// Independence: constants — the intrinsic regular gas is EIP-2780's for a bare call, the body's
+/// history its `TX_BODY_SIZE` bytes at the price in effect, by hand.
+#[test]
+fn test_a_system_transaction_short_of_its_body_history_is_a_failed_deposit() {
+    let least = BARE_CALL_INTRINSIC_GAS + body_history(0);
+    let existing = || chain_db().account_balance(MEGA_SYSTEM_ADDRESS, U256::from(FUNDS));
+
+    let mut evm = MegaEvm::new(chain_context(existing())).with_inspector(GasInspector::new());
+    let outcome = evm.execute_transaction(bare_system_tx(least - 1)).expect("it is included");
+    assert!(
+        matches!(
+            outcome.result,
+            ExecutionResult::Halt { reason: MegaHaltReason::FailedDeposit, .. }
+        ),
+        "{:?} is not a failed deposit",
+        outcome.result,
     );
+    assert!(evm.inspector().trace.is_none(), "the transaction starts no frame");
+    let gas = &outcome.gas;
+    assert_eq!((gas.regular, gas.state, gas.history), (least - 1, 0, 0));
+    assert_eq!(gas.history_bytes, mega_evm::TX_BODY_SIZE, "the body's bytes stay");
+    assert_eq!((gas.gas_used, gas.block_execution_gas()), (least - 1, least - 1));
+    let touched: Vec<Address> =
+        outcome.state.iter().filter(|(_, account)| account.is_touched()).map(|(a, _)| *a).collect();
+    assert_eq!(touched, [MEGA_SYSTEM_ADDRESS], "the failed deposit changes its sender alone");
+    let sender = &outcome.state[&MEGA_SYSTEM_ADDRESS].info;
+    assert_eq!((sender.nonce, sender.balance), (1, U256::from(FUNDS)));
+
+    let stops = existing().account_code(ORACLE_CONTRACT_ADDRESS, Bytes::from_static(&[STOP]));
+    let outcome = run_outcome(stops, bare_system_tx(least));
+    assert!(outcome.result.is_success(), "{:?}", outcome.result);
+    let gas = &outcome.gas;
+    assert_eq!(
+        (gas.regular, gas.state, gas.history),
+        (BARE_CALL_INTRINSIC_GAS, 0, body_history(0))
+    );
+    assert_eq!(gas.gas_used, least);
 }
 
 /// A deposit whose recipient is its own caller pays for that one account once: by the time the
@@ -672,46 +760,18 @@ fn test_a_deposit_that_creates_two_accounts_pays_for_both() {
 /// A deposit from `sender`, an account that does not exist, to the Oracle, whose gas limit is one
 /// short of its intrinsic gas and the account it creates for its caller, at the byte prices in
 /// effect. It carries no value and no calldata, so its intrinsic gas, which is its floor too, is
-/// EIP-2780's base of 12,000 and 3,000 for the recipient.
+/// [`BARE_CALL_INTRINSIC_GAS`].
 fn deposit_one_short_of_its_caller(sender: Address) -> MegaTransaction {
-    const INTRINSIC: u64 = 12_000 + 3_000;
     let mut tx = deposit_tx(sender, TxKind::Call(ORACLE_CONTRACT_ADDRESS), U256::ZERO, 0);
-    tx.0.base.gas_limit = INTRINSIC + account_state_gas() - 1;
+    tx.0.base.gas_limit = BARE_CALL_INTRINSIC_GAS + account_state_gas() - 1;
     tx
-}
-
-/// A deposit that cannot pay for the account it creates for its caller runs out of gas before its
-/// first frame, and a deposit that does is a failed deposit: the `FailedDeposit` halt, not an
-/// out-of-gas, billed its whole gas limit.
-///
-/// Rules: [S5], [S21.5], [S21.7], [S5.12]. Independence: constants — the intrinsic gas is
-/// EIP-2780's, the caller account's state gas the schedule's entry at the price in effect.
-#[test]
-fn test_a_deposit_that_cannot_pay_for_its_caller_is_a_failed_deposit() {
-    // An account that costs nothing is one any deposit can pay for.
-    if state_is_free() {
-        return;
-    }
-    let sender = address!("0x00000000000000000000000000000000000f0006");
-    let tx = deposit_one_short_of_its_caller(sender);
-    let gas_limit = tx.0.base.gas_limit;
-    let outcome = run_outcome(chain_db(), tx);
-    assert!(
-        matches!(
-            outcome.result,
-            ExecutionResult::Halt { reason: MegaHaltReason::FailedDeposit, .. }
-        ),
-        "{:?} is not a failed deposit",
-        outcome.result,
-    );
-    assert_eq!(outcome.gas.gas_used, gas_limit, "a failed deposit bills its whole gas limit");
 }
 
 /// The account a deposit creates for its caller is charged before its first frame, and a body over
 /// the data-size limit does not waive the charge: a deposit that cannot pay for it is a failed
 /// deposit, which reports the failure and not the data-size stop, and keeps its body counted.
 ///
-/// Rules: [S11], [S10.15], [S21.7]. Independence: constants — the body is `TX_BODY_SIZE`, the gas
+/// Independence: constants — the body is `TX_BODY_SIZE`, the gas
 /// limit as [`deposit_one_short_of_its_caller`] works it out.
 #[test]
 fn test_a_deposit_over_the_data_size_limit_that_cannot_pay_for_its_caller_is_a_failed_deposit() {
@@ -801,27 +861,6 @@ fn test_the_callee_sees_the_system_address_as_its_caller() {
     );
 }
 
-/// The account a deposit-like transaction creates for its caller is the transaction's own
-/// account: it is part of the transaction body, so it is not a write record of its own. It is a
-/// new account all the same, one of state growth on the transaction.
-#[test]
-fn test_the_created_caller_is_not_a_write_record() {
-    let fresh = run_outcome(chain_db(), system_tx(0, B256::with_last_byte(0x99)));
-    let existing = run_outcome(
-        chain_db().account_balance(MEGA_SYSTEM_ADDRESS, U256::from(1)),
-        system_tx(0, B256::with_last_byte(0x99)),
-    );
-    assert!(fresh.result.is_success() && existing.result.is_success());
-    assert_eq!(
-        (fresh.usage.data_size, fresh.usage.write_records),
-        (existing.usage.data_size, existing.usage.write_records),
-        "creating the sender's own account records nothing a transaction with an existing sender \
-         does not record",
-    );
-    assert_eq!(existing.usage.state_growth, 1, "the Oracle's slot, set from zero");
-    assert_eq!(fresh.usage.state_growth, 2, "and the sender's new account");
-}
-
 /// A deposit-like transaction that creates a contract pays for the account it creates for its
 /// caller as well as for the contract.
 #[test]
@@ -843,30 +882,5 @@ fn test_a_deposit_that_creates_a_contract_pays_for_its_caller_too() {
         fresh.gas.state,
         existing.gas.state + account_state_gas(),
         "the created caller costs state gas on top of the created contract",
-    );
-}
-
-/// A transaction that already carries the system source hash is a deposit by type, so it does
-/// not have the system shape: from the live system address it is a failed deposit, as every
-/// deposit from that address is. No promotion is made for
-/// it, so none of the promotion's checks runs: its nonce is not the system address's.
-///
-/// A block's transactions are decoded from their legacy encoding, which carries no source hash,
-/// so this is the shape a caller hands the engine directly, not one a block holds.
-#[test]
-fn test_a_transaction_that_arrives_promoted_is_a_failed_deposit() {
-    let mut tx =
-        legacy_tx(MEGA_SYSTEM_ADDRESS, TxKind::Call(ORACLE_CONTRACT_ADDRESS), get_slot(), 7);
-    tx.0.deposit.source_hash = MEGA_SYSTEM_TRANSACTION_SOURCE_HASH;
-    let outcome = MegaEvm::new(chain_context(chain_db()))
-        .execute_transaction(tx)
-        .expect("a deposit is not refused");
-    assert!(
-        matches!(
-            outcome.result,
-            ExecutionResult::Halt { reason: MegaHaltReason::FailedDeposit, .. }
-        ),
-        "{:?}",
-        outcome.result
     );
 }

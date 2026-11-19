@@ -9,6 +9,7 @@ use alloy_evm::Database;
 use alloy_primitives::{address, Address, Bytes};
 use alloy_sol_types::SolCall;
 use revm::{
+    context::ContextTr,
     handler::FrameResult,
     interpreter::{CallInputs, InstructionResult},
 };
@@ -85,7 +86,7 @@ pub(crate) fn intercept<DB: Database, ExtEnvs: ExternalEnvTypes>(
     if selector != IMegaLimitControl::remainingComputeGasCall::SELECTOR {
         return None;
     }
-    if let Some(rejected) = reject_non_zero_transfer(inputs) {
+    if let Some(rejected) = reject_non_zero_transfer(ctx.cfg(), inputs) {
         return Some(rejected);
     }
     let own = caller_remaining.saturating_add(inputs.gas_limit);
@@ -94,5 +95,5 @@ pub(crate) fn intercept<DB: Database, ExtEnvs: ExternalEnvTypes>(
         .allowance(depth, inputs.gas_limit)
         .map_or(own, |allowance| own.min(allowance));
     let output = IMegaLimitControl::remainingComputeGasCall::abi_encode_returns(&remaining);
-    Some(synthetic_call_result(inputs, InstructionResult::Return, Bytes::from(output)))
+    Some(synthetic_call_result(ctx.cfg(), inputs, InstructionResult::Return, Bytes::from(output)))
 }

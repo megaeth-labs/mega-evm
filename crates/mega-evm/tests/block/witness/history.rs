@@ -37,6 +37,7 @@ fn test_block_hash_reads_replay() {
             Some(B256::ZERO),
             Bytes::new(),
             BlockLimits::no_limits(),
+            None,
         ))
         .tx(call(0, CONTRACT, Bytes::new(), common::empty_call_gas()))
         .run();

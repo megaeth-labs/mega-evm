@@ -57,6 +57,10 @@ Every named entry of the schedule, at the Osaka price, at the Amsterdam (glamste
 | max_refund_quotient | 5 | 5 | 5 |
 | tx_account_write_cost | 0 | 9000 | 9000 |
 | tx_create_access_cost | 0 | 12000 | 12000 |
+| create_state_gas_legacy_share | 0 | 0 | 20000 |
+| selfdestruct_new_account_state_gas_legacy_share | 0 | 0 | 16000 |
+| new_account_state_gas_legacy_share | 0 | 0 | 25000 |
+| sstore_set_state_gas_legacy_share | 0 | 0 | 10000 |
 | code_deposit_history_gas | 0 | 0 | 88 |
 
 ## Measured transactions

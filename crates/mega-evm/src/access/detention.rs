@@ -116,7 +116,10 @@ impl FrameFigures {
 ///
 /// Compute is the regular gas the transaction's frames spend on what they run, whoever funds it. A
 /// frame's regular gas spent is read off its [`Gas`]: its limit, less what it has left, less the
-/// state and history gas that spilled onto its regular gas, which are not compute. What it has
+/// state and history gas its regular gas paid, which are not compute. Under Satin's give-backs,
+/// which credit the reservoir alone, that figure is never lowered by a give-back: what regular gas
+/// paid stays spent, and stays out of compute, when the charge later comes back into a reservoir
+/// by a take-back or a rollback. What it has
 /// left is the whole of its regular gas, the part withheld from regular charges included, so
 /// withheld gas is never spent, and every other reader of the frame's gas sees the same figure.
 ///
@@ -148,8 +151,10 @@ impl FrameFigures {
 /// then refuses the call or its creation runs.
 ///
 /// The one part of the regular ledger that is not compute is what a halt burns (`burned`): a
-/// frame that halts consumes the gas it had left, and its spill, without running anything with
-/// it. A frame answered without running that halts burns its whole gas limit: a precompile that
+/// frame that halts consumes the gas it had left without running anything with it. What its
+/// regular gas paid of state and history gas, which the halt consumes too, stays out of compute by
+/// its caller's count under Satin's give-backs, and is burned with the rest under EIP-8037's own. A
+/// frame answered without running that halts burns its whole gas limit: a precompile that
 /// runs out of gas counts nothing of its forward, nor of a value call's stipend, as compute. An
 /// out-of-gas zeroes what the frame had before the frame returns; the revm fork records it first,
 /// before every deduction that fails — an opcode's static gas, which the interpreter's step loop
@@ -166,10 +171,11 @@ impl FrameFigures {
 /// # Refused reads
 ///
 /// A frame in a subtree where volatile-data access is switched off does not read volatile data:
-/// the Host refuses the load and the opcode's wrapper reverts the frame with
-/// `VolatileDataAccessDisabled`. The switch is scoped to the frame that turned it off and the
-/// frames below it, and turns back on when that frame returns. `MegaAccessControl`'s interceptor
-/// steers it for the frame that calls the contract.
+/// the opcode's wrapper refuses the read before the opcode runs, and reverts the frame with
+/// `VolatileDataAccessDisabled`; the Host refuses a load it would mark all the same, which no
+/// opcode reaches. The switch is scoped to the frame that turned it off and the frames below it,
+/// and turns back on when that frame returns. `MegaAccessControl`'s interceptor steers it for the
+/// frame that calls the contract.
 ///
 /// # What is a read
 ///
@@ -185,6 +191,10 @@ pub struct Detention {
     observed: Cell<VolatileDataAccess>,
     /// What the Host refused to load for the running opcode, waiting for its wrapper.
     refused: Cell<VolatileDataAccess>,
+    /// Whether the last account the Host loaded for the running opcode, in a frame whose reads
+    /// are refused, was cold, or `None` while it loaded none: for a call the Host refused at its
+    /// target's EIP-7702 delegate, the target, whose access the refusal charges.
+    loaded_cold: Option<bool>,
     /// Whether the wrapper of an opcode that reads volatile data runs it: the Host refuses and
     /// marks a load only then.
     reading: bool,
@@ -218,6 +228,7 @@ impl Detention {
     pub(crate) fn reset(&mut self, block_env_cap: u64, oracle_cap: u64) {
         self.observed.set(VolatileDataAccess::empty());
         self.refused.set(VolatileDataAccess::empty());
+        self.loaded_cold = None;
         self.reading = false;
         self.block_env_cap = (block_env_cap != u64::MAX).then_some(block_env_cap);
         self.oracle_cap = (oracle_cap != u64::MAX).then_some(oracle_cap);
@@ -291,6 +302,16 @@ impl Detention {
         }
     }
 
+    /// Notes that the Host loaded an account that is no volatile read for the running read
+    /// wrapper's opcode, cold or warm, in a frame whose reads are refused: a call the Host then
+    /// refuses at its target's delegate charges its target's access by it.
+    #[inline]
+    pub(crate) const fn note_load(&mut self, is_cold: bool) {
+        if self.refusing && self.reading {
+            self.loaded_cold = Some(is_cold);
+        }
+    }
+
     /* The opcode wrappers */
 
     /// Whether the running frame's volatile reads are refused, so its opcodes must keep the gas
@@ -308,6 +329,7 @@ impl Detention {
     #[inline]
     pub(crate) fn begin_read(&mut self) {
         debug_assert!(!self.has_reads(), "a read left over from before the opcode");
+        self.loaded_cold = None;
         self.reading = true;
     }
 
@@ -323,19 +345,16 @@ impl Detention {
         !(self.observed.get() | self.refused.get()).is_empty()
     }
 
-    /// Names a refusal the running opcode's Host calls made `access`, whichever load was refused:
-    /// the kind the opcode reads, for an opcode that loads another kind first.
-    #[inline]
-    pub(crate) fn name_refusal(&self, access: VolatileDataAccess) {
-        if !self.refused.get().is_empty() {
-            self.refused.set(access);
-        }
-    }
-
     /// Takes what the Host refused for the running opcode, if it refused anything.
     pub(crate) fn take_refused(&self) -> Option<VolatileDataAccess> {
         let refused = self.refused.replace(VolatileDataAccess::empty());
         (!refused.is_empty()).then_some(refused)
+    }
+
+    /// Takes whether the last account the Host loaded for the running opcode, in a frame whose
+    /// reads are refused, was cold, if it loaded one ([`note_load`](Self::note_load)).
+    pub(crate) const fn take_loaded_cold(&mut self) -> Option<bool> {
+        self.loaded_cold.take()
     }
 
     /// Takes what the Host observed for the running opcode.
@@ -384,8 +403,10 @@ impl Detention {
     /// read set one.
     ///
     /// Called where the frame's spendable gas can have grown past it: when the frame starts, when
-    /// it resumes on the gas a child handed back, and after a storage write, whose restore of a
-    /// slot to its original value refills the state and history gas that spilled onto regular gas.
+    /// it resumes on the gas a child handed back, and after a storage write. Under EIP-8037's own
+    /// give-backs a restore of a slot to its original value refills the state and history gas
+    /// that spilled onto regular gas; under Satin's it refills the reservoir alone, and the hold
+    /// there finds nothing grown.
     #[inline]
     pub(crate) fn hold(&self, gas: &mut GasTracker) {
         if let Some(limit) = self.limit {
@@ -472,9 +493,14 @@ impl Detention {
                 return Some(ComputeStop { limit, used: self.compute(gas.tracker()) });
             }
         }
-        // The settlement rolls the spill back into regular gas and burns it all.
+        // The halt burns what the frame had left. Under EIP-8037's own give-backs it burns the
+        // spill too: the settlement rolls it back into regular gas and burns it all, and the
+        // caller's count does not take it. Under Satin's the caller's count takes what the
+        // frame's regular gas paid of state and history gas, which keeps it out of the caller's
+        // regular gas spent, so it is not burned a second time here.
         let left = gas.failed_charge_remaining().unwrap_or_else(|| gas.remaining());
-        self.burned = self.burned.saturating_add(left).saturating_add(gas.state_gas_spilled());
+        let spill = if gas.reservoir_only_give_backs() { 0 } else { gas.state_gas_spilled() };
+        self.burned = self.burned.saturating_add(left).saturating_add(spill);
         None
     }
 
@@ -496,8 +522,8 @@ impl Detention {
     /// the allowance it was held to ([`restore_forward`](Self::restore_forward)) — crossed the
     /// limit. Otherwise, an answer that halts burns the whole gas limit: nothing ran with it. An
     /// answer that spent more regular gas than the limit leaves the frame — the allowance it would
-    /// have run on — is a charge the frame could not have made; state and history gas that spilled
-    /// onto its regular gas are not counted, as they are not a running frame's compute. Such an
+    /// have run on — is a charge the frame could not have made; state and history gas its regular
+    /// gas paid are not counted, as they are not a running frame's compute. Such an
     /// answer is answered out of gas and marked as a crossing, the answer's spending being the
     /// charge that crossed. A crossing is settled by the same rule as a frame that ran
     /// ([`stop`](Self::stop)): the frame spent nothing before the charge, so it is given its whole
@@ -540,7 +566,7 @@ impl Detention {
                 return None;
             }
             let allowance = self.allowance(depth, gas_limit)?;
-            // The regular gas the answer spent: state and history gas that spilled onto it are not
+            // The regular gas the answer spent: state and history gas its regular gas paid are not
             // compute, as they are not a running frame's.
             let spent = gas_limit
                 .saturating_sub(result.gas.remaining())
@@ -555,9 +581,10 @@ impl Detention {
             // so the stop settles on what the frame was forwarded.
             //
             // The record holds the regular gas the frame had before the charge: the gas limit,
-            // less the state and history gas that spilled onto it, which the revert that settles
-            // the stop credits back. The spill is below the gas limit, less the regular gas the
-            // answer spent, so what is left is never zero.
+            // less the state and history gas its regular gas paid, which the revert that settles
+            // the stop gives back into the frame's reservoir under Satin's give-backs, and into
+            // its regular gas under EIP-8037's own. That part is below the gas limit, less the
+            // regular gas the answer spent, so what is left is never zero.
             let remaining = NonZeroU64::new(gas_limit - result.gas.state_gas_spilled())?;
             result.result = InstructionResult::OutOfGas;
             result.gas.tracker_mut().set_limit(gas_limit);
@@ -565,9 +592,10 @@ impl Detention {
         }
         let limit = self.stop(&mut result.gas)?;
         // Every crossing an answer carries was marked by the engine with the regular gas the frame
-        // had before the charge: the forward less the spill here, the forward for a precompile's,
-        // which spills nothing. Put back, it leaves the answer no regular gas spent, so the stop's
-        // compute is the transaction's when the frame started.
+        // had before the charge: the forward less what its regular gas paid of state and history
+        // gas here, the forward for a precompile's, which pays none. Put back, it leaves the answer
+        // no regular gas spent, so the stop's compute is the transaction's when the frame
+        // started.
         debug_assert_eq!(regular_spent(result.gas.tracker()), 0, "a stopped answer spent nothing");
         Some(ComputeStop { limit, used: self.compute_at_start(depth, gas_limit) })
     }
@@ -737,7 +765,7 @@ const fn is_out_of_gas(result: InstructionResult) -> bool {
 }
 
 /// The regular gas a frame spent: its limit, less what it has left — the withheld part included —
-/// less the state and history gas that spilled onto its regular gas.
+/// less the state and history gas its regular gas paid.
 #[inline]
 pub(crate) const fn regular_spent(gas: &GasTracker) -> u64 {
     gas.limit().saturating_sub(gas.remaining()).saturating_sub(gas.state_gas_spilled())
@@ -1074,7 +1102,7 @@ mod tests {
 
     /// An answer that halts burns the gas limit; one that spent more regular gas than the frame's
     /// allowance is answered out of gas and stops at the limit, with its whole gas limit back but
-    /// the spill. State gas that spilled onto the answer's regular gas is not compute.
+    /// what its regular gas paid of state gas, which is not compute.
     #[test]
     fn test_an_answer_is_held_to_the_allowance_it_would_have_run_on() {
         let mut detention = detaining();
@@ -1105,7 +1133,8 @@ mod tests {
         detention.burned = 0;
 
         // The answer's spending is the charge that crossed: before it the frame had its whole gas
-        // limit, less the spill, which the revert that settles the stop credits back.
+        // limit, less what its regular gas paid of state gas, which the revert that settles the
+        // stop gives back.
         let limit = BLOCK_ENV_ACCESS_COMPUTE_GAS;
         for spill in [0, 1_000] {
             let mut beyond = answer(BLOCK_ENV_ACCESS_COMPUTE_GAS + 1, InstructionResult::Return);
@@ -1237,11 +1266,9 @@ mod tests {
         assert!(!detention.enable_access(2), "a frame below cannot switch it back on");
         detention.begin_read();
         assert!(detention.refuses(VolatileDataAccess::BLOCK_NUMBER));
-        detention.name_refusal(VolatileDataAccess::BLOCK_HASH);
         detention.end_read();
-        assert_eq!(detention.take_refused(), Some(VolatileDataAccess::BLOCK_HASH));
-        detention.name_refusal(VolatileDataAccess::BLOCK_HASH);
-        assert_eq!(detention.take_refused(), None, "nothing refused, nothing named");
+        assert_eq!(detention.take_refused(), Some(VolatileDataAccess::BLOCK_NUMBER));
+        assert_eq!(detention.take_refused(), None, "a refusal is taken once");
 
         detention.on_frame_end(InstructionResult::Stop, &mut child, 1);
         assert!(!detention.is_access_disabled(1), "on again once the frame returned");
@@ -1286,6 +1313,43 @@ mod tests {
         assert!(detention.refuses(beneficiary));
         detention.end_read();
         assert_eq!(detention.take_refused(), Some(beneficiary));
+    }
+
+    /// Whether the account the Host loaded was cold is noted only for a read wrapper's opcode in a
+    /// frame whose access is off, the last load's, and only for that opcode: the next opcode's
+    /// wrapper and the next transaction start with none, and it is taken once.
+    #[test]
+    fn test_a_noted_load_is_the_running_opcodes_last() {
+        let mut detention = detaining();
+        let mut frame = gas(1_000_000, 0);
+        detention.on_frame_run(&mut frame, 0);
+        detention.begin_read();
+        detention.note_load(true);
+        detention.end_read();
+        assert_eq!(detention.take_loaded_cold(), None, "access on: nothing is noted");
+
+        detention.disable_access(0);
+        detention.on_frame_run(&mut frame, 0);
+        detention.note_load(true);
+        assert_eq!(detention.take_loaded_cold(), None, "outside a read: nothing is noted");
+        detention.begin_read();
+        detention.note_load(true);
+        detention.note_load(false);
+        detention.end_read();
+        assert_eq!(detention.take_loaded_cold(), Some(false), "the last load's");
+        assert_eq!(detention.take_loaded_cold(), None, "taken once");
+
+        detention.begin_read();
+        detention.note_load(true);
+        detention.end_read();
+        detention.begin_read();
+        detention.end_read();
+        assert_eq!(detention.take_loaded_cold(), None, "the next opcode starts with none");
+
+        detention.begin_read();
+        detention.note_load(true);
+        detention.reset(BLOCK_ENV_ACCESS_COMPUTE_GAS, ORACLE_ACCESS_COMPUTE_GAS);
+        assert_eq!(detention.take_loaded_cold(), None, "the next transaction starts with none");
     }
 
     /// A refusal's revert data decodes back to the kind it names, for every kind the engine

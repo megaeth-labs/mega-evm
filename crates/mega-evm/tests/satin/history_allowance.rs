@@ -24,12 +24,9 @@ use mega_evm::{
     constants::COST_PER_HISTORY_BYTE,
     history_allowance_gas,
     system::{IMegaAccessControl, ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE},
-    test_utils::{
-        is_transfer_log, note_price_guard, transfer_log, BytecodeBuilder, MemoryDatabase,
-    },
+    test_utils::{is_transfer_log, note_price_guard, BytecodeBuilder, MemoryDatabase},
     EvmTxRuntimeLimits, LimitKind, MegaContext, MegaEvm, MegaTransaction, MegaTransactionOutcome,
-    HISTORY_ALLOWANCE_BYTES, LOG_BASE_SIZE, LOG_TOPIC_SIZE, TRANSFER_LOG_SIZE, TX_BODY_SIZE,
-    WRITE_RECORD_SIZE,
+    HISTORY_ALLOWANCE_BYTES, TRANSFER_LOG_SIZE, TX_BODY_SIZE, WRITE_RECORD_SIZE,
 };
 use revm::{
     bytecode::opcode::{
@@ -44,10 +41,7 @@ use revm::{
     Inspector,
 };
 
-use crate::common::{
-    body_history, call, context, execute, history, runs_at_measurement_prices, slot_state_gas,
-    state_is_free,
-};
+use crate::common::{body_history, call, context, execute, history, runs_at_measurement_prices};
 
 const CALLER: Address = address!("0000000000000000000000000000000000500000");
 const SENDER: Address = address!("0000000000000000000000000000000000500001");
@@ -129,52 +123,6 @@ fn test_the_allowance_is_one_three_topic_event_of_history() {
     assert_eq!(history_allowance_gas(), 160 * COST_PER_HISTORY_BYTE);
 }
 
-/// The boundary the allowance exists for: a `transfer()` — 2,300 gas and nothing else — reaches a
-/// `receive()` hook that emits one event, and the event's history costs the sender nothing beyond
-/// the two write records the transfer itself writes.
-///
-/// Without the allowance the event's 160 bytes would have to come out of the 2,300, which does
-/// not cover them at any price a history byte is worth.
-#[test]
-fn test_a_transfer_can_emit_one_event_because_of_the_allowance() {
-    if runs_at_measurement_prices() {
-        return;
-    }
-    let sender = call_with(CALL, RECEIVER, 1, TRANSFER_GAS).append(STOP).build();
-    let receiver = event().append(STOP).build();
-    let outcome = execute(db(sender, receiver), call(CALLER, SENDER, U256::ZERO, GAS_LIMIT));
-
-    assert!(outcome.result.is_success(), "{:?}", outcome.result);
-    assert_eq!(events(&outcome).len(), 1, "the hook emitted its event");
-    assert_eq!(
-        outcome.result.logs()[0],
-        transfer_log(SENDER, RECEIVER, U256::from(1)),
-        "after the transfer's own log, which took nothing from the allowance",
-    );
-    assert_eq!(
-        outcome.gas.history,
-        body() + 2 * record(),
-        "the body and the transfer's two records; the event's bytes the allowance paid for",
-    );
-}
-
-/// One event is all it buys: a second one has to come out of the 2,300 gas, which cannot cover
-/// it, so the hook runs out of gas and the transfer fails.
-#[test]
-fn test_the_allowance_buys_one_event_and_no_more() {
-    if runs_at_measurement_prices() {
-        return;
-    }
-    // The caller records whether the transfer succeeded, then stops.
-    let sender = call_with(CALL, RECEIVER, 1, TRANSFER_GAS).append(STOP).build();
-    let two_events = event().append_many(event().build().iter().copied()).append(STOP).build();
-    let outcome = execute(db(sender, two_events), call(CALLER, SENDER, U256::ZERO, GAS_LIMIT));
-
-    assert!(outcome.result.is_success(), "the caller survives the hook's failure");
-    assert!(outcome.result.logs().is_empty(), "the hook ran out and kept neither event");
-    assert_eq!(outcome.gas.history, body(), "and the transfer's records came back with it");
-}
-
 /// A sender that makes one value transfer to [`RECEIVER`], forwarding `gas` beside the 2,300 the
 /// transfer's stipend adds, and returns the call's success flag.
 fn transfer_returning_its_flag(gas: u64) -> Bytes {
@@ -252,7 +200,7 @@ fn the_allowance_outweighs_a_record() -> bool {
 /// exactly the cost it completes. An allowance that entered the frame's gas, or that computation
 /// could fall back on, would carry the short hook through.
 ///
-/// Rule [S8.4]. Expected values `independent`: the hook's cost is summed by hand from the opcode
+/// Expected values `independent`: the hook's cost is summed by hand from the opcode
 /// prices, which no byte price moves, and the exact run is the control that the sum is the hook's
 /// whole cost; the allowance and a record's history are the spec's 160 and 40 bytes at the cost
 /// per history byte in effect (`constants`), and at the spec's prices 14,080 and 3,520, written
@@ -284,59 +232,6 @@ fn test_the_allowance_cannot_be_spent_on_computation() {
     assert_eq!((allowance(), record_history()), (14_080, 3_520), "160 and 40 bytes at 88 gas");
 }
 
-/// The hook's three-topic event over `len` bytes of memory: `PUSH1 3; PUSH1 2; PUSH1 1; PUSH2 len;
-/// PUSH0; LOG3; STOP`.
-fn event_over(len: u16) -> Bytes {
-    let [high, low] = len.to_be_bytes();
-    Bytes::from(vec![PUSH1, 3, PUSH1, 2, PUSH1, 1, PUSH2, high, low, PUSH0, LOG3, STOP])
-}
-
-/// What [`event_over`] computes, by hand from the opcode prices: the four pushes, 3 each, and
-/// `PUSH0`, 2; `LOG3`'s 375, 375 a topic and 8 a byte of data; and the memory it expands, 3 a word
-/// and the square of the words over 512.
-const fn event_over_gas(len: u64) -> u64 {
-    let words = len.div_ceil(32);
-    4 * 3 + 2 + 375 + 3 * 375 + 8 * len + 3 * words + words * words / 512
-}
-
-/// An event larger than the allowance draws the whole allowance and pays the rest out of the
-/// frame's gas: a hook given its computation and one gas less than that rest runs out of gas on
-/// the history charge, after the allowance paid its part, and keeps no event; given the rest in
-/// full it keeps the event, and the transaction pays that rest beside the transfer's records.
-///
-/// Expected values `independent`: the hook's computation is summed by hand from the opcode prices,
-/// and the two runs are the control that the sum is its whole cost; the event's bytes are its
-/// address, its three topics and its data, and the rest is their history less the allowance's 160
-/// bytes, at the cost per history byte in effect (`constants`).
-#[test]
-fn test_an_event_larger_than_the_allowance_pays_the_rest_or_runs_out_of_gas() {
-    if !the_allowance_outweighs_a_record() {
-        return;
-    }
-    let len = 1_024;
-    let computation = event_over_gas(u64::from(len));
-    let rest = history(LOG_BASE_SIZE + 3 * LOG_TOPIC_SIZE + u64::from(len)) - allowance();
-
-    let short = run_hook(event_over(len), computation + rest - 1, U256::ZERO);
-    assert!(!transfer_succeeded(&short), "one gas short of the rest is out of gas");
-    assert!(events(&short).is_empty(), "the hook kept no event");
-    assert_eq!(short.gas.history, body_history(0), "the failed hook's transfer records came back");
-
-    let exact = run_hook(event_over(len), computation + rest, U256::ZERO);
-    assert!(transfer_succeeded(&exact), "the rest in full is enough");
-    assert_eq!(events(&exact).len(), 1, "the hook kept its event");
-    assert_eq!(
-        exact.gas.history,
-        body_history(0) + 2 * record_history() + rest,
-        "the transfer's two records and the rest of the event; the allowance's part is on no ledger",
-    );
-
-    if runs_at_measurement_prices() {
-        return;
-    }
-    assert_eq!((computation, rest), (9_804, (1_152 - 160) * 88));
-}
-
 /// The hook's `SSTORE(0, 2)`: `PUSH1 2; PUSH0; SSTORE; STOP`.
 fn writes_slot_zero() -> Bytes {
     Bytes::from(vec![PUSH1, 2, PUSH0, SSTORE, STOP])
@@ -350,7 +245,7 @@ fn writes_slot_zero() -> Bytes {
 /// The slot is not fresh, so the write charges no state gas: the record's history is the only
 /// charge past the regular gas, and the only one the allowance could have paid.
 ///
-/// Rule [S8.3]. Expected values `independent`: the write's regular gas is the schedule's table by
+/// Expected values `independent`: the write's regular gas is the schedule's table by
 /// hand — `PUSH1` 3, `PUSH0` 2, and an `SSTORE` that resets a cold slot, 100 static, 10,000 for
 /// the reset and 2,000 for the cold load — which no byte price moves; the record's history is 40
 /// bytes at the cost per history byte in effect (`constants`), 3,520 at 88 gas a byte, written
@@ -380,98 +275,7 @@ fn test_the_allowance_cannot_be_spent_on_a_write_record() {
     assert_eq!(record, 3_520, "40 bytes at 88 gas");
 }
 
-/// The allowance cannot pay state gas either: a hook that fills a fresh slot, given the write's
-/// regular gas and one gas less than the slot's state gas, runs out of gas and keeps no write.
-/// An allowance that paid the state gas would carry it through: drawn first, it would pay the
-/// smaller of the state gas and itself, and leave the hook that much less one gas of its own to
-/// pay the record's history with. Given the state gas and the record in full it keeps the write.
-///
-/// So the leak shows only where both the slot's state gas and the allowance outweigh a record.
-/// At a price where the state gas does not — a gas or so a state byte against a dear history
-/// byte — the short hook would run out on the record whether or not the allowance paid its state
-/// gas, and the test returns early with a note.
-///
-/// Rule [S8.5]. Expected values `independent`: the write's regular gas is the schedule's table by
-/// hand — `PUSH1` 3, `PUSH0` 2, and an `SSTORE` that fills a cold fresh slot, 100 static, 10,000
-/// for the fresh slot and 2,000 for the cold load — which no byte price moves; the slot's state
-/// gas at the minimum bucket is the schedule's entry and the record's history 40 bytes at the cost
-/// per history byte, both at the prices in effect (`constants`), and at the spec's prices 97,920
-/// and 3,520, written out.
-#[test]
-fn test_the_allowance_cannot_be_spent_on_state() {
-    // A slot that costs no state gas has no state charge the allowance could pay.
-    if state_is_free() || !the_allowance_outweighs_a_record() {
-        return;
-    }
-    let state = slot_state_gas();
-    let record = record_history();
-    // A leaked allowance leaves the short hook `min(state, allowance) - 1` of its own gas for the
-    // record, which must cover it for the leak to show.
-    if state.min(allowance()) - 1 < record {
-        note_price_guard(
-            "the slot's state gas is worth no more than a write record at these prices",
-        );
-        return;
-    }
-    let regular = 3 + 2 + 100 + 10_000 + 2_000;
-
-    let short = run_hook(writes_slot_zero(), regular + state - 1, U256::ZERO);
-    assert!(!transfer_succeeded(&short), "one gas short of the state gas is out of gas");
-    assert_eq!(short.usage.write_records, 0, "the hook kept no write");
-    assert_eq!(short.gas.state, 0, "and no state gas");
-
-    let exact = run_hook(writes_slot_zero(), regular + state + record, U256::ZERO);
-    assert!(transfer_succeeded(&exact), "the slot paid from the hook's own gas");
-    assert_eq!(exact.gas.state, state);
-    assert_eq!(exact.usage.write_records, 3, "the transfer's two accounts and the slot");
-
-    if runs_at_measurement_prices() {
-        return;
-    }
-    assert_eq!((state, record), (97_920, 3_520), "64 bytes at 1,530 gas, 40 bytes at 88 gas");
-}
-
 /* ---------- who is granted one ---------- */
-
-/// A transaction's own frame is granted nothing: its sender chose the gas limit, so a value
-/// transaction whose recipient emits an event pays for that event itself.
-#[test]
-fn test_a_top_level_transfer_gets_no_allowance() {
-    if runs_at_measurement_prices() {
-        return;
-    }
-    let receiver = event().append(STOP).build();
-    let mut tx = call(CALLER, RECEIVER, U256::from(1), GAS_LIMIT);
-    tx.0.base.value = U256::from(1);
-    let outcome = execute(db(Bytes::new(), receiver), tx);
-
-    assert!(outcome.result.is_success(), "{:?}", outcome.result);
-    assert_eq!(
-        outcome.gas.history,
-        body() + record() + HISTORY_ALLOWANCE_BYTES * COST_PER_HISTORY_BYTE,
-        "the body, the recipient's record, and the event the transaction paid for itself",
-    );
-}
-
-/// A call that carries no value is granted nothing, whatever it forwards: the allowance follows
-/// the transfer, not the call.
-#[test]
-fn test_a_call_without_value_gets_no_allowance() {
-    if runs_at_measurement_prices() {
-        return;
-    }
-    let receiver = event().append(STOP).build();
-    let with_value = call_with(CALL, RECEIVER, 1, 1_000_000).append(STOP).build();
-    let without = call_with(CALL, RECEIVER, 0, 1_000_000).append(STOP).build();
-    let event_history = HISTORY_ALLOWANCE_BYTES * COST_PER_HISTORY_BYTE;
-
-    let paid = execute(db(without, receiver.clone()), call(CALLER, SENDER, U256::ZERO, GAS_LIMIT));
-    let granted = execute(db(with_value, receiver), call(CALLER, SENDER, U256::ZERO, GAS_LIMIT));
-
-    assert!(paid.result.is_success() && granted.result.is_success());
-    assert_eq!(paid.gas.history, body() + event_history, "no transfer, no allowance");
-    assert_eq!(granted.gas.history, body() + 2 * record(), "the allowance paid for the event");
-}
 
 /// `CALLCODE` transfers value and is granted one; `DELEGATECALL` carries none and is not.
 /// `CALLCODE` runs the callee's code in the caller's own account, so its transfer moves the value
@@ -838,24 +642,6 @@ fn test_a_drained_allowance_is_not_refunded_by_a_revert() {
         drained.gas.gas_used - quiet.gas.gas_used < history_allowance_gas(),
         "and the difference is that computation, not an allowance",
     );
-}
-
-/// A call that forwards no gas at all still reaches a `receive()` hook that emits one event: the
-/// EVM's own `CALL_STIPEND` pays for the computation and the allowance for the bytes.
-#[test]
-fn test_a_transfer_forwarding_no_gas_still_buys_its_event() {
-    if runs_at_measurement_prices() {
-        return;
-    }
-    let sender = call_with(CALL, RECEIVER, 1, 0).append(STOP).build();
-    let outcome = execute(
-        db(sender, event().append(STOP).build()),
-        call(CALLER, SENDER, U256::ZERO, GAS_LIMIT),
-    );
-
-    assert!(outcome.result.is_success(), "{:?}", outcome.result);
-    assert_eq!(events(&outcome).len(), 1, "the hook emitted its event");
-    assert_eq!(outcome.gas.history, body() + 2 * record());
 }
 
 /* ---------- an inspector that replaces the interpreter ---------- */

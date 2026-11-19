@@ -7,10 +7,9 @@
 //! and on Satin (the in-tree port against the block driver).
 //!
 //! The RPC is a mock that answers only from the recorded block: a read the recording does not
-//! hold is an error, not a guess. The two exceptions are what Satin's pre-block changes read and
-//! no recording holds: the EIP-7997 factory, which Satin's activation block checks, served with
-//! its code as the chain holds it, and the L1 block contract's L1 fee overhead, served as zero, as
-//! the chain held it. `block_replay.rs` shows the overhead changes no transaction row.
+//! hold is an error, not a guess. The one exception is what Satin's pre-block changes read and no
+//! recording holds: the EIP-7997 factory, which Satin's activation block checks, served with its
+//! code as the chain holds it.
 #![cfg(feature = "legacy")]
 
 mod common;
@@ -22,8 +21,8 @@ use std::{
 
 use alloy_primitives::{address, Address, B256, U256};
 use common::blocks::{
-    cache_copy_for_satin, code_of, factory_account, fixtures, is_deposit, overhead_slot,
-    read_block, run_evme, satin_genesis, timestamp_of, FACTORY, L1_BLOCK,
+    cache_copy_for_satin, code_of, factory_account, fixtures, is_deposit, read_block, run_evme,
+    satin_genesis, timestamp_of, FACTORY,
 };
 use mega_evme::block::{CachedBlock, PreAccount};
 use serde_json::{json, Value};
@@ -43,11 +42,6 @@ struct Recording {
 impl Recording {
     fn account(&self, address: Address) -> Option<PreAccount> {
         match self.block.prestate.accounts.get(&address) {
-            Some(account) if address == L1_BLOCK => {
-                let mut account = account.clone();
-                account.storage.entry(overhead_slot()).or_insert(U256::ZERO);
-                Some(account)
-            }
             Some(account) => Some(account.clone()),
             None if address == FACTORY => Some(factory_account()),
             None => None,
@@ -279,7 +273,7 @@ async fn test_a_transaction_replayed_alone_is_the_one_the_block_replay_runs() {
     assert_eq!(held, 1, "the limits leg checks the transaction the limit held");
 }
 
-/// [S1.8] [S21.12] [S1] A transaction replay is told whether its block admits only deposits as a
+/// A transaction replay is told whether its block admits only deposits as a
 /// node is, from the schedule and the parent block it forks. Under a genesis file that activates
 /// Satin at the block's timestamp, with the parent a second earlier, the block is Satin's
 /// activation block: a user transaction of it is refused for the rule, and its deposit replays.

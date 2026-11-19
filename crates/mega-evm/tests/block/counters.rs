@@ -352,6 +352,7 @@ fn test_the_pre_block_calls_count_towards_no_block_budget() {
         Some(root),
         Bytes::new(),
         mega_evm::BlockLimits::no_limits(),
+        None,
     );
     let mut executor = executor(&mut state, ctx);
     executor.apply_pre_execution_changes().expect("the block starts");

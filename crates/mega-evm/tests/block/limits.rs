@@ -753,14 +753,13 @@ impl revm::Database for RefusesAnAccount {
     }
 }
 
-/// An authorization list is simulated before the first frame when it may cross the transaction's
-/// KV or state-growth limit, and a database error while it reads an authority gives the
-/// transaction no outcome: the block executor reports it as an internal error when the database
-/// declares it fatal, and refuses the block for any other, including when an earlier prefix
-/// would already have crossed. Three new authorities under a state-growth limit of one: the first
-/// two cross it, and the third cannot be read; served, the list is skipped and the transaction
-/// included with the stop. A skipped list is not applied, so the simulation is the only read of
-/// the third.
+/// An authorization list is simulated before the first frame, and a database error while it reads
+/// an authority gives the transaction no outcome: the block executor reports it as an internal
+/// error when the database declares it fatal, and refuses the block for any other, including when
+/// an earlier prefix would already have crossed. Three new authorities under a state-growth limit
+/// of one: the first two cross it, and the third cannot be read; served, the list is skipped and
+/// the transaction included with the stop. A skipped list is not applied, so the simulation is the
+/// only read of the third.
 ///
 /// revm's `State`, which a block runs on, declares every error of the database below it fatal and
 /// only a read its EIP-7928 block access list does not cover not fatal, so a block shows the fatal

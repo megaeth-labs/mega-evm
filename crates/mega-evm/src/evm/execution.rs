@@ -23,7 +23,7 @@ use revm::{
     context::{
         result::{FromStringError, InvalidTransaction, ResultGas},
         transaction::TransactionType,
-        ContextError, ContextTr, FrameStack, Journal, JournalTr, Transaction,
+        Cfg, ContextError, ContextTr, FrameStack, Journal, JournalTr, Transaction,
     },
     context_interface::{
         cfg::{gas::GasTracker, GasId, StateGasCharge, StateGasSite},
@@ -40,7 +40,7 @@ use revm::{
     inspector::{InspectorEvmTr, InspectorHandler, JournalExt},
     interpreter::{
         interpreter::EthInterpreter, interpreter_action::FrameInit, interpreter_types::LoopControl,
-        CallScheme, CallValue, FrameInput, Gas, InitialAndFloorGas, InstructionResult,
+        CallScheme, CallValue, FrameInput, InitialAndFloorGas, InstructionResult,
         InterpreterAction, InterpreterResult,
     },
     primitives::{Address, Bytes, TxKind, CALL_STACK_LIMIT},
@@ -49,7 +49,9 @@ use revm::{
 
 use crate::{
     access::ComputeStop,
-    charge_write_records_history, history_gas,
+    charge_write_records_history,
+    evm::frame::frame_gas,
+    history_gas,
     limit::{CreatorBefore, StartBefore},
     synthetic_frame_result,
     system::{keyless, Answer},
@@ -192,24 +194,27 @@ where
             runtime_oog_unwind(evm.ctx(), checkpoint)?;
             return Ok(None);
         };
+        let (first_frame, from_regular) = first_frame;
         let layer = &mut evm.ctx_mut().additional_limit;
-        layer.keep_first_frame_charge(first_frame);
+        layer.keep_first_frame_charge(first_frame, from_regular);
         layer.count_authorities(applied, created);
         Ok(Some(PreExecutionOutput { eip7702_refund, checkpoint }))
     }
 
-    /// Reads the live system address out of the registry, then decides whether the transaction
-    /// is a system-address transaction and prepares the common execution layer for it, then
-    /// validates a system-address transaction and promotes it to a deposit, then validates the
-    /// transaction as op-revm does — as a deposit, when it was promoted.
+    /// Decides, against the live system address the context holds, whether the transaction is a
+    /// system-address transaction and prepares the common execution layer for it, then validates
+    /// a system-address transaction and promotes it to a deposit, then validates the transaction
+    /// as op-revm does — as a deposit, when it was promoted.
     ///
     /// This is the handler's first phase, so the layer is prepared before anything else of the
-    /// transaction runs, and a read the database cannot serve fails the transaction through the
-    /// handler's error path, which discards what the journal loaded. Every transaction reads the
-    /// live system address, whatever its shape, and the read leaves the registry's account and
-    /// its slot warm for the rest of the transaction, as EIP-3651 leaves the block beneficiary.
+    /// transaction runs. The transaction does not read the registry: the context resolved the
+    /// address outside every transaction — block execution after the block's pre-block steps, any
+    /// other EVM when it was built — so no transaction finds the registry's account or slot warm
+    /// or pays for the read. Only when that read failed does the context make it again here, off
+    /// the database and outside the journal, and a failure again fails the transaction through
+    /// the handler's error path.
     fn validate_env(&self, evm: &mut Self::Evm) -> Result<(), Self::Error> {
-        let system_address = crate::system::load_system_address(evm.ctx_mut().journal_mut())?;
+        let system_address = evm.ctx_mut().live_system_address()?;
         self.validate_env_as(evm, system_address, true)
     }
 
@@ -278,11 +283,12 @@ where
     ///
     /// The body's history is intrinsic: it comes out of the reservoir first and its excess off the
     /// regular budget, as EIP-8037's intrinsic state gas does, so a body does not take the
-    /// execution cap away from computation; and, as intrinsic gas, no reservoir a frame hands back
-    /// unwinds it onto the regular budget, so it is charged as no spill. It is charged here rather
-    /// than before the first frame because revm's runtime out-of-gas fallback rebuilds the
-    /// transaction's gas through this phase, and a transaction that runs out of gas there keeps its
-    /// body charged. Validation admitted no gas limit that cannot pay for it
+    /// execution cap away from computation; and, as intrinsic gas, it is charged as no spill, so
+    /// no reservoir a frame hands back unwinds it onto the regular budget under EIP-8037's own
+    /// give-backs, and under Satin's no returned reservoir unwinds anything. It is charged here
+    /// rather than before the first frame because revm's runtime out-of-gas fallback rebuilds
+    /// the transaction's gas through this phase, and a transaction that runs out of gas there
+    /// keeps its body charged. Validation admitted no gas limit that cannot pay for it
     /// ([`validate_initial_tx_gas`](Handler::validate_initial_tx_gas)).
     ///
     /// revm builds a system call's gas here, on no intrinsic gas, and so does its runtime
@@ -470,7 +476,8 @@ where
     /// A failed deposit still bumps its caller's nonce and mints, so one whose caller had no
     /// account creates it: one account of state growth, which the transaction reports and its
     /// block counts, though it pays no state gas for it and no limit stops a deposit that already
-    /// failed.
+    /// failed. Its body and calldata remain history bytes even when validation never admitted
+    /// their charge; no history gas is reported because the whole gas limit is regular gas.
     ///
     /// It is the fatal cleanup of every entry point, so nothing the failed execution left is read
     /// by the next one on the same EVM, whatever cleanup op-revm made:
@@ -504,8 +511,12 @@ where
                 ..
             })
         );
-        if failed_deposit && deposit_created_caller(evm.ctx()) {
-            evm.ctx_mut().additional_limit.count_created_caller();
+        if failed_deposit {
+            let priced = evm.ctx_ref().prices_history();
+            evm.ctx_mut().additional_limit.settle_failed_deposit_history(priced);
+            if deposit_created_caller(evm.ctx()) {
+                evm.ctx_mut().additional_limit.count_created_caller();
+            }
         }
         result
     }
@@ -620,7 +631,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
         if self.inner.frame_stack.index().is_some() {
             suspend(&mut self.inner.ctx, self.inner.frame_stack.get(), &frame_init);
         }
-        if let Some(result) = call_too_deep(&frame_init) {
+        if let Some(result) = call_too_deep(self.inner.ctx.cfg(), &frame_init) {
             return Ok(ItemOrResult::Result(result));
         }
         if frame_init.depth == 0 {
@@ -632,8 +643,8 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
             }
         }
         let keyless = keyless::is_dispatched(&self.inner.ctx, &frame_init);
-        let answer = if keyless {
-            keyless::ready(&mut self.inner.ctx, &mut frame_init)?.map(Answer::new)
+        let answer = if let Some(call) = &keyless {
+            keyless::ready(&mut self.inner.ctx, &mut frame_init, call)?.map(Answer::new)
         } else {
             self.intercept(&frame_init)
         };
@@ -655,7 +666,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
             // revm never decides the start, so nothing moved and nothing is counted: the answer is
             // held to the price alone, which its settlement turns into the stop. A creation is
             // never a precompile's.
-            let mut result = crossing_answer(&frame_init.frame_input);
+            let mut result = crossing_answer(ctx.cfg(), &frame_init.frame_input);
             settle_answer(ctx, depth, gas_limit, &mut result);
             return Ok(ItemOrResult::Result(result));
         }
@@ -671,8 +682,8 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
             ctx.detention.on_frame_run(&mut frame.interpreter.gas, depth);
             let first = if verdict.exceeded_limit() {
                 Some(stop_action(ctx, frame, &verdict))
-            } else if keyless {
-                Some(keyless::start(ctx, frame)?)
+            } else if let Some(call) = &keyless {
+                Some(keyless::start(ctx, frame, call)?)
             } else {
                 None
             };
@@ -687,7 +698,7 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> EvmTr for MegaEvm<DB, INSP, 
             }
             return Ok(ItemOrResult::Item(self.inner.frame_stack.get()));
         };
-        debug_assert!(!keyless, "revm builds a keylessDeploy call's frame");
+        debug_assert!(keyless.is_none(), "revm builds a keylessDeploy call's frame");
         if let PrecompileHold::Clamped(withheld) = hold {
             Detention::restore_forward(result.interpreter_result_mut(), withheld);
         }
@@ -1094,12 +1105,13 @@ fn hold_detained_precompile<DB: Database, ExtEnvs: ExternalEnvTypes>(
 }
 
 /// The answer to the precompile call `input` starts when its price crosses gas detention's limit
-/// ([`PrecompileHold::Crossing`]): out of gas without running, the forward untouched, and marked
-/// as the crossing ([`Detention::cross_at_price`]).
+/// ([`PrecompileHold::Crossing`]), built under `cfg`: out of gas without running, the forward
+/// untouched, and marked as the crossing ([`Detention::cross_at_price`]).
 #[cold]
 #[inline(never)]
-fn crossing_answer(input: &FrameInput) -> FrameResult {
-    let mut answer = synthetic_frame_result(input, InstructionResult::PrecompileOOG, Bytes::new());
+fn crossing_answer(cfg: &impl Cfg, input: &FrameInput) -> FrameResult {
+    let mut answer =
+        synthetic_frame_result(cfg, input, InstructionResult::PrecompileOOG, Bytes::new());
     Detention::cross_at_price(answer.interpreter_result_mut());
     answer
 }
@@ -1373,23 +1385,23 @@ fn stop_the_answer_at<DB: Database, ExtEnvs: ExternalEnvTypes>(
 ) {
     if verdict.exceeded_limit() {
         let output = ctx.additional_limit.note_frame_stop(&verdict);
-        stop_the_answer(answer, start, output);
+        stop_the_answer(ctx.cfg(), answer, start, output);
         ctx.additional_limit.ledger_mut().rebuild_on_shares();
     }
 }
 
 /// Rewrites `answer`, to the call `start` began, into the stop `output`: a revert on the gas the
-/// call's caller forwarded, untouched, with the reservoir the call inherited, and no precompile
-/// output, as [`synthetic_frame_result`] answers a frame that never started. Its budgets go back
-/// to the shares the call started with on the start ledger
-/// (`StartLedger::rebuild_on_shares`).
+/// call's caller forwarded, untouched, with the reservoir the call inherited and the give-back
+/// mode of `cfg`, the execution's configuration, and no precompile output, as
+/// [`synthetic_frame_result`] answers a frame that never started. Its budgets go back to the
+/// shares the call started with on the start ledger (`StartLedger::rebuild_on_shares`).
 #[cold]
 #[inline(never)]
-fn stop_the_answer(answer: &mut FrameResult, start: &FrameStart, output: Bytes) {
+fn stop_the_answer(cfg: &impl Cfg, answer: &mut FrameResult, start: &FrameStart, output: Bytes) {
     let FrameResult::Call(outcome) = answer else {
         unreachable!("only a call is held to the limits once revm answered it")
     };
-    let gas = Gas::new_with_regular_gas_and_reservoir(start.gas_limit, start.reservoir);
+    let gas = frame_gas(cfg, start.gas_limit, start.reservoir);
     outcome.result = InterpreterResult::new(InstructionResult::Revert, output, gas);
     outcome.was_precompile_called = false;
     outcome.precompile_call_logs.clear();
@@ -1405,7 +1417,12 @@ fn stop_before_the_first_frame<DB: Database, ExtEnvs: ExternalEnvTypes>(
 ) -> Option<FrameResult> {
     let stop = ctx.additional_limit.take_pre_frame_stop()?;
     let output = ctx.additional_limit.note_frame_stop(&stop);
-    Some(synthetic_frame_result(&frame_init.frame_input, InstructionResult::Revert, output))
+    Some(synthetic_frame_result(
+        ctx.cfg(),
+        &frame_init.frame_input,
+        InstructionResult::Revert,
+        output,
+    ))
 }
 
 /// Decides the transaction's EIP-7702 authorization list before it is applied, as the spec has
@@ -1414,8 +1431,14 @@ fn stop_before_the_first_frame<DB: Database, ExtEnvs: ExternalEnvTypes>(
 /// every other authority loaded once, with its code, and skipped when that code is not a
 /// delegation; a nonce compared with the authority's effective one, which the simulation bumps
 /// for each entry it accepts — and the totals it would keep are held to the transaction's KV and
-/// state-growth limits. The stop when they cross one, KV updates first; `None` when they fit, or
-/// when the list is too short to cross either.
+/// state-growth limits. The stop when they cross one, KV updates first; `None` when they fit.
+/// Every list is simulated, whatever its length, so the authorities the witness holds do not
+/// depend on whether the list could cross a limit or on where its application would run out of
+/// gas — every list of a transaction held to a KV-update or a state-growth limit, which Satin's
+/// own limits always set. Limits that set neither hold the list to nothing, so it is not
+/// simulated and loads only what its application loads, as Ethereum's does: the neutral
+/// configuration's runner turns every limit off
+/// ([`AdditionalLimit::holds_authorization_list`](crate::AdditionalLimit)).
 ///
 /// The simulation writes nothing and warms nothing: the loads are taken back to a journal mark,
 /// which leaves the accounts in the transaction's state, cold, so a stateless witness holds every
@@ -1423,11 +1446,9 @@ fn stop_before_the_first_frame<DB: Database, ExtEnvs: ExternalEnvTypes>(
 fn hold_authorization_list<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &mut MegaContext<DB, ExtEnvs>,
 ) -> Result<Option<LimitCheck>, DB::Error> {
-    if ctx.tx().tx_type() != TransactionType::Eip7702 {
-        return Ok(None);
-    }
-    let entries = ctx.tx().authorization_list_len() as u64;
-    if !ctx.additional_limit.authorization_list_may_cross(entries) {
+    if ctx.tx().tx_type() != TransactionType::Eip7702 ||
+        !ctx.additional_limit.holds_authorization_list()
+    {
         return Ok(None);
     }
     let (records, created) = simulate_authorization_list(ctx)?;
@@ -1502,7 +1523,8 @@ fn simulate_authorization_list<DB: Database, ExtEnvs: ExternalEnvTypes>(
 }
 
 /// The depth guard: a frame past the call-stack limit, of any call scheme or a creation, answered
-/// with `CallTooDeep`, its gas untouched and its reservoir carried — the answer revm gives it.
+/// with `CallTooDeep`, its gas untouched, its reservoir carried and the give-back mode of `cfg`,
+/// the execution's configuration — the answer revm gives it.
 ///
 /// revm checks the depth first when it builds a frame, before it moves value or bumps a creator's
 /// nonce. The guard gives the same answer before anything else sees the frame: an interceptor or an
@@ -1514,9 +1536,10 @@ fn simulate_authorization_list<DB: Database, ExtEnvs: ExternalEnvTypes>(
 /// No transaction reaches the limit: regular gas is capped by the execution cap and every call
 /// forwards at most 98/100 of what its caller has left, so a frame at depth 1,024 has less than a
 /// gas.
-fn call_too_deep(frame_init: &FrameInit) -> Option<FrameResult> {
+fn call_too_deep(cfg: &impl Cfg, frame_init: &FrameInit) -> Option<FrameResult> {
     (frame_init.depth > CALL_STACK_LIMIT as usize).then(|| {
         synthetic_frame_result(
+            cfg,
             &frame_init.frame_input,
             InstructionResult::CallTooDeep,
             Bytes::new(),
@@ -1619,35 +1642,49 @@ fn applied_authorities<DB: Database, ExtEnvs: ExternalEnvTypes>(
 /// The authorities' records are the transaction's own and outlive a first frame that fails; the
 /// first frame's record does not, so that frame carries what it cost as its start charge, which
 /// its failure gives back. A first frame revm refuses to start on its sender's account makes no
-/// record, and gets the charge back as any frame that kept nothing does: among the transactions
-/// that pay history, that is a creation from an account whose nonce cannot be bumped, which only a
-/// caller that turned the nonce check off can run, and which revm answers with a success and no
-/// address.
+/// record. A value the sender cannot fund is never charged; a creation whose sender's nonce
+/// cannot be bumped gets the charge back when its start keeps nothing. A deposit or a caller
+/// that turned the nonce check off can reach that nonce, which revm answers with a success and
+/// no address.
+///
+/// The two are one charge, which the reservoir pays first and the regular budget the rest, and of
+/// it the reservoir pays the authorities' records first, the list being applied first: the part of
+/// the first frame's record the reservoir paid is what the authorities' records leave of it.
 ///
 /// Answers the history gas the first frame's record was charged, which pre-execution keeps for
-/// the frame's input to carry, and nothing for a transaction that pays no history; `None` when the
-/// transaction cannot pay, which is an out-of-gas before it runs.
+/// the frame's input to carry, with the part of it regular gas paid, which a halt of that frame
+/// consumes; nothing for a transaction that pays no history; `None` when the transaction cannot
+/// pay, which is an out-of-gas before it runs.
 fn charge_records_made_outside_a_frame<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &MegaContext<DB, ExtEnvs>,
     gas: &mut GasTracker,
     applied_authorities: u64,
-) -> Option<u64> {
+) -> Option<(u64, u64)> {
     if !ctx.prices_history() {
-        return Some(0);
+        return Some((0, 0));
     }
-    charge_write_records_history(gas, first_frame_records(ctx), applied_authorities)
-        .map(|(first_frame, _)| first_frame)
+    let reservoir = gas.reservoir();
+    let (first_frame, authorities) =
+        charge_write_records_history(gas, first_frame_records(ctx), applied_authorities)?;
+    let from_reservoir = reservoir.saturating_sub(authorities).min(first_frame);
+    Some((first_frame, first_frame - from_reservoir))
 }
 
 /// The write records the transaction's own frame makes, as the journal's state stands before the
 /// first frame: the recipient's, when the value changes an account the transaction has not
-/// changed, or the account a creation creates ([`charge_records_made_outside_a_frame`]).
+/// changed, or the account a creation creates. A value the sender cannot fund, its deposit mint
+/// already credited, makes no record ([`charge_records_made_outside_a_frame`]).
 fn first_frame_records<DB: Database, ExtEnvs: ExternalEnvTypes>(
     ctx: &MegaContext<DB, ExtEnvs>,
 ) -> u64 {
     let tx = ctx.tx();
     match tx.kind() {
-        TxKind::Create => 1,
+        TxKind::Create => u64::from(
+            ctx.journal_ref()
+                .state
+                .get(&tx.caller())
+                .is_some_and(|caller| caller.info.balance >= tx.value()),
+        ),
         TxKind::Call(to) => {
             let predicted = ctx.accounts().transfer_records(tx.caller(), to, tx.value()).transfer;
             debug_assert_eq!(predicted.taken, 0, "the sender's value returns no account");
@@ -1661,15 +1698,17 @@ mod tests {
     use super::*;
     use crate::{
         limit::{PoolAmounts, PoolId},
+        spec_cfg,
         test_utils::MemoryDatabase,
         MegaSpecId,
     };
     use alloy_primitives::{address, U256};
     use revm::{
+        context::CfgEnv,
         context_interface::journaled_state::account::JournaledAccountTr,
         interpreter::{
             gas::WithheldCrossing, CallInput, CallInputs, CallValue, CreateInputs, CreateScheme,
-            SharedMemory,
+            Gas, SharedMemory,
         },
     };
     use std::boxed::Box;
@@ -1870,14 +1909,17 @@ mod tests {
     }
 
     /// The answer to a call whose price crosses the limit is out of gas without running, with its
-    /// forward untouched and the crossing recorded with the forward.
+    /// forward untouched, the crossing recorded with the forward, and the give-back mode of the
+    /// configuration it is built under.
     #[test]
     fn test_a_crossing_answer_is_marked_with_its_forward() {
+        let ctx = MegaContext::new(MemoryDatabase::default(), MegaSpecId::SATIN);
         for forward in [1, 100_000, 3_000_000] {
             let input = static_call(crate::kzg_point_evaluation::ADDRESS, &[0; 32], forward);
-            let FrameResult::Call(answer) = crossing_answer(&input.frame_input) else {
+            let FrameResult::Call(answer) = crossing_answer(ctx.cfg(), &input.frame_input) else {
                 panic!("a call's answer")
             };
+            assert!(answer.result.gas.reservoir_only_give_backs(), "Satin's give-backs");
             assert!(!answer.was_precompile_called, "answered without running");
             assert_eq!(answer.result.result, InstructionResult::PrecompileOOG);
             assert_eq!(answer.result.gas.limit(), forward);
@@ -1930,10 +1972,11 @@ mod tests {
     fn test_an_answer_switches_access_off_only_when_it_does_not_cross() {
         use crate::{constants::BLOCK_ENV_ACCESS_COMPUTE_GAS, system::Answer};
         const FORWARD: u64 = 90_000_000;
+        let cfg = spec_cfg(CfgEnv::new_with_spec(MegaSpecId::SATIN));
         let answer = |spent: u64, disables_access_from| {
             let input = static_call(TARGET, &[], FORWARD).frame_input;
             let mut result =
-                synthetic_frame_result(&input, InstructionResult::Return, Bytes::new());
+                synthetic_frame_result(&cfg, &input, InstructionResult::Return, Bytes::new());
             assert!(result.gas_mut().record_regular_cost(spent));
             Answer { result, disables_access_from }
         };
@@ -1980,7 +2023,7 @@ mod tests {
             let start = mark(ctx.journal_mut());
             // What the answer wrote: a bump of the recipient's nonce.
             let _ = ctx.journal_mut().load_account_mut(TARGET).unwrap().data.bump_nonce();
-            let answer = synthetic_frame_result(&value_call(), result, Bytes::new());
+            let answer = synthetic_frame_result(ctx.cfg(), &value_call(), result, Bytes::new());
             take_back_a_stopped_answer(&mut ctx, start, succeeded, &answer);
             let nonce = ctx.journal_ref().state.get(&TARGET).map_or(0, |a| a.info.nonce);
             assert_eq!(nonce, u64::from(!taken_back), "{case}");

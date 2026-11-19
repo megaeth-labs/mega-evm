@@ -1,30 +1,44 @@
 name: Randomized tests, long mode
 
 # Runs the randomized tests of the Satin engine (crates/mega-evm/tests/fuzz) in their long mode:
-# many more cases per property than the bounded run every pull request makes, drawn from a seed
-# this run chooses (or the one given), in a debug build, where every debug assertion runs, and in
-# a release build, where none does. A failure prints the seed and the case count that reproduce it
-# and the minimal case it shrank to; the job's log is the record.
+# many more cases per property than the bounded run every pull request makes in the `test` checks,
+# drawn from a seed this run chooses (or the one given), in a debug build, where every debug
+# assertion runs, and in a release build, where none does. A failure prints the seed and the case
+# count that reproduce it and the minimal case it shrank to; the job's log is the record.
 #
 # It also runs the byte-price record at two prices and compares them: where a case followed the
 # same path at both, its state gas must not fall as the cost per state byte rises, nor its history
 # gas as the cost per history byte rises (scripts/fuzz_price_monotonic.py).
 #
-# Dispatch only: a scheduled trigger fires on the default branch alone, which the Satin
-# integration branch is not. Dispatch it from the branch to test, with a seed to reproduce a run
-# or none to draw a new one.
+# Every pull request runs all of it, and so does a dispatch. There is no schedule and no dispatch
+# alone: GitHub fires a scheduled workflow only from the default branch, and accepts a dispatch
+# only for a workflow the default branch has, which has no such workflow, so a run triggered either
+# way ran nowhere on the Satin integration branch. There is no path filter on the trigger, which
+# would leave a required check pending; a pull request that changes documentation alone is skipped
+# by the `changes` job instead (every changed file under docs/ or a Markdown file outside crates/
+# and bin/, scripts/pull_request_needs_ci.sh), and any other change runs everything. The `long
+# mode` job always runs and reports: it passes when both jobs below passed, or when the run was
+# skipped.
 #
-# The two inputs, and how they meet the long mode:
+# The debug and release runs are separate jobs of a matrix and run in parallel, beside the price
+# comparison. Timeouts are projections from local runs scaled by 3.7, the ratio of a GitHub runner
+# to the local machine seen on the byte-price grid: the debug run takes 400 s locally, about 25
+# minutes there, plus a cold build; the release run 120 s, about 8 minutes; the price comparison is
+# under a minute locally after a release build, a few minutes there. The 60-minute limit on the
+# properties is about twice the debug projection; none is measured on a runner at this seed.
 #
-# - `cases` empty (the default): each property runs fifty times its own bounded count, 6,400 to
-#   38,400 cases, which is what `MEGA_FUZZ_LONG=1` means on its own.
+# The two inputs of a dispatch, and how they meet the long mode:
+#
+# - `cases` empty (the default, and always on a pull request): each property runs fifty times its
+#   own bounded count, 6,400 to 38,400 cases, which is what `MEGA_FUZZ_LONG=1` means on its own.
 # - `cases` set: every property runs exactly that many cases. The count replaces the bounded count
 #   and the multiplier alike; it is not multiplied by fifty.
-# - `seed` empty: the run draws one seed from the clock, prints it, and uses it for every property
-#   and both profiles, so one number reproduces the run.
+# - `seed` empty (the default, and always on a pull request): the run draws one seed from the
+#   clock, prints it in the step summary, and uses it for every property and every job, so one
+#   number reproduces the run. The price comparison needs both of its records from one seed.
 #
 # The runner itself reads an empty `MEGA_FUZZ_CASES` or `MEGA_FUZZ_SEED` as unset, so an input left
-# empty cannot fail the run.
+# empty (or absent, as on a pull request) cannot fail the run.
 
 on:
   workflow_dispatch:
@@ -37,13 +51,54 @@ on:
         description: "The seed to draw the cases from; empty draws one from the clock"
         required: false
         default: ""
+  pull_request:
 
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  changes:
+    name: changes that need the run
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      run: ${{ steps.diff.outputs.run }}
+    steps:
+      - uses: actions/checkout@v4
+        if: github.event_name == 'pull_request'
+        with:
+          # The merge commit and its parents; the first parent is the base it merges into.
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Skip a pull request that changes documentation alone
+        id: diff
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" != pull_request ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! git rev-parse --verify -q 'HEAD^2' > /dev/null; then
+            echo "::warning::HEAD is not the pull request's merge commit; running"
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # The allowlist is in the script: only docs/ and Markdown outside crates/ and bin/ skip.
+          run=$(scripts/pull_request_needs_ci.sh HEAD^1 HEAD)
+          echo "runs: $run"
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+
   seed:
     name: the run's seed
+    needs: changes
+    if: needs.changes.outputs.run == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
@@ -63,7 +118,8 @@ jobs:
     name: long mode (${{ matrix.profile }})
     needs: seed
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    # See the header: about 25 minutes projected for debug, 8 for release.
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -96,7 +152,8 @@ jobs:
     name: state and history gas along the byte prices
     needs: seed
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    # See the header: the three runs take under a minute locally after the build.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
         with:
@@ -124,3 +181,32 @@ jobs:
 
       - name: Compare the records
         run: python3 scripts/fuzz_price_monotonic.py target/price-low.txt target/price-high.txt
+
+  gate:
+    name: long mode
+    needs: [changes, long, price-monotonicity]
+    # Always, a cancelled run included: a required check that is skipped counts as passed.
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Report the outcome
+        env:
+          CHANGES: ${{ needs.changes.result }}
+          RUN: ${{ needs.changes.outputs.run }}
+          LONG: ${{ needs.long.result }}
+          PRICE: ${{ needs.price-monotonicity.result }}
+        run: |
+          if [ "$CHANGES" != success ]; then
+            echo "::error::could not tell whether the run was needed: the changes job ended $CHANGES"
+            exit 1
+          fi
+          if [ "$RUN" != true ]; then
+            echo "only documentation changed; the run was skipped"
+            exit 0
+          fi
+          if [ "$LONG" != success ] || [ "$PRICE" != success ]; then
+            echo "::error::the run ended: long mode $LONG, price comparison $PRICE"
+            exit 1
+          fi
+          echo "passed"

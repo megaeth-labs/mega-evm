@@ -604,11 +604,19 @@ pub(crate) fn materialize_dumped_code<DB: DatabaseRef>(
 
 /// Whether an account an RPC endpoint reported is one that does not exist.
 ///
-/// JSON-RPC cannot say "no such account": `eth_getBalance`, `eth_getTransactionCount` and
-/// `eth_getCode` answer zeros for it. A node's database answers `None`, and the difference is
-/// observable (EIP-7702 refunds an authorization whose authority already exists), so an all-zero
-/// answer is read as absent. An existing account that is empty cannot occur on a chain that has
-/// had EIP-161 from genesis, as every `MegaETH` chain has.
+/// JSON-RPC cannot express account non-existence: `eth_getBalance`, `eth_getTransactionCount` and
+/// `eth_getCode` all answer zeros for an account that was never created, so reading the answer as
+/// it stands materializes an *existing* empty account. That flips every consumer of existence,
+/// most visibly the EIP-7702 refund per authorization: a brand-new authority would be judged
+/// already in the trie and the replay would refund 12,500 gas per authorization that the chain did
+/// not.
+///
+/// Reading an all-zero answer as absent is safe because an existing-but-empty account cannot occur
+/// on `MegaETH`: EIP-161 removes empty accounts on touch and forbids creating them, every chain
+/// this tool replays has had it from genesis, and the genesis allocations carry a balance or code.
+/// The one shape this cannot tell apart, an account with zero balance, nonce and code that still
+/// holds storage, cannot exist after EIP-161 either, since storage is reachable only through code
+/// and a contract has code or a nonce.
 fn rpc_reads_as_absent(info: &AccountInfo) -> bool {
     info.balance.is_zero() && info.nonce == 0 && info.code_hash == revm::primitives::KECCAK_EMPTY
 }

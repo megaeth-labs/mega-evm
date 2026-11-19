@@ -301,9 +301,11 @@ pub(crate) fn assert_caught_with_stipends(
 /// some number of times, or forever.
 ///
 /// The stop lands on the first charge the limit leaves no room for: that charge is not made, and
-/// the stopped frame keeps what it had before it ([`left`](Self::left)).
+/// the stopped frame keeps what it had before it ([`left`](Self::left)). A part can carry a state
+/// charge's legacy share each round makes once its regular charges are paid, which regular gas pays
+/// and which is no compute ([`shares_before_crossing`](Self::shares_before_crossing)).
 #[derive(Clone, Debug, Default)]
-pub(crate) struct Charges(Vec<(Vec<u64>, Option<u64>)>);
+pub(crate) struct Charges(Vec<(Vec<u64>, Option<u64>, u64)>);
 
 impl Charges {
     /// `charges`, once.
@@ -312,14 +314,20 @@ impl Charges {
     }
 
     /// `charges`, `times` times over.
-    pub(crate) fn repeat(mut self, charges: &[u64], times: u64) -> Self {
-        self.0.push((charges.to_vec(), Some(times)));
+    pub(crate) fn repeat(self, charges: &[u64], times: u64) -> Self {
+        self.repeat_with_share(charges, times, 0)
+    }
+
+    /// `charges`, `times` times over, each round making a state charge whose legacy share is
+    /// `share` once its regular charges are paid.
+    fn repeat_with_share(mut self, charges: &[u64], times: u64, share: u64) -> Self {
+        self.0.push((charges.to_vec(), Some(times), share));
         self
     }
 
     /// `charges`, over and over.
     pub(crate) fn forever(mut self, charges: &[u64]) -> Self {
-        self.0.push((charges.to_vec(), None));
+        self.0.push((charges.to_vec(), None, 0));
         self
     }
 
@@ -327,7 +335,7 @@ impl Charges {
     pub(crate) fn total(&self) -> u64 {
         self.0
             .iter()
-            .map(|(charges, times)| {
+            .map(|(charges, times, _)| {
                 charges.iter().sum::<u64>() * times.expect("a program that ends")
             })
             .sum()
@@ -340,8 +348,21 @@ impl Charges {
     }
 
     /// [`left`](Self::left), or `None` when the program ends within `allowance`.
-    pub(crate) fn crossing(&self, mut allowance: u64) -> Option<u64> {
-        for (charges, times) in &self.0 {
+    pub(crate) fn crossing(&self, allowance: u64) -> Option<u64> {
+        self.crossing_and_shares(allowance).0
+    }
+
+    /// The legacy shares of the state charges the program made before the charge `allowance`
+    /// cannot pay: what regular gas paid of them, which the stop's rollback gives back into the
+    /// reservoir.
+    pub(crate) fn shares_before_crossing(&self, allowance: u64) -> u64 {
+        self.crossing_and_shares(allowance).1
+    }
+
+    /// [`crossing`](Self::crossing), with the legacy shares of the rounds made before it.
+    fn crossing_and_shares(&self, mut allowance: u64) -> (Option<u64>, u64) {
+        let mut shares = 0;
+        for (charges, times, share) in &self.0 {
             let round: u64 = charges.iter().sum();
             if round == 0 {
                 continue;
@@ -349,18 +370,20 @@ impl Charges {
             let rounds = allowance / round;
             if times.is_some_and(|times| rounds >= times) {
                 allowance -= round * times.unwrap();
+                shares += share * times.unwrap();
                 continue;
             }
             allowance -= round * rounds;
+            shares += share * rounds;
             for charge in charges {
                 if *charge > allowance {
-                    return Some(allowance);
+                    return (Some(allowance), shares);
                 }
                 allowance -= charge;
             }
             unreachable!("a round the allowance cannot pay whole has a charge it cannot pay");
         }
-        None
+        (None, shares)
     }
 
     /// The charges of [`spin`]'s loop in a frame whose memory holds `words` words: `JUMPDEST`, the
@@ -403,9 +426,14 @@ impl Charges {
 
     /// The charges of `count` writes of a fresh, cold slot, each pushing its value and its slot:
     /// two pushes, then `SSTORE`'s static gas and its dynamic gas, the cold access and the set.
-    /// Their state and history gas are not compute.
+    /// Their state and history gas are not compute, the slot's legacy share, which regular gas
+    /// pays, included.
     pub(crate) fn fresh_writes(self, count: u64) -> Self {
-        self.repeat(&[3, 3, sstore_static(), fresh_sstore()], count)
+        self.repeat_with_share(
+            &[3, 3, sstore_static(), fresh_sstore()],
+            count,
+            crate::common::slot_share(),
+        )
     }
 }
 
@@ -610,8 +638,9 @@ fn reads() -> Vec<Read> {
                 )
             },
             access: VolatileDataAccess::ORACLE,
-            // The Oracle's `POP`, then its caller's.
-            after: &[2, 2],
+            // The `SLOAD`'s cold access, which the Oracle's read is committed before, as one
+            // charge; then the Oracle's `POP`, then its caller's.
+            after: &[2_100, 2, 2],
         },
     ]
 }
@@ -837,7 +866,8 @@ fn test_the_history_contract_reads_the_block_number_and_the_beacon_roots_contrac
 }
 
 /// A read answers with the block's own field: the Host marks the read and serves the value it
-/// loaded, whether or not the read caps anything.
+/// loaded, whether or not the read caps anything. `SLOTNUM` is the exception: it is marked like the
+/// others but pushes zero, whatever slot number the block carries.
 #[test]
 fn test_a_read_answers_with_the_blocks_field() {
     let reads = [
@@ -848,7 +878,8 @@ fn test_a_read_answers_with_the_blocks_field() {
         (GASLIMIT, U256::from(10_000_000_000_u64)),
         (BASEFEE, U256::from(1)),
         (BLOBBASEFEE, U256::from(3)),
-        (SLOTNUM, U256::from(9)),
+        // The block carries a slot number of 9; the engine pushes zero whatever it is.
+        (SLOTNUM, U256::ZERO),
     ];
     let mut code = BytecodeBuilder::default();
     for (slot, (opcode, _)) in reads.iter().enumerate() {
@@ -943,8 +974,9 @@ fn test_the_most_restrictive_limit_binds_whatever_the_order() {
                     2,
                 ])
             } else {
-                // The Oracle's `POP` and its caller's, the work, then `TIMESTAMP` and its `POP`.
-                Charges::default().then(&[2, 2]).work(300, 0).then(&[2, 2])
+                // The `SLOAD`'s cold access, which the Oracle's read comes before, the Oracle's
+                // `POP` and its caller's, the work, then `TIMESTAMP` and its `POP`.
+                Charges::default().then(&[2_100, 2, 2]).work(300, 0).then(&[2, 2])
             };
             let limit = assert_stopped(&run, intrinsic, charges.spin(1_024).left(CAP));
             assert!(limit < CAP + 100_000, "the first read set the limit: {limit}");
@@ -982,8 +1014,9 @@ fn test_a_callers_limits_set_the_caps() {
             limits,
             spin(call(BytecodeBuilder::default(), CALL, ORACLE_CONTRACT_ADDRESS)),
         );
-        // The Oracle's `POP` and its caller's, then the loop.
-        let left = Charges::default().then(&[2, 2]).spin(0).left(2_000_000);
+        // The `SLOAD`'s cold access, which the Oracle's read comes before, the Oracle's `POP` and
+        // its caller's, then the loop.
+        let left = Charges::default().then(&[2_100, 2, 2]).spin(0).left(2_000_000);
         let limit = assert_stopped(&run, intrinsic, left);
         assert!((2_000_000..2_100_000).contains(&limit), "the Oracle's own cap: {limit}");
         assert_eq!(run.accessed, VolatileDataAccess::ORACLE);
@@ -1414,17 +1447,13 @@ fn test_writes_after_a_read_stop_at_the_cap_or_run_out_of_their_own_gas() {
 
 /* ---------- what is not marked ---------- */
 
-/// A read that does not happen marks nothing, and neither does one whose opcode fails after it:
-/// the frame halts, and the caller it halts back into computes on uncapped.
+/// A read whose opcode fails after it marks nothing: the frame halts, and the caller it halts back
+/// into computes on uncapped. A value transfer to the empty beneficiary loads it, then cannot pay
+/// the transfer, and the `CALL` fails.
 ///
-/// - The Oracle's slot is cold and the frame cannot pay the cold access, so the Host does not load
-///   it. (The block beneficiary is always warm, so its load cannot be skipped this way.)
-/// - A value transfer to the empty beneficiary loads it, then cannot pay the transfer, and the
-///   `CALL` fails.
+/// An Oracle read is the exception ([`test_an_unpaid_oracle_read_caps_the_transaction`]).
 #[test]
 fn test_a_failed_load_caps_nothing() {
-    // The push and SLOAD's static 100 leave less than the 2,000 more a cold slot costs.
-    let oracle = BytecodeBuilder::default().append_many([PUSH0, SLOAD, STOP]).build();
     // The child's pushes and the warm access leave less than the value transfer.
     let child = BytecodeBuilder::default()
         .append_many([PUSH0, PUSH0, PUSH0, PUSH0])
@@ -1433,7 +1462,7 @@ fn test_a_failed_load_caps_nothing() {
         .append_many([PUSH0, CALL, STOP])
         .build();
     let transfer = u32::try_from(value_transfer()).expect("the transfer's price fits a PUSH4");
-    for (callee, gas) in [(ORACLE_CONTRACT_ADDRESS, 2_000_u32), (CHILD, transfer)] {
+    for (callee, gas) in [(CHILD, transfer)] {
         let parent = BytecodeBuilder::default()
             .append_many([PUSH0, PUSH0, PUSH0, PUSH0, PUSH0])
             .push_address(callee)
@@ -1447,7 +1476,6 @@ fn test_a_failed_load_caps_nothing() {
             let db = MemoryDatabase::default()
                 .account_balance(CHILD, U256::from(10))
                 .account_code(CONTRACT, parent.clone())
-                .account_code(ORACLE_CONTRACT_ADDRESS, oracle.clone())
                 .account_code(CHILD, child.clone());
             let run = execute(db, tx(CALLER, CONTRACT, gas_limit));
             assert!(run.outcome.result.is_success(), "{callee}: {:?}", run.outcome.result);
@@ -1460,6 +1488,41 @@ fn test_a_failed_load_caps_nothing() {
             assert_eq!(run.limit, None, "{callee}");
             assert_eq!(run.accessed, VolatileDataAccess::empty(), "{callee}");
         }
+    }
+}
+
+/// An Oracle read is made before its cold access is charged, so a frame that cannot pay the
+/// access has read the slot and marked the read all the same: the Oracle's frame, forwarded 2,000
+/// gas, reads and then runs out of gas, and the caller it halts back into is held to the limit
+/// the read set, and stopped by the work it does past the cap.
+#[test]
+fn test_an_unpaid_oracle_read_caps_the_transaction() {
+    // The push leaves the `SLOAD` 1,998, less than the 2,100 of its cold access.
+    let oracle = BytecodeBuilder::default().append_many([PUSH0, SLOAD, STOP]).build();
+    let parent = BytecodeBuilder::default()
+        .append_many([PUSH0, PUSH0, PUSH0, PUSH0, PUSH0])
+        .push_address(ORACLE_CONTRACT_ADDRESS)
+        .push_number(2_000_u16)
+        .append_many([CALL, POP]);
+    // More compute than the cap.
+    let parent = work(parent, 7_000).stop().build();
+    for gas_limit in TIERS {
+        let db = MemoryDatabase::default()
+            .account_code(CONTRACT, parent.clone())
+            .account_code(ORACLE_CONTRACT_ADDRESS, oracle.clone());
+        let run = execute(db, tx(CALLER, CONTRACT, gas_limit));
+        assert_eq!(run.accessed, VolatileDataAccess::ORACLE, "the read is marked");
+        let limit = run.limit.expect("the read set a limit");
+        assert!((CAP..CAP + 10_000).contains(&limit), "set at the read: {limit}");
+        assert!(
+            matches!(
+                run.outcome.limit_exceeded,
+                Some(LimitCheck::ExceedsLimit { kind: LimitKind::ComputeGas, .. })
+            ),
+            "the caller's work is stopped: {:?}",
+            run.outcome.result
+        );
+        assert_eq!(run.outcome.oracle_reads, [OracleRead { slot: U256::ZERO, answer: None }]);
     }
 }
 
@@ -1542,52 +1605,84 @@ impl<DB: Database> Inspector<MegaContext<DB>, EthInterpreter> for Calls {
     }
 }
 
-/// While volatile-data access is off, every read is refused: the frame reverts with
-/// `VolatileDataAccessDisabled(accessType)`, having paid the static gas of what ran and nothing
-/// more — not a cold access, not a copy's memory, not a call's value transfer — and the refused
-/// read caps nothing.
+/// While volatile-data access is off, every read is refused before it charges anything: the frame
+/// reverts with `VolatileDataAccessDisabled(accessType)` on the gas it held when it reached the
+/// opcode, having paid the static gas of what ran before it and nothing of the refused opcode —
+/// not its static gas, not a cold access, not a copy's memory, not a call's value transfer — and
+/// the refused read caps nothing. A frame that reaches the opcode with less gas than its static
+/// gas is refused all the same, rather than running out of gas.
+///
+/// An opcode volatile whatever its operands is refused before it reads them, so a `BLOCKHASH` on
+/// an empty stack is refused rather than halting on the underflow; one volatile for the account
+/// or the storage its operands or its frame name is refused once its operands are on the stack,
+/// before its body checks anything — a large copy, a call's memory, a value transfer it could not
+/// fund — and so is an `SLOAD` in the Oracle's own frame. A call whose target is an EIP-7702
+/// delegator of the beneficiary is not among them: it is refused where it loads the delegate,
+/// after its own steps.
 #[test]
-fn test_a_refused_read_reverts_the_frame_and_charges_its_static_gas() {
-    // (code, the static gas of everything in it, the refused kind)
-    let cases: Vec<(&str, Bytes, u64, VolatileDataAccess)> = vec![
+fn test_a_refused_read_reverts_the_frame_and_charges_nothing() {
+    // Pushes the operands of a call of `to` through `scheme`, carrying `value` when the scheme
+    // takes one, with an input of 1 MiB, an output of nothing and 1,000 gas.
+    let call_with_memory = |scheme: u8, value: u8, to: Address| {
+        let code =
+            BytecodeBuilder::default().append_many([PUSH0, PUSH0]).push_number(0x10_0000_u32);
+        let code = code.append(PUSH0);
+        let code = if matches!(scheme, CALL | CALLCODE) { code.push_number(value) } else { code };
+        code.push_address(to).push_number(1_000_u16).append(scheme).build()
+    };
+    // (name, the frame that reads, its code, the static gas of what runs before the refused
+    // opcode, the refused kind)
+    let cases: Vec<(&str, Address, Bytes, u64, VolatileDataAccess)> = vec![
         (
             "TIMESTAMP",
+            CHILD,
             BytecodeBuilder::default().append(TIMESTAMP).build(),
-            2,
+            0,
             VolatileDataAccess::TIMESTAMP,
         ),
         (
             "SLOTNUM",
+            CHILD,
             BytecodeBuilder::default().append(SLOTNUM).build(),
-            2,
+            0,
             VolatileDataAccess::SLOT_NUM,
         ),
         (
             "BLOCKHASH",
+            CHILD,
             BytecodeBuilder::default().push_number(299_u16).append(BLOCKHASH).build(),
-            3 + 20,
+            3,
+            VolatileDataAccess::BLOCK_HASH,
+        ),
+        (
+            "BLOCKHASH on an empty stack",
+            CHILD,
+            BytecodeBuilder::default().append(BLOCKHASH).build(),
+            0,
             VolatileDataAccess::BLOCK_HASH,
         ),
         (
             "BALANCE",
+            CHILD,
             on_beneficiary(BytecodeBuilder::default(), BALANCE).build(),
-            3 + 100,
+            3,
             VolatileDataAccess::BENEFICIARY_BALANCE,
         ),
         (
-            "EXTCODECOPY",
+            "EXTCODECOPY of 1 MiB",
+            CHILD,
             BytecodeBuilder::default()
-                .push_number(1024_u16)
+                .push_number(0x10_0000_u32)
                 .append_many([PUSH0, PUSH0])
                 .push_address(BENEFICIARY)
                 .append(EXTCODECOPY)
                 .build(),
-            // `EXTCODECOPY`'s static gas is EIP-8038's two warm reads, the account and its code.
-            3 + 2 + 2 + 3 + 200,
+            3 + 2 + 2 + 3,
             VolatileDataAccess::BENEFICIARY_BALANCE,
         ),
         (
             "CALL with value",
+            CHILD,
             BytecodeBuilder::default()
                 .push_number(64_u8)
                 .append_many([PUSH0, PUSH0, PUSH0])
@@ -1596,48 +1691,84 @@ fn test_a_refused_read_reverts_the_frame_and_charges_its_static_gas() {
                 .append(GAS)
                 .append(CALL)
                 .build(),
-            3 + 2 + 2 + 2 + 3 + 3 + 2 + 100,
+            3 + 2 + 2 + 2 + 3 + 3 + 2,
+            VolatileDataAccess::BENEFICIARY_BALANCE,
+        ),
+        (
+            "CALL of the beneficiary, with a value it cannot fund",
+            CHILD,
+            call_with_memory(CALL, 200, BENEFICIARY),
+            2 + 2 + 3 + 2 + 3 + 3 + 3,
+            VolatileDataAccess::BENEFICIARY_BALANCE,
+        ),
+        (
+            "STATICCALL of the beneficiary",
+            CHILD,
+            call_with_memory(STATICCALL, 0, BENEFICIARY),
+            2 + 2 + 3 + 2 + 3 + 3,
             VolatileDataAccess::BENEFICIARY_BALANCE,
         ),
         (
             "SELFDESTRUCT",
+            CHILD,
             on_beneficiary(BytecodeBuilder::default(), SELFDESTRUCT).build(),
-            3 + 5_000,
+            3,
             VolatileDataAccess::BENEFICIARY_BALANCE,
         ),
         (
             "SELFBALANCE of the beneficiary's own frame",
+            BENEFICIARY,
             BytecodeBuilder::default().append(SELFBALANCE).build(),
-            5,
+            0,
             VolatileDataAccess::BENEFICIARY_BALANCE,
+        ),
+        (
+            "SLOAD in the Oracle's own frame",
+            ORACLE_CONTRACT_ADDRESS,
+            BytecodeBuilder::default().append_many([PUSH0, SLOAD]).build(),
+            2,
+            VolatileDataAccess::ORACLE,
         ),
     ];
     for gas_limit in TIERS {
-        for (name, code, static_gas, refused) in &cases {
-            // The beneficiary runs its own SELFBALANCE; every other read runs in the child.
-            let target = if name.starts_with("SELFBALANCE") { BENEFICIARY } else { CHILD };
-            let parent = call(BytecodeBuilder::default(), CALL, target).stop().build();
-            let db = MemoryDatabase::default()
-                .account_balance(CHILD, U256::from(10))
-                .account_code(CONTRACT, parent)
-                .account_code(target, code.clone());
-            let mut evm = MegaEvm::new(context(db).with_volatile_access_disabled_from(1))
-                .with_inspector(Calls::default());
-            let run = run_on(&mut evm, tx(CALLER, CONTRACT, gas_limit));
-            assert!(run.outcome.result.is_success(), "{name}: the caller resumes");
-            let record = &evm.inspector().calls[0];
-            assert_eq!(record.target, target);
-            assert_eq!(record.result, InstructionResult::Revert, "{name}");
-            assert_eq!(
-                record.output,
-                volatile_data_access_disabled_revert_data(*refused),
-                "{name}"
-            );
-            assert_eq!(record.spent, *static_gas, "{name}: the static gas of what ran");
-            // Only the calls a transaction to the beneficiary makes read it; the refusal did not.
-            if target == CHILD {
-                assert_eq!(run.accessed, VolatileDataAccess::empty(), "{name}");
-                assert_eq!(run.limit, None, "{name}");
+        for (name, target, code, before, refused) in &cases {
+            // The frame gets all the parent has, or one gas more than what runs before the refused
+            // opcode, which is less than the static gas of every opcode refused here.
+            for forward in [None, Some(before + 1)] {
+                let parent =
+                    BytecodeBuilder::default().append_many([PUSH0; 5]).push_address(*target);
+                let parent = match forward {
+                    Some(gas) => parent.push_number(gas),
+                    None => parent.append(GAS),
+                };
+                let parent = parent.append_many([CALL, POP]).stop().build();
+                let db = with_delegation(MemoryDatabase::default(), DELEGATOR, BENEFICIARY)
+                    .account_balance(CHILD, U256::from(10))
+                    .account_code(CONTRACT, parent)
+                    .account_code(*target, code.clone());
+                let mut evm = MegaEvm::new(context(db).with_volatile_access_disabled_from(1))
+                    .with_inspector(Calls::default());
+                let run = run_on(&mut evm, tx(CALLER, CONTRACT, gas_limit));
+                let case = format!("{name}, forwarding {forward:?}");
+                assert!(run.outcome.result.is_success(), "{case}: the caller resumes");
+                let record = &evm.inspector().calls[0];
+                assert_eq!(record.target, *target);
+                assert_eq!(record.result, InstructionResult::Revert, "{case}");
+                assert_eq!(
+                    record.output,
+                    volatile_data_access_disabled_revert_data(*refused),
+                    "{case}"
+                );
+                assert_eq!(
+                    record.spent, *before,
+                    "{case}: only what ran before the refused opcode"
+                );
+                // Only the calls a transaction to the beneficiary makes read it; the refusal did
+                // not.
+                if *target != BENEFICIARY {
+                    assert_eq!(run.accessed, VolatileDataAccess::empty(), "{case}");
+                    assert_eq!(run.limit, None, "{case}");
+                }
             }
         }
     }
@@ -1899,8 +2030,9 @@ fn test_gas_spilled_before_the_read_is_not_compute() {
     }
 }
 
-/// A slot restored to its original value refills the state gas it spilled onto regular gas; the
-/// spill here predates the read, and the refill must not give the frame compute past the cap.
+/// A slot restored to its original value gives back the state gas it spilled onto regular gas,
+/// into the reservoir alone under Satin's give-backs; the spill here predates the read, and the
+/// give-back must not give the frame compute past the cap.
 #[test]
 fn test_a_refill_after_the_read_does_not_lift_the_cap() {
     let code = BytecodeBuilder::default().sstore(U256::from(1), U256::from(1));
@@ -1918,9 +2050,9 @@ fn test_a_refill_after_the_read_does_not_lift_the_cap() {
 
 /// A slot written away from a non-zero original value and back takes its record back, and the
 /// history the record paid with it; there is no state gas to give back, since the write added no
-/// state. That history spilled onto regular gas before the read, and its refill — the
-/// completed-write hook's own, after revm's state refill — must not give the frame compute past the
-/// cap either.
+/// state. That history spilled onto regular gas before the read, and its give-back — the
+/// completed-write hook's own, after revm's state give-back, into the reservoir alone — must not
+/// give the frame compute past the cap either.
 #[test]
 fn test_a_history_refill_after_the_read_does_not_lift_the_cap() {
     // A record that costs nothing refills nothing.

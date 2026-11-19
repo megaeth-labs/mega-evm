@@ -13,7 +13,10 @@ use alloy_primitives::{address, Address, Bytes, TxKind, B256, U256};
 use alloy_sol_types::SolCall;
 use mega_evm::{
     system::{IOracle, ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE},
-    test_utils::{op_transaction, zero_fee_l1_block_info, BytecodeBuilder, MemoryDatabase},
+    test_utils::{
+        op_transaction, zero_fee_l1_block_info, BytecodeBuilder, GasInspector, MemoryDatabase,
+        MsgCallMeta,
+    },
     EvmTxRuntimeLimits, ExternalEnvs, LimitUsage, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
     MegaTransaction, MegaTransactionOutcome, TestExternalEnvs, TX_BODY_SIZE,
 };
@@ -42,6 +45,60 @@ fn deposit(data: Bytes, system: bool) -> MegaTransaction {
     OpTx(tx)
 }
 
+/// A mint too small for the creation's value makes no start record. The inspector must see the
+/// whole forward left after the intrinsic and account charges, before revm refuses the value.
+#[test]
+fn test_a_deposit_creation_with_insufficient_mint_pays_no_start_record() {
+    let db = MemoryDatabase::default().account_nonce(CALLER, 1);
+    let mut tx = deposit(Bytes::new(), false);
+    tx.0.base.kind = TxKind::Create;
+    tx.0.base.value = U256::from(8);
+    tx.0.deposit.mint = Some(7);
+    let gas_limit = 24_000 + crate::common::body_history(0) + account_state_gas() + 1_000_000;
+    tx.0.base.gas_limit = gas_limit;
+    let mut evm = MegaEvm::new(context(db)).with_inspector(GasInspector::default());
+
+    let outcome = evm.execute_transaction(tx).expect("the deposit is included");
+
+    let trace = evm.inspector().trace.as_ref().expect("the creation reaches its funds check");
+    let MsgCallMeta::Create(input) = &trace.borrow().meta else { panic!("a creation") };
+    assert_eq!(input.gas_limit(), 1_000_000, "an unfunded creation has no record to charge");
+    assert!(matches!(
+        outcome.result,
+        ExecutionResult::Halt { reason: MegaHaltReason::FailedDeposit, .. }
+    ));
+    assert_eq!((outcome.gas.regular, outcome.gas.state, outcome.gas.history), (gas_limit, 0, 0));
+    assert_eq!(outcome.gas.history_bytes, TX_BODY_SIZE);
+    assert_eq!(outcome.usage.write_records, 0);
+    assert_eq!(outcome.state[&CALLER].info.nonce, 2);
+    assert_eq!(outcome.state[&CALLER].info.balance, U256::from(7));
+}
+
+/// History leaves only one regular gas after the read. The next two-gas charge cannot be paid
+/// even without detention, so the deposit fails rather than returning a compute-limit stop.
+#[test]
+fn test_a_deposit_short_of_regular_gas_at_the_detention_edge_fails() {
+    let db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(10))
+        .account_code(CALLEE, Bytes::from_static(&[revm::bytecode::opcode::TIMESTAMP, POP]));
+    let mut tx = deposit(Bytes::new(), false);
+    let gas_limit = 15_000 + crate::common::body_history(0) + 3;
+    tx.0.base.gas_limit = gas_limit;
+    let limits = EvmTxRuntimeLimits::no_limits().with_block_env_access_compute_gas_limit(1);
+
+    let outcome = MegaEvm::new(context(db).with_tx_runtime_limits(limits))
+        .execute_transaction(tx)
+        .expect("the deposit is included");
+
+    assert!(matches!(
+        outcome.result,
+        ExecutionResult::Halt { reason: MegaHaltReason::FailedDeposit, .. }
+    ));
+    assert_eq!(outcome.limit_exceeded, None);
+    assert_eq!((outcome.gas.regular, outcome.gas.history), (gas_limit, 0));
+    assert_eq!(outcome.gas.history_bytes, TX_BODY_SIZE);
+}
+
 /// A system deposit whose body crosses the data-size limit is refused by the inherited rules,
 /// which refuse every system deposit under Regolith, and op-revm includes it as a failed deposit:
 /// the outcome reports the failure, no stop, and the body as what was kept.
@@ -64,6 +121,7 @@ fn test_a_system_deposit_over_the_limit_reports_the_failed_deposit() {
         outcome.result
     );
     assert_eq!(outcome.gas.gas_used, 100_000, "a failed deposit bills its gas limit");
+    assert_eq!(outcome.gas.history_bytes, body, "the body survives an early validation failure");
     assert_eq!(outcome.limit_exceeded, None, "the halt is what the deposit reports");
     assert_eq!(outcome.usage, LimitUsage { data_size: body, write_records: 0, state_growth: 0 });
     assert_eq!(outcome.state[&CALLER].info.nonce, 1, "a failed deposit bumps its sender's nonce");
@@ -107,6 +165,7 @@ fn test_a_deposit_whose_body_is_over_the_limit_is_a_failed_deposit() {
             outcome.result
         );
         assert_eq!(outcome.gas.gas_used, 100_000, "{case}: a failed deposit bills its gas limit");
+        assert_eq!(outcome.gas.history_bytes, body, "{case}: the body and calldata survive");
         assert_eq!(outcome.limit_exceeded, None, "{case}: the failure is what it reports");
         assert_eq!(
             outcome.usage,
@@ -140,7 +199,7 @@ const ABSENT: Address = address!("0000000000000000000000000000000000f00002");
 /// - a user deposit from an absent sender whose gas limit covers its intrinsic gas and all but one
 ///   gas of its caller's account, and one whose gas limit covers that account too.
 ///
-/// Rules: [S10.15], [S11], [S5], [S4], [S21.5], [S21.7], [S5.12]. Independence: constants — the
+/// Independence: constants — the
 /// intrinsic gas and the body are hand arithmetic from EIP-2780 and `TX_BODY_SIZE`; the caller
 /// account's state gas is the schedule's entry at the price in effect.
 #[test]
@@ -192,6 +251,7 @@ fn test_a_deposit_over_the_limit_fails_at_every_gas_limit() {
         );
         assert_eq!(outcome.limit_exceeded, None, "{row}: no stop is reported");
         assert_eq!(outcome.gas.gas_used, gas_limit, "{row}: the whole gas limit");
+        assert_eq!(outcome.gas.history_bytes, TX_BODY_SIZE, "{row}: the body survives");
         assert_eq!(
             (outcome.gas.regular, outcome.gas.state, outcome.gas.history),
             (gas_limit, 0, 0),
@@ -320,6 +380,8 @@ fn test_a_failed_deposit_keeps_the_hints_it_forwarded() {
     assert_eq!(hints, 1, "the hint reached the oracle service before the halt");
     assert_eq!(outcome.limit_exceeded, None);
     assert_eq!(outcome.usage, kept, "the body and the forwarded hint stay counted");
+    assert_eq!(outcome.gas.history, 0);
+    assert_eq!(outcome.gas.history_bytes, TX_BODY_SIZE, "the hint is not history");
 
     let ordinary = call(CALLER, CALLEE, U256::ZERO, 1_000_000);
     assert_eq!(

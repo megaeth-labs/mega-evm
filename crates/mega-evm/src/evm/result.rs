@@ -20,7 +20,8 @@
 //! gas is what its own gas paid for.
 //!
 //! The byte count is the history the schedule prices, not the chain's physical growth: a
-//! transaction exempt from history gas reports none of the bytes it carries, a body counts its
+//! system call reports none, a failed deposit reports its body despite paying no history gas,
+//! a body counts its
 //! five fixed write records even when fewer fee accounts are written, and the EIP-7708 transfer
 //! logs of its value movements, which nothing prices, are not in it.
 
@@ -100,11 +101,11 @@ pub struct MegaGasUsage {
     /// them: nothing prices them.
     ///
     /// At the cost per history byte they are worth [`history`](Self::history) plus what the
-    /// history allowances of its value transfers paid, which no gas ledger carries.
+    /// history allowances of its value transfers paid, which no gas ledger carries. A failed
+    /// deposit is the exception: it reports its body and calldata here but no history gas.
     ///
     /// They are the history bytes the schedule prices, not the chain's physical growth: a
-    /// transaction exempt from history gas (a deposit, a transaction the protocol sent, a system
-    /// call) reports none, and the body counts its five fixed write records — the sender's
+    /// system call reports none, and the body counts its five fixed write records — the sender's
     /// account and the four accounts fees are credited to — even when fewer fee accounts are
     /// written.
     pub history_bytes: u64,

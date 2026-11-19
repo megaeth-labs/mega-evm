@@ -198,10 +198,12 @@ fn test_gas_answers_the_whole_regular_gas_after_a_read() {
 
 /// A callee started after the caller's read with an explicit gas stays bounded by it: its state
 /// writes draw the reservoir the transaction has, not the caller's withheld gas. The bound pays
-/// the compute of three fresh slots and what one of them spills: below the execution cap, where
-/// every slot's state gas and history spill onto it, the callee runs out of gas before its third
-/// write completes — at the spec's prices already on its second write's state gas, which is more
-/// than one write's compute; above it the reservoir pays all three — each as without the read.
+/// the compute and the legacy share of three fresh slots, and what one of them spills past its
+/// share: below the execution cap, where every slot's state gas and history spill onto it, the
+/// callee runs out of gas before its third write completes — at the spec's prices already on its
+/// second write's state gas, which is more than one write's compute — unless a write spills no
+/// more than its share; above it the reservoir pays all three but their shares — each as without
+/// the read.
 #[test]
 fn test_a_bounded_callee_writes_what_it_writes_without_the_read() {
     let child = BytecodeBuilder::default()
@@ -210,9 +212,11 @@ fn test_a_bounded_callee_writes_what_it_writes_without_the_read() {
         .sstore(U256::from(3), U256::from(1))
         .stop()
         .build();
-    let bound = u32::try_from(3 * fresh_write() + fresh_write_spill()).expect("a bound in a push");
-    // Where a write spills nothing, the bound pays all three below the cap too.
-    let below = u64::from(fresh_write_spill() == 0);
+    let share = crate::common::slot_share();
+    let bound = u32::try_from(3 * (fresh_write() + share) + fresh_write_spill() - share)
+        .expect("a bound in a push");
+    // Where a write spills no more than its share, the bound pays all three below the cap too.
+    let below = u64::from(fresh_write_spill() == share);
     for (gas_limit, status) in [(BELOW, below), (ABOVE, 1)] {
         let (detained, plain) = with_and_without_read(|first| {
             let parent =
@@ -264,7 +268,7 @@ fn test_the_sstore_sentry_reads_the_whole_regular_gas() {
 /// The sender pays what the receipt reports at the gas price, and the beneficiary is credited it;
 /// the same transaction without the read settles the same way.
 ///
-/// Rules: [S12.34], [S12.42], [S12]. Independence: independent — every charge is the opcode's
+/// Independence: independent — every charge is the opcode's
 /// price, the refund and its cap are EIP-3529's, the intrinsic gas is EIP-2780's, and the body's
 /// history is `TX_BODY_SIZE` at the cost per history byte in effect.
 #[test]
@@ -619,7 +623,7 @@ const CALL_INTRINSIC: u64 = 12_000 + 3_000;
 /// charge of 5,000 fails with 4,999 left. Each burns those, and the caller completes under a cap of
 /// 200,000 as without the read: counted as compute, the fifty burns would pass the cap.
 ///
-/// Rules: [S12.18], [S12]. Independence: independent — every charge is the opcode's price, the
+/// Independence: independent — every charge is the opcode's price, the
 /// burns are the forward less the `PUSH20`, and the intrinsic gas is EIP-2780's.
 #[test]
 fn test_a_halt_on_a_static_charge_burns_what_its_frame_had() {
@@ -696,7 +700,7 @@ struct StaticHalts {
 /// Each case runs below the execution cap and above it, completes as without the read, and is
 /// billed its compute and its burns.
 ///
-/// Rules: [S12.18], [S12.24], [S12.38], [S11], [S12]. Independence: independent — every charge is
+/// Independence: independent — every charge is
 /// the opcode's price, the limit is the read's compute plus the cap, and the intrinsic gas is
 /// EIP-2780's.
 #[test]
@@ -1539,21 +1543,68 @@ fn test_a_priced_and_an_unpriced_precompile_part_as_a_failed_call_and_a_crossing
 /// default cap the allowance pays the price, and the call fails on its input as without the read.
 #[test]
 fn test_a_precompile_whose_input_fails_past_its_gas_check_stops_past_the_allowance() {
-    let input = vec![0_u8; 3 * 192 + 1];
+    assert_invalid_precompile_is_held_from_its_price(EC_PAIRING, &[0_u8; 3 * 192 + 1], 100_000);
+}
+
+#[test]
+fn test_modexp_over_bound_input_crosses_at_its_formula_price() {
+    let input: Vec<u8> = [U256::from(1_025), U256::from(1), U256::from(1)]
+        .into_iter()
+        .flat_map(|len| len.to_be_bytes::<32>())
+        .collect();
+    // Its 33,282-gas formula price exceeds this cap; the old 500-gas quote did not.
+    assert_invalid_precompile_is_held_from_its_price(MODEXP, &input, 16_641);
+}
+
+#[test]
+fn test_modexp_over_bound_input_returns_its_forward_at_the_default_compute_cap() {
+    let input: Vec<u8> = [U256::from(1_025), U256::from(80), U256::from(1)]
+        .into_iter()
+        .flat_map(|len| len.to_be_bytes::<32>())
+        .collect();
+    // EIP-7883: 2 * 129^2 * (16 * (80 - 32)) = 25,560,576, above the default cap.
+    let forward = 30_000_000;
+    for gas_limit in TIERS {
+        let run = |first| {
+            let db = MemoryDatabase::default()
+                .account_code(CONTRACT, calls_precompile(first, MODEXP, Some(forward)));
+            let mut evm = MegaEvm::new(context(db)).with_inspector(Calls::default());
+            let run = run_on(&mut evm, tx_with(&input, gas_limit));
+            let call = evm.inspector().calls.iter().find(|call| call.target == MODEXP).unwrap();
+            (run, call.spent, call.precompile_ran)
+        };
+        let ((detained, spent, ran), (plain, plain_spent, plain_ran)) =
+            (run(TIMESTAMP), run(PUSH0));
+        let allowance = CAP - charges_to_the_precompile(input.len(), Some(forward)).total();
+        assert_caught(
+            &detained,
+            intrinsic_with(&input, gas_limit),
+            allowance,
+            &failed_status_store(),
+        );
+        assert_eq!(spent, 0, "the crossing returns the whole forward");
+        assert!(!ran && plain_ran);
+        assert_eq!(plain_spent, u64::from(forward), "the size failure burns the forward");
+        assert!(detained.outcome.gas.regular < plain.outcome.gas.regular);
+    }
+}
+
+/// An input rejected after its gas check crosses when its price lies between allowance and forward.
+fn assert_invalid_precompile_is_held_from_its_price(to: Address, input: &[u8], cap: u64) {
     for gas_limit in TIERS {
         let run = |first, cap| {
             let limits = EvmTxRuntimeLimits::default().with_block_env_access_compute_gas_limit(cap);
-            let code = calls_precompile(first, EC_PAIRING, None);
+            let code = calls_precompile(first, to, None);
             let db = MemoryDatabase::default().account_code(CONTRACT, code);
             let mut evm = MegaEvm::new(context(db).with_tx_runtime_limits(limits))
                 .with_inspector(Calls::default());
-            let run = run_on(&mut evm, tx_with(&input, gas_limit));
-            let call = evm.inspector().calls.iter().find(|call| call.target == EC_PAIRING).unwrap();
+            let run = run_on(&mut evm, tx_with(input, gas_limit));
+            let call = evm.inspector().calls.iter().find(|call| call.target == to).unwrap();
             (run, call.precompile_ran)
         };
-        let ((detained, ran), (plain, plain_ran)) = (run(TIMESTAMP, 100_000), run(PUSH0, 100_000));
-        let allowance = 100_000 - charges_to_the_precompile(input.len(), None).total();
-        let intrinsic = intrinsic_with(&input, gas_limit);
+        let ((detained, ran), (plain, plain_ran)) = (run(TIMESTAMP, cap), run(PUSH0, cap));
+        let allowance = cap - charges_to_the_precompile(input.len(), None).total();
+        let intrinsic = intrinsic_with(input, gas_limit);
         assert_caught(&detained, intrinsic, allowance, &failed_status_store());
         assert!(!ran && plain_ran, "answered without running");
         assert!(plain.outcome.result.is_success());

@@ -54,10 +54,17 @@ const fn is_zero(n: &u64) -> bool {
 impl PreAccount {
     /// Whether the account does not exist.
     ///
-    /// Neither a trace nor an RPC endpoint can say "no such account": they report zeros for it.
-    /// A node's database answers `None`, and the difference is observable (EIP-7702 refunds an
-    /// authorization whose authority already exists), so an all-zero account is absent. An
-    /// existing empty account cannot occur on a chain that has had EIP-161 from genesis.
+    /// Neither a trace nor an RPC endpoint can say "no such account": they report zeros for it, so
+    /// reading the report as it stands would make every absent account an existing empty one. A
+    /// node's database answers `None`, and the difference is observable (EIP-7702 refunds an
+    /// authorization whose authority already exists, 12,500 gas each), so an all-zero account is
+    /// absent.
+    ///
+    /// That is safe because an existing-but-empty account cannot occur on a chain that has had
+    /// EIP-161 from genesis, as every `MegaETH` chain has: EIP-161 removes empty accounts on touch
+    /// and forbids creating them, and the genesis allocations carry a balance or code. An account
+    /// with no balance, nonce or code that still holds storage cannot exist either, since storage
+    /// is reachable only through code and a contract has code or a nonce.
     pub fn is_absent(&self) -> bool {
         self.balance.is_zero() && self.nonce == 0 && self.code_hash.is_none()
     }

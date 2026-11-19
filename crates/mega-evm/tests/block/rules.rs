@@ -18,8 +18,8 @@ use revm::{
 };
 
 use crate::common::{
-    self, deposit_tx, empty_call_gas, executor, system_tx, unlimited_ctx, user_tx, TestExecutor,
-    BLOCK_GAS_LIMIT, BLOCK_NUMBER,
+    self, deposit_tx, empty_call_gas, executor, executor_with_spec, system_tx, unlimited_ctx,
+    user_tx, TestExecutor, BLOCK_GAS_LIMIT, BLOCK_NUMBER,
 };
 
 /// The word the L1 block contract holds at its scalars slot: the data-availability footprint
@@ -90,7 +90,8 @@ fn operator_fee_paid(executor: TestExecutor<'_>) -> U256 {
 #[test]
 fn test_activation_block_rejects_a_mega_system_transaction() {
     let mut state = common::state();
-    let mut executor = executor(&mut state, unlimited_ctx().with_no_user_tx_activation_block(true));
+    let mut executor =
+        executor_with_spec(&mut state, common::activation_ctx(), common::activation_spec());
     executor.apply_pre_execution_changes().expect("the block starts");
 
     let err = executor
@@ -316,7 +317,7 @@ fn test_the_l1_info_deposit_prices_the_transactions_after_it() {
         .execute_transaction(&common::deposit_tx_to(
             L1_BLOCK_CONTRACT,
             Bytes::from(word.to_be_bytes::<32>()),
-            200_000,
+            200_000 + common::body_history(32) + mega_evm::write_record_history_gas(1).unwrap(),
         ))
         .expect("the deposit executes");
     assert_eq!(state_scalars(&mut executor), word, "the deposit wrote the block's scalars");

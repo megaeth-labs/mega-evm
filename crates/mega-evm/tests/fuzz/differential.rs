@@ -27,17 +27,15 @@
 //! block with no base fee, and op-revm's three fee vaults, touched empty, are taken out of
 //! `MegaEvm`'s state before the two are compared, as `tests/satin/neutral.rs` does.
 //!
-//! Neither reference reads the live system address, which every Satin transaction does when it is
-//! validated: the read-only entry it leaves in `MegaEvm`'s state is taken out before either
-//! comparison, and taking it out fails when it is anything but the read.
+//! No Satin transaction reads the live system address either: the EVM reads it when it is built,
+//! outside every transaction, so the states compare as they are.
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use alloy_op_evm::OpTx;
 use mega_evm::{
     test_utils::{
-        neutral_cfg, neutral_gas_table, neutralize_evm, take_system_address_read,
-        zero_fee_l1_block_info, MemoryDatabase,
+        neutral_cfg, neutral_gas_table, neutralize_evm, zero_fee_l1_block_info, MemoryDatabase,
     },
     EthSpecId, EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
 };
@@ -110,9 +108,7 @@ fn run_mega(
     let outcome = mega
         .execute_transaction(OpTx(tx))
         .map(|outcome| {
-            let mut state = outcome.result_and_state.state;
-            take_system_address_read(&mut state);
-            ExecResultAndState::new(outcome.result_and_state.result, state)
+            ExecResultAndState::new(outcome.result_and_state.result, outcome.result_and_state.state)
         })
         .map_err(|error| format!("{error}"));
     (outcome, cfg)
@@ -158,6 +154,46 @@ fn run_eth(case: &Case, fork: EthSpecId, block: BlockEnv, tx: TxEnv) -> Result<O
         .map_err(|error| format!("{error}"))
 }
 
+/// Whether `case` produces under the neutral configuration of each fork, on `MegaEvm`, the outcome
+/// op-revm produces: the result, its gas, logs and output, and the state, or the same refusal.
+pub(crate) fn matches_op_revm(case: &Case) -> Result<(), proptest::test_runner::TestCaseError> {
+    for fork in FORKS {
+        let block = case.block();
+        let tx = case.transaction().0;
+        let (mega, cfg) = run_mega(fork, case, block.clone(), tx.clone());
+        let op = run_op(case, fork, cfg, block, tx);
+        prop_eq!(render(&mega), render(&op), "{fork:?}: MegaEvm and op-revm differ");
+    }
+    Ok(())
+}
+
+/// Whether `case`, a transaction that is not a deposit, run unpriced under the neutral
+/// configuration of each fork, produces on `MegaEvm` what revm's mainnet EVM produces on the fork,
+/// but for the three fee vaults op-revm touches; on Amsterdam without the self-destructions its
+/// init codes held.
+pub(crate) fn matches_ethereum(case: &Case) -> Result<(), proptest::test_runner::TestCaseError> {
+    let on_amsterdam = case.without_destruction_in_creation();
+    for fork in FORKS {
+        let case = if fork == EthSpecId::AMSTERDAM { &on_amsterdam } else { case };
+        let block = BlockEnv { basefee: 0, ..case.block() };
+        let mut tx = case.transaction().0;
+        tx.base.gas_price = 0;
+        tx.base.gas_priority_fee = tx.base.gas_priority_fee.map(|_| 0);
+        let (mega, _) = run_mega(fork, case, block.clone(), tx.clone());
+        let mega = mega.map(|mut outcome| {
+            for vault in [BASE_FEE_RECIPIENT, L1_FEE_RECIPIENT, OPERATOR_FEE_RECIPIENT] {
+                if outcome.state.get(&vault).is_some_and(|account| account.is_empty()) {
+                    outcome.state.remove(&vault);
+                }
+            }
+            outcome
+        });
+        let eth = run_eth(case, fork, block, tx.base);
+        prop_eq!(render(&mega), render(&eth), "{fork:?}: MegaEvm and Ethereum differ");
+    }
+    Ok(())
+}
+
 /// Under the neutral configuration of each fork, `MegaEvm` and op-revm produce byte-identical
 /// outcomes — the result, its gas, logs and output, and the state — or the same refusal, for
 /// every transaction but a deposit that creates its caller's account.
@@ -177,14 +213,7 @@ fn test_differential_neutral_mega_evm_matches_op_revm() {
                 return Ok(());
             }
             compared.fetch_add(1, Ordering::Relaxed);
-            for fork in FORKS {
-                let block = case.block();
-                let tx = case.transaction().0;
-                let (mega, cfg) = run_mega(fork, case, block.clone(), tx.clone());
-                let op = run_op(case, fork, cfg, block, tx);
-                prop_eq!(render(&mega), render(&op), "{fork:?}: MegaEvm and op-revm differ");
-            }
-            Ok(())
+            matches_op_revm(case)
         },
     );
     let compared = compared.load(Ordering::Relaxed);
@@ -211,30 +240,11 @@ fn test_differential_neutral_mega_evm_matches_ethereum() {
             if case.tx.is_deposit() {
                 return Ok(());
             }
-            let on_amsterdam = case.without_destruction_in_creation();
             compared.fetch_add(1, Ordering::Relaxed);
-            if on_amsterdam != *case {
+            if case.without_destruction_in_creation() != *case {
                 rewritten.fetch_add(1, Ordering::Relaxed);
             }
-            for fork in FORKS {
-                let case = if fork == EthSpecId::AMSTERDAM { &on_amsterdam } else { case };
-                let block = BlockEnv { basefee: 0, ..case.block() };
-                let mut tx = case.transaction().0;
-                tx.base.gas_price = 0;
-                tx.base.gas_priority_fee = tx.base.gas_priority_fee.map(|_| 0);
-                let (mega, _) = run_mega(fork, case, block.clone(), tx.clone());
-                let mega = mega.map(|mut outcome| {
-                    for vault in [BASE_FEE_RECIPIENT, L1_FEE_RECIPIENT, OPERATOR_FEE_RECIPIENT] {
-                        if outcome.state.get(&vault).is_some_and(|account| account.is_empty()) {
-                            outcome.state.remove(&vault);
-                        }
-                    }
-                    outcome
-                });
-                let eth = run_eth(case, fork, block, tx.base);
-                prop_eq!(render(&mega), render(&eth), "{fork:?}: MegaEvm and Ethereum differ");
-            }
-            Ok(())
+            matches_ethereum(case)
         },
     );
     let compared = compared.load(Ordering::Relaxed);

@@ -104,6 +104,11 @@ pub struct AdditionalLimit {
     /// makes, kept from that charge until the frame's input is built, which carries it as its
     /// start charge ([`take_first_frame_charge`](Self::take_first_frame_charge)).
     first_frame_charge: Option<u64>,
+    /// The part of that charge the transaction's regular gas paid, the reservoir having paid the
+    /// authorities' records first: what a halt of the transaction's own frame consumes with its
+    /// regular gas rather than gives back
+    /// ([`first_frame_charge_from_regular`](Self::first_frame_charge_from_regular)).
+    first_frame_charge_from_regular: u64,
     /// What the transaction's frames keep, every running frame counted as if it succeeds.
     kept: Kept,
     /// One per start revm decided whose result has not returned, the latest last.
@@ -131,10 +136,12 @@ pub struct AdditionalLimit {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum TxClass {
     /// The protocol's own work, a system-originated transaction or a system call: held to no
-    /// per-transaction limit, not detained, priced at the minimum bucket and paying no history.
-    ProtocolOwn,
-    /// A user's deposit: held to every limit like any transaction, and paying no history, its
-    /// bytes paid for on L1.
+    /// per-transaction limit, not detained and priced at the minimum bucket.
+    ProtocolOwn {
+        /// Transactions pay history; system calls and the neutral configuration do not.
+        prices_history: bool,
+    },
+    /// A user's deposit: held to every limit and paying history like any transaction.
     Deposit,
     /// Any other transaction under the neutral configuration, which prices no history: held as
     /// an ordinary transaction is, paying no history. Switching the context to the neutral
@@ -311,6 +318,7 @@ impl AdditionalLimit {
         self.created_caller = false;
         self.pre_frame_stop = None;
         self.first_frame_charge = None;
+        self.first_frame_charge_from_regular = 0;
         self.kept = Kept::default();
         self.decided.clear();
         self.intrinsic_history_bytes = 0;
@@ -436,15 +444,17 @@ impl AdditionalLimit {
         self.created_caller = true;
     }
 
-    /// Whether an authorization list of `entries` could keep more than the transaction's KV or
-    /// state-growth limit allows: each entry changes one authority at most and creates one at
-    /// most, so a list no longer than what both limits leave cannot cross them, and needs no
-    /// simulation.
-    pub(crate) const fn authorization_list_may_cross(&self, entries: u64) -> bool {
-        let records = self.tx_limit(LimitKind::KvUpdate) as i128 - self.net(LimitKind::KvUpdate);
-        let created =
-            self.tx_limit(LimitKind::StateGrowth) as i128 - self.net(LimitKind::StateGrowth);
-        !self.is_exempt() && (entries as i128 > records || entries as i128 > created)
+    /// Whether the transaction's authorization list is held to a limit before it is applied: it
+    /// is when the transaction is held to a KV-update or a state-growth limit, which what the list
+    /// keeps counts towards ([`hold_authorization_list`](Self::hold_authorization_list)).
+    ///
+    /// Satin's own limits set both, so every list is decided before it is applied, whatever its
+    /// length. Only a configuration that sets neither — the limits a tool turns off, as the
+    /// execution-spec runner does for its neutral configuration — has nothing to hold the list
+    /// to, and decides nothing, so it loads nothing beyond what the list's application loads, as
+    /// Ethereum does.
+    pub(crate) const fn holds_authorization_list(&self) -> bool {
+        self.limits.tx_kv_update_limit != u64::MAX || self.limits.tx_state_growth_limit != u64::MAX
     }
 
     /// The verdict on an authorization list that would keep `records` write records and create
@@ -475,9 +485,18 @@ impl AdditionalLimit {
 
     /// Keeps `history`, the history gas pre-execution just charged for the write record the
     /// transaction's own frame makes, for the frame's input to carry
-    /// ([`take_first_frame_charge`](Self::take_first_frame_charge)).
-    pub(crate) const fn keep_first_frame_charge(&mut self, history: u64) {
+    /// ([`take_first_frame_charge`](Self::take_first_frame_charge)), and `from_regular`, the part
+    /// of it the transaction's regular gas paid.
+    pub(crate) const fn keep_first_frame_charge(&mut self, history: u64, from_regular: u64) {
         self.first_frame_charge = Some(history);
+        self.first_frame_charge_from_regular = from_regular;
+    }
+
+    /// The part of the history gas pre-execution charged for the write record the transaction's
+    /// own frame makes that the transaction's regular gas paid: zero until pre-execution charges
+    /// it, and for a transaction that pays no history.
+    pub(crate) const fn first_frame_charge_from_regular(&self) -> u64 {
+        self.first_frame_charge_from_regular
     }
 
     /// The history gas pre-execution charged for the write record the transaction's own frame
@@ -787,7 +806,7 @@ impl AdditionalLimit {
     /// Whether the running transaction is exempt from every per-transaction limit: the protocol's
     /// own work is.
     pub const fn is_exempt(&self) -> bool {
-        matches!(self.class, TxClass::ProtocolOwn)
+        matches!(self.class, TxClass::ProtocolOwn { .. })
     }
 
     /// What the running (or last) execution is, decided when it was begun.
@@ -800,9 +819,10 @@ impl AdditionalLimit {
     /// decides again.
     #[cfg(any(test, feature = "test-utils"))]
     pub(crate) const fn price_no_history(&mut self) {
-        if matches!(self.class, TxClass::Ordinary) {
-            self.class = TxClass::Neutral;
-        }
+        self.class = match self.class {
+            TxClass::ProtocolOwn { .. } => TxClass::ProtocolOwn { prices_history: false },
+            _ => TxClass::Neutral,
+        };
     }
 
     /* The start ledger */
@@ -859,6 +879,13 @@ impl AdditionalLimit {
     /// their price.
     pub const fn history_bytes(&self) -> u64 {
         self.history_bytes
+    }
+
+    /// Settles a failed deposit's history: its gas limit is reported entirely as regular gas,
+    /// but its body and calldata remain in the block even if validation never admitted them.
+    pub(crate) const fn settle_failed_deposit_history(&mut self, priced: bool) {
+        self.history_gas_spent = 0;
+        self.history_bytes = if priced { self.body } else { 0 };
     }
 
     /// Settles the history figures once the transaction's own frame returned: `spent`, the history
@@ -927,7 +954,7 @@ mod tests {
     #[test]
     fn test_the_exemption_answers_every_crossing_and_lasts_one_transaction() {
         let mut limit = AdditionalLimit::default();
-        limit.begin_transaction(TxClass::ProtocolOwn, 0);
+        limit.begin_transaction(TxClass::ProtocolOwn { prices_history: false }, 0);
         assert!(limit.is_exempt());
         for kind in [LimitKind::DataSize, LimitKind::ComputeGas] {
             for frame_local in [false, true] {
@@ -1070,9 +1097,10 @@ mod tests {
         // A frame's pool before the draw: empty, short of the count, ample; an exempt
         // transaction's frames start with unlimited pools.
         let mut cases = 0;
-        for (class, pools) in
-            [(TxClass::Ordinary, &[0_u64, 4, 100][..]), (TxClass::ProtocolOwn, &[u64::MAX - 2][..])]
-        {
+        for (class, pools) in [
+            (TxClass::Ordinary, &[0_u64, 4, 100][..]),
+            (TxClass::ProtocolOwn { prices_history: false }, &[u64::MAX - 2][..]),
+        ] {
             for tx_limit in [10_u64, u64::MAX] {
                 for kept in [0_u64, 3, 8] {
                     let limits = EvmTxRuntimeLimits::no_limits()
@@ -1169,13 +1197,15 @@ mod tests {
         let mut limit = AdditionalLimit::default();
         limit.begin_transaction(TxClass::Ordinary, 0);
         assert_eq!(limit.take_first_frame_charge(), None, "nothing charged yet");
-        limit.keep_first_frame_charge(7);
+        limit.keep_first_frame_charge(7, 3);
         assert_eq!(limit.take_first_frame_charge(), Some(7));
         assert_eq!(limit.take_first_frame_charge(), None, "taken by the frame's input");
+        assert_eq!(limit.first_frame_charge_from_regular(), 3, "read where the frame settles");
 
-        limit.keep_first_frame_charge(7);
-        limit.begin_transaction(TxClass::ProtocolOwn, 0);
+        limit.keep_first_frame_charge(7, 3);
+        limit.begin_transaction(TxClass::ProtocolOwn { prices_history: false }, 0);
         assert_eq!(limit.take_first_frame_charge(), None, "the next execution begins without it");
+        assert_eq!(limit.first_frame_charge_from_regular(), 0);
     }
 
     /// Validation admits no body whose authority records cross the data-size limit, so a debug
@@ -1192,46 +1222,29 @@ mod tests {
         limit.count_authorities(2, 0);
     }
 
-    /// An authorization list may cross exactly when it has more entries than the KV or the
-    /// state-growth limit leaves the transaction, the limit less what the transaction already
-    /// counts: a list that fills the room exactly cannot cross, one entry more may. An exempt
-    /// transaction's list never may, whatever its length.
+    /// An authorization list is held to a limit before it is applied when the transaction is held
+    /// to a KV-update or a state-growth limit, and only then: the spec's limits hold it, so does
+    /// either limit alone, and limits that set neither, the data size and the detention caps aside,
+    /// do not.
     #[test]
-    fn test_an_authorization_list_may_cross_only_past_what_both_limits_leave() {
-        let records = |kv| Counted::records(kv, 0, false);
-        let growth = |accounts| Counted::NONE.with_growth(accounts, 0);
-        // (case, KV limit, state-growth limit, counted before the list, entries, may cross)
+    fn test_an_authorization_list_is_held_where_a_kv_or_state_growth_limit_is_set() {
+        let none = EvmTxRuntimeLimits::no_limits();
         let cases = [
-            ("no entries", 3, 5, Counted::NONE, 0, false),
-            ("entries fill the KV room", 3, 10, Counted::NONE, 3, false),
-            ("one entry past the KV room", 3, 10, Counted::NONE, 4, true),
-            ("entries fill the state-growth room", 10, 3, Counted::NONE, 3, false),
-            ("one entry past the state-growth room", 10, 3, Counted::NONE, 4, true),
-            ("entries fill the KV room left after records", 5, 10, records(2), 3, false),
-            ("one entry past the KV room left after records", 5, 10, records(2), 4, true),
-            ("entries fill the state-growth room left after growth", 10, 5, growth(2), 3, false),
-            ("one entry past the state-growth room left after growth", 10, 5, growth(2), 4, true),
-            ("no KV room", 0, 10, Counted::NONE, 1, true),
-            ("no state-growth room", 10, 0, Counted::NONE, 1, true),
-            ("the longest list under no limit", u64::MAX, u64::MAX, Counted::NONE, u64::MAX, false),
+            ("the spec's", EvmTxRuntimeLimits::default(), true),
+            ("KV updates alone", none.with_tx_kv_update_limit(500_000), true),
+            ("state growth alone", none.with_tx_state_growth_limit(1_000), true),
+            ("a limit of nothing", none.with_tx_state_growth_limit(0), true),
+            ("none", none, false),
+            (
+                "data size and detention alone",
+                none.with_tx_data_size_limit(1_000)
+                    .with_block_env_access_compute_gas_limit(1_000)
+                    .with_oracle_access_compute_gas_limit(1_000),
+                false,
+            ),
         ];
-        for (case, kv, state_growth, before, entries, may_cross) in cases {
-            let limits = EvmTxRuntimeLimits::no_limits()
-                .with_tx_kv_update_limit(kv)
-                .with_tx_state_growth_limit(state_growth);
-            let mut limit = AdditionalLimit::new(limits);
-            limit.begin_transaction(TxClass::Ordinary, crate::TX_BODY_SIZE);
-            limit.count(&before);
-            assert_eq!(limit.authorization_list_may_cross(entries), may_cross, "{case}");
-        }
-
-        let limits = EvmTxRuntimeLimits::no_limits()
-            .with_tx_kv_update_limit(0)
-            .with_tx_state_growth_limit(0);
-        let mut limit = AdditionalLimit::new(limits);
-        limit.begin_transaction(TxClass::ProtocolOwn, crate::TX_BODY_SIZE);
-        for entries in [1, u64::MAX] {
-            assert!(!limit.authorization_list_may_cross(entries), "exempt, {entries} entries");
+        for (name, limits, held) in cases {
+            assert_eq!(AdditionalLimit::new(limits).holds_authorization_list(), held, "{name}");
         }
     }
 }

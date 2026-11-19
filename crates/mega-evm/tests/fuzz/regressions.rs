@@ -28,11 +28,12 @@ use crate::{
     gen::{
         case::Case,
         program::{End, Forward, InitCode, Op, Program, Scheme, Target},
-        tx::{GasTier, Price, Shape, Tx},
+        tx::{Auth, Delegate, GasTier, Price, Shape, Tx},
         world::{
-            AccountShape, Balance, BeneficiaryIs, BlockShape, Delegation, Limits, Salt, World,
+            AccountShape, Balance, BeneficiaryIs, BlockShape, Delegation, EmptyLeaves, Limits,
+            Salt, World,
         },
-        Value, Who,
+        Value, Who, Word,
     },
     harness::{history_rounds, runs_at_measurement_prices},
     render::render,
@@ -59,6 +60,7 @@ fn plain_world() -> World {
         limits: Limits::Default,
         block: BlockShape { basefee: 0, slot_num: 0, blob: true },
         system_nonce: 0,
+        empty_leaves: EmptyLeaves::default(),
     }
 }
 
@@ -206,6 +208,67 @@ fn test_a_delegated_sender_that_funds_then_creates_reports_the_net_change() {
     );
 }
 
+/// An EIP-7702 authority whose account the pre-state holds empty — nonce zero, no balance, no
+/// code, and one slot that holds zero — is no new account: an authority is new only where the state
+/// holds no account at its address, an account empty under EIP-161 included, while the other sites
+/// that add an account count an empty one as new. Applying the authorization charges the
+/// delegation's bytes alone and counts no state growth.
+///
+/// The state-growth property's oracle decided every account by EIP-161 emptiness and counted the
+/// authority as a rise the engine, by the existence rule, does not make.
+#[test]
+fn test_an_authority_whose_empty_account_the_state_holds_is_no_new_state() {
+    let mut world = plain_world();
+    world.a.slots = vec![(0, Word::Zero)];
+    let case = Case {
+        world,
+        tx: Tx {
+            shape: Shape::Eip7702 {
+                to: Who::Caller,
+                auths: vec![Auth {
+                    authority: Who::A,
+                    nonce_ok: true,
+                    chain_ok: true,
+                    recovers: true,
+                    delegate: Delegate::Contract,
+                }],
+            },
+            value: Value::Zero,
+            gas: GasTier::Small,
+            price: Price::Free,
+            nonce_ok: true,
+        },
+        main: stop(),
+        a: Program { ops: vec![], end: End::Fallthrough },
+        b: stop(),
+    };
+    let execution = case.execute();
+    let rendered = render(&execution);
+    if let Err(error) = crate::properties::check_state_growth(&case) {
+        panic!("{error}\n{rendered}");
+    }
+    // The figures below need the authorization applied, which the case's gas limit pays for at the
+    // spec's byte prices, where the case was found; at the dearest prices it runs out of gas before
+    // the first frame, which takes the authorization back.
+    if runs_at_measurement_prices() {
+        return;
+    }
+    use revm::context_interface::cfg::GasId;
+    let outcome = execution.as_ref().expect("the transaction is valid");
+    assert!(outcome.result.is_success(), "{rendered}");
+    let authority = &outcome.state[&Who::A.address()];
+    assert!(
+        authority.info.nonce == 1 && authority.info.code.as_ref().is_some_and(|c| c.is_eip7702()),
+        "the authorization applied\n{rendered}"
+    );
+    assert_eq!(outcome.usage.state_growth, 0, "the authority existed\n{rendered}");
+    assert_eq!(
+        outcome.gas.state,
+        mega_evm::satin_gas_params().get(GasId::tx_eip7702_state_gas_bytecode()),
+        "the delegation's bytes, and no new account\n{rendered}"
+    );
+}
+
 /// A program that funds the account its `CREATE2` lands on, named by [`Target::Created`], then
 /// creates it, keeps one record for the account and one for itself: the transfer changed both, so
 /// neither the creation nor the bump of the program's nonce adds a record. The creation lands on
@@ -280,4 +343,42 @@ fn test_a_program_that_funds_the_account_it_then_creates_keeps_one_record_for_it
              back\n{rendered}"
         );
     }
+}
+
+/// An EIP-7702 transaction that runs out of gas part-way through its authorization list, under
+/// the neutral configuration, loads what Ethereum and op-revm load: the list is held to no limit
+/// there, so it is not simulated, and the second authority, which the application never reached,
+/// is not in the state. Found by the neutral differential, where the simulation had loaded that
+/// authority as a cold, untouched account.
+#[test]
+fn test_a_neutral_authorization_list_that_runs_out_of_gas_loads_what_ethereum_loads() {
+    let mut world = plain_world();
+    world.caller.balance = Balance::Zero;
+    world.beneficiary = BeneficiaryIs::Fresh;
+    world.empty_leaves = EmptyLeaves { fresh: true, beneficiary: true, created: true };
+    let auth = |authority| Auth {
+        authority,
+        nonce_ok: true,
+        chain_ok: true,
+        recovers: true,
+        delegate: Delegate::Contract,
+    };
+    let case = Case {
+        world,
+        tx: Tx {
+            shape: Shape::Eip7702 {
+                to: Who::Caller,
+                auths: vec![auth(Who::Fresh), auth(Who::Contract)],
+            },
+            value: Value::Zero,
+            gas: GasTier::Tiny,
+            price: Price::Free,
+            nonce_ok: true,
+        },
+        main: stop(),
+        a: stop(),
+        b: stop(),
+    };
+    crate::differential::matches_ethereum(&case).unwrap_or_else(|error| panic!("{error}"));
+    crate::differential::matches_op_revm(&case).unwrap_or_else(|error| panic!("{error}"));
 }

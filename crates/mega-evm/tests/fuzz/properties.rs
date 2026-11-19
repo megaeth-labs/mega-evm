@@ -4,7 +4,10 @@
 //! states what the spec says of the outcome. A property that does not hold by design is stated
 //! as what does hold, and says so.
 
-use std::{collections::BTreeMap, sync::Mutex};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Mutex,
+};
 
 use alloy_primitives::{Address, U256};
 use mega_evm::{
@@ -29,7 +32,7 @@ use crate::{
         tx::{tx, Delegate, Shape},
         Flavor, Who, SYSTEM_ADDRESS,
     },
-    harness::{check, print_tally, prop_check, prop_eq},
+    harness::{check, print_tally, prop_check, prop_eq, require_coverage},
     render::{render, render_outcome},
 };
 
@@ -118,9 +121,9 @@ fn test_property_inspector_transparency() {
     );
 }
 
-/// Whether the transaction is exempt from history gas and the per-transaction limits: a deposit,
-/// a transaction the protocol sent, or one the engine promotes to a deposit.
-fn is_exempt(tx: &MegaTransaction) -> bool {
+/// Whether the transaction is fee-free: a deposit or the protocol's own transaction.
+/// Failed deposits can also keep a body larger than the transaction's resource limit.
+fn is_fee_exempt(tx: &MegaTransaction) -> bool {
     tx.0.deposit.source_hash != alloy_primitives::B256::ZERO ||
         is_system_originated(tx, SYSTEM_ADDRESS)
 }
@@ -138,6 +141,35 @@ fn leaf_at_start(db: &mut MemoryDatabase, address: Address) -> Option<revm::stat
     db.basic(address).unwrap_or_default()
 }
 
+/// The class of a case with an applied EIP-7702 authority the world holds as an account empty
+/// under EIP-161: the authority exists, so it is no new account.
+const EMPTY_AUTHORITY: &str = "an applied authority the world holds as an empty account";
+
+/// The class of a case in which an account the world holds as empty (not absent) ends non-empty
+/// by a value transfer or a creation, outside an authorization: emptiness decides it, so it is a
+/// new account.
+const EMPTY_LEAF_FILLED: &str = "an empty account of the world that the transaction fills";
+
+/// The class of a case with an account created in the transaction and destroyed over a leaf the
+/// world holds as empty: the leaf existed at the start, so the destruction does not take it back.
+const EMPTY_LEAF_DESTROYED: &str = "an account created and destroyed over an empty leaf";
+
+/// Holds a property's claim that its default run reached each of `classes` (see
+/// [`require_coverage`]).
+fn require_classes(
+    name: &str,
+    bounded_cases: u32,
+    tally: &BTreeMap<&'static str, u32>,
+    classes: &[&str],
+) {
+    let missing: Vec<String> = classes
+        .iter()
+        .filter(|class| tally.get(**class).copied().unwrap_or(0) == 0)
+        .map(|class| (*class).to_string())
+        .collect();
+    require_coverage(name, bounded_cases, &missing);
+}
+
 /// Whether the outcome's `account` was created in the transaction and destroyed since: its first
 /// effective destruction took back every part of it the transaction made — each slot it made
 /// non-zero, and, where its leaf was absent at the start, the account's record and its unit of
@@ -153,13 +185,15 @@ fn destroyed_in_the_transaction(account: &revm::state::Account) -> bool {
 /// - the receipt's figure is the raw spend less the refund, at least the floor, at most the gas
 ///   limit;
 /// - the refund is within its cap, a fifth of the raw spend;
-/// - the reservoir is the gas above the execution cap, and it pays the state and history gas before
-///   the regular budget does and nothing else: what is gone from it is exactly the state and
-///   history ledgers, or all of it when they exceed it. Two rules bill it otherwise and are left
-///   out: the EIP-7623 floor, when it is the receipt's figure, and op-revm's failed deposit, which
-///   bills the whole gas limit;
-/// - an exempt transaction pays no history and reports no history bytes; any other reports at least
-///   its body and pays at most what its bytes cost, the allowances paying the rest;
+/// - the reservoir is the gas above the execution cap, and it pays state and history gas and
+///   nothing else, after a state charge's legacy share, which regular gas pays first; every
+///   give-back goes into a reservoir, whichever pool paid the charge, so what comes back of it can
+///   exceed what it held, and what is gone from it is at most the state and history ledgers. What
+///   comes back of it and the spend fit in the gas limit. Two rules bill it otherwise and are left
+///   out of the last: the EIP-7623 floor, when it is the receipt's figure, and op-revm's failed
+///   deposit, which bills the whole gas limit;
+/// - every transaction reports at least its body as history bytes and pays at most their price, the
+///   allowances paying some logs and a failed deposit reporting no history gas;
 /// - value is conserved: the balances change by what a deposit minted, less what a self-destruction
 ///   burned;
 /// - the sender's nonce moves by one, or by more when its own code creates.
@@ -208,31 +242,29 @@ fn test_property_gas_ledgers() {
 
             let reservoir = gas_limit.saturating_sub(gas_limit.min(TX_GAS_LIMIT_CAP));
             prop_check!(
-                gas.reservoir_remaining <= reservoir,
-                "no more comes back than was in the reservoir"
+                total + gas.reservoir_remaining <= gas_limit,
+                "the spend and the reservoir that comes back fit in the gas limit"
             );
             if !failed_deposit && gas.gas_used != gas.floor {
-                prop_eq!(
-                    reservoir - gas.reservoir_remaining,
-                    reservoir.min(gas.state + gas.history),
-                    "the reservoir pays the state and history gas first, and nothing else"
+                prop_check!(
+                    reservoir.saturating_sub(gas.reservoir_remaining) <= gas.state + gas.history,
+                    "the reservoir pays no more than the state and history gas the transaction \
+                     kept, and nothing else"
                 );
             }
 
-            if is_exempt(&tx) {
+            prop_check!(
+                gas.history_bytes >= transaction_body_bytes(&tx),
+                "the body is in the history bytes"
+            );
+            let worth = mega_evm::history_gas(gas.history_bytes).expect("the bytes have a price");
+            prop_check!(gas.history <= worth, "the history gas is at most what the bytes cost");
+            if failed_deposit {
                 prop_eq!(
-                    (gas.history, gas.history_bytes),
-                    (0, 0),
-                    "an exempt transaction pays no history"
+                    gas.history_bytes,
+                    transaction_body_bytes(&tx),
+                    "a failed deposit retains only its body as history"
                 );
-            } else {
-                prop_check!(
-                    gas.history_bytes >= transaction_body_bytes(&tx),
-                    "the body is in the history bytes"
-                );
-                let worth =
-                    mega_evm::history_gas(gas.history_bytes).expect("the bytes have a price");
-                prop_check!(gas.history <= worth, "the history gas is at most what the bytes cost");
             }
 
             let mut pre = case.database();
@@ -332,7 +364,7 @@ fn test_property_kv_weighs_no_more_than_data_size() {
                 usage.data_size >= transaction_body_bytes(&tx) + hints,
                 "the body and the {hints} bytes of hints forwarded are counted: {usage:?}"
             );
-            if !is_exempt(&tx) {
+            if !is_fee_exempt(&tx) {
                 let limits = case.world.limits.runtime();
                 let limit = limits.tx_data_size_limit;
                 prop_check!(
@@ -364,13 +396,38 @@ fn test_property_kv_weighs_no_more_than_data_size() {
 /// only where the world held an account there, a balance or an account empty under EIP-161: a
 /// leaf that existed at the start is an ordinary deletion, whose record stands, and one that did
 /// not is taken back with what the transaction made of it.
+///
+/// The destruction rule branches on whether the world held the account's leaf, so the case must
+/// reach an account created and destroyed over a leaf that existed empty (a class this property
+/// claims, see [`EMPTY_LEAF_DESTROYED`]).
 #[test]
 fn test_property_the_record_count_is_the_net_change() {
-    check("record_count", CASES, || case(Flavor::Satin), check_record_count);
+    let tally: Mutex<BTreeMap<&'static str, u32>> = Mutex::new(BTreeMap::new());
+    check(
+        "record_count",
+        CASES,
+        || case(Flavor::Satin),
+        |case| {
+            check_record_count_observed(case, &|class| {
+                *tally.lock().unwrap().entry(class).or_default() += 1;
+            })
+        },
+    );
+    let tally = tally.into_inner().unwrap();
+    print_tally("record_count", tally.iter().map(|(class, n)| (class, *n)));
+    require_classes("record_count", CASES, &tally, &[EMPTY_LEAF_DESTROYED]);
 }
 
 /// What [`test_property_the_record_count_is_the_net_change`] checks of a case.
 pub(crate) fn check_record_count(case: &Case) -> Result<(), proptest::test_runner::TestCaseError> {
+    check_record_count_observed(case, &|_| {})
+}
+
+/// [`check_record_count`], reporting the classes the case reached to `observe`.
+fn check_record_count_observed(
+    case: &Case,
+    observe: &dyn Fn(&'static str),
+) -> Result<(), proptest::test_runner::TestCaseError> {
     let tx = case.transaction();
     let Ok(outcome) = case.execute() else { return Ok(()) };
     let credit = fee_credits(case, &tx, &outcome);
@@ -378,7 +435,11 @@ pub(crate) fn check_record_count(case: &Case) -> Result<(), proptest::test_runne
     let mut expected = 0;
     for (address, account) in &outcome.state {
         if destroyed_in_the_transaction(account) {
-            expected += u64::from(leaf_at_start(&mut pre, *address).is_some());
+            let leaf = leaf_at_start(&mut pre, *address);
+            if leaf.as_ref().is_some_and(|info| info.is_empty()) {
+                observe(EMPTY_LEAF_DESTROYED);
+            }
+            expected += u64::from(leaf.is_some());
             continue;
         }
         let slots = account.storage.values().filter(|slot| slot.is_changed()).count();
@@ -416,7 +477,7 @@ fn fee_credits(
     let basefee = u128::from(block.basefee);
     let used = u128::from(outcome.gas.gas_used);
     let tip = tx.effective_gas_price(basefee).saturating_sub(basefee);
-    let pays_fees = !is_exempt(tx);
+    let pays_fees = !is_fee_exempt(tx);
     move |address: Address| {
         let mut credit = 0;
         if pays_fees && address == block.beneficiary {
@@ -436,27 +497,67 @@ fn fee_credits(
 /// credits are taken out of its balance — a fee credit is no rise. The sender's account is the
 /// body's, and is a rise only as the caller a deposit-like transaction created.
 ///
+/// An applied EIP-7702 authority is decided by existence instead: it is a rise only where the
+/// world held no account at its address, and one the world held empty under EIP-161 is no new
+/// account. Every other site that adds an account counts an empty one as new.
+///
 /// An account the transaction created and destroyed keeps none of its slots, and its leaf only
 /// where the world held it as an account empty under EIP-161: the creation added that account and
 /// the destruction does not take a leaf back that existed at the start. One the world did not hold
 /// is taken back, and one that held a balance was no new account.
+///
+/// Existence and emptiness give different answers at three sites, and the property claims a case
+/// at each: an applied authority the world holds as an empty account (no new account), an empty
+/// account a value transfer or a creation fills (a new account), and an account created and
+/// destroyed over an empty leaf (a leaf the destruction does not take back).
 #[test]
 fn test_property_state_growth_is_the_net_count_of_new_state() {
-    check("state_growth", CASES, || case(Flavor::Satin), check_state_growth);
+    let tally: Mutex<BTreeMap<&'static str, u32>> = Mutex::new(BTreeMap::new());
+    check(
+        "state_growth",
+        CASES,
+        || case(Flavor::Satin),
+        |case| {
+            check_state_growth_observed(case, &|class| {
+                *tally.lock().unwrap().entry(class).or_default() += 1;
+            })
+        },
+    );
+    let tally = tally.into_inner().unwrap();
+    print_tally("state_growth", tally.iter().map(|(class, n)| (class, *n)));
+    require_classes(
+        "state_growth",
+        CASES,
+        &tally,
+        &[EMPTY_AUTHORITY, EMPTY_LEAF_FILLED, EMPTY_LEAF_DESTROYED],
+    );
 }
 
 /// What [`test_property_state_growth_is_the_net_count_of_new_state`] checks of a case.
 pub(crate) fn check_state_growth(case: &Case) -> Result<(), proptest::test_runner::TestCaseError> {
+    check_state_growth_observed(case, &|_| {})
+}
+
+/// [`check_state_growth`], reporting the classes the case reached to `observe`.
+fn check_state_growth_observed(
+    case: &Case,
+    observe: &dyn Fn(&'static str),
+) -> Result<(), proptest::test_runner::TestCaseError> {
     let tx = case.transaction();
     let Ok(outcome) = case.execute() else { return Ok(()) };
     let credit = fee_credits(case, &tx, &outcome);
     let deposit_like =
         tx.0.deposit.source_hash != alloy_primitives::B256::ZERO || tx.caller() == SYSTEM_ADDRESS;
     let mut pre = case.database();
+    let authorities: BTreeSet<Address> =
+        applied_authorizations(case).into_iter().map(|(authority, _)| authority).collect();
     let mut expected = 0;
     for (address, account) in &outcome.state {
         if destroyed_in_the_transaction(account) {
             let empty_leaf = leaf_at_start(&mut pre, *address).is_some_and(|info| info.is_empty());
+            if empty_leaf {
+                observe(EMPTY_LEAF_DESTROYED);
+            }
             expected += u64::from(empty_leaf);
             continue;
         }
@@ -469,6 +570,17 @@ pub(crate) fn check_state_growth(case: &Case) -> Result<(), proptest::test_runne
         if *address == tx.caller() && !deposit_like {
             continue;
         }
+        // An authority is decided by existence: one whose account the world held, empty or not, is
+        // no new account, and its application leaves it with a nonce, so no later site in the
+        // transaction adds it either. Where the list was skipped or taken back, the account stands
+        // as the world held it, which is no rise whichever test decides it.
+        let leaf = leaf_at_start(&mut pre, *address);
+        if authorities.contains(address) && leaf.is_some() {
+            if leaf.as_ref().is_some_and(|info| info.is_empty()) {
+                observe(EMPTY_AUTHORITY);
+            }
+            continue;
+        }
         if pre_account(&mut pre, *address).is_some() {
             continue;
         }
@@ -478,6 +590,9 @@ pub(crate) fn check_state_growth(case: &Case) -> Result<(), proptest::test_runne
         let exists = account.info.nonce != 0 ||
             !balance.is_zero() ||
             account.info.code_hash != revm::primitives::KECCAK_EMPTY;
+        if exists && leaf.is_some() {
+            observe(EMPTY_LEAF_FILLED);
+        }
         expected += u64::from(exists);
     }
     prop_eq!(
@@ -741,7 +856,7 @@ pub(crate) fn check_survivors(
             "the data size kept is the body, the records and the hints forwarded\n{rendered}"
         );
     }
-    if !is_exempt(tx) {
+    if !is_fee_exempt(tx) {
         prop_eq!(
             outcome.gas.history_bytes,
             priced,

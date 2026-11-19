@@ -6,7 +6,8 @@
 //! [`SequencerRegistry`](sequencer_registry). Each module carries its address, the code and code
 //! hash the `mega-system-contracts` crate ships, and its ABI. The EIP-7997 `CREATE2` factory
 //! lives at its canonical address beside them; [`predeploys`] is the single list of all seven,
-//! with the check Satin's activation block makes of them.
+//! with every block's deployment of the five flat contracts and the check Satin's activation
+//! block makes of the factory.
 //!
 //! Four of them have an interceptor: a `CALL` or `STATICCALL` to one of their intercepted
 //! selectors is answered by the engine instead of by the contract's code (see the `intercept`

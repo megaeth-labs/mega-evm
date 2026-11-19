@@ -109,9 +109,10 @@ fn test_a_child_receives_the_reservoir_share() {
     );
 }
 
-/// The child spends one fresh slot from its reservoir share and reverts. The caller had no
-/// outstanding spill, so it holds the reservoir it had after the body's charge. The slot is not
-/// kept and the state ledger is zero.
+/// The child spends one fresh slot, its legacy share from regular gas and the rest from its
+/// reservoir share, and reverts. Its rollback gives the whole charge back into its reservoir, the
+/// share regular gas paid included, so its caller holds the reservoir it had after the body's
+/// charge and the share on top. The slot is not kept and the state ledger is zero.
 #[test]
 fn test_a_reverted_child_returns_its_reservoir_share() {
     const R: u64 = 50 * SLOT_STATE_GAS_M1;
@@ -126,27 +127,28 @@ fn test_a_reverted_child_returns_its_reservoir_share() {
     assert!(outcome.result.is_success(), "{:?}", outcome.result);
     assert_eq!(slot_value(&outcome, CHILD, 1), U256::ZERO);
     assert_eq!(outcome.gas.state, 0, "the child's state charge came back");
-    assert_eq!(outcome.gas.reservoir_remaining, R);
+    assert_eq!(outcome.gas.reservoir_remaining, R + common::slot_share());
 }
 
-/// The share a failed child returns when its caller has an outstanding spill.
+/// The share a failed child returns when its caller has an outstanding spill joins what the
+/// caller kept, and unwinds nothing.
 ///
 /// The caller holds `R` and keeps `k = R × 2 / 100` when its first child takes the share. That
-/// child fills 50 fresh slots, more than its share pays, and succeeds, so its spill joins the
-/// caller's and the caller's kept `k` is not drawn. The second child is given `k − k × 2 / 100`
-/// and reverts at once. The share it returns unwinds the caller's spill first, so the caller ends
-/// with `k × 2 / 100`, not the `k` it held after the start's charges. At `m` = 1, `R` =
-/// 4,896,000, `k` = 97,920 and the reservoir left is 1,958.
+/// child fills 50 fresh slots, whose state gas past their legacy shares is more than its share
+/// pays, and succeeds, so its spill joins the caller's and the caller's kept `k` is not drawn. The
+/// second child is given `k − k × 2 / 100` and reverts at once. The share it returns joins the part
+/// the caller kept, so the caller ends with `k`, the spill standing. At `m` = 1, `R` = 4,396,000
+/// and `k` = 87,920.
 ///
-/// The caller is the transaction's own frame, so its reservoir is read where its frame ends:
-/// the transaction then settles that frame as a caller settles a child, and the 1,958 unwinds
-/// the frame's own outstanding spill there, coming back to the sender as regular gas.
+/// The caller is the transaction's own frame, so its reservoir is read where its frame ends: the
+/// transaction then settles that frame as a caller settles a child, and `k` stays the
+/// transaction's reservoir, which returns to the sender.
 #[test]
-fn test_a_reverted_childs_share_unwinds_the_callers_spill_first() {
+fn test_a_reverted_childs_share_joins_what_its_caller_kept() {
     if common::state_is_free() {
         return;
     }
-    let r = 50 * common::slot_state_gas();
+    let r = 50 * (common::slot_state_gas() - common::slot_share());
     let kept = r * RESERVOIR_KEPT_PERCENT / 100;
     let left = kept * RESERVOIR_KEPT_PERCENT / 100;
     if left == 0 {
@@ -171,11 +173,8 @@ fn test_a_reverted_childs_share_unwinds_the_callers_spill_first() {
     assert_eq!(probe.reservoir_given(GRAND), kept - left, "the second child's share");
     let ended = probe.call_ends.last().expect("the transaction's own frame ended");
     assert_eq!(ended.0, CONTRACT);
-    assert_eq!(
-        ended.1, left,
-        "the returned share unwound the spill; k = {kept}, k × 2 / 100 = {left}"
-    );
-    assert_eq!(outcome.gas.reservoir_remaining, 0, "the transaction's settlement unwound the rest");
+    assert_eq!(ended.1, kept, "the returned share joined what was kept; k = {kept}");
+    assert_eq!(outcome.gas.reservoir_remaining, kept, "and the transaction's settlement kept it");
 }
 
 /// `CALL` with gas argument 1 still forwards the reservoir share, `R − R × 2 / 100` of the
@@ -394,13 +393,13 @@ fn test_neutral_forwards_eip150_and_satin_keeps_its_cap_without_limits() {
     assert_eq!(probe.reservoir, Some(child - child * RESERVOIR_KEPT_PERCENT / 100));
 }
 
-/// Below the execution cap the reservoir starts at 0. The callee fills a fresh slot, so 97,920 of
-/// state gas spills onto its regular gas and, on return, onto the caller. The callee then clears
-/// the slot. The refill lands in the callee's reservoir and the returned reservoir unwinds the
-/// caller's spill, so the caller's reservoir stays 0. A settlement that left the 97,920 in the
-/// reservoir would report at least that much still remaining.
+/// Below the execution cap the reservoir starts at 0. The callee fills a fresh slot, so its
+/// regular gas pays the 97,920 of state gas and the record's 3,520 of history. Called again, the
+/// callee clears the slot. The refill and the record's give-back land in the callee's reservoir,
+/// and the returned reservoir joins the caller's without unwinding the regular gas the caller's
+/// first child paid: the 101,440 stay in the reservoir and return to the sender.
 #[test]
-fn test_a_returned_reservoir_unwinds_the_callers_spill() {
+fn test_a_returned_reservoir_does_not_unwind_the_callers_spill() {
     if !at_spec_prices() || common::state_is_free() {
         return;
     }
@@ -432,7 +431,8 @@ fn test_a_returned_reservoir_unwinds_the_callers_spill() {
     assert_eq!(slot_value(&outcome, CHILD, 1), U256::ZERO);
     assert_eq!(outcome.gas.state, 0, "the clear refilled the fresh-slot charge");
     assert_eq!(
-        outcome.gas.reservoir_remaining, 0,
-        "the returned refill unwinds the caller's spill instead of staying in the reservoir"
+        outcome.gas.reservoir_remaining,
+        common::slot_state_gas() + common::history(mega_evm::WRITE_RECORD_SIZE),
+        "the returned refill stays in the reservoir"
     );
 }

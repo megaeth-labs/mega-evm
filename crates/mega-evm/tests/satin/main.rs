@@ -28,6 +28,7 @@ mod inspector_limits;
 mod inspector_settlement;
 mod intrinsic;
 mod kv_updates;
+mod legacy_share;
 mod limit_exemption;
 mod limit_matrix;
 mod limit_stop;

@@ -34,15 +34,15 @@
 //! # The answer
 //!
 //! An answer is a [`synthetic_call_result`]: the forwarded gas untouched, the caller's reservoir
-//! carried, and the calling opcode's upfront state-gas flags, so the caller settles it exactly
-//! like a frame revm ran. It carries what follows it once it settled ([`Answer`]), so the
-//! settlement knows no method.
+//! carried, the give-back mode of the execution's configuration, and the calling opcode's upfront
+//! state-gas flags, so the caller settles it exactly like a frame revm ran. It carries what follows
+//! it once it settled ([`Answer`]), so the settlement knows no method.
 
 use alloy_evm::Database;
 use alloy_primitives::{Address, Bytes};
 use alloy_sol_types::SolError;
 use revm::{
-    context::{ContextTr, LocalContextTr},
+    context::{Cfg, ContextTr, LocalContextTr},
     handler::FrameResult,
     interpreter::{CallInput, CallInputs, InstructionResult},
 };
@@ -180,16 +180,17 @@ pub(crate) fn peek_selector<CTX: ContextTr>(input: &CallInput, ctx: &CTX) -> Opt
     Some(selector)
 }
 
-/// The answer to a call that carries value to a method that takes none: a revert with
-/// `NonZeroTransfer()`. `None` when the call carries no value and the method may run.
+/// The answer to a call that carries value to a method that takes none, built under `cfg`: a
+/// revert with `NonZeroTransfer()`. `None` when the call carries no value and the method may run.
 ///
 /// Every intercepted method of the two control contracts and of `KeylessDeploy` reads state or
 /// steers execution and takes no value. A method that takes value on purpose states why, in its
 /// own interceptor, instead of calling this.
 #[inline]
-pub(crate) fn reject_non_zero_transfer(inputs: &CallInputs) -> Option<FrameResult> {
+pub(crate) fn reject_non_zero_transfer(cfg: &impl Cfg, inputs: &CallInputs) -> Option<FrameResult> {
     inputs.transfer_value().is_some_and(|value| !value.is_zero()).then(|| {
         synthetic_call_result(
+            cfg,
             inputs,
             InstructionResult::Revert,
             Bytes::from_static(&NON_ZERO_TRANSFER_REVERT_DATA),

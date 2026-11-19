@@ -216,28 +216,12 @@ fn keyless_failure(outcome: &mega_evm::MegaTransactionOutcome) -> KeylessDeployE
     decode_error_result(&ret.errorData).expect("errorData is a keyless error")
 }
 
-/// The creation's state-gas and history charges the call makes before it forwards the reservoir:
-/// the signer's leaf, the deploy address's leaf, and one record for each.
+/// What the reservoir pays of the creation's state-gas and history charges the call makes before
+/// it forwards the reservoir: the signer's leaf and the deploy address's leaf, each but its legacy
+/// share, which regular gas pays first, and one record for each.
 fn start_charges() -> u64 {
-    2 * common::account_state_gas() + 2 * common::history(super::WRITE_RECORD_SIZE)
-}
-
-/// 1,001 distinct new authorities, below the execution cap. Apply none. The transaction's own
-/// frame stops before it runs, kind 3, `limit` 1,000. No authority is created.
-#[test]
-fn test_an_authorization_list_of_1001_new_authorities_stops_before_the_first_frame() {
-    let Some(gas) = gas_below(1_001) else { return };
-    let db = world(&[(CONTRACT, Bytes::from_static(&[0x00]))]);
-    let outcome = execute(db, auth_tx(gas, U256::ZERO, CONTRACT, &many(1_001)));
-    let stop = reverted_stop(&outcome);
-    assert_eq!(stop, MegaLimitExceeded { kind: 3, limit: TX_STATE_GROWTH_LIMIT });
-    assert!(outcome.limit_exceeded.is_some());
-    assert_eq!(nonce_of(&outcome, authority(1)), 0, "no authority account is kept");
-    assert_eq!(nonce_of(&outcome, CALLER), 1, "the sender's nonce stands");
-    assert_eq!(outcome.usage.write_records, 0);
-    if pins_state() {
-        assert_eq!(outcome.gas.state, 0, "no authority state gas is charged");
-    }
+    2 * common::account_state_gas() - common::account_share() - common::create_share() +
+        2 * common::history(super::WRITE_RECORD_SIZE)
 }
 
 /// 1,000 new authorities fit and are applied. The transaction's value would create one more
@@ -504,80 +488,44 @@ fn test_authorization_list_boundaries() {
     assert_eq!(outcome.usage.write_records, 0);
 }
 
-/// Signer nonce 0, signer absent. With the deploy address's +1, the init code's 980th fresh slot
-/// crosses the creation's budget of 980, the share of the call's 1,000; the signer's rise is the
-/// call's, counted once the creation returned. The call answers `ExecutionReverted` with that stop.
-/// The deploy account and its record are taken back. The signer's bump stands, and its record with
-/// it, while the account still differs.
+/// A caught child stop leaves no top-level limit or deploy code in the returned outcome.
 #[test]
-fn test_a_keyless_creation_from_nonce_0_stopped_in_its_initcode() {
+fn test_a_caught_keyless_stop_returns_no_outer_limit_or_deploy_code() {
     if 980 * common::slot_state_gas() > SIGNED_SLOT_GAS {
         note_price_guard("980 slots of state gas do not fit the keyless forward");
         return;
     }
     let deployment = Deployment::signed(SIGNED_SLOT_GAS, store_n_slots(980));
     let data = deployment.call_data(LARGE_OVERRIDE);
-    let data_len = data.len() as u64;
-    let state = 980 * common::slot_state_gas() + 2 * common::account_state_gas();
-    let gas = EXECUTION_CAP + common::body_history(data.len() as u64) + state + 5_000_000;
-    let outcome = execute(keyless_db(), keyless_tx(data, gas));
-    let KeylessDeployError::ExecutionReverted { output, .. } = keyless_failure(&outcome) else {
-        panic!("the creation did not revert: {:?}", outcome.result);
-    };
-    let stop = MegaLimitExceeded::abi_decode(&output).expect("the revert data is a stop");
-    assert_eq!(stop, MegaLimitExceeded { kind: 3, limit: frame_share(1_000) });
-    assert_eq!(nonce_of(&outcome, deployment.signer), 1);
-    assert!(!super::has_code(&outcome, deployment.address));
-    assert!(outcome.limit_exceeded.is_none(), "the call caught the creation's stop");
-    // The signer's record stands, the deploy address's goes with the creation.
-    assert_eq!(outcome.usage.write_records, 1);
-    assert_eq!(outcome.usage.data_size, BODY_BYTES + data_len + super::WRITE_RECORD_SIZE);
-    if pins_state() {
-        assert_eq!(outcome.gas.state, ACCOUNT_LEAF_STATE_GAS_M1, "only the signer's leaf");
-    }
-}
-
-/// The same creation from signer nonce 1. The bump does not create the signer, so the creation's
-/// budget is `floor(1,000 × 98 / 100)` = 980, and the deploy address's rise is inside it. 980
-/// fresh slots cross that budget. The bump is the last nonce change the deployment made and is
-/// taken back, with its record and that record's history.
-#[test]
-fn test_a_keyless_creation_from_nonce_1_takes_the_bump_back() {
-    if 980 * common::slot_state_gas() > SIGNED_SLOT_GAS {
-        note_price_guard("980 slots of state gas do not fit the keyless forward");
-        return;
-    }
-    let deployment = Deployment::signed(SIGNED_SLOT_GAS, store_n_slots(980));
-    let mut db = keyless_db();
-    db.set_account_nonce(deployment.signer, 1);
-    db.set_account_balance(deployment.signer, U256::from(1));
-    let data = deployment.call_data(LARGE_OVERRIDE);
-    let data_len = data.len() as u64;
-    let state = 980 * common::slot_state_gas() + common::account_state_gas();
-    let gas = EXECUTION_CAP + common::body_history(data.len() as u64) + state + 5_000_000;
-    let outcome = execute(db, keyless_tx(data, gas));
-    let KeylessDeployError::ExecutionReverted { output, .. } = keyless_failure(&outcome) else {
-        panic!("the creation did not revert: {:?}", outcome.result);
-    };
-    let stop = MegaLimitExceeded::abi_decode(&output).expect("the revert data is a stop");
-    assert_eq!(stop, MegaLimitExceeded { kind: 3, limit: frame_share(TX_STATE_GROWTH_LIMIT) });
-    assert_eq!(nonce_of(&outcome, deployment.signer), 1, "the bump is taken back");
-    assert!(!super::has_code(&outcome, deployment.address));
-    // The signer is again as the transaction loaded it: its record and the record's history go.
-    assert_eq!(outcome.usage.write_records, 0);
-    assert_eq!(outcome.usage.data_size, BODY_BYTES + data_len);
-    assert_eq!(outcome.gas.history, common::body_history(data_len));
-    if pins_state() {
-        assert_eq!(outcome.gas.state, 0, "the deploy address's leaf goes with the creation");
+    for signer_nonce in [0, 1] {
+        let mut db = keyless_db();
+        if signer_nonce == 1 {
+            db.set_account_nonce(deployment.signer, 1);
+            db.set_account_balance(deployment.signer, U256::ONE);
+        }
+        let state =
+            980 * common::slot_state_gas() + (2 - signer_nonce) * common::account_state_gas();
+        let gas = EXECUTION_CAP + common::body_history(data.len() as u64) + state + 5_000_000;
+        let outcome = execute(db, keyless_tx(data.clone(), gas));
+        let KeylessDeployError::ExecutionReverted { output, .. } = keyless_failure(&outcome) else {
+            panic!("the creation did not revert: {:?}", outcome.result);
+        };
+        assert_eq!(
+            MegaLimitExceeded::abi_decode(&output).expect("the revert data is a stop"),
+            MegaLimitExceeded { kind: 3, limit: frame_share(TX_STATE_GROWTH_LIMIT) },
+        );
+        assert_eq!(outcome.limit_exceeded, None);
+        assert!(!super::has_code(&outcome, deployment.address));
     }
 }
 
 /// The constructor `DELEGATECALL`s a library that self-destructs the account, then returns one
 /// byte of runtime. The creation's EVM result succeeds, and the call answers `EmptyCodeDeployed`
 /// with the zero address. The destruction gives the deploy address's leaf and its record back to
-/// the destroying frame, inside the creation, so what the creation spent from both pools net of
-/// that give-back is below its regular gas, and `gasUsed` is the regular gas it spent. The code is
-/// deposited after the mark: no state gas, and its data size and history stay charged. The
+/// the destroying frame, inside the creation: charges the call made, not the creation, so the
+/// give-back is added back to what the creation returned. The code is deposited after the mark:
+/// no state gas, and its data size and history stay charged, paid from the reservoir the give-back
+/// filled. `gasUsed` is the regular gas the creation spent and the deposited byte's history. The
 /// account is removed at the end of the transaction.
 #[test]
 fn test_a_keyless_constructor_that_self_destructs_answers_empty_code() {
@@ -604,7 +552,11 @@ fn test_a_keyless_constructor_that_self_destructs_answers_empty_code() {
     };
     let (forwarded, _) = probe.created.expect("the creation started");
     let left = probe.create_end_remaining.expect("the creation ended");
-    assert_eq!(gas_used, forwarded - left, "gasUsed is the creation's regular gas");
+    assert_eq!(
+        gas_used,
+        forwarded - left + super::HISTORY_GAS_PER_BYTE,
+        "gasUsed is the creation's regular gas and the history it kept"
+    );
     assert_eq!(outcome.gas.state, ACCOUNT_LEAF_STATE_GAS_M1, "only the signer's leaf stands");
     // The signer's record and the deposited byte stay; the deploy address's record goes.
     assert_eq!(

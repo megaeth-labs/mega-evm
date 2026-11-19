@@ -21,7 +21,7 @@ Defer to the baseline for everything not listed here; the rules below take prece
 ### Consensus-critical execution
 
 - All execution logic must be **deterministic and architecture-independent** — no `mem::transmute`, no native-endian byte conversions, no platform-dependent operations in consensus paths.
-- Pre-block helpers (the activation block's predeploy check, pre-block system calls, the registry's due-change read, the L1 block info read) return their state (an `EvmState`, or a `ResultAndState` for a system call) for the block executor to commit on its own, in order; they never call `db.commit(...)`.
+- Pre-block helpers (the activation block's check of the EIP-7997 factory, the system contracts' deployments, the pre-block system calls, the registry's due-change read and the resolution of the live system address) return their state (an `EvmState`, or a `ResultAndState` for a system call) for the block executor to commit on its own, in order; they never call `db.commit(...)`.
   An idempotent "no change" path returns an `EvmState` that carries the observed account as a read-only entry; returning nothing drops the account from the stateless witness read set and produces an incomplete proof.
   The same applies inside execution: read through the journal with revm's own loads (`load_account`, `sload`), never `journal.database.basic(...)`, or the account driving the result is missing from the returned state.
 - **A write is counted once its opcode completed.**
@@ -37,7 +37,7 @@ Defer to the baseline for everything not listed here; the rules below take prece
   Flag a stop that surfaces as a halt, a limit that is checked after the state change it guards, a stopped frame whose writes, logs or counted bytes survive into its caller, and an answer the engine turns into the stop whose journal is not taken back.
   The outcome's `limit_exceeded`, not the output bytes, tells a stop from a contract that reverts with the same bytes.
 - **Pools and ledgers stay aligned with frames.**
-  A frame's budgets are on its start's entry of the engine's start ledger, which revm's start lifecycle opens and settles (`limit/ledger.rs`); `frame_init` opens one entry per start revm decided (`AdditionalLimit::open_start`), which the result returning at that depth closes (`close_start`), and a start revm did not decide opens none; a synthetic frame result carries the inherited reservoir (`synthetic_frame_result`), never `Gas::new(limit)`, and settles on its start's budgets and start charge by status.
+  A frame's budgets are on its start's entry of the engine's start ledger, which revm's start lifecycle opens and settles (`limit/ledger.rs`); `frame_init` opens one entry per start revm decided (`AdditionalLimit::open_start`), which the result returning at that depth closes (`close_start`), and a start revm did not decide opens none; a synthetic frame result carries the inherited reservoir (`synthetic_frame_result`), never `Gas::new(limit)`, and the configuration's give-back mode, and settles on its start's budgets and start charge by status.
   A mechanism that adds a state charge goes through `Host::state_gas_price` at the site the state lands on and does not price the charge itself; a charge is given back at the price it was made at, unless an inspector rewrote the call's target, which revm reads the refund's account off.
   The three ledgers (regular, state, history) add up to the raw spend, and the block counts `max(regular, floor)` with history taken out first.
 - **Gas detention caps a frame inside the frame's own tracker.**
@@ -48,7 +48,7 @@ Defer to the baseline for everything not listed here; the rules below take prece
   The `keylessDeploy` call's frame runs no code and makes its actions by hand; check that the creation's outcome returns into the call through `frame_return_result`, that every effect (gas, the data-size pool, volatile access, logs, state) is reconciled in the one frame stack, that the signer's nonce rule holds on success and on failure, and that a value validated before execution (a gas-limit override) is not mutated afterwards.
 - **The interceptor dispatch is ordered cheapest-first and fails closed.**
   The call-scheme guard, then the address, then the selector, then the method's value policy; only `CALL` and `STATICCALL` reach an interceptor; an unknown selector is not intercepted and falls through to the contract's bytecode; a method that takes no value answers a value-bearing call with its error.
-- **System calls and system-address transactions:** a system call and a system-originated transaction are exempt from the per-transaction limits and history gas, priced at the minimum SALT bucket and not detained; a pre-block call runs on the one pre-block budget (`constants::PRE_BLOCK_CALL_GAS_LIMIT`), whatever the block's gas limit; a database error the database calls fatal is an internal error and any other failure refuses the block with the call's own validation error; a system-address transaction validates nonce, chain id and EIP-3607 against replay, and a commit step that re-checks block limits re-checks the sender's nonce and balance too.
+- **System calls and system-address transactions:** a system call and a system-originated transaction are exempt from the per-transaction limits, priced at the minimum SALT bucket and not detained, and only a system call is exempt from history gas: a system-originated transaction, like a deposit, pays history for what it appends; a pre-block call runs on the one pre-block budget (`constants::PRE_BLOCK_CALL_GAS_LIMIT`), whatever the block's gas limit; a database error the database calls fatal is an internal error and any other failure refuses the block with the call's own validation error; a system-address transaction validates nonce, chain id and EIP-3607 against replay, and a commit step that re-checks block limits re-checks the sender's nonce and balance too.
 - **The stateless witness must hold every read.**
   A change that makes block execution read state outside a transaction's journal commits the read as a read-only entry of a pre-block state or exports it, and adds a witness-replay case; nothing may depend on which source (the database, the SALT environment, the oracle service) answered.
 - **Hot-path accounting stays O(1)** in attacker-controlled call depth and authorization count — no frame-stack walk per opcode, no unindexed `Vec` scan per authorization.
@@ -99,7 +99,7 @@ Defer to the baseline for everything not listed here; the rules below take prece
 ## Test gates
 
 These checks guard every change to the Satin engine.
-`lint`, `test`, `no-std` and `require-label` are the required checks on `satin`; the rest inform the review, and the reviewer reads them.
+`lint`, `test`, `no-std` and `require-label` are the required checks on `satin`, and `Mega EEST gate` becomes one once an administrator adds it to the branch rule; the rest inform the review, and the reviewer reads them.
 
 ### The op-revm baseline
 
@@ -142,16 +142,54 @@ These checks guard every change to the Satin engine.
   `.github/workflows/exec-spec-satin.yml` runs the fixture replay after the equivalence gate, on the same fixture releases: every Osaka and Amsterdam entry, in equivalence and in Satin mode; an entry that does not replay fails the job, and so `execution-spec gate on Satin`, and so does a run that prints no single well-formed summary, executes nothing or reports a failed entry.
   The step summary counts the entries replayed on both witnesses apart from the rejected ones.
 
+### Mega EEST
+
+- Mega EEST is the conformance suite both Satin implementations share: state-transition cases, each pinned to rules of the Satin specification, run on an implementation through an adapter.
+  `.github/workflows/mega-eest.yml` runs `scripts/mega_eest.sh`, which consumes every gating case of the suite at the commit `scripts/mega_eest.env` pins (`MEGA_EEST_REV`), plain and instrumented, through the suite's revm adapter built against the pull request's own mega-evm, `[patch]` blocks and `Cargo.lock` (AGENTS.md, Test Gates, has how).
+- The `Mega EEST gate` job always runs, and becomes a required check once an administrator adds it to the `satin` branch rule; a pull request that changes documentation alone skips the run and passes it.
+  The step summary has the summary line (`MEGA-EEST rev=… run=full cases=… plain=pass:…,fail:…,unsupported:…,error:… instrumented=… parity=… negative=… provenance=… caseset=… result=…`), the run's time and exit, and, when the pull request moves the pin, the case ids it removes, adds and changes; a failing run uploads its reports.
+  The script's exit says what failed: 1 the cases (a verdict), 2 no verdict (a fetch, a build, a report; the log names the step), 3 the pin refused; the job also requires the line of the full run of a pin on the suite's default branch.
+  Each mode has a negative control report that must contain the indexed case IDs and fixture paths relative to `slice`, with consumer exit 1.
+  A gating or control report with a missing or mismatched mode leaves the run without a verdict.
+  When all gating cases pass and their observations agree, every negative control must fail at its indexed `wrongAt` path or report status `error` with the exact indexed `error` message.
+  If gating cases fail or their observations differ between modes, every control must still report a failure or an error in each mode.
+  The summary shows `negative=fail-as-recorded` when every control matches its index entry in every mode and `negative=fail-elsewhere` when the gating run fails and at least one control fails differently.
+  A passing case without an observation digest leaves the run without a verdict before the modes are compared.
+  A case that errors without an observation digest in either mode counts as a parity difference.
+  A malformed control entry, a missing, unsupported or passing control, a mismatched fixture path or an unexpected consumer exit also leaves the run without a verdict.
+- A case that fails is a change of behaviour the specification pins.
+  A pull request that makes it on purpose, or that changes the mega-evm API the suite's adapter calls (the adapter then no longer builds, and the gate says so), changes Mega EEST first: the case, derived from the changed rule, or the adapter, in a pull request there.
+  It then moves `MEGA_EEST_REV` to that Mega EEST commit, in the same mega-evm pull request, so the gate runs the suite that pull request needs.
+  While the Mega EEST change is under review, the pin may name its branch's commit as a draft state only: the cases run and show in the log, but the gate fails (`provenance=unmerged`, exit 3) until the pin moves to the commit merged on the suite's default branch, which it must before the mega-evm pull request merges.
+  Locally, a Mega EEST checkout at that commit is used with `MEGA_EEST_DIR=<checkout> scripts/mega_eest.sh` once the pin names it.
+- Moving the pin is a one-line change and is reviewed as one: the step summary lists the case ids it removes, adds and changes relative to the base's pin, and the suite's own history between the two commits says why.
+  A removal fails the gate unless the same pull request lists exactly the removed ids in `MEGA_EEST_REMOVED_CASES` in `scripts/mega_eest.env`, and so does a case changed under its id (another file digest) unless it is listed exactly in `MEGA_EEST_CHANGED_CASES`, so every behaviour the suite stops pinning, or pins differently, is a line the reviewer reads in the diff; a move that removes or changes nothing leaves both lines empty.
+  The default branch the pin must be on is `MEGA_EEST_REPO`'s, so a pull request that changes it fails the gate (`repo=changed`, exit 3) unless its base has no pin file or it declares the move: `MEGA_EEST_REPO_MOVED_FROM` names the base's repository exactly, and the pin is then checked on the new repository's default branch (`repo=moved`).
+  A pull request that keeps `MEGA_EEST_REPO` and sets that line is refused as stale (`repo=stale`); the line a merged move left in the base only warns, and a later pull request clears it.
+  A refused run's annotation names its causes, from the summary line's fields.
+- The coverage report and the mutation gate count the suite too: `scripts/coverage_mega_evm.sh` merges its run into the report Codecov receives, and the cargo-mutants gate runs a mutant the tests miss against it (Mutation testing, below).
+
 ### Byte-price grid
 
 - `.github/workflows/price-grid.yml` runs the `mega-evm` suite at byte prices other than the constants, through `scripts/price_grid.sh`: a cost per state byte and a cost per history byte per point, each run with `--no-fail-fast`.
-- On a pull request it runs five points: both bytes free (0 / 0), both at one gas (1 / 1), the cheapest and the dearest pair under consideration (312.5 / 20 and 5000 / 300), and a point past every candidate (10000 / 1000).
-  Between them they have failed every test the whole grid failed; 1 / 1 is where a premise that a charge cannot be paid, true only while a byte is dear, breaks.
-- Nightly and on dispatch it runs the whole grid: CPSB 0, 1, 312.5, 700, 1530, 2000, 5000 and 10000 by CPHB 0, 1, 20, 50, 88, 100, 200, 300 and 1000, and 0.001 on both.
+  The full grid runs as four parallel shards (`--full --shard I/4`) of one point list kept in the script, and a pull request that changes documentation alone skips it under the same allowlist; the `byte-price grid` job always runs and reports.
+- On a pull request and on dispatch it runs the whole grid: CPSB 0, 1, 312.5, 700, 1530, 2000, 5000 and 10000 by CPHB 0, 1, 20, 50, 88, 100, 200, 300 and 1000, and 0.001 on both.
+  It has no schedule, because a scheduled run would fire only from the default branch.
 - It is not a required check.
   A failure is a test that assumes a price, a scenario that does not scale with it, or an engine defect; the first two are fixed in the test, the third is not hidden behind a guard.
 - Each point reports how many tests a price guard held back (`guarded`, from `note_price_guard`; the tests are listed in the point's `.guards` file beside its log): every point passes the same number of tests, and this column tells a point at which tests returned early from one at which they ran.
-- Locally, `scripts/price_grid.sh --pr`, `--full`, or the points named (`scripts/price_grid.sh 312.5/20 5000/300`); each point's log is under `target/price-grid/`.
+- Locally, `scripts/price_grid.sh --full`, `--pr` (five points: 0 / 0, 1 / 1, 312.5 / 20, 5000 / 300 and 10000 / 1000, a quick local check), or the points named (`scripts/price_grid.sh 312.5/20 5000/300`); each point's log is under `target/price-grid/`.
+
+### Randomized tests, long mode
+
+- The bounded fuzz run is part of the `test` and `test-release` checks.
+- `.github/workflows/fuzz.yml` runs the long mode on every pull request and on dispatch: every property at fifty times its bounded count, in debug and in release, and the byte-price record at two prices compared by `scripts/fuzz_price_monotonic.py`, all from one seed the run draws and prints in the step summary.
+  It has no schedule and no path filter, because a scheduled or dispatch-only workflow would never run on this line (GitHub needs the workflow on the default branch for either).
+  A pull request that changes documentation alone is skipped, by an allowlist: every changed file must be under `docs/` or be a Markdown file outside `crates/` and `bin/` (`scripts/pull_request_needs_ci.sh`); any other change runs it.
+  The `long mode` job always runs and reports, so a skipped run does not leave a required check pending.
+- It is not a required check.
+  A failure prints the seed and the case count that reproduce it and the minimal case; it is a defect in the engine or a property to correct, never a seed to avoid.
+- Locally, `MEGA_FUZZ_LONG=1 MEGA_FUZZ_SEED=<seed> cargo test [--release] -p mega-evm --test fuzz -- --nocapture`.
 
 ### Instruction counts (CodSpeed)
 
@@ -170,7 +208,15 @@ These checks guard every change to the Satin engine.
   Reference point, the pull request that brought the Satin skeleton: 115 mutants, 49 caught, 0 survived, 1 suppressed, 65 unviable, in 7m41s on CI and 4m12s on a 15-core laptop with `JOBS=8`.
   That population is the diff against `a8f8c7c9`, the last commit of the legacy core, and it is reproduced by `scripts/mutation_test.sh diff a8f8c7c9` followed by `python3 scripts/mutation_gate.py report --results target/mutants/mutants.out --recheck target/mutants/recheck/mutants.out --suppressions mutants/suppressions.toml`.
   Take the numbers from that pair, not from `cargo mutants` on its own: the driver turns the function-scoped suppressions into `--exclude-re` before generation, and the gate filters the line-scoped ones after the run, so the bare command reports a different population and a different survivor count.
-- The job is bounded to 330 minutes.
+- A mutant the tests miss is run once more against the Mega EEST suite, with mega-evm's ignored `mega_eest` test as the only test, which runs `scripts/mega_eest.sh` in plain mode only on the mutated tree; one a Mega EEST case catches counts as caught, and the report says how many the suite decided.
+  The kill counts only on the suite's own verdict in that mutant's log (`MEGA-EEST … result=FAIL`): a run that failed before its cases ran (a build, a fetch) fails the test too, and the gate then refuses the results as unscorable rather than counting a kill.
+  The suite is fetched and its adapter built on the unmutated tree first, which must pass; a warm-up or a run that fails as a run, or that the budget stops, is recorded in its results, which the gate refuses.
+  The mutants run one at a time, each with the machine's parallelism for the cases.
+  The pass costs nothing while the tests catch every mutant; otherwise the warm-up, cargo-mutants' baseline, one copy of `./target` and, per mutant, two incremental builds of mega-evm and one plain run of the cases (about three minutes on a 4-vCPU runner, estimated, not measured), plus any struct-field mutant in the run's scope (`mutants/README.md` has the details).
+- The job is bounded to 330 minutes, and the driver's own budget (`MUTANTS_BUDGET`, 300 minutes) stops the run before that, so a run that cannot finish still scores and uploads what it tested; the driver's `MUTANTS-STATUS` line says how far it got, and the gate (`report --status`) fails anything but a complete run.
+  The driver builds the tests once before the mutants (the warm build) and CI builds incrementally (`CARGO_INCREMENTAL=1`), so each mutant recompiles only what its mutation changed.
+  The nightly full run is four shards (`scripts/mutation_test.sh full --shard k/4`), merged against the full inventory (`mutation_gate.py merge`, and `merge-runs` for their re-checks and Mega EEST runs) and scored as a full run.
+  A line suppression is anchored to one mutant (`file`, `line`, `column` and its text); one whose mutant moves gates it again, and the hygiene job names where its text went.
   Shard a series whose diff lists more than 1,000 mutants (`cargo mutants --list --in-diff <diff> --package mega-evm`): at the reference rate that is about an hour, and the rate falls as the test suite grows.
   Run shard `k` of `n` with `MUTANTS_SHARD=k/n OUT_DIR=target/mutants-k scripts/mutation_test.sh diff <base>` and gate each shard with `scripts/mutation_gate.py report`; the pull request that first needs it adds a shard matrix to the job, and every shard must pass.
 - The gate has a second scope, for its own infrastructure: `.cargo/mutants-infra.toml` and `scripts/mutation_test.sh infra` mutate the scenario runner (`crates/mega-evm/src/test_utils/scenario.rs`) against `mega-evm`'s tests.
@@ -185,12 +231,12 @@ These checks guard every change to the Satin engine.
 
 ### Scheduled workflows
 
-- GitHub fires a `schedule` trigger only from the default branch's copy of a workflow, so the schedules in `satin`'s copies (nightly mutation, doc-audit, the weekly execution-spec run, the nightly byte-price grid) stay inert until `satin` is the default branch.
-- Run them on `satin` by hand: `gh workflow run <workflow>.yml --ref satin` runs `satin`'s copy of the workflow on `satin`'s head, so none of them needs a `ref` input.
+- GitHub fires a `schedule` trigger only from the default branch's copy of a workflow, so the schedules in `satin`'s copies (nightly mutation, doc-audit, the weekly execution-spec run) stay inert until `satin` is the default branch.
+- `price-grid.yml` and `fuzz.yml` are not in that list: they have no schedule, and a dispatch needs the workflow on the default branch, so neither can be dispatched on `satin` and both run on every pull request instead.
+- Run the others on `satin` by hand: `gh workflow run <workflow>.yml --ref satin` runs `satin`'s copy of the workflow on `satin`'s head, so none of them needs a `ref` input.
   - `mutation.yml`: the whole-crate cargo-mutants run and suppression hygiene.
   - `exec-spec.yml`: the execution-spec fixtures at the pinned fork tag.
   - `doc-audit.yml`: the documentation audit of `satin`'s docs.
-  - `price-grid.yml`: the whole byte-price grid.
 
 ## Dev tools and test infrastructure
 

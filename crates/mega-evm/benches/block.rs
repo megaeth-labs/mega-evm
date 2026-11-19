@@ -4,15 +4,15 @@
 //! Every block runs as a node runs one:
 //!
 //! - on a state that holds the seven predeploys as a chain that ran Rex6 holds them, with what the
-//!   previous block's pre-block changes left: no block but Satin's activation block reads the
-//!   predeploys, and none deploys them;
+//!   previous block's pre-block changes left: every block deploys the system contracts, which on
+//!   that state only reads them, and only Satin's activation block reads the EIP-7997 factory;
 //! - with the EIP-2935 and EIP-4788 contracts' own code, so the pre-block calls record the parent
 //!   hash and the beacon root;
 //! - under the spec's limits, `ProtocolLimits::for_spec`: the production data-size limits and gas
 //!   detention's caps, with no building policy on top (`BlockLimits::default()`);
 //! - from a fresh `State` over that database, as a node starts each block.
 //!
-//! Three workloads of `N` transactions each, whose per-transaction work beyond the transaction
+//! Four workloads of `N` transactions each, whose per-transaction work beyond the transaction
 //! itself is the executor's own: the admission checks, the size estimates, the limits, the
 //! counters, the receipt and the commit.
 //!
@@ -25,6 +25,9 @@
 //!   that already holds tokens, on the token `contracts/Token.sol` builds: a block of the commonest
 //!   contract call there is. Each reads and writes two balances and emits one `Transfer` log, so it
 //!   carries two write records and a log through the counters.
+//!
+//! - `system_updates`: legacy calls from the live system address that write fresh Oracle slots,
+//!   exercising the same admission and commit checks as user transactions.
 //!
 //! The measurement runs `apply_pre_execution_changes`, the transactions and `finish` — the whole
 //! block a node executes — and hands the state back, so dropping it is not measured. One more arm,
@@ -42,14 +45,17 @@ use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
 use alloy_primitives::{
     address, b256, hex, keccak256, Address, Bytes, Signature, TxKind, B256, U256,
 };
+use alloy_sol_types::SolCall;
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use mega_evm::{
-    system::{MEGA_SYSTEM_ADDRESS, SEQUENCER_REGISTRY_ADDRESS},
+    system::{
+        flat_system_contract_specs, IOracle, MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS,
+        SEQUENCER_REGISTRY_ADDRESS,
+    },
     test_utils::{BytecodeBuilder, CommittedStates, MemoryDatabase},
     BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutor, MegaEvmFactory, MegaHardforkConfig,
     MegaSpecId, MegaTransactionOutcome, MegaTxEnvelope,
 };
-use op_revm::constants::L1_BLOCK_CONTRACT;
 use revm::{
     bytecode::opcode::{CALLDATALOAD, SSTORE},
     context::{BlockEnv, CfgEnv},
@@ -182,6 +188,7 @@ fn block_ctx() -> MegaBlockExecutionCtx {
         Some(PARENT_BEACON_ROOT),
         Bytes::new(),
         BlockLimits::default(),
+        Some(BLOCK_TIMESTAMP - 1),
     )
 }
 
@@ -285,9 +292,10 @@ fn steady_database() -> MemoryDatabase {
 }
 
 /// Asserts that the pre-block changes of the bench's block on `db` are a steady block's: the two
-/// calls, which write their contracts, then the reads of the registry's pending changes and of the
-/// L1 block info, and no read of a predeploy, which only Satin's activation block makes. Each step
-/// names one account.
+/// calls, which write their contracts, then the deployment of the five flat system contracts, the
+/// read of the registry's pending changes, the registry's deployment and the resolution of the
+/// live system address, and no read of the EIP-7997 factory, which only Satin's activation block
+/// makes. Each step names one account.
 fn assert_steady_pre_block(db: &MemoryDatabase) {
     let states = pre_block_states(db.clone(), BLOCK_NUMBER);
     let named: Vec<_> = states
@@ -297,16 +305,10 @@ fn assert_steady_pre_block(db: &MemoryDatabase) {
             *state.keys().next().expect("one account")
         })
         .collect();
-    assert_eq!(
-        named,
-        [
-            HISTORY_STORAGE_ADDRESS,
-            BEACON_ROOTS_ADDRESS,
-            SEQUENCER_REGISTRY_ADDRESS,
-            L1_BLOCK_CONTRACT
-        ],
-        "a steady block reads no predeploy"
-    );
+    let mut expected = vec![HISTORY_STORAGE_ADDRESS, BEACON_ROOTS_ADDRESS];
+    expected.extend(flat_system_contract_specs().map(|spec| spec.address));
+    expected.extend([SEQUENCER_REGISTRY_ADDRESS; 3]);
+    assert_eq!(named, expected, "a steady block deploys the system contracts and reads no factory");
     // Outside every measured section: both calls wrote the contract the bench seeded.
     for (call, address) in states.iter().zip([HISTORY_STORAGE_ADDRESS, BEACON_ROOTS_ADDRESS]) {
         let writes = call[&address].storage.values().filter(|slot| slot.is_changed()).count();
@@ -328,6 +330,27 @@ fn bench_block(c: &mut Criterion) {
         ("storage_writes", transactions(WRITER, 0, 300_000, slot_calldata), 1),
         // The sender's balance and the recipient's.
         ("erc20_transfers", token_transfers(), 2),
+        (
+            "system_updates",
+            (0..N)
+                .map(|nonce| {
+                    transaction(
+                        MEGA_SYSTEM_ADDRESS,
+                        nonce,
+                        ORACLE_CONTRACT_ADDRESS,
+                        0,
+                        500_000,
+                        IOracle::setSlotCall {
+                            slot: U256::from(nonce),
+                            value: B256::repeat_byte(1),
+                        }
+                        .abi_encode()
+                        .into(),
+                    )
+                })
+                .collect(),
+            1,
+        ),
     ];
 
     let mut group = c.benchmark_group("block");

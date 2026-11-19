@@ -14,7 +14,8 @@
 //! holds that rule for all of them.
 //!
 //! The executor's own reads of the block's state outside a call (the activation block's check of
-//! the predeploys, the registry's due check, the L1 block info, a sender's account) follow the
+//! the EIP-7997 factory, the system contracts' deployments, the registry's due check, the
+//! resolution of the live system address, the L1 block info, a sender's account) follow the
 //! convention of `alloy-op-evm`'s executor for its reads: any database error is an internal error,
 //! fatal or not.
 

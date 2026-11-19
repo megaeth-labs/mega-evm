@@ -342,6 +342,9 @@ fn test_a_precompile_answered_from_its_price_at_a_data_size_boundary_is_the_comp
                 "{case}: the call's answer"
             );
             assert_eq!(balance(&run, MODEXP), U256::ZERO, "{case}: nothing moved");
+            // The opcode charged the empty account's state gas before the price; the crossing
+            // gives it back.
+            assert_eq!(run.outcome.gas.state, 0, "{case}: the new account's state gas came back");
             let body_alone = LimitUsage { data_size: body, write_records: 0, state_growth: 0 };
             assert_eq!(run.outcome.usage, body_alone, "{case}");
         }

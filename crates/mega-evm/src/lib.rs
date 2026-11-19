@@ -32,15 +32,16 @@ pub use access::{
     VolatileDataAccess,
 };
 pub use block::{
-    chain_activation, estimated_da_size, hardfork_schedule, mainnet_hardforks, read_l1_block_info,
-    testnet_hardforks, transact_beacon_root_contract_call, transact_blockhashes_contract_call,
-    BlockGasCounters, BlockLimiter, BlockLimits, BlockUsage, ChainActivation, EnrichedMegaTx,
-    MegaBlockExecutionCtx, MegaBlockExecutionError, MegaBlockExecutionResult, MegaBlockExecutor,
-    MegaBlockExecutorFactory, MegaBlockLimitExceededError, MegaBlockTxResult, MegaFinishedBlock,
-    MegaHardfork, MegaHardforkConfig, MegaHardforks, MegaTransactionExt, MegaTxLimitExceededError,
+    chain_activation, estimated_da_size, hardfork_schedule, mainnet_hardforks, testnet_hardforks,
+    transact_beacon_root_contract_call, transact_blockhashes_contract_call, BlockGasCounters,
+    BlockLimiter, BlockLimits, BlockUsage, ChainActivation, EnrichedMegaTx, MegaBlockExecutionCtx,
+    MegaBlockExecutionError, MegaBlockExecutionResult, MegaBlockExecutor, MegaBlockExecutorFactory,
+    MegaBlockLimitExceededError, MegaBlockTxResult, MegaFinishedBlock, MegaHardfork,
+    MegaHardforkConfig, MegaHardforks, MegaTransactionExt, MegaTxLimitExceededError,
     ProtocolLimits, SatinChainConfig, SatinChainConfigError, ScheduleError, CHAIN_ACTIVATIONS,
-    L1_BLOCK_INFO_SLOTS, MAINNET_CHAIN_ID, SATIN_CHAIN_CONFIG_KEYS, SATIN_TIME_KEY, SYSTEM_ADDRESS,
-    TESTNET_CHAIN_ID,
+    L1_BLOCK_INFO_SLOTS, MAINNET_CHAIN_ID, REX5_INITIAL_ADMIN_KEY, REX5_INITIAL_SEQUENCER_KEY,
+    REX6_MIN_ROTATION_DELAY_KEY, SATIN_CHAIN_CONFIG_KEYS, SATIN_TIME_KEY,
+    SEQUENCER_REGISTRY_BOOTSTRAP_KEYS, SYSTEM_ADDRESS, TESTNET_CHAIN_ID,
 };
 #[cfg(feature = "satin-price-override")]
 pub use evm::install_satin_prices;

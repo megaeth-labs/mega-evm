@@ -13,15 +13,20 @@
 #   kind = "function"  -> matched as an --exclude-re against the mutant NAME.
 #                         Use for whole functions that are entirely equivalent or
 #                         dead (stable across line moves). `pattern` is a regex.
-#   kind = "line"      -> matched against the exact mutant description line from
-#                         missed.txt OR timeout.txt. Use for a single surviving
-#                         mutant inside an otherwise-tested function, or to accept
-#                         a genuinely non-terminating/equivalent timed-out mutant.
-#                         `mutant` is the literal text (without "file:line:col: "),
-#                         or, when several mutants share that text, the full
-#                         "file:line:col: text" line of each one suppressed: a
-#                         bare text that matches more than one mutant fails the
-#                         gate.
+#   kind = "line"      -> matched against one mutant line of missed.txt OR
+#                         timeout.txt (`file:line:col: text`): `file`, `line` and
+#                         `column` must name its location and `mutant` must be its
+#                         exact text (without the "file:line:col: " prefix). Use for
+#                         a single surviving mutant inside an otherwise-tested
+#                         function, or to accept a genuinely non-terminating or
+#                         equivalent timed-out mutant. The anchor keeps the entry
+#                         to the one reviewed mutant: the same mutation text
+#                         elsewhere in the function (a new `&&`, say) stays gated.
+#                         When the code above it moves, the entry stops matching
+#                         (fail closed: the mutant is gated again) and the
+#                         suppression-hygiene job reports it as stale, with the
+#                         location the text has moved to; re-anchor it after
+#                         checking the justification still holds.
 #
 # Every entry also carries:
 #   category = "equivalent" | "dead"
@@ -40,7 +45,7 @@
 # a caller, its mutants silently stop being generated and no gap is reported.
 # `kind = "line"` is safer — the mutant is still generated and run every time, so
 # if the code changes such that a test now kills it, it simply shows up as caught
-# and the suppression becomes a harmless no-op. Prefer "line" unless the whole
+# and the suppression becomes a harmless no-op; if it moves, it is gated again. Prefer "line" unless the whole
 # function is genuinely, permanently dead, and re-audit the "function" entries
 # (and every "dead" justification) whenever their surrounding code changes. The
 # nightly full-crate run (.github/workflows/mutation.yml) re-checks "line"
@@ -58,6 +63,8 @@
 kind = "line"
 category = "equivalent"
 file = "crates/mega-evm/src/external/mod.rs"
+line = 98
+column = 9
 mutant = "replace <impl ExternalEnvFactory for EmptyExternalEnv>::external_envs -> ExternalEnvs<Self::EnvTypes> with ExternalEnvs::from(Default::default())"
 justification = "EmptyExternalEnv is a unit struct; real body builds ExternalEnvs{salt_env:EmptyExternalEnv, oracle_env:EmptyExternalEnv}; from(Default::default()) resolves to Default for ExternalEnvs<EmptyExternalEnv> producing identical fields. Value-identical, no observable behavioral difference."
 reviewer = "improve-mutation-score (William Aaron Cheung)"
@@ -79,7 +86,9 @@ reviewer = "improve-mutation-score (William Aaron Cheung)"
 kind = "line"
 category = "equivalent"
 file = "crates/mega-evm/src/external/hasher/fallback.rs"
-mutant = "crates/mega-evm/src/external/hasher/fallback.rs:120:48: replace | with ^ in <impl core::hash::Hasher for DeterministicHasher>::write"
+line = 120
+column = 48
+mutant = "replace | with ^ in <impl core::hash::Hasher for DeterministicHasher>::write"
 justification = "Equivalent: `(front as u128) | ((back as u128) << 64)` ORs a u64-widened low half (bits 0..63 only) with a u64-widened high half shifted into bits 64..127 only. The operands have disjoint set bits by construction for every input, so | == ^ identically; no reachable input distinguishes them."
 reviewer = "RealiCZ"
 
@@ -87,7 +96,9 @@ reviewer = "RealiCZ"
 kind = "line"
 category = "equivalent"
 file = "crates/mega-evm/src/external/hasher/fallback.rs"
-mutant = "crates/mega-evm/src/external/hasher/fallback.rs:125:47: replace | with ^ in <impl core::hash::Hasher for DeterministicHasher>::write"
+line = 125
+column = 47
+mutant = "replace | with ^ in <impl core::hash::Hasher for DeterministicHasher>::write"
 justification = "Equivalent: `(value[0] as u128) | ((value[1] as u128) << 64)` ORs a u64-widened low half (bits 0..63 only) with a u64-widened high half shifted into bits 64..127 only. The operands have disjoint set bits by construction for every input, so | == ^ identically; no reachable input distinguishes them."
 reviewer = "improve-mutation-score (William Aaron Cheung)"
 
@@ -115,6 +126,8 @@ reviewer = "improve-mutation-score (William Aaron Cheung)"
 kind = "line"
 category = "dead"
 file = "crates/mega-evm/src/external/hasher/fallback.rs"
+line = 58
+column = 48
 mutant = "replace ^ with | in DeterministicHasher::update"
 justification = "Dead outside the unit tests: bucket_id drives only the slice write() -> large_update, and update() is reached solely via the typed write_uN methods, which no non-test code calls. test_hasher_typed_write_methods runs it but asserts only that the typed hashes differ from one another, which `new_data | buffer` keeps; observed passing the hasher tests and the whole mega-evm suite. Changes no bucket id."
 reviewer = "RealiCZ"
@@ -123,6 +136,8 @@ reviewer = "RealiCZ"
 kind = "line"
 category = "dead"
 file = "crates/mega-evm/src/external/hasher/fallback.rs"
+line = 58
+column = 48
 mutant = "replace ^ with & in DeterministicHasher::update"
 justification = "Dead outside the unit tests: see the ^->| entry for update. test_hasher_typed_write_methods asserts only that the typed hashes differ from one another, which `new_data & buffer` keeps; observed passing the hasher tests and the whole mega-evm suite. Changes no bucket id."
 reviewer = "RealiCZ"
@@ -131,6 +146,8 @@ reviewer = "RealiCZ"
 kind = "line"
 category = "dead"
 file = "crates/mega-evm/src/external/hasher/fallback.rs"
+line = 73
+column = 9
 mutant = "replace <impl core::hash::Hasher for DeterministicHasher>::write_u8 with ()"
 justification = "Dead outside the unit tests: bucket_id uses only the slice write() -> large_update, and no non-test code calls write_u8. test_hasher_typed_write_methods calls it but asserts only that its hash differs from the other typed writes', which the hash of an unwritten hasher still does; observed passing the hasher tests and the whole mega-evm suite. Changes no bucket id."
 reviewer = "RealiCZ"
@@ -139,6 +156,8 @@ reviewer = "RealiCZ"
 kind = "line"
 category = "dead"
 file = "crates/mega-evm/src/external/hasher/fallback.rs"
+line = 78
+column = 9
 mutant = "replace <impl core::hash::Hasher for DeterministicHasher>::write_u16 with ()"
 justification = "Dead outside the unit tests: same as write_u8. test_hasher_typed_write_methods asserts only that write_u16's hash differs from the other typed writes', which the hash of an unwritten hasher still does; observed passing the hasher tests and the whole mega-evm suite. Changes no bucket id."
 reviewer = "RealiCZ"
@@ -147,6 +166,8 @@ reviewer = "RealiCZ"
 kind = "line"
 category = "dead"
 file = "crates/mega-evm/src/external/hasher/fallback.rs"
+line = 83
+column = 9
 mutant = "replace <impl core::hash::Hasher for DeterministicHasher>::write_u32 with ()"
 justification = "Dead outside the unit tests: same as write_u8. test_hasher_typed_write_methods asserts only that write_u32's hash differs from the other typed writes', which the hash of an unwritten hasher still does; observed passing the hasher tests and the whole mega-evm suite. Changes no bucket id."
 reviewer = "RealiCZ"
@@ -155,6 +176,8 @@ reviewer = "RealiCZ"
 kind = "line"
 category = "dead"
 file = "crates/mega-evm/src/external/hasher/fallback.rs"
+line = 88
+column = 9
 mutant = "replace <impl core::hash::Hasher for DeterministicHasher>::write_u64 with ()"
 justification = "Dead outside the unit tests: same as write_u8; write_usize delegates to it. test_hasher_typed_write_methods asserts only that write_u64 and write_usize agree, which they still do, both hashing nothing; observed passing the hasher tests and the whole mega-evm suite. Changes no bucket id."
 reviewer = "RealiCZ"
@@ -163,6 +186,8 @@ reviewer = "RealiCZ"
 kind = "line"
 category = "dead"
 file = "crates/mega-evm/src/external/hasher/fallback.rs"
+line = 93
+column = 9
 mutant = "replace <impl core::hash::Hasher for DeterministicHasher>::write_u128 with ()"
 justification = "Dead outside the unit tests: bucket_id's slice write() calls large_update directly, never write_u128, and no non-test code calls it. test_hasher_typed_write_methods asserts only that its hash differs from the other typed writes', which the hash of an unwritten hasher still does; observed passing the hasher tests and the whole mega-evm suite. Changes no bucket id."
 reviewer = "RealiCZ"
@@ -186,7 +211,9 @@ reviewer = "RealiCZ"
 kind = "line"
 category = "equivalent"
 file = "crates/mega-evm/src/external/hasher/fallback.rs"
-mutant = "crates/mega-evm/src/external/hasher/fallback.rs:109:27: replace > with >= in <impl core::hash::Hasher for DeterministicHasher>::write"
+line = 109
+column = 27
+mutant = "replace > with >= in <impl core::hash::Hasher for DeterministicHasher>::write"
 justification = "Equivalent (line 109 `> 16`): the > vs >= boundary only differs at len == 16, where both the mid branch (front | (back<<64)) and the large branch (read_last_u128, with no loop pass since 16 is not > 16) feed the identical le_u128(bytes[0..16]) to a single large_update. Same buffer, same bucket id; no input distinguishes them. The line-108 and line-112 mutants sharing this text are non-equivalent and are not suppressed."
 reviewer = "improve-mutation-score (William Aaron Cheung)"
 
@@ -203,8 +230,49 @@ reviewer = "improve-mutation-score (William Aaron Cheung)"
 kind = "line"
 category = "equivalent"
 file = "crates/mega-evm/src/evm/spec.rs"
+line = 136
+column = 9
 mutant = "replace <impl From<MegaSpecId> for EthSpecId>::from -> Self with Default::default()"
 justification = "Equivalent: revm's SpecId::OSAKA carries #[default], and Satin's sole rung (SATIN) maps to EthSpecId::OSAKA, so Default::default() returns the same value on every current input. test_all_specs_map_to_karst_and_osaka pins the mapping; if the upstream default moves, that test kills this mutant and the entry becomes a no-op."
+reviewer = "RealiCZ"
+
+# --- MegaContext::prepare's deposit test (equivalent: the two classes behave alike) ---------
+# `prepare` classes an execution that is neither the protocol's own nor neutral as
+# `TxClass::Deposit` when the transaction is a deposit and as `TxClass::Ordinary` otherwise.
+# The two classes are read in exactly two places, `AdditionalLimit::is_exempt` (both false) and
+# `MegaContext::prices_history` (both true), so `==` -> `!=`, which swaps the two labels, changes
+# nothing a transaction is held to or pays. A line entry keeps the mutant generated: once the two
+# classes part on a rule, a test of that rule kills it and the entry becomes a no-op.
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/evm/context.rs"
+line = 714
+column = 43
+mutant = "replace == with != in MegaContext<DB, ExtEnvs>::prepare"
+justification = "Equivalent: the comparison only chooses between TxClass::Deposit and TxClass::Ordinary for an execution that is neither the protocol's own nor neutral, and every reader of the class treats the two alike (is_exempt false, prices_history true). Swapping them changes no limit, exemption, detention or history charge."
+reviewer = "RealiCZ"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# crates/mega-evm/src/block/ survivors.
+
+# --- Entry::address's format check (equivalent: the parser enforces the same) -------------
+# `Entry::address` refuses a value unless it is `0x` and then 40 hexadecimal digits, and then
+# parses the digits with `Address::from_str`, which is alloy's `FixedBytes::from_hex`: it strips
+# an optional `0x` prefix, refuses an odd length, a length other than 40 digits and any
+# non-hexadecimal byte. `||` -> `&&` lets through only digits that fail one test and pass the
+# other — 40 bytes that are not all hexadecimal, or an all-hexadecimal string of another
+# length — and the parser refuses every one of them, with the same `invalid()` error the check
+# returns. A line entry keeps the mutant generated: if alloy's parser ever accepts such a string,
+# the format tests of `genesis.rs` kill it.
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/block/genesis.rs"
+line = 290
+column = 31
+mutant = "replace || with && in Entry::address"
+justification = "Equivalent: every string the mutated check lets through (40 bytes not all hexadecimal, or all-hexadecimal of another length) is refused by Address::from_str (alloy's FixedBytes::from_hex: exact 40 hex digits after an optional 0x), and the refusal maps to the same invalid() error, so the result is identical for every input."
 reviewer = "RealiCZ"
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -224,6 +292,8 @@ reviewer = "RealiCZ"
 kind = "line"
 category = "equivalent"
 file = "crates/mega-evm/src/test_utils/scenario.rs"
+line = 238
+column = 13
 mutant = "delete field timestamp from struct BlockEnv expression in Scenario::block"
 justification = "Equivalent: the field writes U256::from(1) and revm 40's BlockEnv::default() already has timestamp: U256::ONE, so the struct is identical with or without it. test_block_is_fixed_except_for_the_beneficiary pins the value, so the mutant becomes killable the moment the upstream default moves."
 reviewer = "RealiCZ"
@@ -232,6 +302,8 @@ reviewer = "RealiCZ"
 kind = "line"
 category = "equivalent"
 file = "crates/mega-evm/src/test_utils/scenario.rs"
+line = 240
+column = 13
 mutant = "delete field basefee from struct BlockEnv expression in Scenario::block"
 justification = "Equivalent: the field writes 0 and revm 40's BlockEnv::default() already has basefee: 0, so the struct is identical with or without it. test_block_is_fixed_except_for_the_beneficiary pins the value, so the mutant becomes killable the moment the upstream default moves."
 reviewer = "RealiCZ"
@@ -240,6 +312,8 @@ reviewer = "RealiCZ"
 kind = "line"
 category = "equivalent"
 file = "crates/mega-evm/src/test_utils/scenario.rs"
+line = 241
+column = 13
 mutant = "delete field gas_limit from struct BlockEnv expression in Scenario::block"
 justification = "Equivalent: the field writes u64::MAX and revm 40's BlockEnv::default() already has gas_limit: u64::MAX, so the struct is identical with or without it. test_block_is_fixed_except_for_the_beneficiary pins the value, so the mutant becomes killable the moment the upstream default moves."
 reviewer = "RealiCZ"

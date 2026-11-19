@@ -6,21 +6,22 @@
 //! becomes the chain's head and its state the chain's; a block it refuses is dropped with its copy,
 //! so the chain stays at the previous block.
 //!
-//! Satin runs on a chain that ran the legacy forks, which holds the six system contracts, and OP's
-//! EIP-7997 factory, and deploys none of them; the runner seeds each of the seven the fixture's
-//! pre-state lacks into the chain's genesis state, once, as such a chain holds them
-//! ([`rex6_predeploys`]), the `SequencerRegistry` with roles that bind nothing on an Osaka fixture
-//! ([`registry_roles`], which says why).
+//! Every Satin block deploys the six system contracts before its transactions, and OP's EIP-7997
+//! factory, which nothing deploys, is checked only in the block in which Satin activates; the
+//! runner seeds each of the seven the fixture's pre-state lacks into the chain's genesis state,
+//! once, as a chain that ran the legacy forks holds them ([`rex6_predeploys`]), so every block's
+//! deployment only reads them, the `SequencerRegistry` with roles that bind nothing on an Osaka
+//! fixture ([`registry_roles`], which says why).
 //!
 //! Each block's context tells the executor whether the block admits only deposits and whether
 //! Satin activates in it, worked out as a node works them out: from the schedule and the timestamp
 //! of the chain's head, the block's parent. Under [`chain_spec`], which activates every fork at
-//! genesis, no block the runner imports is either, so no block checks the predeploys.
+//! genesis, no block the runner imports is either, so no block checks the EIP-7997 factory.
 //!
-//! A Satin chain holds accounts an Ethereum chain does not: the seven predeploys, which Satin
-//! requires and does not create, so the chain's pre-state holds them; and the fee vaults op-revm
-//! routes fees to. [`SATIN_ACCOUNTS`] lists them, each with the rule it is taken out of the
-//! post-state by before the root is computed; any other account that differs is a failure.
+//! A Satin chain holds accounts an Ethereum chain does not: the seven predeploys, which the runner
+//! seeds into the chain's pre-state and every block's deployment then only reads; and the fee
+//! vaults op-revm routes fees to. [`SATIN_ACCOUNTS`] lists them, each with the rule it is taken out
+//! of the post-state by before the root is computed; any other account that differs is a failure.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -43,16 +44,16 @@ use mega_evm::{
         DatabaseCommit,
     },
     system::{
-        keyless::KEYLESS_DEPLOY_ADDRESS, ACCESS_CONTROL_ADDRESS, CREATE2_FACTORY_ADDRESS,
-        HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS, LIMIT_CONTROL_ADDRESS, MEGA_SYSTEM_ADDRESS,
-        ORACLE_CONTRACT_ADDRESS, SEQUENCER_REGISTRY_ADDRESS,
+        keyless::KEYLESS_DEPLOY_ADDRESS, SequencerRegistryBootstrap, ACCESS_CONTROL_ADDRESS,
+        CREATE2_FACTORY_ADDRESS, HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS, LIMIT_CONTROL_ADDRESS,
+        MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS, SEQUENCER_REGISTRY_ADDRESS,
     },
     test_utils::{
         rex6_predeploys, RecordingDatabase, RecordingEnvFactory, SequencerRegistryRoles,
         SharedWitnessRecord,
     },
     BlockLimits, EmptyExternalEnv, ExternalEnvFactory, ExternalEnvTypes, MegaBlockExecutionCtx,
-    MegaBlockExecutor, MegaEvm, MegaHardforkConfig, MegaHardforks, ProtocolLimits,
+    MegaBlockExecutor, MegaEvm, MegaHardforkConfig, ProtocolLimits,
 };
 
 use super::fixture::DecodedBlock;
@@ -73,10 +74,10 @@ const BLOCK_HASH_WINDOW: u64 = 256;
 /// out.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Added {
-    /// A predeploy, which Satin requires and neither creates nor upgrades: the chain's pre-state
-    /// holds it as a chain that ran Rex6 holds it ([`rex6_predeploys`]), the `SequencerRegistry`
-    /// with the roles of [`registry_roles`]. It is taken out when it holds exactly that: the code,
-    /// the nonce, the storage, and no balance.
+    /// A predeploy, which the chain's pre-state holds as a chain that ran Rex6 holds it
+    /// ([`rex6_predeploys`]), the `SequencerRegistry` with the roles of [`registry_roles`], and
+    /// which every block's deployment of the system contracts therefore only reads. It is taken
+    /// out when it holds exactly that: the code, the nonce, the storage, and no balance.
     PreState,
     /// The vault op-revm credits the base fee to, where Ethereum burns it. It is taken out when it
     /// holds exactly the base fees of the blocks the chain accepted, and nothing else.
@@ -169,9 +170,15 @@ pub fn registry_roles() -> SequencerRegistryRoles {
     SequencerRegistryRoles::from(MEGA_SYSTEM_ADDRESS)
 }
 
-/// The schedule the blocks run on: every fork active from genesis.
+/// The schedule the blocks run on: every fork active from genesis, carrying the
+/// `SequencerRegistry` bootstrap values the roles of [`registry_roles`] are, as a schedule that
+/// activates Satin must. A registry is seeded into every pre-state that lacks one, so no block
+/// seeds one from them.
 pub fn chain_spec() -> MegaHardforkConfig {
-    MegaHardforkConfig::default().with_all_activated()
+    let roles = registry_roles();
+    let bootstrap =
+        SequencerRegistryBootstrap::new(roles.sequencer, roles.admin, roles.min_rotation_delay);
+    MegaHardforkConfig::default().with_all_activated().with_sequencer_registry_bootstrap(bootstrap)
 }
 
 /// The limits the blocks are held to in place of Satin's: none ([`ProtocolLimits::no_limits`]).
@@ -434,17 +441,13 @@ impl Chain {
         E: ExternalEnvTypes,
     {
         let header = &block.header;
-        let only_deposits = self.spec.admits_only_deposits(self.head_timestamp, header.timestamp);
-        let activates_satin =
-            self.spec.is_satin_activation_block(self.head_timestamp, header.timestamp);
         let ctx = MegaBlockExecutionCtx::new(
             header.parent_hash,
             header.parent_beacon_block_root,
             header.extra_data.clone(),
             BlockLimits::no_limits(),
-        )
-        .with_no_user_tx_activation_block(only_deposits)
-        .with_satin_activation_block(activates_satin);
+            Some(self.head_timestamp),
+        );
         let mut executor =
             MegaBlockExecutor::new(evm, ctx, self.spec.clone(), OpAlloyReceiptBuilder::default())
                 .with_protocol_limits(limits());
@@ -477,6 +480,8 @@ fn refusal(error: BlockExecutionError) -> Refusal {
 
 #[cfg(test)]
 mod tests {
+    use mega_evm::MegaHardforks;
+
     use super::*;
 
     /// The removal list names every predeploy the pre-state holds and the three fee vaults, each
@@ -502,7 +507,7 @@ mod tests {
         );
     }
 
-    /// [S10] The schedule the chain runs on loads, and the blocks are held to no limit:
+    /// The schedule the chain runs on loads, and the blocks are held to no limit:
     /// equivalence mode takes out every one `MegaETH` sets.
     ///
     /// Expected values: constants (no limit at all).
@@ -515,7 +520,7 @@ mod tests {
         assert_eq!(limits().block_txs_data_limit, u64::MAX);
     }
 
-    /// [S1.8] [S21.12] [S1] A block's context says whether it admits only deposits, from the
+    /// A block's context says whether it admits only deposits, from the
     /// schedule and the head's timestamp, as a node works it out. Under a schedule that activates
     /// Satin at the block's timestamp, with the genesis a second earlier, the block is Satin's
     /// activation block: a user transaction in it is refused, and the block without it is

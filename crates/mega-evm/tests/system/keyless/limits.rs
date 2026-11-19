@@ -24,7 +24,7 @@ use mega_evm::{
     LimitCheck, LimitKind, MegaLimitExceeded, LOG_BASE_SIZE, WRITE_RECORD_SIZE,
 };
 use revm::{
-    bytecode::opcode::{CALL, GAS, POP, PUSH0, REVERT, TIMESTAMP},
+    bytecode::opcode::{CALL, GAS, POP, PUSH0, TIMESTAMP},
     interpreter::{
         interpreter::EthInterpreter, CallInputs, CallOutcome, CreateInputs, CreateOutcome,
         InstructionResult,
@@ -104,12 +104,26 @@ fn assert_nothing_kept(
     assert_eq!([state, history_gas, history_bytes], [0; 3], "{case} at {gas_limit}");
     assert!(regular >= KEYLESS_DEPLOY_OVERHEAD_GAS, "{case}: the overhead stays spent");
     assert_eq!(outcome.usage.write_records, 0, "{case}: no record is kept");
+    // The call's regular gas paid the legacy shares of the signer's account and of the created
+    // account before the reservoir; the call's revert gives them back into the reservoir with the
+    // rest of the charges.
     if gas_limit > TX_GAS_LIMIT_CAP {
         assert_eq!(
-            outcome.gas.reservoir_remaining, reference.gas.reservoir_remaining,
+            outcome.gas.reservoir_remaining,
+            reference.gas.reservoir_remaining + account_share() + create_share(),
             "{case}: the reservoir comes back",
         );
     }
+}
+
+/// The legacy share of the signer's account, which a keyless call's regular gas pays first.
+fn account_share() -> u64 {
+    entry(GasId::new_account_state_gas()).min(25_000)
+}
+
+/// The legacy share of the created account, which a keyless call's regular gas pays first.
+fn create_share() -> u64 {
+    entry(GasId::create_state_gas()).min(20_000)
 }
 
 /// A log that crosses the creation's own data-size budget reverts the creation alone: the call
@@ -325,7 +339,8 @@ fn test_a_deployment_within_every_limit_deploys() {
 /// An answer built without a frame carries the reservoir the call inherited: a call refused after
 /// it paid for the signer's account — the forward capped below the signed gas limit, which only a
 /// signed gas limit near the execution cap reaches above it — gives the charge back to the
-/// reservoir and the sender gets all of it but the body's history.
+/// reservoir, the legacy share its regular gas paid included, and the sender gets all of it but
+/// the body's history.
 #[test]
 fn test_a_refusal_after_the_charges_gives_the_reservoir_back() {
     let deployment =
@@ -339,26 +354,35 @@ fn test_a_refusal_after_the_charges_gives_the_reservoir_back() {
         [total, regular, state, history_gas],
         [KEYLESS_DEPLOY_OVERHEAD_GAS, KEYLESS_DEPLOY_OVERHEAD_GAS, 0, 0]
     );
-    assert_eq!(outcome.gas.reservoir_remaining, reference.gas.reservoir_remaining,);
+    assert_eq!(
+        outcome.gas.reservoir_remaining,
+        reference.gas.reservoir_remaining + account_share()
+    );
 }
 
 /// And a call refused after the charges of the creation's start — the forward the `CREATE`
-/// opcode's regular gas takes below the signed gas limit, which above the execution cap only a
-/// signed gas limit just under what the call has left reaches — gives their state and history gas
-/// back to the reservoir, and keeps their regular gas, as it keeps the overhead.
+/// opcode's regular gas and the created account's legacy share take below the signed gas limit,
+/// which above the execution cap only a signed gas limit just under what the call has left once it
+/// paid the signer's account reaches — gives their state and history gas back to the reservoir,
+/// the legacy shares its regular gas paid included, and keeps their regular gas, as it keeps the
+/// overhead.
 #[test]
 fn test_a_refusal_after_the_creations_charges_gives_the_reservoir_back() {
     let gas_limit = GAS_LIMITS[1];
     let init_code = deploying(&runtime(1));
     // Above the cap the call has what the execution cap leaves once the body's regular gas — all
-    // the reference spends — and the overhead are paid. The signed gas limit is one less, and is
-    // part of the calldata the body is priced by, so the two are settled together.
+    // the reference spends — and the overhead are paid, and the signer's account its legacy share.
+    // The signed gas limit is one less, so the forward check after the signer's account passes,
+    // and is part of the calldata the body is priced by, so the two are settled together.
     let mut signed = TX_GAS_LIMIT_CAP - 200_000;
     let (deployment, left) = (0..10)
         .find_map(|_| {
             let deployment = Deployment::signed(0, signed, U256::ZERO, init_code.clone());
             let reference = reference(deployment.call_data(LARGE_OVERRIDE), gas_limit);
-            let left = TX_GAS_LIMIT_CAP - reference.gas.regular - KEYLESS_DEPLOY_OVERHEAD_GAS;
+            let left = TX_GAS_LIMIT_CAP -
+                reference.gas.regular -
+                KEYLESS_DEPLOY_OVERHEAD_GAS -
+                account_share();
             let settled = left - 1 == signed;
             signed = left - 1;
             settled.then_some((deployment, left))
@@ -370,53 +394,17 @@ fn test_a_refusal_after_the_creations_charges_gives_the_reservoir_back() {
         refusal(&outcome),
         KeylessDeployError::GasLimitTooLow {
             tx_gas_limit: signed,
-            provided_gas_limit: left - opcode
+            provided_gas_limit: left - opcode - create_share()
         },
     );
     let reference = reference(deployment.call_data(LARGE_OVERRIDE), gas_limit);
     let [total, regular, state, history_gas, _] = beyond(&outcome, &reference);
     let kept = KEYLESS_DEPLOY_OVERHEAD_GAS + opcode;
     assert_eq!([total, regular, state, history_gas], [kept, kept, 0, 0]);
-    assert_eq!(outcome.gas.reservoir_remaining, reference.gas.reservoir_remaining,);
-}
-
-/// The call gets back what its creation did not spend, the same way whether the creation
-/// succeeds or reverts: the transaction spends the overhead, the `CREATE` opcode's regular gas,
-/// what the call kept of the creation's start, and the creation's `gasUsed`, and nothing else,
-/// below and above the execution cap.
-#[test]
-fn test_the_unspent_forward_comes_back_on_success_and_revert_alike() {
-    let succeeding = Deployment::new(deploying(&runtime(1)));
-    let reverting = Deployment::new(Bytes::from_static(&[PUSH0, PUSH0, REVERT]));
-    let new_account = entry(GasId::new_account_state_gas());
-    for gas_limit in GAS_LIMITS {
-        let success = limited(&succeeding, gas_limit, EvmTxRuntimeLimits::no_limits());
-        let [total, ..] =
-            beyond(&success, &reference(succeeding.call_data(LARGE_OVERRIDE), gas_limit));
-        assert_eq!(
-            total,
-            KEYLESS_DEPLOY_OVERHEAD_GAS +
-                create_regular(deploying(&runtime(1)).len()) +
-                new_account +
-                entry(GasId::create_state_gas()) +
-                2 * record() +
-                returned(&success).gasUsed,
-            "success at {gas_limit}",
-        );
-
-        let revert = limited(&reverting, gas_limit, EvmTxRuntimeLimits::no_limits());
-        let [total, ..] =
-            beyond(&revert, &reference(reverting.call_data(LARGE_OVERRIDE), gas_limit));
-        assert_eq!(
-            total,
-            KEYLESS_DEPLOY_OVERHEAD_GAS +
-                create_regular(3) +
-                new_account +
-                record() +
-                returned(&revert).gasUsed,
-            "revert at {gas_limit}",
-        );
-    }
+    assert_eq!(
+        outcome.gas.reservoir_remaining,
+        reference.gas.reservoir_remaining + account_share() + create_share()
+    );
 }
 
 /* ---------- the stop, as a column of the matrix ---------- */

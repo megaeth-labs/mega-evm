@@ -1,5 +1,6 @@
-//! The predeploys and the check Satin's activation block makes of them: the list, a matching
-//! account read as it is, and every other account refused with one error.
+//! The predeploys and the check of an account against one of them, which Satin's activation block
+//! makes of the EIP-7997 factory: the list, a matching account read as it is, and every other
+//! account refused with one error.
 
 use alloy_primitives::{keccak256, Address, Bytes, B256, U256};
 use mega_evm::{
@@ -23,7 +24,7 @@ fn test_the_factory_code_hashes_to_its_pinned_hash() {
     assert_eq!(keccak256(CREATE2_FACTORY_CODE), CREATE2_FACTORY_CODE_HASH);
 }
 
-/// [S18.8] The list is the six `MegaETH` contracts in address order, then the factory, each with
+/// The list is the six `MegaETH` contracts in address order, then the factory, each with
 /// the code hash of its code, and the public address list is the list's addresses in that order.
 ///
 /// Expected values: constants (the addresses and code hashes are the production constants).
@@ -57,7 +58,7 @@ fn spec_at(address: Address) -> SystemContractSpec {
         .expect("the address is a predeploy")
 }
 
-/// [S18] An address holding the expected code passes whatever else it holds — the nonce mainnet's
+/// An address holding the expected code passes whatever else it holds — the nonce mainnet's
 /// six hold (0), the factory's (in the thousands), a balance, storage — and the check returns the
 /// account as a read-only entry, as held: neither touched nor created, no storage, the nonce kept.
 ///
@@ -83,7 +84,7 @@ fn test_the_expected_code_is_read_as_it_is() {
     }
 }
 
-/// [S18] Anything but the expected code is refused with the one error, naming the address, the
+/// Anything but the expected code is refused with the one error, naming the address, the
 /// expected hash and the one held: no account, an account without code — funded, or at a used
 /// nonce — an older version of the contract, another contract's version and other code. Satin
 /// creates and upgrades nothing.

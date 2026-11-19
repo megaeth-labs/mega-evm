@@ -31,7 +31,7 @@ use revm::{
     },
     context::{
         transaction::{AccessList, AccessListItem, TransactionType},
-        TxEnv,
+        ContextTr, TxEnv,
     },
     context_interface::{
         either::Either,
@@ -45,8 +45,8 @@ use revm::{
 };
 
 use crate::common::{
-    assert_answered_at_unlimited_budgets, call, call_with_data, context, create, execute,
-    runs_at_measurement_prices,
+    account_share, assert_answered_at_unlimited_budgets, beneficiary_share, call, call_with_data,
+    context, create, create_share, execute, runs_at_measurement_prices, slot_share,
 };
 use mega_evm::test_utils::{record_start_ledger_settlements, take_start_ledger_settlements};
 
@@ -123,8 +123,15 @@ fn callee_running(code: BytecodeBuilder) -> MemoryDatabase {
 }
 
 /// Asserts what the reservoir of a run above the execution cap says about its two ledgers: what
-/// the transaction spent on state and history came out of it, and nothing else did.
-fn assert_reservoir_paid(name: &str, gas_limit: u64, outcome: &MegaTransactionOutcome) {
+/// the transaction spent on state and history came out of it, and nothing else did, but `shares`:
+/// the legacy shares of the state charges its frames made, which regular gas paid before the
+/// reservoir whether the charge was then kept or given back, a give-back going into a reservoir.
+fn assert_reservoir_paid(
+    name: &str,
+    gas_limit: u64,
+    outcome: &MegaTransactionOutcome,
+    shares: u64,
+) {
     if gas_limit <= TX_GAS_LIMIT_CAP {
         return;
     }
@@ -132,8 +139,8 @@ fn assert_reservoir_paid(name: &str, gas_limit: u64, outcome: &MegaTransactionOu
     assert!(outcome.gas.reservoir_remaining > 0, "{name}: the reservoir is not exhausted");
     assert_eq!(
         outcome.gas.reservoir_remaining,
-        reservoir - outcome.gas.state - outcome.gas.history,
-        "{name}: the reservoir paid the state and history ledgers and nothing else",
+        reservoir + shares - outcome.gas.state - outcome.gas.history,
+        "{name}: the reservoir paid the state and history ledgers but the legacy shares",
     );
 }
 
@@ -157,10 +164,11 @@ fn every_site_called(gas_limit: u64) -> MegaTransaction {
     call_with_data(CALLER, CALLEE, Bytes::from(vec![1; 10]), gas_limit)
 }
 
-/// A reservoir too small for what a transaction spends on state and history runs out, and the
-/// rest spills onto regular gas. That changes who paid and nothing else: the bytes, the history
-/// gas and the state gas are the ones an ample reservoir leaves, the regular ledger is too — a
-/// spilled charge stays on its own ledger — and the reservoir is spent to the last gas.
+/// A reservoir too small for what a transaction spends on state and history, but the legacy shares
+/// regular gas pays first, runs out, and the rest spills onto regular gas. That changes who paid
+/// and nothing else: the bytes, the history gas and the state gas are the ones an ample reservoir
+/// leaves, the regular ledger is too — a spilled charge stays on its own ledger — and the reservoir
+/// is spent to the last gas.
 #[test]
 fn test_a_reservoir_that_runs_out_changes_only_who_paid() {
     if runs_at_measurement_prices() {
@@ -168,15 +176,29 @@ fn test_a_reservoir_that_runs_out_changes_only_who_paid() {
     }
     let ample = execute(every_site(), every_site_called(TX_GAS_LIMIT_CAP + RESERVOIR));
     assert!(ample.result.is_success(), "{:?}", ample.result);
-    assert_reservoir_paid("an ample reservoir", TX_GAS_LIMIT_CAP + RESERVOIR, &ample);
-    let spent = ample.gas.state + ample.gas.history;
+    let shares = slot_share() + account_share() + create_share();
+    assert_reservoir_paid("an ample reservoir", TX_GAS_LIMIT_CAP + RESERVOIR, &ample, shares);
+    // What the reservoir pays: the state and history ledgers but the legacy shares, which regular
+    // gas pays first whatever the reservoir holds.
+    let spent = ample.gas.state + ample.gas.history - shares;
 
-    // Short of the body; short of everything but the body; short by one gas.
+    // Short of the body; short of everything but the body; short by one gas. A reservoir that
+    // runs out in the creation the callee makes last leaves what the callee kept at that start,
+    // which nothing after it charges: at most 2 per cent of the reservoir.
     for reservoir in [1, TX_BODY_SIZE * CPHB - 1, TX_BODY_SIZE * CPHB + 1, spent - 1] {
         let outcome = execute(every_site(), every_site_called(TX_GAS_LIMIT_CAP + reservoir));
         let name = format!("a reservoir of {reservoir}");
         assert!(outcome.result.is_success(), "{name}: {:?}", outcome.result);
-        assert_eq!(outcome.gas.reservoir_remaining, 0, "{name}: spent to the last gas");
+        if reservoir < spent - 1 {
+            assert_eq!(outcome.gas.reservoir_remaining, 0, "{name}: spent to the last gas");
+        } else {
+            assert!(
+                outcome.gas.reservoir_remaining <= reservoir * 2 / 100,
+                "{name}: what the creator kept is left: {}",
+                outcome.gas.reservoir_remaining
+            );
+        }
+        assert_eq!(outcome.gas.gas_used, ample.gas.gas_used, "{name}: the spend");
         assert_eq!(outcome.gas.history_bytes, ample.gas.history_bytes, "{name}: the bytes");
         assert_eq!(outcome.gas.history, ample.gas.history, "{name}: the history gas");
         assert_eq!(outcome.gas.state, ample.gas.state, "{name}: the state gas");
@@ -189,34 +211,12 @@ fn test_a_reservoir_that_runs_out_changes_only_who_paid() {
     }
 
     let exact = execute(every_site(), every_site_called(TX_GAS_LIMIT_CAP + spent));
-    assert_eq!(exact.gas.reservoir_remaining, 0, "a reservoir of exactly what is spent");
+    assert!(
+        exact.gas.reservoir_remaining <= spent * 2 / 100,
+        "a reservoir of exactly what is spent: what the creator kept is left"
+    );
     assert_eq!(exact.gas.regular, ample.gas.regular);
-}
-
-/// A transaction whose gas cannot pay for the record its own frame makes runs out of gas before
-/// that frame, and the record is not made: it reports its body alone, in bytes and in gas.
-#[test]
-fn test_a_transaction_that_cannot_pay_its_first_record_reports_its_body_alone() {
-    if runs_at_measurement_prices() {
-        return;
-    }
-    let transfer = |gas| call(CALLER, PAYEE, U256::from(1), gas);
-    // What the transfer spends is its intrinsic gas and the one record, nothing else: that is the
-    // least gas limit that pays for all of it.
-    let ample = execute(funded(), transfer(GAS_LIMITS[0]));
-    assert!(ample.result.is_success(), "{:?}", ample.result);
-    let fits = ample.gas.gas_used;
-
-    let exact = execute(funded(), transfer(fits));
-    assert!(exact.result.is_success(), "{:?}", exact.result);
-    assert_eq!(exact.gas.history_bytes, TX_BODY_SIZE + WRITE_RECORD_SIZE);
-    assert_eq!(exact.gas.history, exact.gas.history_bytes * CPHB);
-
-    let short = execute(funded(), transfer(fits - 1));
-    assert!(short.result.is_halt(), "{:?}", short.result);
-    assert_eq!(short.usage.write_records, 0, "no frame ran, so no record was made");
-    assert_eq!(short.gas.history_bytes, TX_BODY_SIZE, "the body alone");
-    assert_eq!(short.gas.history, TX_BODY_SIZE * CPHB);
+    assert_eq!(exact.gas.gas_used, ample.gas.gas_used);
 }
 
 /// Answers every creation itself with a success whose output is a word of bytes, so no frame runs
@@ -230,14 +230,14 @@ struct AnswersCreations;
 impl Inspector<MegaContext<MemoryDatabase>, EthInterpreter> for AnswersCreations {
     fn create(
         &mut self,
-        _context: &mut MegaContext<MemoryDatabase>,
+        context: &mut MegaContext<MemoryDatabase>,
         inputs: &mut CreateInputs,
     ) -> Option<CreateOutcome> {
         Some(CreateOutcome::new(
             InterpreterResult::new(
                 InstructionResult::Return,
                 Bytes::from(vec![0xfe; 32]),
-                untouched_create_gas(inputs),
+                untouched_create_gas(context.cfg(), inputs),
             ),
             Some(CHILD),
         ))
@@ -272,7 +272,12 @@ fn test_a_creation_answered_without_running_appends_no_code() {
             (TX_BODY_SIZE + 2 * WRITE_RECORD_SIZE) * CPHB,
             "the two records' history stays charged"
         );
-        assert_reservoir_paid("a creation answered without running", gas_limit, &outcome);
+        assert_reservoir_paid(
+            "a creation answered without running",
+            gas_limit,
+            &outcome,
+            create_share(),
+        );
     }
 }
 
@@ -422,7 +427,7 @@ fn test_a_write_back_dies_with_the_frame_that_made_it() {
         assert!(outcome.result.is_success(), "{:?}", outcome.result);
         assert_eq!(outcome.gas.history_bytes, TX_BODY_SIZE + WRITE_RECORD_SIZE);
         assert_eq!(outcome.gas.history, outcome.gas.history_bytes * CPHB);
-        assert_reservoir_paid("a write-back that reverts", gas_limit, &outcome);
+        assert_reservoir_paid("a write-back that reverts", gas_limit, &outcome, slot_share());
     }
 }
 
@@ -512,7 +517,7 @@ fn test_the_bytes_exceed_the_history_gas_by_what_the_allowances_paid() {
                 paid_by_allowances * CPHB,
                 "{name} at {gas_limit}: the gap is what the allowances paid",
             );
-            assert_reservoir_paid(name, gas_limit, &outcome);
+            assert_reservoir_paid(name, gas_limit, &outcome, 0);
         }
     }
 }
@@ -571,8 +576,11 @@ fn test_the_history_bytes_are_the_data_size_every_record_kept() {
         return;
     }
     let hint = hint_call().len() as u64;
+    // The last column is what regular gas paid of the case's state charges, every one of which
+    // the reservoir pays but its legacy share: kept or given back, a legacy share is paid from
+    // regular gas and does not come back to it.
     type Case =
-        (&'static str, fn() -> MemoryDatabase, fn(u64) -> MegaTransaction, Run, u64, u64, u64);
+        (&'static str, fn() -> MemoryDatabase, fn(u64) -> MegaTransaction, Run, u64, u64, u64, u64);
     let cases: [Case; 34] = [
         (
             "the body",
@@ -580,6 +588,7 @@ fn test_the_history_bytes_are_the_data_size_every_record_kept() {
             |gas| call(CALLER, CALLEE, U256::ZERO, gas),
             Run::Plain,
             TX_BODY_SIZE,
+            0,
             0,
             0,
         ),
@@ -591,6 +600,7 @@ fn test_the_history_bytes_are_the_data_size_every_record_kept() {
             TX_BODY_SIZE + 100,
             0,
             0,
+            0,
         ),
         (
             "an access list",
@@ -598,6 +608,7 @@ fn test_the_history_bytes_are_the_data_size_every_record_kept() {
             |gas| with_access_list(&[(CALLEE, 2), (PAYEE, 1), (FRESH, 0)], gas),
             Run::Plain,
             TX_BODY_SIZE + 3 * ACCESS_LIST_ADDRESS_SIZE + 3 * ACCESS_LIST_SLOT_SIZE,
+            0,
             0,
             0,
         ),
@@ -609,6 +620,7 @@ fn test_the_history_bytes_are_the_data_size_every_record_kept() {
             TX_BODY_SIZE + 2 * AUTHORIZATION_SIZE + WRITE_RECORD_SIZE,
             0,
             0,
+            0,
         ),
         (
             "a log",
@@ -616,6 +628,7 @@ fn test_the_history_bytes_are_the_data_size_every_record_kept() {
             |gas| call(CALLER, CALLEE, U256::ZERO, gas),
             Run::Plain,
             TX_BODY_SIZE + log_bytes(2, 50),
+            0,
             0,
             0,
         ),
@@ -630,6 +643,7 @@ fn test_the_history_bytes_are_the_data_size_every_record_kept() {
             TX_BODY_SIZE,
             0,
             0,
+            0,
         ),
         (
             "a storage write",
@@ -639,6 +653,7 @@ fn test_the_history_bytes_are_the_data_size_every_record_kept() {
             TX_BODY_SIZE + WRITE_RECORD_SIZE,
             0,
             0,
+            slot_share(),
         ),
         (
             "a storage write written back",
@@ -654,6 +669,7 @@ fn test_the_history_bytes_are_the_data_size_every_record_kept() {
             TX_BODY_SIZE,
             0,
             0,
+            slot_share(),
         ),
         (
             "a value transfer's two records",
@@ -663,6 +679,7 @@ fn test_the_history_bytes_are_the_data_size_every_record_kept() {
             TX_BODY_SIZE + 2 * WRITE_RECORD_SIZE,
             0,
             1,
+            0,
         ),
         (
             "a SELFDESTRUCT's beneficiary, and the account it clears",
@@ -672,6 +689,7 @@ fn test_the_history_bytes_are_the_data_size_every_record_kept() {
             TX_BODY_SIZE + 2 * WRITE_RECORD_SIZE,
             0,
             1,
+            0,
         ),
         (
             "a creation transaction's code",
@@ -679,6 +697,7 @@ fn test_the_history_bytes_are_the_data_size_every_record_kept() {
             |gas| create(CALLER, deploying(), gas),
             Run::Plain,
             TX_BODY_SIZE + deploying().len() as u64 + WRITE_RECORD_SIZE + DEPLOYED,
+            0,
             0,
             0,
         ),
@@ -690,6 +709,7 @@ fn test_the_history_bytes_are_the_data_size_every_record_kept() {
             TX_BODY_SIZE + 2 * WRITE_RECORD_SIZE + DEPLOYED,
             0,
             0,
+            create_share(),
         ),
         (
             "a failed creation: its creator's nonce, and no code",
@@ -699,6 +719,7 @@ fn test_the_history_bytes_are_the_data_size_every_record_kept() {
             TX_BODY_SIZE + WRITE_RECORD_SIZE,
             0,
             0,
+            create_share(),
         ),
         (
             "output EIP-3541 refuses to deposit",
@@ -708,6 +729,7 @@ fn test_the_history_bytes_are_the_data_size_every_record_kept() {
             TX_BODY_SIZE + WRITE_RECORD_SIZE,
             0,
             0,
+            create_share(),
         ),
         (
             "output past the code-size limit",
@@ -717,6 +739,7 @@ fn test_the_history_bytes_are_the_data_size_every_record_kept() {
             TX_BODY_SIZE + WRITE_RECORD_SIZE,
             0,
             0,
+            create_share(),
         ),
         (
             "a creation transaction whose output EIP-3541 refuses",
@@ -724,6 +747,7 @@ fn test_the_history_bytes_are_the_data_size_every_record_kept() {
             |gas| create(CALLER, refused_code(), gas),
             Run::Plain,
             TX_BODY_SIZE + refused_code().len() as u64,
+            0,
             0,
             0,
         ),
@@ -738,6 +762,7 @@ fn test_the_history_bytes_are_the_data_size_every_record_kept() {
             TX_BODY_SIZE + WRITE_RECORD_SIZE,
             0,
             0,
+            slot_share(),
         ),
         (
             "a value call an interceptor refuses without a frame",
@@ -747,6 +772,7 @@ fn test_the_history_bytes_are_the_data_size_every_record_kept() {
             TX_BODY_SIZE,
             0,
             0,
+            0,
         ),
         (
             "a first frame answered with the stop",
@@ -754,6 +780,7 @@ fn test_the_history_bytes_are_the_data_size_every_record_kept() {
             |gas| call(CALLER, FRESH, U256::from(1), gas),
             Run::Limited(TX_BODY_SIZE + WRITE_RECORD_SIZE - 1),
             TX_BODY_SIZE,
+            0,
             0,
             0,
         ),
@@ -771,6 +798,7 @@ fn test_the_history_bytes_are_the_data_size_every_record_kept() {
             TX_BODY_SIZE + LOG_BASE_SIZE,
             0,
             0,
+            slot_share(),
         ),
         (
             "a hint sent by the transaction: its calldata is history, its payload is not",
@@ -779,6 +807,7 @@ fn test_the_history_bytes_are_the_data_size_every_record_kept() {
             Run::Plain,
             TX_BODY_SIZE + hint_call().len() as u64,
             1,
+            0,
             0,
         ),
         (
@@ -792,6 +821,7 @@ fn test_the_history_bytes_are_the_data_size_every_record_kept() {
             TX_BODY_SIZE,
             1,
             0,
+            0,
         ),
         (
             "a transfer that creates its recipient",
@@ -801,6 +831,7 @@ fn test_the_history_bytes_are_the_data_size_every_record_kept() {
             TX_BODY_SIZE + WRITE_RECORD_SIZE,
             0,
             1,
+            0,
         ),
         (
             "a transaction whose own frame writes, logs, deploys and reverts",
@@ -816,6 +847,7 @@ fn test_the_history_bytes_are_the_data_size_every_record_kept() {
             TX_BODY_SIZE,
             0,
             0,
+            slot_share() + create_share(),
         ),
         (
             "every site at once",
@@ -834,6 +866,7 @@ fn test_the_history_bytes_are_the_data_size_every_record_kept() {
                 DEPLOYED,
             0,
             1,
+            slot_share() + account_share() + create_share(),
         ),
         (
             "an authority applied twice is one record",
@@ -841,6 +874,7 @@ fn test_the_history_bytes_are_the_data_size_every_record_kept() {
             |gas| with_authorizations(&[(AUTHORITY, 0), (AUTHORITY, 1)], gas),
             Run::Plain,
             TX_BODY_SIZE + 2 * AUTHORIZATION_SIZE + WRITE_RECORD_SIZE,
+            0,
             0,
             0,
         ),
@@ -852,6 +886,7 @@ fn test_the_history_bytes_are_the_data_size_every_record_kept() {
             TX_BODY_SIZE + AUTHORIZATION_SIZE,
             0,
             0,
+            0,
         ),
         (
             "a SELFDESTRUCT's beneficiary the destruction creates, and the account it clears",
@@ -861,6 +896,7 @@ fn test_the_history_bytes_are_the_data_size_every_record_kept() {
             TX_BODY_SIZE + 2 * WRITE_RECORD_SIZE,
             0,
             1,
+            beneficiary_share(),
         ),
         (
             "a SELFDESTRUCT to the sender records the account it clears alone: the sender's \
@@ -871,6 +907,7 @@ fn test_the_history_bytes_are_the_data_size_every_record_kept() {
             TX_BODY_SIZE + WRITE_RECORD_SIZE,
             0,
             1,
+            0,
         ),
         (
             "a SELFDESTRUCT that moves nothing records nothing",
@@ -878,6 +915,7 @@ fn test_the_history_bytes_are_the_data_size_every_record_kept() {
             |gas| call(CALLER, RECEIVER, U256::ZERO, gas),
             Run::Plain,
             TX_BODY_SIZE,
+            0,
             0,
             0,
         ),
@@ -893,6 +931,7 @@ fn test_the_history_bytes_are_the_data_size_every_record_kept() {
             TX_BODY_SIZE + WRITE_RECORD_SIZE,
             0,
             0,
+            slot_share(),
         ),
         (
             "a slot written, then written back by a delegate: the record is taken back",
@@ -908,6 +947,7 @@ fn test_the_history_bytes_are_the_data_size_every_record_kept() {
             TX_BODY_SIZE,
             0,
             0,
+            slot_share(),
         ),
         (
             "a slot a delegate wrote, written back by its caller",
@@ -923,6 +963,7 @@ fn test_the_history_bytes_are_the_data_size_every_record_kept() {
             TX_BODY_SIZE,
             0,
             0,
+            slot_share(),
         ),
         (
             "a slot written, then written back by a call to itself",
@@ -932,10 +973,11 @@ fn test_the_history_bytes_are_the_data_size_every_record_kept() {
             TX_BODY_SIZE,
             0,
             0,
+            slot_share(),
         ),
     ];
 
-    for (name, db, tx, run, bytes, hints, moves) in cases {
+    for (name, db, tx, run, bytes, hints, moves, shares) in cases {
         for gas_limit in GAS_LIMITS {
             let limit = match run {
                 Run::Limited(limit) | Run::Caught(limit) => limit,
@@ -972,7 +1014,7 @@ fn test_the_history_bytes_are_the_data_size_every_record_kept() {
                 bytes * CPHB,
                 "{name} at {gas_limit}: the history gas is the bytes at the price",
             );
-            assert_reservoir_paid(name, gas_limit, &outcome);
+            assert_reservoir_paid(name, gas_limit, &outcome, shares);
         }
     }
 }

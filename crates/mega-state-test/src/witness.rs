@@ -177,6 +177,9 @@ pub fn check_replay(
     };
     let mut keys = WitnessKeys::default();
     keys.add_state(&outcome.state);
+    // The EVM read the live system address off the pre-state when it was built, outside the
+    // transaction.
+    keys.add_system_address_read();
     let buckets = recorded
         .bucket_ids
         .iter()

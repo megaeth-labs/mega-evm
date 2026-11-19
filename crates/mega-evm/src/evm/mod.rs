@@ -35,7 +35,11 @@
 //!   revm's inspected run returns an action set before it runs without a `step`, and hands a frame
 //!   built with one to no `initialize_interp`, so the inspector sees the call start, its creation,
 //!   and the call end. A frame a child returned into over a limit returns the stop the same way,
-//!   with no `step` after the child's end.
+//!   with no `step` after the child's end. A result the engine builds in place of a frame — an
+//!   interceptor's or the keyless dispatch's answer, the depth guard's, a stop it answers a frame
+//!   or an answer with — carries on its gas the give-back mode of the execution's configuration, as
+//!   the gas of every frame revm builds does, so a charge an inspector makes on it and gives back
+//!   is credited where the configuration says: into the reservoir alone under Satin's.
 //! - **Where an inspector runs.** Every transaction, the system-address transaction included. A
 //!   pre-block call runs on the handler's plain system-call path, with no callback; a tool runs a
 //!   system call through revm's `InspectSystemCallEvm` to watch it. The end of a block runs no
@@ -230,6 +234,31 @@ impl<DB: Database, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs> {
     pub(crate) fn replace_precompile_set(&mut self, precompiles: PrecompilesMap) {
         self.inner.precompiles = precompiles;
         self.priced_precompiles.record_foreign();
+    }
+
+    /// Replaces the static opcode prices the EVM charges with `table`: the test tooling's
+    /// neutral configuration installs a fixture fork's. The opcodes that can read volatile data
+    /// charge theirs in their read wrappers, which read them from the context; the instruction
+    /// table carries the rest.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) fn replace_static_gas_table(
+        &mut self,
+        table: revm::interpreter::instructions::GasTable,
+    ) {
+        self.inner.ctx.set_read_static_gas(table);
+        *self.inner.instruction.gas_table_mut() = instructions::without_read_static_gas(table);
+    }
+
+    /// The static opcode prices the EVM charges: the instruction table's, and for the opcodes
+    /// that can read volatile data the ones their read wrappers charge.
+    #[cfg(test)]
+    pub(crate) fn static_gas_table(&self) -> revm::interpreter::instructions::GasTable {
+        let mut table = *self.inner.instruction.gas_table();
+        for opcode in instructions::READ_OPCODES {
+            table[opcode as usize] =
+                u16::try_from(self.inner.ctx.read_static_gas(opcode)).unwrap_or(u16::MAX);
+        }
+        table
     }
 
     /// Enforces `limits` on every transaction this EVM runs from now on.

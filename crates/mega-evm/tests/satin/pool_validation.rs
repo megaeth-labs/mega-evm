@@ -105,9 +105,8 @@ fn access_list(gas_limit: u64) -> MegaTransaction {
     wrap(call)
 }
 
-/// A deposit carrying a kilobyte of calldata: it pays no history gas, so the floor, which prices
-/// every byte at 64 gas where the intrinsic charge prices it at 16, is what the gas limit must
-/// cover.
+/// A deposit carrying a kilobyte of calldata: its gas limit must cover both the intrinsic
+/// charges, including history, and the floor at 64 gas per calldata byte.
 fn deposit_with_calldata(gas_limit: u64) -> MegaTransaction {
     let mut deposit = call(gas_limit);
     deposit.0.base.data = Bytes::from(vec![0x5a; 1_024]);
@@ -290,7 +289,7 @@ fn test_the_helper_and_the_evm_agree_on_what_they_admit() {
         Row::new("a creation", create, None),
         Row::new("EIP-7702 authorizations", authorizations, None),
         Row::new("an access list", access_list, None),
-        Row::new("a deposit whose floor binds", deposit_with_calldata, None).deposit_like(),
+        Row::new("a deposit with calldata", deposit_with_calldata, None).deposit_like(),
         Row::new("a system-address transaction", system_transaction, Some(SYSTEM)).deposit_like(),
         Row::new("the system shape from a user", system_shape_from_a_user, Some(SYSTEM)),
         Row::new("the system shape with no registry", system_transaction, None),
@@ -307,16 +306,8 @@ fn test_the_helper_and_the_evm_agree_on_what_they_admit() {
             gas.state, 0,
             "{name}: EIP-2780 charges the state a transaction adds when it runs"
         );
-        // The transactions executed as deposits are the ones exempt from history gas.
-        let body = if row.deposit_like {
-            0
-        } else {
-            history_gas(transaction_body_bytes(&(row.build)(ROOMY))).unwrap()
-        };
-        assert_eq!(
-            gas.history, body,
-            "{name}: the body's history, or none for an exempt transaction"
-        );
+        let body = history_gas(transaction_body_bytes(&(row.build)(ROOMY))).unwrap();
+        assert_eq!(gas.history, body, "{name}: the body's history for every transaction");
     }
 }
 
@@ -333,21 +324,22 @@ fn test_what_the_intrinsic_gas_is_made_of() {
     assert!(helper(value_to_self, None).regular < helper(call, None).regular);
     assert!(helper(call, None).regular < helper(value_to_existing, None).regular);
 
-    // A deposit and a system-address transaction pay no history; the same transaction from
-    // anyone else, or with no registry naming its sender, does.
-    assert_eq!(helper(deposit_with_calldata, None).history, 0);
-    assert_eq!(helper(system_transaction, Some(SYSTEM)).history, 0);
+    assert_eq!(
+        helper(deposit_with_calldata, None).history,
+        history_gas(TX_BODY_SIZE + 1_024).unwrap()
+    );
+    assert_eq!(
+        helper(system_transaction, Some(SYSTEM)).history,
+        helper(system_transaction, None).history
+    );
     // A body priced at a fraction of a gas may round to nothing.
     if !history_is_free() && !history_rounds() {
         assert!(helper(system_shape_from_a_user, Some(SYSTEM)).history > 0);
         assert!(helper(system_transaction, None).history > 0);
     }
 
-    // The floor binds a transaction that pays no history, and it is what its gas limit must
-    // cover.
     let deposit = helper(deposit_with_calldata, None);
-    assert!(deposit.floor > deposit.total());
-    assert_eq!(deposit.min_gas_limit(), deposit.floor);
+    assert_eq!(deposit.min_gas_limit(), deposit.total().max(deposit.floor));
 }
 
 fn on_another_chain() -> MegaTransaction {

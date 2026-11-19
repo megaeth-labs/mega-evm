@@ -8,10 +8,13 @@
 //!
 //! A system-address transaction has a fixed shape
 //! ([`has_system_transaction_shape`]): a legacy transaction calling a contract on
-//! [`MEGA_SYSTEM_TX_WHITELIST`]. Every transaction reads the live system address out of the
-//! registry when it is validated
-//! ([`load_system_address`](crate::system::load_system_address)), and one of the system shape
-//! whose caller is that address is a system-address transaction. A transaction from that address
+//! [`MEGA_SYSTEM_TX_WHITELIST`]. The live system address is the one the registry names, which the
+//! block resolves once, after its pre-block steps
+//! ([`resolve_system_address`](crate::system::resolve_system_address)), and an EVM built outside
+//! block execution reads once, when it is built
+//! ([`live_system_address`](crate::system::live_system_address)); no transaction reads the
+//! registry for its classification. A transaction of the system shape whose caller is that address
+//! is a system-address transaction. A transaction from that address
 //! of any other shape is invalid ([`SYSTEM_ADDRESS_WITHOUT_SYSTEM_SHAPE`]): the Oracle's
 //! `onlySystemAddress` tests the sender alone, so the system key must send nothing the Oracle
 //! would accept as an ordinary transaction. A deposit is never of the system shape, so a deposit
@@ -48,8 +51,9 @@ use crate::{
 ///
 /// A system-address transaction is executed as a deposit: no nonce check of op-revm's own and no
 /// fee. Which address sends them is the registry's to say, and it can be rotated through the
-/// registry: the engine reads the live one out of the registry for every transaction, and never
-/// falls back to this address.
+/// registry: a block resolves the live one out of the registry once, after its pre-block steps,
+/// and classifies every transaction of the block against it, an EVM built outside block execution
+/// reads it off its state once when it is built, and neither falls back to this address.
 pub const MEGA_SYSTEM_ADDRESS: Address = address!("0xA887dCB9D5f39Ef79272801d05Abdf707CFBbD1d");
 
 /// The contracts a system-address transaction may call. It may call nothing else and create
@@ -143,11 +147,14 @@ pub(crate) fn classify_system_transaction(
 /// transaction that carries one is a deposit, and is executed as one, whatever type its other
 /// fields declare. Testing the source hash is therefore testing for a deposit that carries it.
 ///
-/// It is what exempts the protocol's own work from the metering `MegaETH` holds users to — the
-/// history gas of a system transaction is not charged, and no per-transaction limit stops it, so
-/// the protocol's maintenance cannot fail on a resource limit. The engine makes the same decision
-/// for the running transaction with the address it read itself
-/// ([`MegaContext::is_system_originated`]).
+/// It is what exempts the protocol's own work from the limits `MegaETH` holds users to: no
+/// per-transaction limit stops it, gas detention does not detain it, and it prices every state
+/// charge at the minimum SALT bucket, so the protocol's maintenance cannot fail on a resource limit
+/// or be priced out by the growth of a region it does not control. It still pays history gas for
+/// the bytes it appends — its body, its calldata, its logs, its write records and its deployed
+/// code — as a deposit does: only a system call is exempt from history gas, because nothing it
+/// appends is a transaction's. The engine makes the same decision for the running transaction with
+/// the address it holds ([`MegaContext::is_system_originated`]).
 pub fn is_system_originated(tx: &MegaTransaction, system_address: Address) -> bool {
     originates_from_the_protocol(tx, is_mega_system_transaction_with(tx, system_address))
 }

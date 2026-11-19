@@ -58,7 +58,8 @@ use revm::{
 };
 
 use crate::common::{
-    account_state_gas, call, context, execute_under, history_rounds, share, value_call_room,
+    account_share, account_state_gas, call, context, create_share, execute_under, history_rounds,
+    share, slot_share, value_call_room,
 };
 
 const CALLER: Address = address!("0000000000000000000000000000000000d00000");
@@ -174,6 +175,29 @@ impl Site {
             (Self::CallWithoutCode | Self::CallToPrecompile, Variant::Plain) => 1,
             (_, Variant::Plain) => 0,
             (_, Variant::Twin) => self.records(),
+        }
+    }
+
+    /// What regular gas pays of `variant`'s state charges, their legacy shares, which come out
+    /// of regular gas before the reservoir pays the rest and do not come back to it, whether the
+    /// charge is kept, given back or taken back with a failed frame: the new account a value call
+    /// to [`PAYEE`] or the identity precompile creates, the account a creation creates, and the
+    /// twin's fresh slots. The transaction's own value and endowment are charged before its frame,
+    /// with no share.
+    fn shares(self, variant: Variant) -> u64 {
+        match (self, variant) {
+            (Self::TxEndowment, _) |
+            (
+                Self::TxValue | Self::Call | Self::SelfDestruct,
+                Variant::Plain | Variant::TakenBack,
+            ) => 0,
+            (Self::TxValue, Variant::Twin) => slot_share(),
+            (
+                Self::Call | Self::CallWithoutCode | Self::CallToPrecompile | Self::SelfDestruct,
+                Variant::Twin,
+            ) => self.records() * slot_share(),
+            (Self::CallWithoutCode | Self::CallToPrecompile, _) => account_share(),
+            (Self::Create | Self::Create2, _) => create_share(),
         }
     }
 
@@ -349,16 +373,22 @@ fn balance(outcome: &MegaTransactionOutcome, address: Address) -> U256 {
 }
 
 /// Asserts what the reservoir of a run above the execution cap says: the state and history it
-/// spent came out of it, and nothing else did.
-fn assert_reservoir_paid(case: &str, gas_limit: u64, outcome: &MegaTransactionOutcome) {
+/// spent came out of it, and nothing else did, but `shares`, the legacy shares regular gas paid
+/// ([`Site::shares`]).
+fn assert_reservoir_paid(
+    case: &str,
+    gas_limit: u64,
+    outcome: &MegaTransactionOutcome,
+    shares: u64,
+) {
     if gas_limit <= TX_GAS_LIMIT_CAP {
         return;
     }
     let reservoir = gas_limit - TX_GAS_LIMIT_CAP;
     assert_eq!(
         outcome.gas.reservoir_remaining,
-        reservoir - outcome.gas.state - outcome.gas.history,
-        "{case}: the reservoir paid the state and history ledgers and nothing else",
+        reservoir + shares - outcome.gas.state - outcome.gas.history,
+        "{case}: the reservoir paid the state and history ledgers but the legacy shares",
     );
 }
 
@@ -444,7 +474,7 @@ fn test_each_site_counts_its_transfer_log() {
             let outcome = execute_under(db, tx, EvmTxRuntimeLimits::no_limits());
 
             assert_completed(&case, site, Variant::Plain, &outcome, body);
-            assert_reservoir_paid(&case, gas_limit, &outcome);
+            assert_reservoir_paid(&case, gas_limit, &outcome, site.shares(Variant::Plain));
         }
     }
 }
@@ -475,7 +505,7 @@ fn test_each_site_stops_one_byte_short_of_its_frame_budget() {
 
                 let (fits, body) = run(cap);
                 assert_completed(&format!("{case}: at the budget"), site, variant, &fits, body);
-                assert_reservoir_paid(&case, gas_limit, &fits);
+                assert_reservoir_paid(&case, gas_limit, &fits, site.shares(variant));
 
                 let (over, body) = run(cap - 1);
                 let own_frames = (site.depth() == 0).then_some(LimitCheck::ExceedsLimit {
@@ -511,7 +541,7 @@ fn test_each_site_stops_one_byte_short_of_its_frame_budget() {
                     }
                     Variant::TakenBack => unreachable!(),
                 }
-                assert_reservoir_paid(&case, gas_limit, &over);
+                assert_reservoir_paid(&case, gas_limit, &over, site.shares(variant));
             }
         }
     }
@@ -578,12 +608,12 @@ fn test_each_site_stops_one_byte_short_of_the_transaction_limit() {
                     }
                     Variant::TakenBack => unreachable!(),
                 }
-                assert_reservoir_paid(&case, gas_limit, &outcome);
+                assert_reservoir_paid(&case, gas_limit, &outcome, site.shares(variant));
 
                 if site.depth() == 0 {
                     let (fits, body, _) = run(0);
                     assert_completed(&format!("{case}: at the limit"), site, variant, &fits, body);
-                    assert_reservoir_paid(&case, gas_limit, &fits);
+                    assert_reservoir_paid(&case, gas_limit, &fits, site.shares(variant));
                 }
             }
         }
@@ -673,7 +703,7 @@ fn test_a_failure_takes_each_sites_transfer_log_back() {
                 assert_eq!(balance(&outcome, DESTRUCTOR), U256::from(VALUE), "{case}");
             }
             assert_eq!(balance(&outcome, site.recipient()), U256::ZERO, "{case}");
-            assert_reservoir_paid(&case, gas_limit, &outcome);
+            assert_reservoir_paid(&case, gas_limit, &outcome, site.shares(Variant::TakenBack));
         }
     }
 }
@@ -1097,7 +1127,7 @@ fn test_a_creation_onto_an_occupied_address_fails_on_the_collision() {
 
 /// A deposit's value moves in its first frame and is logged there, from the depositor to the
 /// recipient; its mint is credited before any frame and is logged nowhere. The log is counted in
-/// the data size like any other, though a deposit pays no history, and a user's deposit is held
+/// the data size like any other, but is exempt from history, and a user's deposit is held
 /// to the data-size limit at it.
 #[test]
 fn test_a_deposits_value_is_logged_and_its_mint_is_not() {
@@ -1122,7 +1152,14 @@ fn test_a_deposits_value_is_logged_and_its_mint_is_not() {
         },
         "the recipient's record and the log; the deposit creates its depositor",
     );
-    assert_eq!((outcome.gas.history, outcome.gas.history_bytes), (0, 0), "a deposit pays none");
+    assert_eq!(
+        (outcome.gas.history, outcome.gas.history_bytes),
+        (
+            crate::common::history(body) + crate::common::history(WRITE_RECORD_SIZE),
+            body + WRITE_RECORD_SIZE
+        ),
+        "the body and recipient record pay history; the transfer log does not"
+    );
 
     let minted = execute_under(
         db(),
@@ -1475,7 +1512,7 @@ fn test_a_system_transactions_value_is_logged_and_no_limit_stops_it() {
     }
 }
 
-/// EIP-7708 logs keep execution order. [S14.3]
+/// EIP-7708 logs keep execution order.
 ///
 /// independent: each expected log is the event the bytecode emits, or the transfer of the wei
 /// the program moves, built from those accounts and that amount.

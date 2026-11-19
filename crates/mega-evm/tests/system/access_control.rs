@@ -500,7 +500,7 @@ fn test_oracle_sload_reverts_when_volatile_access_disabled() {
 /// timestamp, which the parent returns. The parent logs the address `CREATE` left, zero for a
 /// failed creation.
 ///
-/// Rule [S13.2]. Expected values `constants`: the revert data is decoded with the contract's own
+/// Expected values `constants`: the revert data is decoded with the contract's own
 /// error binding, and the access type is the one the init code reads.
 #[test]
 fn test_create_reverts_when_volatile_access_disabled() {

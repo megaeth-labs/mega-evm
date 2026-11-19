@@ -84,6 +84,7 @@ fn ctx() -> MegaBlockExecutionCtx {
         Some(PARENT_BEACON_ROOT),
         Bytes::new(),
         BlockLimits::no_limits(),
+        None,
     )
 }
 
