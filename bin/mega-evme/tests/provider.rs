@@ -189,6 +189,102 @@ async fn test_chain_id_error_omits_rpc_credentials(#[case] status: u16, #[case] 
     }
 }
 
+/// JSON-RPC errors that echo configured endpoint components without a scheme, percent-encoded,
+/// or with JSON-escaped separators must never leak those secrets while keeping the error code.
+#[rstest]
+#[case::schemeless_path("unauthorized request to /v2/path-secret")]
+#[case::host_and_path("upstream {host}/v2/path-secret?key=query-secret refused")]
+#[case::query_key("invalid query parameter key=query-secret")]
+#[case::userinfo("authentication failed for alice:userinfo-secret")]
+#[case::fragment("unexpected fragment fragment-secret")]
+#[case::percent_encoded_url(
+    "bad upstream http%3A%2F%2F{host}%2Fv2%2Fpath-secret%3Fkey%3Dquery-secret"
+)]
+#[case::percent_encoded_path("unauthorized %2Fv2%2Fpath-secret")]
+#[case::escaped_separator_configured(
+    r#"{"url":"http:\/\/alice:userinfo-secret@{host}\/v2\/path-secret?key=query-secret"}"#
+)]
+#[case::escaped_separator_other(r#"{"upstream":"https:\/\/other.example\/v2\/other-secret"}"#)]
+#[tokio::test(flavor = "multi_thread")]
+async fn test_chain_id_error_redacts_schemeless_and_encoded_echo(#[case] server_msg: &str) {
+    let server = MockServer::start().await;
+    let host = server.uri().strip_prefix("http://").unwrap().to_string();
+    let url = format!(
+        "{}/v2/path-secret?key=query-secret#fragment-secret",
+        server.uri().replacen("http://", "http://alice:userinfo-secret@", 1)
+    );
+    let rendered_msg = server_msg.replace("{host}", &host);
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 0,
+        "error": { "code": -32000, "message": rendered_msg },
+    });
+    Mock::given(matchers::method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(body))
+        .mount(&server)
+        .await;
+    let error = test_rpc_args(&url, Some(0)).build_provider().await.expect_err("request fails");
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    let message = error.to_string();
+    assert!(message.contains("Failed to fetch chain ID"), "{message}");
+    assert!(message.contains("-32000"), "JSON-RPC error code must be preserved: {message}");
+    for secret in [
+        "alice",
+        "userinfo-secret",
+        "path-secret",
+        "query-secret",
+        "fragment-secret",
+        "other-secret",
+    ] {
+        assert!(!message.contains(secret), "secret {secret:?} leaked in: {message}");
+    }
+}
+
+/// Percent-decoded endpoint components (such as a path containing spaces) echoed by the server
+/// are also redacted, while an ordinary unrelated error message is preserved.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_chain_id_error_redacts_percent_decoded_echo_and_keeps_safe_message() {
+    let server = MockServer::start().await;
+    let host = server.uri().strip_prefix("http://").unwrap().to_string();
+    let url = format!("{}/v2/my%20key-secret?x=tail-secret", server.uri());
+
+    // Echoing the space-decoded path leaks `key-secret` and `tail-secret` if URL scanning stops
+    // at whitespace or only checks raw percent-encoded components.
+    Mock::given(matchers::method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 0,
+            "error": {
+                "code": -32001,
+                "message": format!("bad upstream http://{host}/v2/my key-secret?x=tail-secret"),
+            },
+        })))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(matchers::method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 0,
+            "error": { "code": -32601, "message": "method not found" },
+        })))
+        .with_priority(2)
+        .mount(&server)
+        .await;
+
+    let leaked = test_rpc_args(&url, Some(0)).build_provider().await.expect_err("echo fails");
+    let leaked_msg = leaked.to_string();
+    assert!(leaked_msg.contains("-32001"), "{leaked_msg}");
+    for secret in ["key-secret", "tail-secret"] {
+        assert!(!leaked_msg.contains(secret), "secret {secret:?} leaked in: {leaked_msg}");
+    }
+
+    let safe = test_rpc_args(&url, Some(0)).build_provider().await.expect_err("safe error fails");
+    let safe_msg = safe.to_string();
+    assert!(safe_msg.contains("-32601") && safe_msg.contains("method not found"), "{safe_msg}");
+}
+
 // ─── Chain-id resolution ─────────────────────────────────────────────────────
 
 /// `build_provider` must call `eth_chainId` against the endpoint, name the

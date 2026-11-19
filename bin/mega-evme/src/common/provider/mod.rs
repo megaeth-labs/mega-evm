@@ -18,6 +18,7 @@ mod transport;
 use std::{
     fs,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use alloy_provider::{
@@ -394,8 +395,8 @@ impl RpcArgs {
     }
 
     /// Build an `RpcClient` over an arbitrary transport, wired with the configured
-    /// retry layer (or bare when `max_retries == 0`). `url` is used only to detect
-    /// whether the endpoint is local.
+    /// retry layer (or bare when `max_retries == 0`). `url` is used to detect whether
+    /// the endpoint is local and to redact configured URL components from server errors.
     fn build_client<T: alloy_transport::IntoBoxTransport>(
         &self,
         transport: T,
@@ -404,6 +405,7 @@ impl RpcArgs {
         let is_local =
             url.host_str().is_some_and(|h| h == "localhost" || h == "127.0.0.1" || h == "::1");
         let max_retries = self.max_retries;
+        let secrets = Arc::new(EndpointSecrets::from_url(url));
         if self.max_retries > 0 {
             let policy = RateLimitRetryPolicy::default().or(|err: &TransportError| {
                 matches!(err, RpcError::Transport(TransportErrorKind::Custom(_)))
@@ -416,13 +418,13 @@ impl RpcArgs {
             );
             ClientBuilder::default()
                 .layer(tower::layer::layer_fn(move |inner| {
-                    RedactedTransport::new(inner, max_retries)
+                    RedactedTransport::new(inner, max_retries, Arc::clone(&secrets))
                 }))
                 .layer(retry)
                 .transport(transport, is_local)
         } else {
             ClientBuilder::default()
-                .transport(RedactedTransport::new(transport, max_retries), is_local)
+                .transport(RedactedTransport::new(transport, max_retries, secrets), is_local)
         }
     }
 
@@ -502,20 +504,186 @@ pub(crate) fn display_rpc_url(raw: &str) -> String {
         .map_or_else(|| "<redacted RPC URL>".to_string(), |url| url.origin().ascii_serialization())
 }
 
+/// Credential-bearing components of the configured RPC endpoint URL (raw and percent-decoded).
+///
+/// Used by [`RedactedTransport`] to detect when a server JSON-RPC error echoes the endpoint's
+/// userinfo, non-root path, query, or fragment without a full `scheme://` URL.
+#[derive(Debug, Clone)]
+pub(super) struct EndpointSecrets {
+    needles: Vec<String>,
+}
+
+impl EndpointSecrets {
+    fn from_url(url: &alloy_transport_http::reqwest::Url) -> Self {
+        let mut needles = Vec::new();
+        let mut push = |raw: &str, decode_plus: bool| {
+            let push_one = |list: &mut Vec<String>, candidate: String| {
+                if !candidate.is_empty() && candidate != "/" && !list.contains(&candidate) {
+                    list.push(candidate);
+                }
+            };
+            push_one(&mut needles, raw.to_string());
+            push_one(&mut needles, percent_decode_lossy(raw, decode_plus));
+        };
+
+        push(url.username(), false);
+        if let Some(password) = url.password() {
+            push(password, false);
+        }
+        let path = url.path();
+        if !path.is_empty() && path != "/" {
+            push(path, false);
+            let trimmed_end = path.trim_end_matches('/');
+            if trimmed_end != path {
+                push(trimmed_end, false);
+            }
+            let trimmed_start = trimmed_end.trim_start_matches('/');
+            if trimmed_start != trimmed_end {
+                push(trimmed_start, false);
+            }
+        }
+        if let Some(query) = url.query() {
+            push(query, true);
+            for pair in query.split('&') {
+                push(pair, true);
+            }
+        }
+        if let Some(fragment) = url.fragment() {
+            push(fragment, false);
+        }
+        Self { needles }
+    }
+
+    fn matches(&self, text: &str) -> bool {
+        if self.needles.is_empty() {
+            return false;
+        }
+        let unescaped = unescape_json_ascii_escapes(text);
+        let decoded = percent_decode_lossy(text, false);
+        let decoded_plus = text.contains('+').then(|| percent_decode_lossy(text, true));
+        let unescaped_decoded = percent_decode_lossy(&unescaped, false);
+        self.needles.iter().any(|needle| {
+            text.contains(needle) ||
+                unescaped.contains(needle) ||
+                decoded.contains(needle) ||
+                decoded_plus.as_deref().is_some_and(|s| s.contains(needle)) ||
+                unescaped_decoded.contains(needle)
+        })
+    }
+}
+
+/// Percent-decodes `%XX` sequences in `input` (and `+` to space when `decode_plus` is true).
+/// Malformed `%` sequences are kept verbatim; non-UTF-8 byte sequences are decoded lossily.
+fn percent_decode_lossy(input: &str, decode_plus: bool) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (hex_nibble(bytes[i + 1]), hex_nibble(bytes[i + 2])) {
+                out.push((hi << 4) | lo);
+                i += 3;
+                continue;
+            }
+        } else if decode_plus && bytes[i] == b'+' {
+            out.push(b' ');
+            i += 1;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// Unescapes JSON-style `\/` (including repeated backslashes before `/`) and ASCII `\u00XX`
+/// escapes so serialized URLs or paths embedded in a server error string are matched against
+/// configured endpoint components.
+fn unescape_json_ascii_escapes(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' && i + 1 < bytes.len() {
+            let mut end = i;
+            while end < bytes.len() && bytes[end] == b'\\' {
+                end += 1;
+            }
+            if end < bytes.len() && bytes[end] == b'/' {
+                out.push(b'/');
+                i = end + 1;
+                continue;
+            }
+            if bytes[i + 1] == b'u' &&
+                i + 5 < bytes.len() &&
+                bytes[i + 2] == b'0' &&
+                bytes[i + 3] == b'0'
+            {
+                if let (Some(hi), Some(lo)) = (hex_nibble(bytes[i + 4]), hex_nibble(bytes[i + 5])) {
+                    let ch = (hi << 4) | lo;
+                    if ch.is_ascii() {
+                        out.push(ch);
+                        i += 6;
+                        continue;
+                    }
+                }
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Redacts server-provided JSON-RPC error messages.
+///
+/// If the message echoes any secret-bearing component of the configured endpoint URL (even without
+/// a scheme, percent-encoded, or JSON-escaped), the entire server message is replaced with a safe
+/// placeholder while the JSON-RPC error code is preserved by the caller. Otherwise, any absolute
+/// URLs embedded in the text are redacted.
+pub(super) fn redact_rpc_error_message(text: &str, secrets: &EndpointSecrets) -> String {
+    if secrets.matches(text) {
+        return "<redacted RPC error message>".to_string();
+    }
+    redact_rpc_urls_in_text(text)
+}
+
+/// Finds the earliest `://`, JSON-escaped `:\/`, or percent-encoded `%3A%2F%2F` scheme separator.
+fn find_scheme_separator(text: &str) -> Option<(usize, usize, bool)> {
+    let plain = text.find("://").map(|at| (at, 3, true));
+    let escaped = text.find(r":\/\/").map(|at| (at, 5, false));
+    let encoded = text.to_ascii_lowercase().find("%3a%2f%2f").map(|at| (at, 9, false));
+    [plain, escaped, encoded].into_iter().flatten().min_by_key(|(at, _, _)| *at)
+}
+
 /// Redacts URLs echoed by RPC errors, without changing successful RPC results.
 fn redact_rpc_urls_in_text(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
-    while let Some(colon) = rest.find("://") {
+    while let Some((colon, sep_len, is_plain)) = find_scheme_separator(rest) {
         let start = rest[..colon]
             .rfind(|c: char| !c.is_ascii_alphanumeric() && !matches!(c, '+' | '-' | '.'))
             .map_or(0, |at| at + rest[at..].chars().next().expect("a character").len_utf8());
         // Punctuation can be part of a credential-bearing path or query. Consume the whole
         // non-whitespace token, including surrounding punctuation if present, to fail closed.
-        let end =
-            rest[colon + 3..].find(char::is_whitespace).map_or(rest.len(), |at| colon + 3 + at);
+        let end = rest[colon + sep_len..]
+            .find(char::is_whitespace)
+            .map_or(rest.len(), |at| colon + sep_len + at);
         out.push_str(&rest[..start]);
-        out.push_str(&display_rpc_url(&rest[start..end]));
+        if is_plain {
+            out.push_str(&display_rpc_url(&rest[start..end]));
+        } else {
+            out.push_str("<redacted RPC URL>");
+        }
         rest = &rest[end..];
     }
     out.push_str(rest);
