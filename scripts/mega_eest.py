@@ -47,27 +47,24 @@ Subcommands:
               [--repo <same|moved|changed|stale|unchecked>]
               [--caseset <unmoved|kept|declared|undeclared|unchecked>]
         Read the run reports `mega-fixture consume` wrote into <dir> (<mode>.json, and
-        negative.json for the suite's deliberately wrong expectation) and decide: in every mode, the
+        negative.json for the suite's negative controls) and decide: in every mode, the
         cases consumed are exactly the slice's index, by case id and file digest, and every one
         passed; with both modes, every case's observations are the same bytes plain and
-        instrumented. The wrong expectation, which the index must list, is the control that shows
-        the consumer and the adapter can report a failure at all: it decides only when every
-        gating case passed, and then it must fail at the path it records; when gating cases
-        failed, the failures already show that, and the control need only have run and not passed
-        (failed or erred, at any path), since a change of behaviour can move where it first
-        differs. Prints the failures (case id, first differing path, both values, the rules the
+        instrumented. When every gating case passed, each indexed negative control must fail at
+        its recorded path or report an error with its exact recorded message, according to its
+        index entry. When gating cases failed, each control must have run and reported a failure
+        or an error. Prints the failures (case id, first differing path, both values, the rules the
         case pins) and one summary line, `MEGA-EEST … result=<result>`, and exits with its code:
         0 pass; 1 FAIL, a verdict (complete reports of exactly the index in every mode, a case
-        failed or erred, or the modes' observations differ, and the control ran and did not pass);
+        failed or erred, or the modes' observations differ, and every control failed or erred);
         2 INCOMPLETE, no verdict (no mode, a report missing, cases that are not the index, a
         consume exit its report does not explain, a case the adapter does not support, a case
-        status other than the consumer's four (pass, fail, unsupported, error), no control,
-        a control not run or passing, a control that failed elsewhere while every gating case
-        passed, or the checker itself failing); 3 REFUSED, every case passed but the pin is refused
-        for a cause `refusal` names: its provenance is `unmerged`; its repository is not the base's
-        and no declaration names the base's (`repo=changed`); a declaration names a move the change
-        does not make (`repo=stale`); its repository moves and its provenance is unchecked; or its
-        case set is `undeclared`.
+        status other than the consumer's four (pass, fail, unsupported, error), a missing or
+        malformed control, a control not run or passing, a control that did not fail as recorded
+        while every gating case passed, or the checker itself failing).
+        3 REFUSED means every case passed and the pin has a cause `refusal` names, such as
+        `provenance=unmerged`, `repo=changed`, `repo=stale`, a repository move with unchecked
+        provenance, or `caseset=undeclared`.
 
   refusal     --summary <MEGA-EEST line>
         The causes for which the pin of a summary line is refused, one sentence, from the line's
@@ -501,37 +498,57 @@ def check(args: argparse.Namespace) -> int:
         summary.append(f"parity={'identical' if not differ else f'{len(differ)}-differ'}")
         cases_failed |= bool(differ)
 
-    # The wrong expectation is the control that shows the consumer and the adapter can report a
-    # failure at all. When every gating case passed, nothing else shows it, so the control must
-    # fail at the path it records. When gating cases failed, the failures show it, and a change
-    # of behaviour can also move where the control first differs, so it need only have run and
-    # not passed (failed or erred, at any path). A control that was not run, or that passed,
-    # says the consumer cannot be trusted either way. Without one, there is no verdict.
+    # The controls show that the consumer can report a mismatch or an adapter error.
+    # When gating cases failed, a change of behaviour can also change a control's first failure.
     negative_path = work / "negative.json"
-    wrong_at = {n["caseId"]: n["wrongAt"] for n in index.get("negative", [])}
-    if not wrong_at:
+    controls = index.get("negative", [])
+    control_keys = {"caseId", "file"}
+    if not isinstance(controls, list) or any(
+        not isinstance(control, dict)
+        or control.keys() not in (control_keys | {"wrongAt"}, control_keys | {"error"})
+        or not all(isinstance(value, str) and value for value in control.values())
+        for control in controls
+    ):
+        verdict = "invalid-index"
+        incomplete.append("malformed negative control index: expected caseId, file and exactly one of wrongAt or error")
+    elif len({control["caseId"] for control in controls}) != len(controls):
+        verdict = "invalid-index"
+        incomplete.append("malformed negative control index: repeated case IDs")
+    elif not controls:
         verdict = "none"
-        incomplete.append("the slice's index lists no wrong expectation, which shows the consumer can fail")
+        incomplete.append("the slice's index lists no negative control")
     elif not negative_path.exists():
         verdict = "no-report"
-        incomplete.append("`mega-fixture consume` wrote no report of the wrong expectation")
+        incomplete.append("`mega-fixture consume` wrote no report of the negative controls")
     else:
-        cases = {c.get("caseId"): c for c in json.loads(negative_path.read_text())["cases"]}
-        states = []
-        for case_id, path in wrong_at.items():
-            c = cases.get(case_id)
-            seen = f"{c['status']} at {c.get('path')}" if c else "not consumed"
-            if c and c["status"] == "fail" and c.get("path") == path:
-                states.append("fail-as-recorded")
-            elif c and c["status"] in ("fail", "error") and cases_failed:
-                states.append("fail-elsewhere")
-                print(f"mega-eest: the wrong expectation {case_id} did not fail at {path} ({seen}); "
+        reports = json.loads(negative_path.read_text())["cases"]
+        cases = {report.get("caseId"): report for report in reports}
+        states = set()
+        if len(cases) != len(reports) or cases.keys() - {control["caseId"] for control in controls}:
+            states.add("not-caught")
+            incomplete.append("negative control report has extra or repeated case IDs")
+        for control in controls:
+            case_id = control["caseId"]
+            if "wrongAt" in control:
+                status, field, value = "fail", "path", control["wrongAt"]
+            else:
+                status, field, value = "error", "message", control["error"]
+            report = cases.get(case_id)
+            if report and report["status"] == status and report.get(field) == value:
+                states.add("fail-as-recorded")
+                continue
+            want = f"{status} with {field} {canonical(value)}"
+            seen = (f"{report['status']} with {field} {canonical(report.get(field))}"
+                    if report else "not consumed")
+            if report and report["status"] in ("fail", "error") and cases_failed:
+                states.add("fail-elsewhere")
+                print(f"mega-eest: negative control {case_id} expected {want} ({seen}); "
                       f"gating cases failed, which can move where it first differs", file=sys.stderr)
             else:
-                states.append("not-caught")
+                states.add("not-caught")
                 why = ("gating cases failed, and it did not fail" if cases_failed
-                       else "every gating case passed, so it must fail where recorded")
-                incomplete.append(f"the wrong expectation {case_id} did not fail at {path} ({seen}): {why}")
+                       else "every gating case passed, so it must match the recorded failure")
+                incomplete.append(f"negative control {case_id} expected {want} ({seen}): {why}")
         verdict = ("not-caught" if "not-caught" in states
                    else "fail-elsewhere" if "fail-elsewhere" in states else "fail-as-recorded")
     summary.append(f"negative={verdict}")

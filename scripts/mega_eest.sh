@@ -39,14 +39,13 @@
 #    Cargo runs from this checkout's root, so the toolchain is its rust-toolchain.toml and the
 #    configuration its .cargo/config.toml.
 # 5. Consumes every gating case (slice/cases) with `mega-fixture consume` in each mode of
-#    $MEGA_EEST_MODES, plain and --instrumented by default, and the suite's deliberately wrong
-#    expectation (slice/negative).
+#    $MEGA_EEST_MODES, plain and --instrumented by default, and the suite's negative controls
+#    (slice/negative).
 # 6. Decides (scripts/mega_eest.py check): in each mode the cases consumed are exactly the slice's
-#    index and every one passed; plain and instrumented observations are the same bytes. The wrong
-#    expectation, which the index must list, is the control that shows the pipeline can report a
-#    failure: when every gating case passed it must fail where the index says; when gating cases
-#    failed, the failures show that already, and since a change of behaviour can also move where
-#    the control first differs, it need only have run and not passed (failed or erred, anywhere).
+#    index and every one passed, with identical plain and instrumented observations. When every
+#    gating case passed, each indexed negative control must fail at its `wrongAt` path or report
+#    status `error` with its exact `error` message, according to its index entry. When gating cases
+#    failed, each control must have run and reported a failure or an error.
 #    A failure prints the case id, the first differing path and both values, and the rules the
 #    case pins.
 #
@@ -57,21 +56,26 @@
 #     repo=<same|moved|changed|stale|unchecked> caseset=<unmoved|kept|declared|undeclared|unchecked>
 #     result=<pass|FAIL|INCOMPLETE|REFUSED>
 #
+# `negative=fail-as-recorded` means every control matched its own expectation.
+# `fail-elsewhere` means each control failed or erred and at least one differed during a failing run.
+# `not-caught` means the report did not meet the conditions for a verdict.
+# `none`, `invalid-index` and `no-report` identify missing controls, malformed entries and a missing report.
+#
 # `run=full` is both modes, which the gate requires; `run=partial` is one, which the mutation gate
 # runs (plain). A run that stops before the reports are read prints
 # `MEGA-EEST rev=<commit> run=<...> stage=<step> result=INCOMPLETE` instead.
 #
 # Exit codes:
-#   0  pass: every case passed in every mode run, the wrong expectation failed where recorded, and
+#   0  pass: every case passed in every mode run, the negative controls matched the index, and
 #      the pin's checks passed or were skipped (result=pass)
 #   1  the cases failed: every mode ran to a complete report of exactly the slice's cases, a case
-#      failed or erred or plain and instrumented observations differ, and the wrong expectation ran
-#      and did not pass, wherever it first differed (result=FAIL). The only exit that is a verdict
+#      failed or erred or plain and instrumented observations differ, and every negative control
+#      failed or erred (result=FAIL). The only exit that is a verdict
 #      on this tree.
 #   2  no verdict: anything that kept the run from one, a fetch, a build, the resolution, the lock
 #      check, a report missing or incomplete, cases that are not the index, a case the adapter does
-#      not support, no mode, a wrong expectation not run or passing, or one that failed elsewhere
-#      while every gating case passed (result=INCOMPLETE)
+#      not support, no mode, missing or malformed controls, a control not run or passing, or
+#      a control that did not match the index while every gating case passed (result=INCOMPLETE)
 #   3  the cases passed, but the pin is refused: not on Mega EEST's default branch, in another
 #      repository than the base's without a declared move, with a stale move declaration, or it
 #      removes or changes cases scripts/mega_eest.env does not declare (result=REFUSED; the log
@@ -395,7 +399,7 @@ for mode in $MODE_WORDS; do
     echo "$rc" > "$WORK/$mode.exit"
     grep '^CONSUME ' "$WORK/$mode.log" >&2 || log "$mode: no CONSUME line; see $WORK/$mode.log"
 done
-log "consuming slice/negative, the wrong expectation ($(elapsed))"
+log "consuming slice/negative, the negative controls ($(elapsed))"
 "$CLI" consume --adapter "$ADAPTER" --specs "$SUITE/specs" --report "$WORK/negative.json" \
     "$SUITE/slice/negative" > "$WORK/negative.log" || true
 
