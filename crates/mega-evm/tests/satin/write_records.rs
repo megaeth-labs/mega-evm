@@ -30,8 +30,8 @@ use mega_evm::{
 };
 use revm::{
     bytecode::opcode::{
-        CALL, CALLDATASIZE, CALLER as CALLER_OPCODE, CREATE, DELEGATECALL, GAS, JUMPDEST, JUMPI,
-        LOG2, POP, PUSH0, PUSH1, RETURN, REVERT, SELFDESTRUCT, SSTORE, STATICCALL, STOP,
+        CALL, CALLDATASIZE, CALLER as CALLER_OPCODE, CREATE, DELEGATECALL, GAS, INVALID, JUMPDEST,
+        JUMPI, LOG2, POP, PUSH0, PUSH1, RETURN, REVERT, SELFDESTRUCT, SSTORE, STATICCALL, STOP,
     },
     context::ContextTr,
     interpreter::{
@@ -538,6 +538,34 @@ fn test_nested_self_transfer_after_recorded_sender_counts_nothing() {
 }
 
 /* ---------- storage, logs, selfdestruct ---------- */
+
+/// A write-back in a child refunds the record its caller made, and the refund dies with a
+/// failing child.
+#[test]
+fn test_write_back_in_a_child_refunds_the_caller_record() {
+    let child = BytecodeBuilder::default().sstore(U256::ZERO, U256::ZERO).stop().build();
+    let failing_child =
+        BytecodeBuilder::default().sstore(U256::ZERO, U256::ZERO).append(INVALID).build();
+    // The write-back takes back the caller's new slot with its record, and dies with the child.
+    for (code, expected) in [(child, body_only()), (failing_child, grown(records(1), 1))] {
+        // CALLEE writes slot 0, then DELEGATECALLs CONTRACT, which writes it back in CALLEE's
+        // storage.
+        let parent = BytecodeBuilder::default()
+            .sstore(U256::ZERO, U256::from(1))
+            .append_many([PUSH0, PUSH0, PUSH0, PUSH0])
+            .push_address(CONTRACT)
+            .append(GAS)
+            .append(revm::bytecode::opcode::DELEGATECALL)
+            .append(POP)
+            .stop()
+            .build();
+        let db =
+            MemoryDatabase::default().account_code(CALLEE, parent).account_code(CONTRACT, code);
+        let (result, usage) = run(db, call(CALLER, CALLEE, U256::ZERO, value_call_room()));
+        assert!(result.result.is_success());
+        assert_eq!(usage, expected);
+    }
+}
 
 /* ---------- the fee accounts and the sender ---------- */
 
