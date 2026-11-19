@@ -673,6 +673,8 @@ for s in $(seq 1 20); do MEGA_FUZZ_SEED=$s cargo test --release -p mega-evm --te
   The adapter's `Cargo.lock`, resolved for the commit it pins, is not used: the workspace's lock is seeded with this tree's `Cargo.lock`, cargo resolves it once, every package mega-evm links must then be at the version and source this tree locks, with one revm, and the build runs `--locked`.
   The executables it runs are the ones those builds report (cargo's JSON messages), never a file at a path guessed from the target directory.
   The gate passes when every case in the slice's index passes in both modes with identical observation digests, each gating report contains exactly the indexed case IDs and file digests, and every negative control matches its index entry in both modes.
+  Every gating or control report must declare its requested mode.
+  When the gate compares modes, a case that errors without an observation digest in either mode counts as a parity difference.
   A case failure names the case, its first differing path, both values and the rules it pins.
   The gate runs the negative controls in each requested mode and checks that the consumer exited 1 and reported the indexed case IDs and fixture paths relative to the suite's `slice` directory.
   When the gating cases pass and their observations agree, each control must fail at its indexed `wrongAt` path or report status `error` with the exact indexed `error` message.

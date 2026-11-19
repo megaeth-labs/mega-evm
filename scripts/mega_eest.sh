@@ -41,11 +41,12 @@
 # 5. Consumes every gating case (slice/cases) and negative control (slice/negative) with
 #    `mega-fixture consume` in each mode of $MEGA_EEST_MODES, plain and --instrumented by default.
 #    It saves each control run's report, log and exit as negative-<mode>.{json,log,exit}.
-# 6. Uses scripts/mega_eest.py check to decide. Each mode's gating report must match the slice's
-#    index, and each passing case needs an observation digest before plain and instrumented
-#    observations can be compared. Each control report must match the indexed case IDs and
-#    fixture paths, relative to slice, and its consumer must have exited 1. When every gating
-#    case passed and the observations agree, each control must fail at its indexed `wrongAt`
+# 6. Uses scripts/mega_eest.py check to decide. Each report must identify the requested mode.
+#    Each mode's gating report must match the slice's index, and each passing case needs an
+#    observation digest before plain and instrumented observations can be compared. An errored
+#    case without a digest in either mode counts as a parity difference. Each control report must
+#    match the indexed case IDs and fixture paths relative to slice, with consumer exit 1. When
+#    every gating case passed and the observations agree, each control must fail at its indexed `wrongAt`
 #    path or report status `error` with its exact indexed `error` message. A gating failure or an
 #    observation difference allows each control to report any failure or error.
 #    A failure prints the case id, the first differing path and both values, and the rules the

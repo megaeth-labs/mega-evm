@@ -274,7 +274,8 @@ class Check(Case):
     def write(self, reports: dict[str, list[dict] | None], negative: list[dict] | None = None,
               exits: dict[str, int] | None = None, *, modes: str | None = None,
               index_negative: list[dict] | None = None, provenance: str = "unchecked",
-              repo: str = "unchecked", caseset: str = "unchecked") -> tuple[int, str, str]:
+              repo: str = "unchecked", caseset: str = "unchecked",
+              report_modes: dict[str, str | None] | None = None) -> tuple[int, str, str]:
         # A fresh pair for every call: a test may write several runs.
         run = Path(tempfile.mkdtemp(dir=self.tmp))
         suite, work = run / "suite", run / "work"
@@ -284,15 +285,23 @@ class Check(Case):
             "cases": [{"caseId": c, "fileDigest": d} for c, d in self.CASES],
             "negative": self.INDEX_NEGATIVE if index_negative is None else index_negative,
         }))
+
+        def write_report(stem: str, mode: str, cases: list[dict]) -> None:
+            reported_mode = (report_modes or {}).get(stem, mode)
+            report = {"cases": cases}
+            if reported_mode is not None:
+                report["mode"] = reported_mode
+            (work / f"{stem}.json").write_text(json.dumps(report))
+
         for mode, cases in reports.items():
             if cases is not None:
-                (work / f"{mode}.json").write_text(json.dumps({"cases": cases}))
+                write_report(mode, mode, cases)
             default = 1 if cases and any(c["status"] != "pass" for c in cases) else 0
             (work / f"{mode}.exit").write_text(f"{(exits or {}).get(mode, default)}\n")
             if negative is not None:
                 controls = [{**c, "file": str(suite / "slice" / c["file"])} if "file" in c else c
                             for c in negative]
-                (work / f"negative-{mode}.json").write_text(json.dumps({"cases": controls}))
+                write_report(f"negative-{mode}", mode, controls)
                 control_exit = 1 if any(c["status"] != "pass" for c in controls) else 0
                 (work / f"negative-{mode}.exit").write_text(f"{control_exit}\n")
         return self.run_quietly(eest.cmd_check, Namespace(
@@ -347,6 +356,18 @@ class Check(Case):
         self.assertIn("negative=fail-elsewhere", out)
         self.assertIn("result=FAIL", out)
 
+    def test_parity_counts_cases_without_an_observation_pair(self) -> None:
+        for modes_without_digest in (("plain",), ("instrumented",), ("plain", "instrumented")):
+            with self.subTest(modes_without_digest=modes_without_digest):
+                reports = {"plain": self.all_passed(), "instrumented": self.all_passed()}
+                for mode in modes_without_digest:
+                    reports[mode] = self.one_failing("error")
+                    del reports[mode][1]["observationsDigest"]
+                code, out, err = self.write(reports, self.NEGATIVE)
+                self.assertEqual(code, 1, err)
+                self.assertIn("parity=1-differ", out)
+                self.assertIn("result=FAIL", out)
+
     def test_a_passing_case_without_a_digest_is_incomplete_before_parity(self) -> None:
         for modes, control, verdict in (("plain instrumented", self.control("fail", "/expected/y"), "not-caught"),
                                         ("instrumented", self.NEGATIVE, "fail-as-recorded")):
@@ -382,6 +403,14 @@ class Check(Case):
                                     exits={"instrumented": 2})
         self.assert_no_verdict(code, out, err, "wrote no report (exit 2)")
         self.assertIn("instrumented=no-report", out)
+
+    def test_reports_must_identify_the_requested_mode(self) -> None:
+        reports = {"plain": self.all_passed(), "instrumented": self.all_passed()}
+        for stem in ("instrumented", "negative-instrumented"):
+            for reported_mode in ("plain", None):
+                with self.subTest(report=stem, reported_mode=reported_mode):
+                    run = self.write(reports, self.NEGATIVE, report_modes={stem: reported_mode})
+                    self.assert_no_verdict(*run, f'{stem}.json: expected report mode "instrumented"')
 
     def test_a_consume_exit_its_report_does_not_explain_is_no_verdict(self) -> None:
         for cases, exit_code in ((self.all_passed(), 1), (self.one_failing(), 0), (self.one_failing(), 101)):
@@ -749,7 +778,8 @@ else:
     cases = [{"caseId": c["caseId"], "fileDigest": c["fileDigest"], "observationsDigest": "sha256:o",
               "status": "fail" if failing else "pass", "path": "/expected/x", "expected": 1, "actual": 2,
               "rules": ["R-1"]} for c in index["cases"]]
-Path(report).write_text(json.dumps({"cases": cases}))
+mode = "instrumented" if "--instrumented" in args else "plain"
+Path(report).write_text(json.dumps({"mode": mode, "cases": cases}))
 passed = sum(c["status"] == "pass" for c in cases)
 print(f"CONSUME adapter=fake cases={len(cases)} pass={passed} fail={len(cases) - passed} unsupported=0 error=0")
 if path.name == "negative" and "--instrumented" in args and "FAKE_INSTRUMENTED_CONTROL_EXIT" in os.environ:

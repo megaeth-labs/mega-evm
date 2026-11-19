@@ -47,9 +47,11 @@ Subcommands:
               [--repo <same|moved|changed|stale|unchecked>]
               [--caseset <unmoved|kept|declared|undeclared|unchecked>]
         Read <mode>.json and negative-<mode>.json with their recorded exits for every requested mode.
-        The gating reports must match the slice's index by case ID and file digest. Each passed
-        case must have an observation digest before the modes are compared. Each control report
-        must match the indexed case IDs and fixture paths relative to slice, with consumer exit 1.
+        Each report must identify the requested mode. The gating reports must match the slice's
+        index by case ID and file digest. Each passed case must have an observation digest before
+        the modes are compared. If both modes ran and a case errored without observations, its
+        missing digest counts as a parity difference. Each control report must match the indexed
+        case IDs and fixture paths relative to slice, with consumer exit 1.
         When every gating case passes and observations agree, each negative control must fail at
         its indexed path or report an error with its exact indexed message. If a gating case
         fails or the observations differ, a control can report any failure or error.
@@ -404,6 +406,16 @@ CASE_STATUSES = ("pass", "fail", "unsupported", "error")
 RESULT_EXIT = {"pass": 0, "FAIL": 1, "INCOMPLETE": 2, "REFUSED": 3}
 
 
+def read_report(path: Path, mode: str, incomplete: list[str]) -> dict | None:
+    report = json.loads(path.read_text())
+    reported_mode = report.get("mode")
+    if reported_mode != mode:
+        incomplete.append(f"{path.name}: expected report mode {canonical(mode)}, "
+                          f"got {canonical(reported_mode)}")
+        return None
+    return report
+
+
 def cmd_check(args: argparse.Namespace) -> int:
     """`check`; no failure of the checker itself can read as a verdict."""
     try:
@@ -445,7 +457,11 @@ def check(args: argparse.Namespace) -> int:
                               f"see {work / (mode + '.log')}")
             summary.append(f"{mode}=no-report")
             continue
-        cases = json.loads(report_path.read_text())["cases"]
+        report = read_report(report_path, mode, incomplete)
+        if report is None:
+            summary.append(f"{mode}=invalid-mode")
+            continue
+        cases = report["cases"]
         statuses = Counter(c["status"] for c in cases)
         got = Counter((c.get("caseId"), c.get("fileDigest")) for c in cases)
         missing, extra = expected - got, got - expected
@@ -500,8 +516,9 @@ def check(args: argparse.Namespace) -> int:
 
     if not incomplete and {"plain", "instrumented"} <= observations.keys():
         plain, inst = observations["plain"], observations["instrumented"]
-        # An adapter error can stop a case before it produces observations.
-        differ = sorted(k for k in plain.keys() & inst.keys() if plain[k] != inst[k])
+        # An adapter error can leave an indexed case without observations in either mode.
+        differ = sorted({case_id for case_id, _ in expected
+                         if case_id not in plain or plain[case_id] != inst.get(case_id)})
         for case in differ[:MAX_SHOWN]:
             print(f"mega-eest: parity: {case}: plain {plain.get(case)} instrumented {inst.get(case)}",
                   file=sys.stderr)
@@ -569,7 +586,11 @@ def check_controls(controls, modes: list[str], slice_dir: Path, work: Path, case
         if code != "1":
             states.add("not-caught")
             incomplete.append(f"{mode}: negative controls: `mega-fixture consume` exited {code}; expected 1")
-        reports = json.loads(negative_path.read_text())["cases"]
+        control_report = read_report(negative_path, mode, incomplete)
+        if control_report is None:
+            states.add("not-caught")
+            continue
+        reports = control_report["cases"]
         cases = {report.get("caseId"): report for report in reports}
         if len(cases) != len(reports) or cases.keys() - indexed_files.keys():
             states.add("not-caught")
