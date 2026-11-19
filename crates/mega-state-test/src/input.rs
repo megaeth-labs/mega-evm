@@ -21,18 +21,38 @@ const MAX_STATE_ACCOUNTS: usize = 100_000;
 /// The largest state a fixture may materialize, in storage slots across all accounts.
 const MAX_STATE_SLOTS: usize = 1_000_000;
 
-/// Reads a UTF-8 fixture, refusing an oversized file before allocating its contents.
+/// Reads a UTF-8 fixture, refusing non-regular and oversized files before allocating contents.
 pub(crate) fn read_fixture(path: &Path) -> io::Result<String> {
-    read_with_limit(File::open(path)?, MAX_FIXTURE_BYTES)
+    read_file_with_limit(path, MAX_FIXTURE_BYTES)
 }
 
 /// Reads a blockchain fixture under its larger bound, using the same guarded reader.
 pub(crate) fn read_blockchain_fixture(path: &Path) -> io::Result<String> {
-    read_with_limit(File::open(path)?, MAX_BLOCKCHAIN_FIXTURE_BYTES)
+    read_file_with_limit(path, MAX_BLOCKCHAIN_FIXTURE_BYTES)
+}
+
+fn read_file_with_limit(path: &Path, limit: u64) -> io::Result<String> {
+    let metadata = path
+        .metadata()
+        .map_err(|error| io::Error::new(error.kind(), format!("{}: {error}", path.display())))?;
+    if !metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("fixture input is not a regular file: {}", path.display()),
+        ));
+    }
+    read_with_limit(File::open(path)?, limit)
 }
 
 fn read_with_limit(file: File, limit: u64) -> io::Result<String> {
-    if file.metadata()?.len() > limit {
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "fixture input is not a regular file",
+        ));
+    }
+    if metadata.len() > limit {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("fixture exceeds {limit} bytes"),
@@ -87,7 +107,15 @@ fn discover(path: &Path, files: &mut Vec<PathBuf>, depth: usize, limit: usize) -
     if metadata.is_file() {
         return add_file(path.to_path_buf(), files, limit);
     }
-    for entry in WalkDir::new(path) {
+    if !metadata.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("fixture input is not a regular file or directory: {}", path.display()),
+        ));
+    }
+    // Follow symlinks so symlinked fixture directories are traversed rather than silently dropped;
+    // WalkDir reports symlink loops and broken links as errors, which propagate via `?`.
+    for entry in WalkDir::new(path).follow_links(true) {
         let entry = entry?;
         // WalkDir::max_depth would silently omit descendants, so inspect the first excess entry.
         if entry.depth() > depth {
@@ -97,6 +125,15 @@ fn discover(path: &Path, files: &mut Vec<PathBuf>, depth: usize, limit: usize) -
             ));
         }
         if entry.path().extension().is_some_and(|ext| ext == "json") {
+            let entry_meta = entry.path().metadata().map_err(|error| {
+                io::Error::new(error.kind(), format!("{}: {error}", entry.path().display()))
+            })?;
+            if !entry_meta.is_file() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("fixture input is not a regular file: {}", entry.path().display()),
+                ));
+            }
             add_file(entry.into_path(), files, limit)?;
         }
     }
@@ -194,5 +231,95 @@ mod tests {
         assert!(check_state_size([MAX_STATE_SLOTS / 2, MAX_STATE_SLOTS / 2]).is_ok());
         assert!(check_state_size([MAX_STATE_SLOTS, 1]).unwrap_err().contains("total slots"));
         assert!(check_state_size([1, usize::MAX]).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_discovery_rejects_fifo_and_non_regular_json_without_hanging() {
+        use std::{process::Command, sync::mpsc, time::Duration};
+
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("valid.json"), "{}").unwrap();
+        let fifo = root.path().join("p.json");
+        let status = Command::new("mkfifo").arg(&fifo).status().expect("mkfifo runs");
+        assert!(status.success(), "mkfifo failed");
+
+        // Discovery of a directory containing a FIFO named `*.json` fails explicitly without
+        // hanging.
+        let err = find_json_files(root.path()).expect_err("FIFO named *.json must fail discovery");
+        assert!(err.to_string().contains(&fifo.display().to_string()), "{err}");
+        let err = find_json_files_in_paths(&[root.path().to_path_buf()])
+            .expect_err("multi-path discovery must also reject FIFO named *.json");
+        assert!(err.to_string().contains(&fifo.display().to_string()), "{err}");
+
+        // Passing the FIFO directly also fails discovery explicitly.
+        let err = find_json_files(&fifo).expect_err("direct FIFO input must fail discovery");
+        assert!(err.to_string().contains(&fifo.display().to_string()), "{err}");
+
+        // Even a direct `read_fixture` call refuses the FIFO without blocking in `File::open`.
+        let fifo_clone = fifo.clone();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(read_fixture(&fifo_clone));
+        });
+        let read_res = rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("read_fixture must reject FIFO without blocking");
+        assert!(read_res.is_err(), "FIFO must not be read as a fixture");
+
+        // A directory whose name ends in `.json` is also a non-regular entry and fails discovery.
+        let dir_root = tempfile::tempdir().unwrap();
+        let json_dir = dir_root.path().join("nested.json");
+        std::fs::create_dir(&json_dir).unwrap();
+        std::fs::write(json_dir.join("real.json"), "{}").unwrap();
+        let err = find_json_files(dir_root.path())
+            .expect_err("directory named *.json must fail discovery");
+        assert!(err.to_string().contains(&json_dir.display().to_string()), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_discovery_follows_symlink_dir_and_rejects_symlink_loop() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let real = root.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        std::fs::write(real.join("a.json"), "{}").unwrap();
+
+        let top = root.path().join("top");
+        std::fs::create_dir(&top).unwrap();
+        std::fs::write(top.join("b.json"), "{}").unwrap();
+        symlink(&real, top.join("link")).unwrap();
+
+        // Symlinked subdirectory's fixture is discovered, not silently dropped.
+        let files = find_json_files(&top).expect("symlinked directory is followed");
+        assert_eq!(files.len(), 2, "{files:?}");
+        assert!(files.iter().any(|p| p.ends_with("b.json")), "{files:?}");
+        assert!(files.iter().any(|p| p.ends_with("a.json")), "{files:?}");
+
+        // Existing depth limit still applies to entries reached through a symlinked directory.
+        let err = discover(&top, &mut Vec::new(), 1, 10)
+            .expect_err("depth limit must apply through symlinked directory");
+        assert!(err.to_string().contains("depth exceeds 1"), "{err}");
+
+        // A symlink loop yields an error rather than hanging or silently dropping entries.
+        let loop_root = tempfile::tempdir().unwrap();
+        let sub = loop_root.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        symlink(loop_root.path(), sub.join("back")).unwrap();
+        assert!(find_json_files(loop_root.path()).is_err(), "symlink loop must fail discovery");
+
+        // A symlink to a non-regular file (FIFO) named `*.json` fails discovery explicitly.
+        let fifo_target = root.path().join("pipe");
+        let status =
+            std::process::Command::new("mkfifo").arg(&fifo_target).status().expect("mkfifo runs");
+        assert!(status.success(), "mkfifo failed");
+        let link_root = tempfile::tempdir().unwrap();
+        let fifo_link = link_root.path().join("linked.json");
+        symlink(&fifo_target, &fifo_link).unwrap();
+        let err = find_json_files(link_root.path())
+            .expect_err("symlink to FIFO named *.json must fail discovery");
+        assert!(err.to_string().contains(&fifo_link.display().to_string()), "{err}");
     }
 }

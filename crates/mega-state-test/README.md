@@ -63,6 +63,8 @@ cargo run --release -p state-test -- --mode satin --fork Osaka <main>/state_test
 ## Fixture input limits
 
 Discovery accepts at most 100,000 fixture files across all input paths and entries at most 64 levels below each input directory.
+Discovery follows symlinks so symlinked fixture subdirectories are included under the same depth and count limits, while broken links and symlink loops fail discovery.
+Only regular files (after following links) are admitted: a non-regular input or `*.json` entry (such as a FIFO, socket, device, or directory) fails discovery with an error naming the path before any file is opened.
 A traversal error or an exceeded limit fails the run; neither a deep subtree nor excess files are silently omitted.
 The state-test runner accepts fixture files up to 64 MiB; the blockchain-test runner accepts up to 256 MiB because a file bundles many block sequences, and the pinned execution-spec fixtures include files around 160 MiB.
 Both reject oversized files before reading their contents and cap the read itself in case a file grows.
