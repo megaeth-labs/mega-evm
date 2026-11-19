@@ -782,3 +782,6 @@ mod tests {
         assert!(result.is_err());
     }
 }
+
+#[cfg(test)]
+mod gate_reuse_tests;

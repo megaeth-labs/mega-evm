@@ -1628,4 +1628,47 @@ mod tests {
             "deposit-caller state-growth must not be recorded when the storage gas computation fails",
         );
     }
+
+    /// The REX5 keyless-deploy sandbox runs as a fee-free deposit-like transaction, so its
+    /// balance precheck must ignore the gas price. Force a non-zero `gas_price` here (the
+    /// production caller always builds `gas_price = 0`) and pin that a signer holding exactly
+    /// `value` still clears the precheck: gating the fee-free branch one fork later would add
+    /// `gas_limit * gas_price` and reject the deploy.
+    #[test]
+    fn test_rex5_sandbox_balance_precheck_ignores_gas_price() {
+        use crate::test_utils::MemoryDatabase;
+        use alloy_primitives::{address, Bytes, TxKind, U256};
+        use revm::context::TxEnv;
+
+        let signer = address!("0x00000000000000000000000000000000000000aa");
+        let value = U256::from(100u64);
+        let gas_price: u128 = 7;
+        let gas_limit: u64 = 100_000;
+
+        let mut db = MemoryDatabase::default().account_balance(signer, value);
+
+        let tx = TxEnv {
+            caller: signer,
+            kind: TxKind::Create,
+            data: Bytes::from_static(&[0x60, 0x00, 0x60, 0x00, 0xf3]),
+            value,
+            gas_limit,
+            gas_price,
+            nonce: 0,
+            ..Default::default()
+        };
+        let mut sandbox_tx = crate::MegaTransaction(op_revm::OpTransaction::new(tx));
+        sandbox_tx.enveloped_tx = Some(Bytes::new());
+
+        let mut ctx = crate::MegaContext::new(&mut db, MegaSpecId::REX5);
+        let outcome = execute_keyless_deploy_sandbox(
+            &mut ctx,
+            sandbox_tx,
+            Some(EvmTxRuntimeLimits::from_spec(MegaSpecId::REX5)),
+        );
+        assert!(
+            !matches!(outcome, SandboxOutcome::Rejected(KeylessDeployError::InsufficientBalance)),
+            "REX5 must not charge the gas price in the sandbox balance precheck: {outcome:?}"
+        );
+    }
 }
