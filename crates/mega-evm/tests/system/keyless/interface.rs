@@ -45,3 +45,14 @@ fn test_decode_gas_limit_too_low_preserves_both_limits() {
         }),
     );
 }
+
+#[test]
+fn test_decode_execution_reverted_preserves_gas_and_output() {
+    let output = alloy_primitives::Bytes::from_static(&[0xc0, 0xff, 0xee]);
+    let bytes =
+        IKeylessDeploy::ExecutionReverted { gasUsed: 16, output: output.clone() }.abi_encode();
+    assert_eq!(
+        decode_error_result(&bytes),
+        Some(KeylessDeployError::ExecutionReverted { gas_used: 16, output }),
+    );
+}

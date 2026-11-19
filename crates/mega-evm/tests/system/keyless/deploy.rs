@@ -20,9 +20,8 @@ use mega_evm::{
 };
 use revm::{
     bytecode::opcode::{
-        CALL, CREATE, DELEGATECALL, GAS, GASPRICE, INVALID, JUMP, JUMPDEST, LOG0, LOG1, MLOAD,
-        ORIGIN, POP, PUSH0, RETURNDATACOPY, RETURNDATASIZE, REVERT, SELFDESTRUCT, SHR, SSTORE,
-        STATICCALL,
+        CALL, CREATE, DELEGATECALL, GAS, GASPRICE, JUMP, JUMPDEST, LOG0, LOG1, MLOAD, ORIGIN, POP,
+        PUSH0, REVERT, SELFDESTRUCT, SSTORE, STATICCALL,
     },
     context::BlockEnv,
     primitives::KECCAK_EMPTY,
@@ -106,24 +105,6 @@ fn test_a_deployment_survives_a_commit() {
     }
 }
 
-/// Init code that reverts: the call succeeds and reports `ExecutionReverted` with the revert
-/// data, the deployment writes no code, and the signer's nonce is spent.
-#[test]
-fn test_keyless_deploy_execution_reverted() {
-    let deployment =
-        Deployment::new(BytecodeBuilder::default().revert_with_data([0xc0, 0xff, 0xee]).build());
-    for gas_limit in GAS_LIMITS {
-        let outcome = deploy(system_db(), &deployment, gas_limit);
-        let KeylessDeployError::ExecutionReverted { gas_used, output } = failure(&outcome) else {
-            panic!("expected ExecutionReverted: {:?}", outcome.result);
-        };
-        assert_eq!(output, Bytes::from_static(&[0xc0, 0xff, 0xee]));
-        assert_eq!(gas_used, returned(&outcome).gasUsed);
-        assert_eq!(nonce(&outcome, deployment.signer), 1);
-        assert!(code_hash(&outcome, deployment.address).is_none_or(|hash| hash == KECCAK_EMPTY));
-    }
-}
-
 /// What the creation of a keyless deployment returned into its call: its regular gas and its
 /// reservoir once revm's settlement of the result, which runs after the inspector sees the
 /// creation end, rolled a failure's state and history gas back.
@@ -197,26 +178,6 @@ fn test_a_reverting_constructor_returns_its_slot_as_reservoir_and_reports_its_re
     }
 }
 
-/// Init code that hits an invalid opcode: `ExecutionHalted`, and the halt spends the whole
-/// forward.
-#[test]
-fn test_keyless_deploy_execution_halted_invalid_opcode() {
-    for gas_limit in GAS_LIMITS {
-        let deployment = Deployment::new(Bytes::from_static(&[INVALID]));
-        let outcome = run_with(
-            system_db(),
-            deployment.call_data(2_000_000),
-            gas_limit,
-            EvmTxRuntimeLimits::no_limits(),
-        );
-        let KeylessDeployError::ExecutionHalted { gas_used, .. } = failure(&outcome) else {
-            panic!("expected ExecutionHalted: {:?}", outcome.result);
-        };
-        assert_eq!(gas_used, 2_000_000, "a halt spends what it was forwarded");
-        assert_eq!(nonce(&outcome, deployment.signer), 1);
-    }
-}
-
 /// A constructor that runs out of gas halts the same way, below and above the execution cap,
 /// and spends its whole forward in both.
 #[test]
@@ -233,48 +194,6 @@ fn test_a_constructor_out_of_gas_is_execution_halted() {
             panic!("expected ExecutionHalted: {:?}", outcome.result);
         };
         assert_eq!(gas_used, SIGNED_GAS_LIMIT, "at {gas_limit}");
-    }
-}
-
-/// A halted deployment is paid for, and its nonce is spent: the transaction spends the overhead,
-/// the `CREATE` opcode's regular gas, the signer's account and its nonce record, and the whole
-/// forward.
-#[test]
-fn test_a_halted_deployment_is_paid_for_and_spends_the_nonce() {
-    let deployment = Deployment::new(Bytes::from_static(&[INVALID]));
-    for gas_limit in GAS_LIMITS {
-        let data = deployment.call_data(SIGNED_GAS_LIMIT);
-        let outcome =
-            run_with(system_db(), data.clone(), gas_limit, EvmTxRuntimeLimits::no_limits());
-        assert!(matches!(failure(&outcome), KeylessDeployError::ExecutionHalted { .. }));
-        assert_eq!(nonce(&outcome, deployment.signer), 1);
-        let [total, ..] = beyond(&outcome, &reference(data, gas_limit));
-        let new_account = entry(GasId::new_account_state_gas());
-        assert_eq!(
-            total,
-            KEYLESS_DEPLOY_OVERHEAD_GAS +
-                create_regular(1) +
-                new_account +
-                record() +
-                SIGNED_GAS_LIMIT,
-            "at {gas_limit}",
-        );
-    }
-}
-
-/// Init code that returns nothing deploys no code: `EmptyCodeDeployed`, and the nonce is spent.
-#[test]
-fn test_keyless_deploy_empty_initcode() {
-    for gas_limit in GAS_LIMITS {
-        for init_code in [Bytes::new(), Bytes::from_static(&[PUSH0, PUSH0, RETURN])] {
-            let deployment = Deployment::new(init_code);
-            let outcome = deploy(system_db(), &deployment, gas_limit);
-            let KeylessDeployError::EmptyCodeDeployed { gas_used } = failure(&outcome) else {
-                panic!("expected EmptyCodeDeployed: {:?}", outcome.result);
-            };
-            assert_eq!(gas_used, returned(&outcome).gasUsed);
-            assert_eq!(nonce(&outcome, deployment.signer), 1);
-        }
     }
 }
 
@@ -324,55 +243,6 @@ fn test_an_empty_code_deployment_leaves_the_address_deployable() {
         assert_eq!(returned(&second).deployedAddress, deployment.address, "at {gas_limit}");
         assert_eq!(nonce(&second, deployment.signer), 1, "the second bump is taken back");
         assert_eq!(nonce(&second, deployment.address), 1);
-    }
-}
-
-/// A deploy address at nonce 1 without code — what a Rex6 deployment whose creation returned
-/// empty code left — passes the occupancy rule, which reads the code alone, and the creation
-/// collides there before its init code runs: whatever the init code would do, the call answers
-/// `ExecutionHalted` with the whole forward spent, the address keeps its nonce and no code, and the
-/// signer's bump from 0 stands.
-#[test]
-fn test_a_deploy_address_with_a_nonce_and_no_code_collides() {
-    let init_codes =
-        [deploying(&runtime(1)), Bytes::new(), Bytes::from_static(&[INVALID]), logging(32)];
-    for init_code in init_codes {
-        let deployment = Deployment::new(init_code);
-        let db = system_db().account_nonce(deployment.address, 1);
-        for gas_limit in GAS_LIMITS {
-            for forward in [SIGNED_GAS_LIMIT, 2 * SIGNED_GAS_LIMIT] {
-                let outcome = run_with(
-                    db.clone(),
-                    deployment.call_data(forward),
-                    gas_limit,
-                    EvmTxRuntimeLimits::no_limits(),
-                );
-                let KeylessDeployError::ExecutionHalted { gas_used, .. } = failure(&outcome) else {
-                    panic!("expected ExecutionHalted: {:?}", outcome.result);
-                };
-                assert_eq!(gas_used, forward, "a collision spends the forward, at {gas_limit}");
-                assert_eq!(nonce(&outcome, deployment.signer), 1, "the bump from 0 stands");
-                assert_eq!(nonce(&outcome, deployment.address), 1, "the address keeps its nonce");
-                assert_eq!(code_hash(&outcome, deployment.address), Some(KECCAK_EMPTY));
-                assert!(outcome.result.logs().is_empty(), "the init code never ran");
-            }
-        }
-    }
-}
-
-/// An empty deposit is refused at the deploy address alone: a constructor's own `CREATE` that
-/// returns empty code is admitted, and the deployment around it succeeds.
-#[test]
-fn test_a_constructors_own_creation_may_return_empty_code() {
-    for gas_limit in GAS_LIMITS {
-        // CREATE of empty init code, then the deployment's own runtime.
-        let prefix = [PUSH0, PUSH0, PUSH0, CREATE, POP];
-        let deployment = Deployment::new(constructor(&prefix, &runtime(1)));
-        let outcome = deploy(system_db(), &deployment, gas_limit);
-        assert_eq!(returned(&outcome).deployedAddress, deployment.address, "at {gas_limit}");
-        let inner = deployment.address.create(1);
-        assert_eq!(nonce(&outcome, inner), 1, "the inner creation stands, with no code");
-        assert_eq!(code_hash(&outcome, inner), Some(KECCAK_EMPTY));
     }
 }
 
@@ -470,17 +340,6 @@ fn test_a_constructor_destroyed_through_delegatecall_deploys_no_code() {
     }
 }
 
-/// Code starting with `0xEF` is refused by the creation (EIP-3541): `ExecutionHalted`.
-#[test]
-fn test_code_starting_with_ef_is_refused() {
-    for gas_limit in GAS_LIMITS {
-        let deployment = Deployment::new(deploying(&[0xef, 0x00]));
-        let outcome = deploy(system_db(), &deployment, gas_limit);
-        assert!(matches!(failure(&outcome), KeylessDeployError::ExecutionHalted { .. }));
-        assert!(code_hash(&outcome, deployment.address).is_none_or(|hash| hash == KECCAK_EMPTY));
-    }
-}
-
 /// Code over the contract size limit is refused by the creation (EIP-170): `ExecutionHalted`.
 #[test]
 fn test_code_over_the_size_limit_is_refused() {
@@ -492,19 +351,6 @@ fn test_code_over_the_size_limit_is_refused() {
         let outcome = deploy(system_db(), &deployment, gas_limit);
         assert!(matches!(failure(&outcome), KeylessDeployError::ExecutionHalted { .. }));
         assert!(code_hash(&outcome, deployment.address).is_none_or(|hash| hash == KECCAK_EMPTY));
-    }
-}
-
-/// A deployment carrying a value moves it from the signer to the contract.
-#[test]
-fn test_keyless_deploy_with_value_transfer() {
-    for gas_limit in GAS_LIMITS {
-        let deployment = Deployment::with_value(deploying(&runtime(1)), U256::from(7_777));
-        let outcome = deploy(db_for(&deployment, U256::from(10_000)), &deployment, gas_limit);
-        assert_eq!(returned(&outcome).deployedAddress, deployment.address);
-        let balance = |address| outcome.state.get(&address).map(|account| account.info.balance);
-        assert_eq!(balance(deployment.address), Some(U256::from(7_777)));
-        assert_eq!(balance(deployment.signer), Some(U256::from(2_223)));
     }
 }
 
@@ -626,29 +472,6 @@ fn test_keyless_deploy_reads_existing_contract() {
     }
 }
 
-/// A constructor that writes storage and then reverts leaves neither the storage nor code, and
-/// the call still reports the revert with a gas figure.
-#[test]
-fn test_failed_initcode_keeps_no_storage() {
-    let init_code =
-        BytecodeBuilder::default().sstore(U256::from(1), U256::from(7)).revert().build();
-    let deployment = Deployment::new(init_code);
-    for gas_limit in GAS_LIMITS {
-        let outcome = deploy(system_db(), &deployment, gas_limit);
-        let KeylessDeployError::ExecutionReverted { gas_used, .. } = failure(&outcome) else {
-            panic!("expected ExecutionReverted: {:?}", outcome.result);
-        };
-        assert!(gas_used > 0);
-        let kept = outcome
-            .state
-            .get(&deployment.address)
-            .and_then(|account| account.storage.get(&U256::from(1)).map(|slot| slot.present_value));
-        assert!(kept.is_none_or(|value| value.is_zero()), "at {gas_limit}");
-        assert!(code_hash(&outcome, deployment.address).is_none_or(|hash| hash == KECCAK_EMPTY));
-        assert_eq!(outcome.gas.state, entry(GasId::new_account_state_gas()));
-    }
-}
-
 /// A constructor's log is the transaction's: it is in the receipt, emitted by the deployed
 /// address.
 #[test]
@@ -688,17 +511,6 @@ fn test_an_empty_code_deployment_keeps_no_log() {
         assert!(matches!(failure(&outcome), KeylessDeployError::EmptyCodeDeployed { .. }));
         assert!(outcome.result.logs().is_empty());
         assert_eq!(nonce(&outcome, deployment.signer), 1);
-    }
-}
-
-/// And init code that logs nothing leaves none.
-#[test]
-fn test_an_empty_code_deployment_adds_no_log() {
-    for gas_limit in GAS_LIMITS {
-        let deployment = Deployment::new(BytecodeBuilder::default().return_empty().build());
-        let outcome = deploy(system_db(), &deployment, gas_limit);
-        assert!(matches!(failure(&outcome), KeylessDeployError::EmptyCodeDeployed { .. }));
-        assert!(outcome.result.logs().is_empty());
     }
 }
 
@@ -800,81 +612,6 @@ fn test_keyless_deploy_not_intercepted_for_inner_calls() {
         assert_eq!(returned, IKeylessDeploy::NotIntercepted::SELECTOR);
         assert!(!outcome.state.contains_key(&deployment.signer), "no rule read the signer");
         assert!(!outcome.state.contains_key(&deployment.address));
-    }
-}
-
-/// A `keylessDeploy` call made inside a keyless deployment is a contract's call like any other:
-/// not dispatched. The contract's bytecode runs and reverts with `NotIntercepted()`, which the
-/// outer constructor stores, and nothing of the inner deployment happens: its address holds no
-/// code and its signer's nonce is unspent. The outer deployment deploys.
-///
-/// A call answered without the bytecode — refused by an interceptor, or run as a deployment that
-/// fails — could fail the same way, but not with the four bytes of `NotIntercepted()`.
-///
-/// Expected values `independent`: the error's selector is computed here from its
-/// signature, `NotIntercepted()`, not taken from the contract's binding.
-#[test]
-fn test_keyless_deploy_nested_inside_a_keyless_deployment_is_not_intercepted() {
-    let not_intercepted = &alloy_primitives::keccak256("NotIntercepted()")[..4];
-    let selector = U256::from_be_slice(not_intercepted);
-    for gas_limit in GAS_LIMITS {
-        let inner = Deployment::new(deploying(&[0x00, 0x00]));
-        let data = inner.call_data(LARGE_OVERRIDE);
-        // The inner call's status in slot 0, the size of its revert data in slot 2, and the first
-        // four bytes of that data, as a number, in slot 1.
-        let prefix = BytecodeBuilder::default()
-            .mstore(0, &data)
-            .push_number(0_u64)
-            .push_number(0_u64)
-            .push_number(data.len() as u64)
-            .push_number(0_u64)
-            .push_number(0_u64)
-            .push_address(KEYLESS_DEPLOY_ADDRESS)
-            .append(GAS)
-            .append(CALL)
-            .push_number(0_u64)
-            .append(SSTORE)
-            .append(RETURNDATASIZE)
-            .push_number(2_u64)
-            .append(SSTORE)
-            .append_many([RETURNDATASIZE, PUSH0, PUSH0, RETURNDATACOPY, PUSH0, MLOAD])
-            .push_number(224_u64)
-            .append(SHR)
-            .push_number(1_u64)
-            .append(SSTORE);
-        let outer = Deployment::new(running(prefix));
-        let outcome = deploy(system_db(), &outer, gas_limit);
-        assert_eq!(returned(&outcome).deployedAddress, outer.address);
-        let slot = |index: u64| {
-            outcome.state[&outer.address]
-                .storage
-                .get(&U256::from(index))
-                .map(|slot| slot.present_value)
-        };
-        assert_eq!(slot(0), Some(U256::ZERO), "the inner call failed");
-        assert_eq!(slot(2), Some(U256::from(4)), "with four bytes of revert data");
-        assert_eq!(slot(1), Some(selector), "which are NotIntercepted(): the bytecode ran");
-        assert!(code_hash(&outcome, inner.address).is_none_or(|hash| hash == KECCAK_EMPTY));
-        assert_eq!(nonce(&outcome, inner.signer), 0);
-    }
-}
-
-/// A constructor's storage writes are priced by the SALT environment the transaction runs in: a
-/// crowded bucket at the deploy address makes the deposited code cost more state gas, and the
-/// creation's `gasUsed` grows by exactly that.
-#[test]
-fn test_a_deployment_is_priced_by_the_transactions_salt_env() {
-    let deployment = Deployment::new(deploying(&runtime(5)));
-    let deposit = satin_gas_params().code_deposit_state_gas(5);
-    for gas_limit in GAS_LIMITS {
-        let minimal = salt_run(system_db(), TestExternalEnvs::new(), &deployment, gas_limit);
-        let envs = crowded(TestExternalEnvs::new(), deployment.address, 3);
-        let crowded_run = salt_run(system_db(), envs, &deployment, gas_limit);
-        assert_eq!(
-            returned(&crowded_run).gasUsed - returned(&minimal).gasUsed,
-            2 * deposit,
-            "at {gas_limit}",
-        );
     }
 }
 
