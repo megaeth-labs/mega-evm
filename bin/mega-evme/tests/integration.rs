@@ -443,6 +443,82 @@ async fn test_rpc_response_errors_hide_credentials_in_stderr_and_log_files() {
     }
 }
 
+/// CLI stderr and `--log.file` must report the JSON-RPC error code with a local diagnostic and
+/// never echo server error text (key value alone, path segment alone, or benign `/rpc` messages).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_rpc_json_error_stderr_and_log_never_echo_server_message() {
+    let cases = [
+        (
+            "/v2/path-secret?key=query-secret",
+            -32000i64,
+            "invalid API key query-secret",
+            &["query-secret", "path-secret", "invalid API key"][..],
+        ),
+        (
+            "/v2/path-secret?key=query-secret",
+            -32001i64,
+            "unknown project path-secret",
+            &["path-secret", "query-secret", "unknown project"][..],
+        ),
+        ("/rpc", -32601i64, "header not found", &["header not found"][..]),
+    ];
+
+    let dir = tempfile::tempdir().unwrap();
+    for (idx, (suffix, code, server_msg, forbidden)) in cases.into_iter().enumerate() {
+        let server = MockServer::start().await;
+        let url = format!("{}{suffix}", server.uri());
+        Mock::given(matchers::method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 0,
+                "error": { "code": code, "message": server_msg, "data": { "raw": server_msg } },
+            })))
+            .mount(&server)
+            .await;
+
+        for to_file in [false, true] {
+            let log_path = dir.path().join(format!("rpc-{idx}-{to_file}.log"));
+            let mut cmd = Command::new(env!("CARGO_BIN_EXE_mega-evme"));
+            cmd.env("RUST_LOG", "mega_evme=debug,alloy_transport_http=trace,alloy_transport=trace")
+                .args([
+                    "--log.no-color",
+                    "replay",
+                    &format!("0x{}", "11".repeat(32)),
+                    "--override.spec",
+                    "Satin",
+                    "--rpc",
+                    &url,
+                    "--rpc.max-retries",
+                    "0",
+                    "--rpc.no-cache-file",
+                    "-vvvv",
+                ]);
+            if to_file {
+                cmd.arg("--log.file").arg(&log_path);
+            }
+            let output = tokio::task::spawn_blocking(move || cmd.output()).await.unwrap().unwrap();
+            assert_eq!(output.status.code(), Some(1));
+            let mut text = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            if to_file {
+                text.push_str(&std::fs::read_to_string(&log_path).unwrap());
+            }
+            assert!(
+                text.contains(&code.to_string()) &&
+                    text.contains("server returned an error response") &&
+                    text.contains("server error message omitted"),
+                "expected error code and local diagnostic in: {text}"
+            );
+            for item in forbidden {
+                assert!(!text.contains(item), "server text {item:?} leaked in: {text}");
+            }
+        }
+    }
+}
+
 const ZERO_HASH: &str = "0x0000000000000000000000000000000000000000000000000000000000000000";
 const SENDER: &str = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
 const RECEIVER: &str = "0x0000000000000000000000000000000000000001";

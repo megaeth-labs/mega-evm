@@ -240,16 +240,14 @@ async fn test_chain_id_error_redacts_schemeless_and_encoded_echo(#[case] server_
     }
 }
 
-/// Percent-decoded endpoint components (such as a path containing spaces) echoed by the server
-/// are also redacted, while an ordinary unrelated error message is preserved.
+/// Percent-decoded endpoint components and ordinary server errors alike are replaced with a
+/// local diagnostic that preserves only the JSON-RPC error code.
 #[tokio::test(flavor = "multi_thread")]
-async fn test_chain_id_error_redacts_percent_decoded_echo_and_keeps_safe_message() {
+async fn test_chain_id_error_redacts_percent_decoded_echo_and_omits_server_message() {
     let server = MockServer::start().await;
     let host = server.uri().strip_prefix("http://").unwrap().to_string();
     let url = format!("{}/v2/my%20key-secret?x=tail-secret", server.uri());
 
-    // Echoing the space-decoded path leaks `key-secret` and `tail-secret` if URL scanning stops
-    // at whitespace or only checks raw percent-encoded components.
     Mock::given(matchers::method("POST"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "jsonrpc": "2.0",
@@ -275,14 +273,95 @@ async fn test_chain_id_error_redacts_percent_decoded_echo_and_keeps_safe_message
 
     let leaked = test_rpc_args(&url, Some(0)).build_provider().await.expect_err("echo fails");
     let leaked_msg = leaked.to_string();
-    assert!(leaked_msg.contains("-32001"), "{leaked_msg}");
-    for secret in ["key-secret", "tail-secret"] {
-        assert!(!leaked_msg.contains(secret), "secret {secret:?} leaked in: {leaked_msg}");
+    assert!(
+        leaked_msg.contains("-32001") && leaked_msg.contains("server error message omitted"),
+        "{leaked_msg}"
+    );
+    for secret in ["key-secret", "tail-secret", "bad upstream"] {
+        assert!(!leaked_msg.contains(secret), "server text {secret:?} leaked in: {leaked_msg}");
     }
 
     let safe = test_rpc_args(&url, Some(0)).build_provider().await.expect_err("safe error fails");
     let safe_msg = safe.to_string();
-    assert!(safe_msg.contains("-32601") && safe_msg.contains("method not found"), "{safe_msg}");
+    assert!(
+        safe_msg.contains("-32601") && safe_msg.contains("server error message omitted"),
+        "{safe_msg}"
+    );
+    assert!(!safe_msg.contains("method not found"), "{safe_msg}");
+}
+
+/// JSON-RPC server error messages and data are never forwarded: every JSON-RPC error response is
+/// replaced with a local diagnostic that preserves the numeric error code and omits all server
+/// text (whether it echoes a single key value, a single path segment, or a benign message under a
+/// short public path such as `/rpc`).
+#[rstest]
+#[case::key_value_alone(
+    "/v2/path-secret?key=query-secret",
+    -32000,
+    "invalid API key query-secret",
+    Some(serde_json::json!({"detail": "secret-data"})),
+    &["query-secret", "path-secret", "invalid API key", "secret-data"][..]
+)]
+#[case::path_segment_alone(
+    "/v2/path-secret?key=query-secret",
+    -32001,
+    "unknown project path-secret",
+    Some(serde_json::json!("secret-data")),
+    &["path-secret", "query-secret", "unknown project", "secret-data"][..]
+)]
+#[case::benign_under_short_public_path(
+    "/rpc",
+    -32005,
+    "invalid jsonrpc request: rate limit exceeded",
+    None,
+    &["invalid jsonrpc", "rate limit exceeded"][..]
+)]
+#[case::benign_not_found_under_rpc(
+    "/rpc",
+    -32601,
+    "header not found",
+    Some(serde_json::json!({"hint": "server-hint"})),
+    &["header not found", "server-hint"][..]
+)]
+#[tokio::test(flavor = "multi_thread")]
+async fn test_rpc_error_uses_local_diagnostic_and_never_echoes_server_message(
+    #[case] suffix: &str,
+    #[case] code: i64,
+    #[case] server_msg: &str,
+    #[case] server_data: Option<serde_json::Value>,
+    #[case] forbidden: &[&str],
+) {
+    let server = MockServer::start().await;
+    let url = format!("{}{suffix}", server.uri());
+    let mut err_obj = serde_json::json!({ "code": code, "message": server_msg });
+    if let Some(data) = server_data {
+        err_obj["data"] = data;
+    }
+    Mock::given(matchers::method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 0,
+            "error": err_obj,
+        })))
+        .mount(&server)
+        .await;
+
+    let error = test_rpc_args(&url, Some(0)).build_provider().await.expect_err("request fails");
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    let message = error.to_string();
+    assert!(message.contains("Failed to fetch chain ID"), "{message}");
+    assert!(
+        message.contains(&code.to_string()),
+        "JSON-RPC error code {code} must be preserved: {message}"
+    );
+    assert!(
+        message.contains("server returned an error response") &&
+            message.contains("server error message omitted"),
+        "expected local diagnostic in: {message}"
+    );
+    for text in forbidden {
+        assert!(!message.contains(text), "server text {text:?} leaked in: {message}");
+    }
 }
 
 // ─── Chain-id resolution ─────────────────────────────────────────────────────

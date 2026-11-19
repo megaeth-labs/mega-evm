@@ -227,7 +227,8 @@ When using fork mode, `mega-evme` caches RPC responses to avoid redundant networ
 
 These options take effect only when an RPC endpoint is actually contacted: on `run` and `tx` that requires `--fork` (without `--fork` they are accepted but silently ignored); on `replay` they apply to its `--rpc` fetches (an offline `--rpc.replay-file` run contacts no endpoint and does not use them).
 
-On Satin, RPC URL diagnostics show only the scheme, host and port: userinfo, path, query and fragment are hidden, including URLs (plain, percent-encoded, or escaped) and scheme-less echoes of the configured URL's components in HTTP and JSON-RPC error messages (preserving the JSON-RPC error code).
+On Satin, RPC URL diagnostics show only the scheme, host and port: userinfo, path, query and fragment are hidden.
+Every JSON-RPC error response replaces the server's error message and `data` with a fixed local diagnostic (`server error message omitted`) while keeping the JSON-RPC error code, so server error text is never forwarded.
 This applies to verbose logs and log files as well as stderr.
 
 ### Per-Endpoint Cache Files

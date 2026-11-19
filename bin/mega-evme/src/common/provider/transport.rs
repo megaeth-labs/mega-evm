@@ -20,18 +20,21 @@ use serde::{Deserialize, Serialize};
 
 use crate::common::{EvmeError, Result};
 
+/// Fixed local diagnostic replacing every server-supplied JSON-RPC error message so server error
+/// payloads can never disclose endpoint credentials or other server-echoed text.
+const LOCAL_RPC_ERROR_MESSAGE: &str = "server error message omitted";
+
 /// Hides transport diagnostics only after the dependency has applied its retry policy.
 /// The inner future runs without tracing because dependency spans can contain the endpoint URL.
 #[derive(Clone)]
 pub(super) struct RedactedTransport<T> {
     inner: T,
     max_retries: u32,
-    secrets: Arc<super::EndpointSecrets>,
 }
 
 impl<T> RedactedTransport<T> {
-    pub(super) fn new(inner: T, max_retries: u32, secrets: Arc<super::EndpointSecrets>) -> Self {
-        Self { inner, max_retries, secrets }
+    pub(super) fn new(inner: T, max_retries: u32) -> Self {
+        Self { inner, max_retries }
     }
 }
 
@@ -44,9 +47,7 @@ impl<T: alloy_transport::IntoBoxTransport> tower::Service<RequestPacket> for Red
         &mut self,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<std::result::Result<(), Self::Error>> {
-        self.inner
-            .poll_ready(cx)
-            .map_err(|error| redact_transport_error(error, self.max_retries, &self.secrets))
+        self.inner.poll_ready(cx).map_err(|error| redact_transport_error(error, self.max_retries))
     }
 
     fn call(&mut self, req: RequestPacket) -> Self::Future {
@@ -55,51 +56,40 @@ impl<T: alloy_transport::IntoBoxTransport> tower::Service<RequestPacket> for Red
         let future =
             tracing::subscriber::with_default(NoSubscriber::default(), || self.inner.call(req));
         let max_retries = self.max_retries;
-        let secrets = Arc::clone(&self.secrets);
         Box::pin(async move {
             let mut response = future
                 .with_subscriber(NoSubscriber::default())
                 .await
-                .map_err(|error| redact_transport_error(error, max_retries, &secrets))?;
+                .map_err(|error| redact_transport_error(error, max_retries))?;
             match &mut response {
-                ResponsePacket::Single(response) => redact_error_response(response, &secrets),
-                ResponsePacket::Batch(responses) => responses
-                    .iter_mut()
-                    .for_each(|response| redact_error_response(response, &secrets)),
+                ResponsePacket::Single(response) => redact_error_response(response),
+                ResponsePacket::Batch(responses) => {
+                    responses.iter_mut().for_each(redact_error_response)
+                }
             }
             Ok(response)
         })
     }
 }
 
-fn redact_error_payload(
-    error: &mut alloy_json_rpc::ErrorPayload,
-    secrets: &super::EndpointSecrets,
-) {
-    error.message = super::redact_rpc_error_message(&error.message, secrets).into();
+fn redact_error_payload(error: &mut alloy_json_rpc::ErrorPayload) {
+    error.message = LOCAL_RPC_ERROR_MESSAGE.into();
     // Arbitrary error data need not be interpreted or re-serialized for a diagnostic.
     // Backoff hints have already been consumed by the inner retry layer.
     error.data = None;
 }
 
-fn redact_error_response(
-    response: &mut alloy_json_rpc::Response,
-    secrets: &super::EndpointSecrets,
-) {
+fn redact_error_response(response: &mut alloy_json_rpc::Response) {
     if let alloy_json_rpc::ResponsePayload::Failure(error) = &mut response.payload {
-        redact_error_payload(error, secrets);
+        redact_error_payload(error);
     }
 }
 
-fn redact_transport_error(
-    error: TransportError,
-    max_retries: u32,
-    secrets: &super::EndpointSecrets,
-) -> TransportError {
+fn redact_transport_error(error: TransportError, max_retries: u32) -> TransportError {
     use alloy_provider::transport::RpcError;
     match error {
         RpcError::ErrorResp(mut error) => {
-            redact_error_payload(&mut error, secrets);
+            redact_error_payload(&mut error);
             RpcError::ErrorResp(error)
         }
         RpcError::Transport(TransportErrorKind::Custom(error)) => {

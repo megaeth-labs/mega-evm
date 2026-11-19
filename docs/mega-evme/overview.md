@@ -110,10 +110,10 @@ Text a person reads on a terminal is filtered: escape sequences, control charact
 This covers error lines and a transaction's revert reason.
 `--json` output is not filtered: a JSON string carries the same characters, escaped.
 
-On Satin, `--rpc` diagnostics (logs, errors, and `--log.file`) show only the scheme, host and port: userinfo, path, query and fragment are hidden, including URLs or configured endpoint components echoed in server error messages.
+On Satin, `--rpc` diagnostics (logs, errors, and `--log.file`) show only the scheme, host and port: userinfo, path, query and fragment are hidden, and every JSON-RPC error response replaces the server's message and `data` with a fixed local diagnostic while preserving the numeric error code.
 Per-endpoint cache file names hash the URL with userinfo removed so endpoints with different paths or queries stay separate without placing the URL in the file name.
 The URL has to start with `http://` or `https://`.
-On the legacy 1.7.1 engine, only userinfo is stripped from cache names and `--rpc` diagnostics are unchanged from 1.7.1.
+On the legacy 1.7.1 engine, cache files are named `rpc-cache-{chain_id}.json` (without an endpoint component) and `--rpc` diagnostics are unchanged from 1.7.1.
 
 ## Read more
 

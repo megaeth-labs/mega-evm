@@ -634,7 +634,9 @@ async fn test_a_replay_stops_when_a_predecessor_account_cannot_be_read() {
     assert_ne!(run.code, 0, "a failed predecessor read is not skipped: {}", run.stdout);
     let output = format!("{}{}", run.stdout, run.stderr);
     assert!(output.contains("Block execution error"), "{output}");
-    assert!(output.contains("account not recorded"), "{output}");
+    assert!(output.contains(&MISSING.to_string()), "{output}");
+    assert!(output.contains("-32000") && output.contains("server error message omitted"), "{output}");
+    assert!(!output.contains("account not recorded"), "{output}");
 }
 
 /// A block of calls from one payer to contracts the test adds to the recorded block's parent
