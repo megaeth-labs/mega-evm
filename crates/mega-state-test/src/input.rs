@@ -31,17 +31,104 @@ pub(crate) fn read_blockchain_fixture(path: &Path) -> io::Result<String> {
     read_file_with_limit(path, MAX_BLOCKCHAIN_FIXTURE_BYTES)
 }
 
-fn read_file_with_limit(path: &Path, limit: u64) -> io::Result<String> {
-    let metadata = path
-        .metadata()
-        .map_err(|error| io::Error::new(error.kind(), format!("{}: {error}", path.display())))?;
-    if !metadata.is_file() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("fixture input is not a regular file: {}", path.display()),
-        ));
+#[cfg(unix)]
+fn unix_o_nonblock() -> Option<i32> {
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly",
+    ))]
+    {
+        Some(0x0004)
     }
-    read_with_limit(File::open(path)?, limit)
+    #[cfg(all(
+        any(target_os = "linux", target_os = "android"),
+        any(target_arch = "mips", target_arch = "mips64"),
+    ))]
+    {
+        Some(0x0080)
+    }
+    #[cfg(all(
+        any(target_os = "linux", target_os = "android"),
+        any(target_arch = "sparc", target_arch = "sparc64"),
+    ))]
+    {
+        Some(0x4000)
+    }
+    #[cfg(all(
+        any(target_os = "linux", target_os = "android"),
+        not(any(
+            target_arch = "mips",
+            target_arch = "mips64",
+            target_arch = "sparc",
+            target_arch = "sparc64",
+        )),
+    ))]
+    {
+        Some(0x0800)
+    }
+    #[cfg(not(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly",
+        target_os = "linux",
+        target_os = "android",
+    )))]
+    {
+        None
+    }
+}
+
+/// Opens `path` read-only without blocking on Unix FIFOs (`O_NONBLOCK`), so descriptor validation
+/// via `fstat` (`File::metadata`) rejects non-regular files even if the path is swapped between
+/// discovery and open.
+fn open_nonblocking(path: &Path) -> io::Result<File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        if let Some(flag) = unix_o_nonblock() {
+            options.custom_flags(flag);
+        } else {
+            let metadata = path.metadata().map_err(|error| {
+                io::Error::new(error.kind(), format!("{}: {error}", path.display()))
+            })?;
+            if !metadata.is_file() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("fixture input is not a regular file: {}", path.display()),
+                ));
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let metadata = path.metadata().map_err(|error| {
+            io::Error::new(error.kind(), format!("{}: {error}", path.display()))
+        })?;
+        if !metadata.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("fixture input is not a regular file: {}", path.display()),
+            ));
+        }
+    }
+    options
+        .open(path)
+        .map_err(|error| io::Error::new(error.kind(), format!("{}: {error}", path.display())))
+}
+
+fn read_file_with_limit(path: &Path, limit: u64) -> io::Result<String> {
+    let file = open_nonblocking(path)?;
+    read_with_limit(file, limit)
+        .map_err(|error| io::Error::new(error.kind(), format!("{}: {error}", path.display())))
 }
 
 fn read_with_limit(file: File, limit: u64) -> io::Result<String> {
@@ -101,21 +188,43 @@ pub fn find_json_files_in_paths(paths: &[PathBuf]) -> io::Result<Vec<PathBuf>> {
 }
 
 fn discover(path: &Path, files: &mut Vec<PathBuf>, depth: usize, limit: usize) -> io::Result<()> {
-    let metadata = path
-        .metadata()
+    // Strip any trailing separator so Unix `lstat` inspects a symlinked root directory itself
+    // rather than following it through the trailing slash.
+    let probe: PathBuf = path.components().collect();
+    let symlink_meta = std::fs::symlink_metadata(&probe)
         .map_err(|error| io::Error::new(error.kind(), format!("{}: {error}", path.display())))?;
-    if metadata.is_file() {
-        return add_file(path.to_path_buf(), files, limit);
-    }
-    if !metadata.is_dir() {
+    if symlink_meta.file_type().is_symlink() {
+        let target_meta = path.metadata().map_err(|error| {
+            io::Error::new(error.kind(), format!("{}: {error}", path.display()))
+        })?;
+        if target_meta.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("symlinked fixture directory is not allowed: {}", path.display()),
+            ));
+        }
+        if target_meta.is_file() {
+            return add_file(path.to_path_buf(), files, limit);
+        }
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("fixture input is not a regular file or directory: {}", path.display()),
         ));
     }
-    // Follow symlinks so symlinked fixture directories are traversed rather than silently dropped;
-    // WalkDir reports symlink loops and broken links as errors, which propagate via `?`.
-    for entry in WalkDir::new(path).follow_links(true) {
+    if symlink_meta.is_file() {
+        return add_file(path.to_path_buf(), files, limit);
+    }
+    if !symlink_meta.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("fixture input is not a regular file or directory: {}", path.display()),
+        ));
+    }
+    // Do not follow directory symlinks: a symlinked directory fails discovery explicitly so
+    // aliased subtrees can neither execute fixtures twice nor cause exponential walks. Symlinks
+    // to regular `*.json` files are permitted; broken links and links to non-regular `*.json`
+    // targets fail explicitly.
+    for entry in WalkDir::new(path) {
         let entry = entry?;
         // WalkDir::max_depth would silently omit descendants, so inspect the first excess entry.
         if entry.depth() > depth {
@@ -124,11 +233,32 @@ fn discover(path: &Path, files: &mut Vec<PathBuf>, depth: usize, limit: usize) -
                 format!("fixture directory depth exceeds {depth}: {}", entry.path().display()),
             ));
         }
-        if entry.path().extension().is_some_and(|ext| ext == "json") {
-            let entry_meta = entry.path().metadata().map_err(|error| {
+        if entry.file_type().is_symlink() {
+            let target_meta = entry.path().metadata().map_err(|error| {
                 io::Error::new(error.kind(), format!("{}: {error}", entry.path().display()))
             })?;
-            if !entry_meta.is_file() {
+            if target_meta.is_dir() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "symlinked fixture directory is not allowed: {}",
+                        entry.path().display()
+                    ),
+                ));
+            }
+            if entry.path().extension().is_some_and(|ext| ext == "json") {
+                if !target_meta.is_file() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("fixture input is not a regular file: {}", entry.path().display()),
+                    ));
+                }
+                add_file(entry.into_path(), files, limit)?;
+            }
+            continue;
+        }
+        if entry.path().extension().is_some_and(|ext| ext == "json") {
+            if !entry.file_type().is_file() {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     format!("fixture input is not a regular file: {}", entry.path().display()),
@@ -256,7 +386,8 @@ mod tests {
         let err = find_json_files(&fifo).expect_err("direct FIFO input must fail discovery");
         assert!(err.to_string().contains(&fifo.display().to_string()), "{err}");
 
-        // Even a direct `read_fixture` call refuses the FIFO without blocking in `File::open`.
+        // Even a direct `read_fixture` call refuses the FIFO without blocking, because the Unix
+        // reader opens with `O_NONBLOCK` and validates the opened descriptor's file type.
         let fifo_clone = fifo.clone();
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
@@ -265,7 +396,23 @@ mod tests {
         let read_res = rx
             .recv_timeout(Duration::from_secs(2))
             .expect("read_fixture must reject FIFO without blocking");
-        assert!(read_res.is_err(), "FIFO must not be read as a fixture");
+        let read_err = read_res.expect_err("FIFO must not be read as a fixture");
+        assert_eq!(read_err.kind(), io::ErrorKind::InvalidInput, "{read_err}");
+        assert!(read_err.to_string().contains(&fifo.display().to_string()), "{read_err}");
+
+        // Exercise `open_nonblocking` directly on the FIFO (no pre-open metadata check) to prove
+        // the `O_NONBLOCK` open itself returns immediately and `read_with_limit` rejects the fd.
+        let fifo_clone2 = fifo.clone();
+        let (tx2, rx2) = mpsc::channel();
+        std::thread::spawn(move || {
+            let res = open_nonblocking(&fifo_clone2).and_then(|file| read_with_limit(file, 64));
+            let _ = tx2.send(res);
+        });
+        let direct_err = rx2
+            .recv_timeout(Duration::from_secs(2))
+            .expect("O_NONBLOCK open on FIFO must not block")
+            .expect_err("descriptor validation must reject opened FIFO");
+        assert_eq!(direct_err.kind(), io::ErrorKind::InvalidInput, "{direct_err}");
 
         // A directory whose name ends in `.json` is also a non-regular entry and fails discovery.
         let dir_root = tempfile::tempdir().unwrap();
@@ -279,47 +426,81 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn test_discovery_follows_symlink_dir_and_rejects_symlink_loop() {
+    fn test_discovery_rejects_symlinked_directories_and_allows_regular_file_symlinks() {
         use std::os::unix::fs::symlink;
 
         let root = tempfile::tempdir().unwrap();
         let real = root.path().join("real");
         std::fs::create_dir(&real).unwrap();
-        std::fs::write(real.join("a.json"), "{}").unwrap();
+        let real_file = real.join("a.json");
+        std::fs::write(&real_file, "{}").unwrap();
 
+        // 1. Symlinked subdirectory fails discovery explicitly with InvalidInput naming the path.
         let top = root.path().join("top");
         std::fs::create_dir(&top).unwrap();
         std::fs::write(top.join("b.json"), "{}").unwrap();
-        symlink(&real, top.join("link")).unwrap();
+        let sub_link = top.join("link");
+        symlink(&real, &sub_link).unwrap();
+        let err = find_json_files(&top).expect_err("symlinked subdirectory must fail discovery");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{err}");
+        assert!(err.to_string().contains(&sub_link.display().to_string()), "{err}");
 
-        // Symlinked subdirectory's fixture is discovered, not silently dropped.
-        let files = find_json_files(&top).expect("symlinked directory is followed");
-        assert_eq!(files.len(), 2, "{files:?}");
-        assert!(files.iter().any(|p| p.ends_with("b.json")), "{files:?}");
-        assert!(files.iter().any(|p| p.ends_with("a.json")), "{files:?}");
+        // 2. Symlinked root directory (with or without trailing slash) fails discovery explicitly.
+        let root_link = root.path().join("root_link");
+        symlink(&real, &root_link).unwrap();
+        let err =
+            find_json_files(&root_link).expect_err("symlinked root directory must fail discovery");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{err}");
+        assert!(err.to_string().contains(&root_link.display().to_string()), "{err}");
 
-        // Existing depth limit still applies to entries reached through a symlinked directory.
-        let err = discover(&top, &mut Vec::new(), 1, 10)
-            .expect_err("depth limit must apply through symlinked directory");
-        assert!(err.to_string().contains("depth exceeds 1"), "{err}");
+        let root_link_slash = PathBuf::from(format!("{}/", root_link.display()));
+        let err = find_json_files(&root_link_slash)
+            .expect_err("symlinked root directory with trailing slash must fail discovery");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{err}");
 
-        // A symlink loop yields an error rather than hanging or silently dropping entries.
+        // 3. Two links to one directory cannot cause duplicate execution (discovery fails).
+        let dup_root = root.path().join("dup");
+        std::fs::create_dir(&dup_root).unwrap();
+        symlink(&real, dup_root.join("first")).unwrap();
+        symlink(&real, dup_root.join("second")).unwrap();
+        let err = find_json_files(&dup_root)
+            .expect_err("multiple directory symlinks must fail discovery");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{err}");
+
+        // 4. Symlink loop fails discovery explicitly.
         let loop_root = tempfile::tempdir().unwrap();
         let sub = loop_root.path().join("sub");
         std::fs::create_dir(&sub).unwrap();
-        symlink(loop_root.path(), sub.join("back")).unwrap();
-        assert!(find_json_files(loop_root.path()).is_err(), "symlink loop must fail discovery");
+        let back = sub.join("back");
+        symlink(loop_root.path(), &back).unwrap();
+        let err = find_json_files(loop_root.path()).expect_err("symlink loop must fail discovery");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{err}");
+        assert!(err.to_string().contains(&back.display().to_string()), "{err}");
 
-        // A symlink to a non-regular file (FIFO) named `*.json` fails discovery explicitly.
+        // 5. Symlink to a regular `*.json` file is permitted (both inside a directory and as root).
+        let file_link_root = root.path().join("file_links");
+        std::fs::create_dir(&file_link_root).unwrap();
+        let file_link = file_link_root.join("linked.json");
+        symlink(&real_file, &file_link).unwrap();
+        let files = find_json_files(&file_link_root).expect("regular file symlink is allowed");
+        assert_eq!(files, vec![file_link.clone()]);
+        assert_eq!(
+            find_json_files(&file_link).expect("direct file symlink root"),
+            vec![file_link.clone()]
+        );
+        assert_eq!(read_fixture(&file_link).expect("read regular file symlink"), "{}");
+
+        // 6. Symlink to a non-regular file (FIFO) named `*.json` fails discovery explicitly.
         let fifo_target = root.path().join("pipe");
         let status =
             std::process::Command::new("mkfifo").arg(&fifo_target).status().expect("mkfifo runs");
         assert!(status.success(), "mkfifo failed");
-        let link_root = tempfile::tempdir().unwrap();
-        let fifo_link = link_root.path().join("linked.json");
+        let fifo_link_root = tempfile::tempdir().unwrap();
+        let fifo_link = fifo_link_root.path().join("linked.json");
         symlink(&fifo_target, &fifo_link).unwrap();
-        let err = find_json_files(link_root.path())
+        let err = find_json_files(fifo_link_root.path())
             .expect_err("symlink to FIFO named *.json must fail discovery");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{err}");
         assert!(err.to_string().contains(&fifo_link.display().to_string()), "{err}");
     }
 }
