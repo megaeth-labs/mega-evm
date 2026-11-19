@@ -899,3 +899,335 @@ async fn test_replay_reads_prestate_at_parent_hash() {
     }
     assert!(state_reads > 0, "expected at least one state RPC read");
 }
+
+/// Bytecode that returns `BLOCKHASH(NUMBER - 1) || BLOCKHASH(NUMBER - 2)` (64 bytes).
+fn blockhash_ancestors_code() -> Vec<u8> {
+    vec![
+        0x60, 0x01, // PUSH1 1
+        0x43, // NUMBER
+        0x03, // SUB            -> N - 1
+        0x40, // BLOCKHASH
+        0x5f, // PUSH0
+        0x52, // MSTORE         -> mem[0x00..0x20] = BLOCKHASH(N - 1)
+        0x60, 0x02, // PUSH1 2
+        0x43, // NUMBER
+        0x03, // SUB            -> N - 2
+        0x40, // BLOCKHASH
+        0x60, 0x20, // PUSH1 0x20
+        0x52, // MSTORE         -> mem[0x20..0x40] = BLOCKHASH(N - 2)
+        0x60, 0x40, // PUSH1 0x40
+        0x5f, // PUSH0
+        0xf3, // RETURN
+    ]
+}
+
+/// Satin transaction replay resolves `BLOCKHASH` ancestors by walking `parentHash` links from the
+/// verified parent block (fetching earlier headers by hash and checking their hash and number),
+/// never by calling `eth_getBlockByNumber` for ancestor heights.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_replay_blockhash_walks_verified_ancestors_by_hash() {
+    let reader = address!("0x9999999999999999999999999999999999999999");
+    let code = blockhash_ancestors_code();
+
+    let mut recorded = read_block(fixtures(), BLOCK);
+    recorded
+        .prestate
+        .accounts
+        .insert(PAYER, PreAccount { balance: U256::from(10u128.pow(18)), ..PreAccount::default() });
+    let code_hash = alloy_primitives::keccak256(&code);
+    let codes = HashMap::from_iter([(code_hash, code)]);
+    recorded
+        .prestate
+        .accounts
+        .insert(reader, PreAccount { code_hash: Some(code_hash), ..Default::default() });
+    let target = "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff01";
+    recorded.block["transactions"] = json!([{
+        "type": "0x2",
+        "chainId": "0x10e6",
+        "nonce": "0x0",
+        "gas": "0x4c4b40",
+        "maxFeePerGas": "0xf4240",
+        "maxPriorityFeePerGas": "0x0",
+        "to": reader,
+        "value": "0x0",
+        "accessList": [],
+        "input": "0x",
+        "r": "0x64c0524917585101b7ffb2286d4de676ca987554b33c6f9a37e7ad7508bfbb84",
+        "s": "0xe5199cacc6e07c6a9f8c74d0b06f964ce36dd362199b1c19d866f1a6f52d510",
+        "yParity": "0x1",
+        "v": "0x1",
+        "hash": target,
+        "blockHash": recorded.block["hash"],
+        "blockNumber": recorded.block["number"],
+        "transactionIndex": "0x0",
+        "from": PAYER,
+        "gasPrice": "0xf4240",
+    }]);
+
+    let parent_hash: B256 = serde_json::from_value(recorded.block["parentHash"].clone()).unwrap();
+    let grandparent_hash = B256::repeat_byte(0x22);
+    let great_grandparent_hash = B256::repeat_byte(0x33);
+    let fork_parent_hash = B256::repeat_byte(0xcc);
+    let fork_grandparent_hash = B256::repeat_byte(0xdd);
+
+    let mut verified_parent = recorded.block.clone();
+    verified_parent["number"] = json!(format!("0x{:x}", BLOCK - 1));
+    verified_parent["hash"] = json!(parent_hash);
+    verified_parent["parentHash"] = json!(grandparent_hash);
+    verified_parent["transactions"] = json!([]);
+
+    let mut fork_parent = verified_parent.clone();
+    fork_parent["hash"] = json!(fork_parent_hash);
+
+    let mut verified_grandparent = recorded.block.clone();
+    verified_grandparent["number"] = json!(format!("0x{:x}", BLOCK - 2));
+    verified_grandparent["hash"] = json!(grandparent_hash);
+    verified_grandparent["parentHash"] = json!(great_grandparent_hash);
+    verified_grandparent["transactions"] = json!([]);
+
+    let mut fork_grandparent = verified_grandparent.clone();
+    fork_grandparent["hash"] = json!(fork_grandparent_hash);
+
+    let server = Server::with_codes(recorded, None, codes).await;
+
+    // First `eth_getBlockByNumber(N-1)` serves the verified parent for header validation; any
+    // subsequent by-number lookup of N-1 serves a conflicting fork header.
+    Mock::given(matchers::body_partial_json(json!({
+        "method": "eth_getBlockByNumber",
+        "params": [format!("0x{:x}", BLOCK - 1), false],
+    })))
+    .respond_with(move |request: &wiremock::Request| {
+        let body: Value = serde_json::from_slice(&request.body).unwrap();
+        ResponseTemplate::new(200).set_body_json(json!({
+            "jsonrpc": "2.0",
+            "id": body["id"],
+            "result": verified_parent,
+        }))
+    })
+    .up_to_n_times(1)
+    .with_priority(1)
+    .mount(&server.0)
+    .await;
+
+    Mock::given(matchers::body_partial_json(json!({
+        "method": "eth_getBlockByNumber",
+        "params": [format!("0x{:x}", BLOCK - 1), false],
+    })))
+    .respond_with(move |request: &wiremock::Request| {
+        let body: Value = serde_json::from_slice(&request.body).unwrap();
+        ResponseTemplate::new(200).set_body_json(json!({
+            "jsonrpc": "2.0",
+            "id": body["id"],
+            "result": fork_parent,
+        }))
+    })
+    .with_priority(2)
+    .mount(&server.0)
+    .await;
+
+    // `eth_getBlockByNumber(N-2)` serves a different fork header than the hash-walked ancestor.
+    Mock::given(matchers::body_partial_json(json!({
+        "method": "eth_getBlockByNumber",
+        "params": [format!("0x{:x}", BLOCK - 2), false],
+    })))
+    .respond_with(move |request: &wiremock::Request| {
+        let body: Value = serde_json::from_slice(&request.body).unwrap();
+        ResponseTemplate::new(200).set_body_json(json!({
+            "jsonrpc": "2.0",
+            "id": body["id"],
+            "result": fork_grandparent,
+        }))
+    })
+    .with_priority(1)
+    .mount(&server.0)
+    .await;
+
+    // `eth_getBlockByHash(grandparent_hash)` serves the verified ancestor reachable via parentHash.
+    Mock::given(matchers::body_partial_json(json!({
+        "method": "eth_getBlockByHash",
+        "params": [grandparent_hash, false],
+    })))
+    .respond_with(move |request: &wiremock::Request| {
+        let body: Value = serde_json::from_slice(&request.body).unwrap();
+        ResponseTemplate::new(200).set_body_json(json!({
+            "jsonrpc": "2.0",
+            "id": body["id"],
+            "result": verified_grandparent,
+        }))
+    })
+    .with_priority(1)
+    .mount(&server.0)
+    .await;
+
+    let run = run_evme(&[
+        "replay",
+        target,
+        "--rpc",
+        &server.0.uri(),
+        "--rpc.no-cache-file",
+        "--rpc.max-retries",
+        "0",
+        "--override.spec",
+        "Satin",
+        "--json",
+    ]);
+    assert_eq!(run.code, 0, "{}{}", run.stderr, run.stdout);
+    let summary: Value = serde_json::from_str(&run.stdout).unwrap();
+    assert_eq!(summary["success"], true, "{summary}");
+
+    let mut expected_output = Vec::with_capacity(64);
+    expected_output.extend_from_slice(parent_hash.as_slice());
+    expected_output.extend_from_slice(grandparent_hash.as_slice());
+    assert_eq!(
+        summary["output"],
+        json!(alloy_primitives::hex::encode_prefixed(&expected_output)),
+        "BLOCKHASH(N-1) and BLOCKHASH(N-2) must observe hash-walked ancestors, not by-number headers"
+    );
+
+    let requests = server.0.received_requests().await.unwrap();
+    let grandparent_num_hex = format!("0x{:x}", BLOCK - 2);
+    let parent_num_hex = format!("0x{:x}", BLOCK - 1);
+    let mut parent_by_number_calls = 0usize;
+    let mut grandparent_by_hash_calls = 0usize;
+    for request in &requests {
+        let body: Value = serde_json::from_slice(&request.body).unwrap();
+        match body["method"].as_str() {
+            Some("eth_getBlockByNumber") if body["params"][0] == grandparent_num_hex => {
+                panic!("replay must never query ancestor N-2 by block number: {body}");
+            }
+            Some("eth_getBlockByNumber") if body["params"][0] == parent_num_hex => {
+                parent_by_number_calls += 1;
+            }
+            Some("eth_getBlockByHash") if body["params"][0] == json!(grandparent_hash) => {
+                grandparent_by_hash_calls += 1;
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(
+        parent_by_number_calls, 1,
+        "N-1 should be fetched by number only once during header verification"
+    );
+    assert_eq!(
+        grandparent_by_hash_calls, 1,
+        "N-2 must be fetched once by hash along the parentHash chain"
+    );
+}
+
+/// If walking `parentHash` encounters a missing ancestor or a header whose hash or number does
+/// not match the expected link, Satin replay must fail explicitly.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_replay_blockhash_fails_on_broken_ancestor_link() {
+    let reader = address!("0x9999999999999999999999999999999999999999");
+    let code = blockhash_ancestors_code();
+    let grandparent_hash = B256::repeat_byte(0x22);
+
+    for (label, bad_grandparent) in [
+        ("wrong_hash", Some((BLOCK - 2, B256::repeat_byte(0xee)))),
+        ("wrong_number", Some((BLOCK - 3, grandparent_hash))),
+        ("missing", None),
+    ] {
+        let mut recorded = read_block(fixtures(), BLOCK);
+        recorded.prestate.accounts.insert(
+            PAYER,
+            PreAccount { balance: U256::from(10u128.pow(18)), ..PreAccount::default() },
+        );
+        let code_hash = alloy_primitives::keccak256(&code);
+        let codes = HashMap::from_iter([(code_hash, code.clone())]);
+        recorded
+            .prestate
+            .accounts
+            .insert(reader, PreAccount { code_hash: Some(code_hash), ..Default::default() });
+        let target = "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff02";
+        recorded.block["transactions"] = json!([{
+            "type": "0x2",
+            "chainId": "0x10e6",
+            "nonce": "0x0",
+            "gas": "0x4c4b40",
+            "maxFeePerGas": "0xf4240",
+            "maxPriorityFeePerGas": "0x0",
+            "to": reader,
+            "value": "0x0",
+            "accessList": [],
+            "input": "0x",
+            "r": "0x64c0524917585101b7ffb2286d4de676ca987554b33c6f9a37e7ad7508bfbb84",
+            "s": "0xe5199cacc6e07c6a9f8c74d0b06f964ce36dd362199b1c19d866f1a6f52d510",
+            "yParity": "0x1",
+            "v": "0x1",
+            "hash": target,
+            "blockHash": recorded.block["hash"],
+            "blockNumber": recorded.block["number"],
+            "transactionIndex": "0x0",
+            "from": PAYER,
+            "gasPrice": "0xf4240",
+        }]);
+
+        let mut verified_parent = recorded.block.clone();
+        verified_parent["number"] = json!(format!("0x{:x}", BLOCK - 1));
+        verified_parent["hash"] = recorded.block["parentHash"].clone();
+        verified_parent["parentHash"] = json!(grandparent_hash);
+        verified_parent["transactions"] = json!([]);
+
+        let bad_result = bad_grandparent.map(|(num, hash)| {
+            let mut b = recorded.block.clone();
+            b["number"] = json!(format!("0x{num:x}"));
+            b["hash"] = json!(hash);
+            b["parentHash"] = json!(B256::repeat_byte(0x33));
+            b["transactions"] = json!([]);
+            b
+        });
+
+        let server = Server::with_codes(recorded, None, codes).await;
+
+        Mock::given(matchers::body_partial_json(json!({
+            "method": "eth_getBlockByNumber",
+            "params": [format!("0x{:x}", BLOCK - 1), false],
+        })))
+        .respond_with(move |request: &wiremock::Request| {
+            let body: Value = serde_json::from_slice(&request.body).unwrap();
+            ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0",
+                "id": body["id"],
+                "result": verified_parent,
+            }))
+        })
+        .with_priority(1)
+        .mount(&server.0)
+        .await;
+
+        Mock::given(matchers::body_partial_json(json!({
+            "method": "eth_getBlockByHash",
+            "params": [grandparent_hash, false],
+        })))
+        .respond_with(move |request: &wiremock::Request| {
+            let body: Value = serde_json::from_slice(&request.body).unwrap();
+            let result = bad_result.clone().unwrap_or(Value::Null);
+            ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0",
+                "id": body["id"],
+                "result": result,
+            }))
+        })
+        .with_priority(1)
+        .mount(&server.0)
+        .await;
+
+        let run = run_evme(&[
+            "replay",
+            target,
+            "--rpc",
+            &server.0.uri(),
+            "--rpc.no-cache-file",
+            "--rpc.max-retries",
+            "0",
+            "--override.spec",
+            "Satin",
+        ]);
+        assert_ne!(run.code, 0, "{label}: broken ancestor link must fail replay: {}", run.stdout);
+        assert!(
+            run.stderr.contains("Ancestor block"),
+            "{label}: expected ancestor diagnostic in stderr: {}",
+            run.stderr
+        );
+    }
+}

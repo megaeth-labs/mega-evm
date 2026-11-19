@@ -29,7 +29,7 @@ Two engines: the in-tree sources run Satin; a spec from `Equivalence` to `Rex6` 
 
 - The engine is decided where a command needs it (`cmd.rs` for `run`/`tx`, `replay::Cmd::engine` for a transaction replay, `block/cmd.rs` per block), always through `Engine` (`of_spec`, `of_block`, `of_chain`), and a Satin run's schedule through `common::satin_schedule`; both read the chain's activation table, so they agree.
   A transaction replay's engine is decided at the timestamp of its mined block, the one whose schedule it runs under: keep a new site to the same pair.
-  Satin transaction replay refuses pending and genesis transactions, checks the fetched parent's number and hash, and forks pre-state at that verified parent hash via EIP-1898 (`requireCanonical: true`).
+  Satin transaction replay refuses pending and genesis transactions, checks the fetched parent's number and hash, forks pre-state at that verified parent hash via EIP-1898 (`requireCanonical: true`), and resolves `BLOCKHASH` ancestors on demand by walking `parentHash` via `eth_getBlockByHash` (verifying each ancestor's hash and number).
 - Output on Satin is additive to the legacy output: every legacy field keeps its name and meaning, and what only Satin counts goes in the `satin` object (`tests/integration.rs` checks it on every fixture pair).
 
 ## ANTI-PATTERNS
