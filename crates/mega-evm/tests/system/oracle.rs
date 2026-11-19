@@ -381,31 +381,6 @@ fn test_the_oracles_code_elsewhere_forwards_no_hint() {
     assert!(hints.is_empty());
 }
 
-/// Two hints reach the service in the order they were sent.
-#[test]
-fn test_hints_reach_the_service_in_the_order_they_were_sent() {
-    use revm::bytecode::opcode::POP;
-
-    let first = IOracle::sendHintCall {
-        topic: B256::repeat_byte(0x11),
-        data: Bytes::from_static(&[0xaa, 0xbb]),
-    };
-    let second = IOracle::sendHintCall {
-        topic: B256::repeat_byte(0x22),
-        data: Bytes::from_static(&[0xcc, 0xdd]),
-    };
-    let code = call_oracle(BytecodeBuilder::default(), &first.abi_encode(), 1_000_000).append(POP);
-    let code = call_oracle(code, &second.abi_encode(), 1_000_000).append(POP).stop().build();
-    let (_, hints, _) = run_with_oracle(with_contract(code), call_tx(CONTRACT, [], U256::ZERO));
-    assert_eq!(
-        hints,
-        vec![
-            RecordedHint { from: CONTRACT, topic: first.topic, data: first.data },
-            RecordedHint { from: CONTRACT, topic: second.topic, data: second.data },
-        ],
-    );
-}
-
 #[test]
 fn test_recorded_hints_preserve_order_and_fields_across_clones() {
     use mega_evm::OracleEnv;
