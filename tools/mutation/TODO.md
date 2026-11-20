@@ -153,10 +153,10 @@ Enabling any of these hooks on that side moves nothing observable:
 ### cargo-mutants operators in `evm/execution.rs`
 
 - `EvmTr::frame_stack` returning a leaked fresh `FrameStack` (both bodies). The method has three
-  call sites reachable from this workspace — `revm-handler-20.0.3` `handler.rs` in
+  call sites reachable from this workspace — `revm-handler-43.0.3` `handler.rs` in
   `execution_result` and `catch_error`, and `MegaHandler::execution_result`'s sandbox branch — and
   all three are `evm.frame_stack().clear()`. `FrameStack::clear` only assigns `index = None`
-  (`revm-context-interface-19.0.3` `local.rs`), and every subsequent use of the real stack starts
+  (`revm-context-interface-43.0.2` `local.rs`), and every subsequent use of the real stack starts
   at `FrameStack::start_init`, which assigns `index = None` as well. Redirecting the reference to a
   fresh stack therefore changes no state any later read can observe. Confirmed by a full
   `cargo test -p mega-evm` run under the mutation.

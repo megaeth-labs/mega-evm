@@ -40,12 +40,12 @@ For the current stable behavior as a single reference, see the [MegaEVM Overview
 
 ## Reference Implementation
 
-| Component        | Version                                                                                    |
-| ---------------- | ------------------------------------------------------------------------------------------ |
-| **MegaEVM**      | [mega-evm](https://github.com/megaeth-labs/mega-evm)                                       |
-| **Base EVM**     | [revm v40.0.3](https://github.com/bluealloy/revm)                                          |
-| **Optimism EVM** | [op-revm v20.0.0](https://github.com/ethereum-optimism/optimism/tree/develop/rust/op-revm) |
-| **Alloy EVM**    | [alloy-evm v0.36.0](https://github.com/alloy-rs/alloy-evm)                                 |
+| Component        | Version                                                                                                          |
+| ---------------- | ---------------------------------------------------------------------------------------------------------------- |
+| **MegaEVM**      | [mega-evm](https://github.com/megaeth-labs/mega-evm)                                                             |
+| **Base EVM**     | [revm v43.0.3](https://github.com/bluealloy/revm)                                                                |
+| **Optimism EVM** | [op-revm v20.0.0](https://github.com/ethereum-optimism/optimism/tree/develop/rust/op-revm) (Optimism `f8498888`) |
+| **Alloy EVM**    | [alloy-evm v0.39.0](https://github.com/alloy-rs/alloy-evm)                                                       |
 
 ## Spec Progression
 
