@@ -6,6 +6,8 @@ Fix wording in the release candidate PR while it is open, or, after it merges, b
 
 ## v1.7.3
 
+Changes since v1.7.2, a hotfix built on v1.7.0. Entries that also appear under v1.7.1 first shipped there; v1.7.2 did not include them. #362 is listed as breaking here because it changed the public API.
+
 ### Breaking changes
 
 - remove REX7 and refresh stale docs ([#402](https://github.com/megaeth-labs/mega-evm/pull/402))
