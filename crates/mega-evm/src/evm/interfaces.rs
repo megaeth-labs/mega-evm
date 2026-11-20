@@ -150,9 +150,8 @@ where
         self.inner.ctx.journal_mut().finalize()
     }
 
-    /// Finalizes the journal whether or not the transaction succeeded, as
-    /// [`transact`](revm::ExecuteEvm::transact) does; see [`MegaEvm`] on the entry points and the
-    /// journal. revm's own `Evm::replay` finalizes only on success.
+    /// Replays through the Mega handler and finalizes the journal on both outcomes.
+    /// revm 43's mainnet `replay` implementation also finalizes on both outcomes.
     fn replay(
         &mut self,
     ) -> Result<ExecResultAndState<Self::ExecutionResult, Self::State>, Self::Error> {
@@ -171,9 +170,8 @@ where
         self.ctx().db_mut().commit(state);
     }
 
-    /// Finalizes the journal whether or not the transaction succeeded, and commits it only on
-    /// success. The trait's default commits through `transact_one` and leaves the journal
-    /// unfinalized on an error.
+    /// Runs [`ExecuteEvm::transact`](revm::ExecuteEvm::transact) to finalize on both outcomes
+    /// and commits state on success. The revm 43 default also finalizes on error.
     fn transact_commit(&mut self, tx: Self::Tx) -> Result<Self::ExecutionResult, Self::Error> {
         let ExecResultAndState { result, state } = revm::ExecuteEvm::transact(self, tx)?;
         self.commit(state);
@@ -198,9 +196,8 @@ where
         revm::inspector::InspectorHandler::inspect_run(&mut h, self)
     }
 
-    /// Finalizes the journal whether or not the transaction succeeded, as
-    /// [`ExecuteEvm::transact`](revm::ExecuteEvm::transact) does; see [`MegaEvm`] on the entry
-    /// points and the journal. The trait's provided method returns before finalizing on an error.
+    /// Runs the inspected Mega handler and finalizes the journal on both outcomes.
+    /// This follows the revm 43 trait default's finalization contract.
     fn inspect_tx(
         &mut self,
         tx: Self::Tx,
@@ -227,8 +224,8 @@ where
     DB: Database + DatabaseCommit,
     INSP: Inspector<MegaContext<DB, ExtEnvs>>,
 {
-    /// Finalizes the journal whether or not the transaction succeeded, and commits it only on
-    /// success. The trait's default leaves the journal unfinalized on an error.
+    /// Uses [`Self::inspect_tx`] to finalize on both outcomes and commits state on success.
+    /// The revm 43 default also finalizes on error.
     fn inspect_tx_commit(&mut self, tx: Self::Tx) -> Result<Self::ExecutionResult, Self::Error> {
         let ExecResultAndState { result, state } = self.inspect_tx(tx)?;
         revm::ExecuteCommitEvm::commit(self, state);

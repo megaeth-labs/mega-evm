@@ -28,8 +28,11 @@ MegaEVM execution core that wraps revm/op-revm with MegaETH instruction tables, 
   `MegaHandler::catch_error` delegates journal cleanup to op-revm and finishes it if failed-deposit recovery itself returns an error.
   It also clears the context's stashed database error, which the handler takes only when it builds the result, so an error returned before that (from post-execution, say) does not fail the next transaction.
   The exception is the pre-REX5 keyless-deploy sandbox merge, which writes the state map without journal entries (frozen behavior); only a finalize drops it, so a `_one` caller keeps it after an error.
-  Every entry point that finalizes the journal on success also finalizes it on an error: `interfaces.rs` overrides the revm provided methods that would not (`transact_commit`, `inspect`, `inspect_tx`, `inspect_tx_commit`, `inspect_commit`, `system_call_with_caller`) and implements the required `replay` and the inherent `transact_system_call_with_gas_limit` the same way.
-  When a revm upgrade adds a provided method that finalizes or commits, override it the same way and add it to the entry-point table in `tests/block_executor/discard_transaction.rs`.
+  Every Mega entry point that finalizes the journal on success also finalizes it on error.
+  The revm 43 defaults for `transact_commit`, `inspect`, `inspect_tx`, `inspect_tx_commit`, and `inspect_commit` finalize on error.
+  Mega's implementations in `interfaces.rs` and its required `replay` implementation preserve that contract.
+  The upstream `system_call_with_caller` default exits early on error, while Mega's override and its inherent `transact_system_call_with_gas_limit` finalize on both outcomes.
+  When a revm upgrade adds a finalizing or committing entry point, check its error cleanup and cover it in the entry-point table in `tests/block_executor/discard_transaction.rs`.
 - State the next transaction inherits (the pre-REX1 detained compute gas limit) is recorded by `MegaContext::on_tx_end`, which the handler runs at the end of every run (`execution_result` and `catch_error`), so a discard restores what the previous transaction left even when the panic landed before `on_new_tx`.
 
 ## WHERE TO LOOK
