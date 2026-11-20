@@ -6,15 +6,9 @@ Fix wording in the release candidate PR while it is open, or, after it merges, b
 
 ## v1.7.3
 
-Changes since v1.7.2, a hotfix built on v1.7.0.
-Entries that also appear under v1.7.1 first shipped there; v1.7.2 did not include them.
-#362 is listed as breaking here because it changed the public API.
-
 ### Breaking changes
 
 - remove REX7 and refresh stale docs ([#402](https://github.com/megaeth-labs/mega-evm/pull/402))
-- upgrade to revm 40.0.3 / alloy-evm 0.36.0 ([#365](https://github.com/megaeth-labs/mega-evm/pull/365))
-- block: derive hardfork gating from single-source spec resolution ([#362](https://github.com/megaeth-labs/mega-evm/pull/362))
 
 ### Features
 
@@ -29,6 +23,11 @@ Entries that also appear under v1.7.1 first shipped there; v1.7.2 did not includ
 - restore coverage uploads and large PR reviews ([#406](https://github.com/megaeth-labs/mega-evm/pull/406))
 - evm: load L1 block info for transactions at block 0 ([#392](https://github.com/megaeth-labs/mega-evm/pull/392))
 - chain: schedule Rex6 on the canonical mainnet and testnet hardfork schedules ([#371](https://github.com/megaeth-labs/mega-evm/pull/371))
+
+### Refactoring
+
+- remove REX7 and refresh stale docs ([#402](https://github.com/megaeth-labs/mega-evm/pull/402))
+- block: derive hardfork gating from single-source spec resolution ([#362](https://github.com/megaeth-labs/mega-evm/pull/362))
 
 ### Documentation
 
@@ -65,6 +64,7 @@ Entries that also appear under v1.7.1 first shipped there; v1.7.2 did not includ
 - deps: bump rustls from 0.23.42 to 0.23.43 in the cargo group across 1 directory ([#401](https://github.com/megaeth-labs/mega-evm/pull/401))
 - deps: relax the exact alloy pins so downstream can resolve newer releases ([#416](https://github.com/megaeth-labs/mega-evm/pull/416))
 - bump Rust nightly to fix closure-call miscompilation ([#411](https://github.com/megaeth-labs/mega-evm/pull/411))
+- upgrade to revm 40.0.3 / alloy-evm 0.36.0 ([#365](https://github.com/megaeth-labs/mega-evm/pull/365))
 
 ## v1.7.2 (2026-09-30)
 
