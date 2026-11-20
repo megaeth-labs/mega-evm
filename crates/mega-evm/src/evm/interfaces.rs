@@ -257,7 +257,7 @@ where
         contract: Address,
         data: Bytes,
     ) -> Result<Self::ExecutionResult, Self::Error> {
-        // Override upstream `SystemCallTx` gas limit: revm 40's
+        // Override upstream `SystemCallTx` gas limit: revm 43's
         // `SYSTEM_CALL_GAS_LIMIT` is 31_566_720 (30M + bal-devnet-7 state-gas
         // reservoir). Frozen MegaETH keeps the historical 30M.
         let mut tx =

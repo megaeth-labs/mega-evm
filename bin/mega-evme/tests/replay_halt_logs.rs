@@ -1,7 +1,7 @@
 //! Mainnet regression: a halted transaction's receipt must carry no logs.
 //!
 //! revm 27 gave `ExecutionResult::Halt` no `logs` field, so "a failed transaction's receipt has no
-//! logs" was guaranteed by the type. revm 40 puts a log list on every variant and fills it from
+//! logs" was guaranteed by the type. revm 43 puts a log list on every variant and fills it from
 //! `journal.take_logs()`. `MegaETH` rewrites an already-committed frame result into a failure —
 //! pre-REX5 a CREATE's code-deposit compute gas is recorded once the constructor's checkpoint is
 //! committed — so the committed logs reached the receipt and changed its logs root.

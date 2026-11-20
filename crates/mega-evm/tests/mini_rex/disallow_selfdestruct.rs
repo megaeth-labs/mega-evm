@@ -101,7 +101,7 @@ fn test_selfdestruct_disallowed_after_mini_rex() {
 /// A rejected `SELFDESTRUCT` costs the frame everything it had, whether or not the frame could
 /// afford the opcode's static gas.
 ///
-/// revm 40 charges an opcode's static gas before dispatching to its handler, so an underfunded
+/// revm 43 charges an opcode's static gas before dispatching to its handler, so an underfunded
 /// frame is halted out of gas without ever reaching `control::invalid`, and reports `OutOfGas`
 /// where revm 27 reported `InvalidFEOpcode`. Which halt is reported is not a `MegaETH` surface — it
 /// reaches traces and tooling, never a receipt. What is consensus-visible is pinned here: the

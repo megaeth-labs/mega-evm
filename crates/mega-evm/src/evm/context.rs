@@ -254,7 +254,7 @@ impl<DB: Database, ExtEnvTypes: ExternalEnvTypes> MegaContext<DB, ExtEnvTypes> {
         let mut inner = context;
 
         // Spec in context must keep the same with parameter `spec`.
-        // revm 40 keeps per-spec `GasParams` in `CfgEnv`, so update both together —
+        // revm 43 keeps per-spec `GasParams` in `CfgEnv`, so update both together —
         // bare `cfg.spec = ...` would leave the caller's (e.g. BEDROCK) params in place.
         // A context already sitting on the target op-spec has nothing to re-derive, and its
         // gas schedule — possibly one the caller installed — is left alone.
@@ -1102,7 +1102,7 @@ mod tests {
     }
 
     /// `with_cfg_unpinned` is the opt-in for the gate: the `tx_chain_id_check` a configuration
-    /// carries — here revm 40's default `true` on an untouched `CfgEnv::new_with_spec` — reaches
+    /// carries — here revm 43's default `true` on an untouched `CfgEnv::new_with_spec` — reaches
     /// the EVM as provided.
     #[test]
     fn test_with_cfg_unpinned_keeps_chain_id_check_on_default_shape() {
@@ -1247,7 +1247,7 @@ mod tests {
         );
     }
 
-    /// revm 40 keeps per-spec [`GasParams`] in [`CfgEnv`]. The deprecated
+    /// revm 43 keeps per-spec [`GasParams`] in [`CfgEnv`]. The deprecated
     /// `new_with_context` must update both when applying the `MegaETH` op-spec —
     /// bare `cfg.spec = ...` would leave the caller's BEDROCK/MERGE params.
     #[allow(deprecated)]
@@ -1351,7 +1351,7 @@ mod tests {
         assert_ne!(sandbox.accessed_bucket_ids(), parent_bucket_ids);
     }
 
-    /// revm 40 defaults `tx_chain_id_check` to `true`; `MegaContext` pins revm-27's
+    /// revm 43 defaults `tx_chain_id_check` to `true`; `MegaContext` pins revm-27's
     /// `false` so unit-test txs with `chain_id: None` still validate.
     #[test]
     fn test_new_disables_tx_chain_id_check_for_revm27_parity() {
@@ -1363,14 +1363,14 @@ mod tests {
     }
 
     /// Deprecated constructor must apply the same revm-27 chain-id pin, even when
-    /// the caller's `OpContext` was built with revm 40's default (`true`).
+    /// the caller's `OpContext` was built with revm 43's default (`true`).
     #[allow(deprecated)]
     #[test]
     fn test_new_with_context_disables_tx_chain_id_check() {
         let mut inner: MegaInnerContext<EmptyDB> = revm::Context::op()
             .with_tx(crate::MegaTransaction::default())
             .with_db(EmptyDB::default());
-        // Simulate a caller that left revm 40's default (true) in place.
+        // Simulate a caller that left revm 43's default (true) in place.
         inner.cfg.tx_chain_id_check = true;
 
         let context = MegaContext::new_with_context(

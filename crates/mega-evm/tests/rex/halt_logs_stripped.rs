@@ -5,7 +5,7 @@
 //! exceeds the TX-level detained compute gas cap, the frame result is rewritten from `Return`
 //! to `OutOfGas` while the journal still holds the constructor's logs and state.
 //!
-//! revm 40 attaches `journal.take_logs()` to `Halt`, so without the `execution_result` strip
+//! revm 43 attaches `journal.take_logs()` to `Halt`, so without the `execution_result` strip
 //! the failed receipt would carry those logs. This test is the positive leak case: it goes
 //! red if the strip is removed.
 //!

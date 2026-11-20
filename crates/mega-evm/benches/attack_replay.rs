@@ -66,7 +66,7 @@ use revm::{
 };
 
 /// Cancun predates EIP-7825's `tx_gas_limit_cap` (2^24). The fixture uses a
-/// multi-gigagas `gas_limit`; revm 40's `mainnet()` defaults to Osaka and
+/// multi-gigagas `gas_limit`; revm 43's `mainnet()` defaults to Osaka and
 /// would reject the tx. Matches the `revm_pinned` subject baseline.
 const REVM_FORK: SpecId = SpecId::CANCUN;
 use serde_json::Value;
@@ -339,7 +339,7 @@ fn sanity_check_pure_revm(
 ) {
     let mut evm = Context::mainnet()
         .modify_cfg_chained(|cfg| {
-            // Sets gas params along with the spec: revm 40 keeps per-spec
+            // Sets gas params along with the spec: revm 43 keeps per-spec
             // `GasParams` in `CfgEnv`, so assigning `cfg.spec` alone would
             // leave the default (Osaka) params — and the 2^24 gas cap — in place.
             cfg.set_spec_and_mainnet_gas_params(REVM_FORK);

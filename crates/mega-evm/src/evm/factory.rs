@@ -314,7 +314,7 @@ mod tests {
     }
 
     /// The production path — `create_evm` routing the embedder's `EvmEnv` through `with_cfg` —
-    /// pins the chain-id gate off however the config arrives: revm 40 defaults the flag to
+    /// pins the chain-id gate off however the config arrives: revm 43 defaults the flag to
     /// `true`, and every frozen `MegaETH` spec ran without the gate.
     #[test]
     fn test_create_evm_pins_chain_id_check_off() {

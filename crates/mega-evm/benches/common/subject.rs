@@ -247,7 +247,7 @@ impl Subject for RevmPinned {
             workload,
             || {
                 ContextPinned::mainnet()
-                    // Sets the gas params along with the spec: revm 40 keeps
+                    // Sets the gas params along with the spec: revm 43 keeps
                     // per-spec `GasParams` in `CfgEnv`, so assigning `cfg.spec`
                     // alone would leave the default (Osaka) params in place.
                     .modify_cfg_chained(|cfg| cfg.set_spec_and_mainnet_gas_params(REVM_FORK))

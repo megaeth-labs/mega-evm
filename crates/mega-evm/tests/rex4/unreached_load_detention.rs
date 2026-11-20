@@ -1,8 +1,8 @@
-//! Beneficiary detention on the paths where revm 40 halts ahead of the target load.
+//! Beneficiary detention on the paths where revm 43 halts ahead of the target load.
 //!
 //! The deployed implementation loaded a CALL-family or `EXTCODECOPY` target before charging the
 //! opcode anything, and loading the block beneficiary marks beneficiary access, which caps the
-//! transaction's remaining compute gas. revm 40 charges first — the CALL family's static gas and
+//! transaction's remaining compute gas. revm 43 charges first — the CALL family's static gas and
 //! value-transfer cost, `EXTCODECOPY`'s copy cost and memory expansion — so a frame that runs out
 //! of gas on one of those never reaches the load. The handlers recreate the mark wherever the
 //! deployed schedule would have reached it, and leave it off wherever that schedule stopped
@@ -237,7 +237,7 @@ fn test_static_charge_window_call_to_beneficiary_is_detained() {
     }
 }
 
-/// The value-transfer cost is the other charge revm 40 takes ahead of its load.
+/// The value-transfer cost is the other charge revm 43 takes ahead of its load.
 #[test]
 fn test_value_transfer_window_call_to_beneficiary_is_detained() {
     for spec in WRAPPED_CALL_SPECS {
@@ -322,7 +322,7 @@ fn test_value_call_to_empty_beneficiary_follows_the_new_account_charge() {
 
 /// A frame short of the new-account charge by less than the static charge: the deployed schedule
 /// took the storage charge with the static gas still in the frame, paid it, reached its load and
-/// marked; revm 40 debits the static charge first and then fails the storage charge. The two
+/// marked; revm 43 debits the static charge first and then fails the storage charge. The two
 /// outer rows pin the window's edges, where both schedules agree.
 #[test]
 fn test_storage_charge_window_follows_the_deployed_static_charge() {
@@ -381,7 +381,7 @@ fn test_extcodecopy_mark_is_latent_until_a_later_tail_applies_it() {
     }
 }
 
-/// An oversized length halts revm 40's body before it charges anything, but the deployed schedule
+/// An oversized length halts revm 43's body before it charges anything, but the deployed schedule
 /// had already loaded by then.
 #[test]
 fn test_extcodecopy_invalid_length_still_marks() {
@@ -392,7 +392,7 @@ fn test_extcodecopy_invalid_length_still_marks() {
     ));
 }
 
-/// The rest of `EXTCODECOPY`'s pre-load halts in revm 40 — an unrepresentable memory offset, and a
+/// The rest of `EXTCODECOPY`'s pre-load halts in revm 43 — an unrepresentable memory offset, and a
 /// memory expansion the frame cannot afford — also came after the deployed load.
 #[test]
 fn test_extcodecopy_memory_operand_halts_still_mark() {

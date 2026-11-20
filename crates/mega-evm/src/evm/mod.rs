@@ -536,7 +536,7 @@ mod tests {
 
     /// Trait-plumbing smoke test for the `EvmTr` / `InspectorEvmTr` accessors.
     ///
-    /// These are pure field projections required by revm 40's traits — every tuple element has a
+    /// These are pure field projections required by revm 43's traits — every tuple element has a
     /// distinct type, so a miswired projection would not compile. There is no logic to get wrong;
     /// this pins only that each projection is wired and callable, so the surface stays exercised.
     #[test]
@@ -669,7 +669,7 @@ mod tests {
     /// `operator_fee_refund`. A default `L1BlockInfo` (operator fee scalars `None`) is the
     /// factory path used by block executors; under Isthmus, incorrectly calling refund panics
     /// with `Missing operator fee scalar for isthmus L1 Block`. Frozen pre-migration and
-    /// revm-handler 20 skip post-execution for system calls entirely — gas outcome is the
+    /// revm-handler 43 skip post-execution for system calls entirely — gas outcome is the
     /// execution gas only (no fee reimbursement side-effects).
     #[test]
     fn test_system_call_default_chain_skips_operator_fee_refund() {

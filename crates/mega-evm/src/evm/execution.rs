@@ -629,7 +629,7 @@ where
     /// access-list entry that lists storage keys — the account and each listed slot — into the
     /// journal.
     ///
-    /// revm 40 only records the access list as pre-warmed and reads an entry the first time the
+    /// revm 43 only records the access list as pre-warmed and reads an entry the first time the
     /// transaction touches it. `MegaETH` has always read an entry with storage keys here, before
     /// the first frame, so the account and its listed slots are in the transaction's read set,
     /// and in the state it hands back, whether or not execution goes on to touch them. Loading
@@ -713,7 +713,7 @@ where
         // System calls skip validation, pre-execution, and post-execution (reimburse_caller /
         // reward_beneficiary / operator_fee_refund). That matches:
         // - pre-migration MegaHandler (revm 27 / op-revm 8)
-        // - revm-handler 20 `Handler::run_system_call` /
+        // - revm-handler 43 `Handler::run_system_call` /
         //   `InspectorHandler::inspect_run_system_call`
         // Calling `post_execution` here panics under Isthmus when `L1BlockInfo` has no operator
         // fee scalars (`Missing operator fee scalar for isthmus L1 Block`) and would also charge
@@ -1171,7 +1171,7 @@ where
         });
         // The run ends here on the result path; `catch_error` is the other end.
         evm.ctx().on_tx_end();
-        // revm 40 attaches journal logs to Success / Revert / Halt alike. Pre-revm-40, Halt had no
+        // revm 43 attaches journal logs to Success / Revert / Halt alike. Pre-revm-40, Halt had no
         // logs field, so a failed receipt was structurally empty. Restore that invariant at the
         // single result seam shared by transact, inspect, and system-call entry points. Status,
         // gasUsed, and post-state are untouched — only the receipt log list is cleared.
@@ -1209,7 +1209,7 @@ where
 
 /// Drop logs from any non-`Success` [`ExecutionResult`].
 ///
-/// Ethereum consensus receipts carry logs only for successful transactions. revm 40 stores a
+/// Ethereum consensus receipts carry logs only for successful transactions. revm 43 stores a
 /// `logs` field on `Revert` and `Halt` as well and fills it from `journal.take_logs()`, so a
 /// post-commit result rewrite (limit exceed after CREATE checkpoint commit) can otherwise leak
 /// constructor logs into a failed receipt. Clearing here is the single product-code fix; it is

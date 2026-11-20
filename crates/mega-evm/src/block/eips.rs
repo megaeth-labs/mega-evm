@@ -74,7 +74,7 @@ where
         // Use the inherent entry point so both branches share the same error type; the
         // `alloy_evm::Evm` method now reports `OpTxError`.
         // Pre-REX5 keeps MegaETH's frozen 30M system-call gas limit (not upstream's
-        // revm 40 `SYSTEM_CALL_GAS_LIMIT`, which includes a state-gas reservoir).
+        // revm 43 `SYSTEM_CALL_GAS_LIMIT`, which includes a state-gas reservoir).
         evm.transact_system_call_with_gas_limit(
             alloy_eips::eip4788::SYSTEM_ADDRESS,
             alloy_eips::eip2935::HISTORY_STORAGE_ADDRESS,

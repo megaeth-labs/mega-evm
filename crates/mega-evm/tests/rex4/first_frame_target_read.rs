@@ -1,6 +1,6 @@
 //! A call transaction reads its target only when its first frame is created.
 //!
-//! revm 40 reads a call transaction's target, and through an EIP-7702 designation its delegate,
+//! revm 43 reads a call transaction's target, and through an EIP-7702 designation its delegate,
 //! with their code before any frame-init check runs. The deployed implementation read them only
 //! when it created the first frame, so a first frame ended before that — by a limit already
 //! exceeded, or by a system contract interceptor — read neither. A stateless witness carries

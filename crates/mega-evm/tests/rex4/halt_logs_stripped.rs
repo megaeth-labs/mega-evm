@@ -5,7 +5,7 @@
 //! `after_frame_run` (REX5 moved that charge earlier). When the deposit blows the **per-frame**
 //! compute budget, `exceeding_instruction_result` / `before_frame_return_result` rewrite the
 //! successful CREATE to `InstructionResult::Revert` (`limit.rs` frame-local branch) without
-//! undoing the journal commit. revm 40 then attaches those logs to `ExecutionResult::Revert`.
+//! undoing the journal commit. revm 43 then attaches those logs to `ExecutionResult::Revert`.
 //!
 //! This test goes red if the `execution_result` strip is removed.
 //!
