@@ -327,15 +327,7 @@ impl TxArgs {
 
     /// Converts the transaction type to a [`MegaTxType`].
     pub fn mega_tx_type(&self) -> Result<MegaTxType> {
-        let ty = self.tx_type();
-        match ty {
-            0 => Ok(MegaTxType::Legacy),
-            1 => Ok(MegaTxType::Eip2930),
-            2 => Ok(MegaTxType::Eip1559),
-            4 => Ok(MegaTxType::Eip7702),
-            126 => Ok(MegaTxType::Deposit),
-            _ => Err(EvmeError::UnsupportedTxType(ty)),
-        }
+        supported_tx_type(self.tx_type())
     }
 
     /// Creates a [`TxEnv`] from the transaction arguments.
@@ -394,6 +386,13 @@ impl TxArgs {
     }
 }
 
+fn supported_tx_type(ty: u8) -> Result<MegaTxType> {
+    match MegaTxType::try_from(ty) {
+        Ok(MegaTxType::PostExec) | Err(_) => Err(EvmeError::UnsupportedTxType(ty)),
+        Ok(tx_type) => Ok(tx_type),
+    }
+}
+
 /// Result of decoding a raw EIP-2718 transaction.
 #[derive(Debug)]
 pub struct DecodedRawTx {
@@ -406,8 +405,7 @@ impl DecodedRawTx {
     /// Decodes raw EIP-2718 encoded transaction bytes into a [`MegaTransaction`].
     ///
     /// Recovers the signer from the signature (or uses the `from` field for deposits). The
-    /// per-variant field mapping is derived through [`FromTxWithEncoded`], so new transaction
-    /// types are picked up from the upstream impl instead of a hand-written mapping here.
+    /// per-variant field mapping for CLI-supported types comes from [`FromTxWithEncoded`].
     /// No CLI overrides are applied.
     pub fn from_raw(raw_bytes: impl Into<Bytes>) -> Result<Self> {
         let raw_bytes = raw_bytes.into();
@@ -415,6 +413,7 @@ impl DecodedRawTx {
             EvmeError::InvalidInput(format!("Failed to decode raw transaction: {e}"))
         })?;
 
+        supported_tx_type(envelope.tx_type() as u8)?;
         let caller = envelope
             .recover_signer()
             .map_err(|e| EvmeError::InvalidInput(format!("Failed to recover signer: {e}")))?;
@@ -504,8 +503,7 @@ impl DecodedRawTx {
         let decoded_type = self.tx.base.tx_type;
         let tx_type = match tx_args.tx_type {
             Some(_) => tx_args.mega_tx_type()?,
-            None => MegaTxType::try_from(decoded_type)
-                .map_err(|_| EvmeError::UnsupportedTxType(decoded_type))?,
+            None => supported_tx_type(decoded_type)?,
         };
         let is_deposit = tx_type == MegaTxType::Deposit;
         if is_deposit != (decoded_type == MegaTxType::Deposit as u8) {
@@ -566,8 +564,7 @@ impl DecodedRawTx {
 fn create_fake_envelope(tx_env: &TxEnv) -> Result<MegaTxEnvelope> {
     let dummy_sig = Signature::new(U256::from(1u64), U256::from(1u64), false);
     let chain_id = tx_env.chain_id.unwrap_or(0);
-    let tx_type = MegaTxType::try_from(tx_env.tx_type)
-        .map_err(|_| EvmeError::UnsupportedTxType(tx_env.tx_type))?;
+    let tx_type = supported_tx_type(tx_env.tx_type)?;
 
     match tx_type {
         MegaTxType::Legacy => {
@@ -660,7 +657,7 @@ fn create_fake_envelope(tx_env: &TxEnv) -> Result<MegaTxEnvelope> {
             };
             Ok(MegaTxEnvelope::Deposit(Sealed::new_unchecked(tx, B256::ZERO)))
         }
-        MegaTxType::PostExec => Err(EvmeError::UnsupportedTxType(tx_env.tx_type)),
+        MegaTxType::PostExec => unreachable!("supported_tx_type rejects PostExec"),
     }
 }
 
@@ -907,6 +904,20 @@ mod tests {
             Some(&raw),
             "the original raw bytes must back the L1 fee calculation",
         );
+    }
+
+    #[test]
+    fn test_from_raw_rejects_post_exec() {
+        use mega_evm::op_alloy_consensus::{PostExecPayload, SDMGasEntry, TxPostExec};
+
+        let post_exec = TxPostExec::new(PostExecPayload {
+            version: 1,
+            block_number: 1,
+            gas_refund_entries: vec![SDMGasEntry { index: 0, gas_refund: 1 }],
+        });
+        let envelope = OpTxEnvelope::PostExec(Sealed::new_unchecked(post_exec, B256::ZERO));
+        let result = DecodedRawTx::from_raw(envelope.encoded_2718());
+        assert!(matches!(result, Err(EvmeError::UnsupportedTxType(0x7d))), "{result:?}");
     }
 
     #[test]
