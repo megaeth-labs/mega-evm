@@ -949,8 +949,8 @@ impl IntoMegaethCfgEnv for CfgEnv<OpSpecId> {
     /// The inverse of [`IntoOpCfgEnv::into_op_cfg`]: it relabels the specification type with the
     /// given `spec` and carries every other field — the gas schedule included — unchanged, so a
     /// configuration handed to the EVM reads back as the caller wrote it. Reading back a
-    /// configuration the EVM has run at least one transaction with also reads back EIP-8037 off,
-    /// because [`force_amsterdam_gas_flags_off`] settles it on the context itself.
+    /// configuration after execution returns the EIP-8037 and EIP-2780 flags as disabled.
+    /// [`force_amsterdam_gas_flags_off`] sets both flags on the context.
     ///
     /// # Arguments
     ///

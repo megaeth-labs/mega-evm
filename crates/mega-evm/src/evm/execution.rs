@@ -162,7 +162,7 @@ where
     /// the transaction gas limit. Pre-execution writes have already been applied.
     fn before_execution(
         &self,
-        evm: &mut EVM,
+        evm: &EVM,
         init_and_floor_gas: &InitialAndFloorGas,
     ) -> Option<FrameResult> {
         let tx = evm.ctx_ref().tx();
@@ -721,7 +721,7 @@ where
         let ctx = evm.ctx_mut();
         ctx.on_new_tx();
 
-        // dummy values that are not used.
+        // System calls have no intrinsic or floor gas.
         let init_and_floor_gas = InitialAndFloorGas::new(0, 0);
         let mut gas = self.tx_gas(evm, &init_and_floor_gas);
         let checkpoint = evm.ctx().journal_mut().checkpoint();
@@ -731,8 +731,7 @@ where
                 Some(result) => result,
                 None => self.runtime_oog_result(evm, &init_and_floor_gas, &mut gas)?,
             };
-            // System calls have no intrinsic gas; build ResultGas from the frame result.
-            // Mirrors revm-handler 20.0.3 `Handler::run_system_call`.
+            // Build ResultGas from the frame result without the transaction post-execution hooks.
             let gas = exec_result.gas();
             let result_gas = build_result_gas(false, gas, init_and_floor_gas);
             self.execution_result(evm, exec_result, result_gas)
@@ -749,8 +748,7 @@ where
         self.run_transaction(evm, Self::execution)
     }
 
-    /// This function copies the logic from `revm::handler::Handler::validate` to and
-    /// add additional storage gas cost for calldata.
+    /// Accounts for MegaETH's intrinsic gas and resource usage before deducting the caller.
     ///
     /// REX5+ adds a final initial+floor gas validation after all Mega-side dynamic storage gas
     /// has been accounted for. Pre-REX5 specs keep the historical mid-sequence check exactly
@@ -812,7 +810,7 @@ where
             // REX5+: this mid-sequence check is deferred to the final check below, which runs
             // after CREATE/new-account storage gas has also been added so a transaction that
             // cannot fit its final Mega-side intrinsic+storage gas is rejected as a validation
-            // error before pre_execution() debits the sender or bumps the nonce.
+            // error before the caller debit or nonce bump.
             if !is_rex5_enabled && initial_and_floor_gas.initial_regular_gas > ctx.tx().gas_limit()
             {
                 return Err(InvalidTransaction::CallGasCostMoreThanGasLimit {
@@ -860,8 +858,8 @@ where
                     // Reading emptiness through the journal (instead of the raw DB) is
                     // observationally equivalent on every spec, relying on two invariants:
                     // pre-REX6 the journal holds no entries when `validate` runs (each
-                    // transaction's journal is drained at finalize, and access-list warming /
-                    // `deduct_caller` only run in `pre_execution`, after `validate`), so the
+                    // transaction's journal is drained at finalize, and the caller debit and
+                    // access-list warming have yet to run), so the
                     // read observes exactly the DB value; and the cold entry the read inserts
                     // is the call target, which frame init loads for every call transaction
                     // anyway, so the transaction's returned state gains no new account.
