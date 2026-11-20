@@ -114,8 +114,50 @@ jobs:
           version_pattern: toml
           changelog_file: CHANGELOG.md
 
-  publish:
+  # Releases are immutable once published, so the binary is built first, in a
+  # job with no credentials, and attached to the draft at publication.
+  build:
     needs: route
+    if: needs.route.outputs.action == 'publish'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ needs.route.outputs.commit }}
+          submodules: recursive
+          persist-credentials: false
+
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        with:
+          cache: false
+
+      - uses: foundry-rs/foundry-toolchain@b00af27efadbc7b4ca8b82abbd903b17cc874d2a # v1
+
+      - name: Build mega-evme
+        run: cargo build --release --locked -p mega-evme
+
+      - id: version
+        name: Derive the release version
+        env:
+          RELEASE_BRANCH: ${{ needs.route.outputs.release_branch }}
+        run: echo "version=${RELEASE_BRANCH#release-v}" >> "$GITHUB_OUTPUT"
+
+      - uses: megaeth-labs/.github/.github/actions/release-verify-version@main
+        with:
+          command: target/release/mega-evme --version
+          version: ${{ steps.version.outputs.version }}
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-files
+          path: target/release/mega-evme
+          if-no-files-found: error
+
+  publish:
+    needs: [route, build]
     if: needs.route.outputs.action == 'publish'
     # One publish per release branch: the tag guard and the tag push are two
     # steps, so a re-run must queue behind a run in flight, never overlap it.
@@ -141,6 +183,11 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-files
+          path: release-files
+
       - uses: megaeth-labs/.github/.github/actions/release-publish@main
         with:
           token: ${{ steps.release-token.outputs.token }}
@@ -151,3 +198,5 @@ jobs:
           version_file: Cargo.toml
           version_pattern: toml
           changelog_file: CHANGELOG.md
+          asset_files: |
+            release-files/mega-evme
