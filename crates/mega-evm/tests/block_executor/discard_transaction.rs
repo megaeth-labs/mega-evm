@@ -19,20 +19,28 @@ use std::{
 };
 
 use alloy_consensus::{transaction::Recovered, Sealed, Signed, Transaction as _, TxLegacy};
-use alloy_evm::{EvmEnv, EvmFactory, IntoTxEnv};
+use alloy_eips::eip7702::{Authorization, RecoveredAuthority, RecoveredAuthorization};
+use alloy_evm::{block::BlockExecutor, EvmEnv, EvmFactory, IntoTxEnv};
 use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
 use alloy_primitives::{address, Address, Bytes, Signature, TxKind, B256, U256};
 use mega_evm::{
     test_utils::{BytecodeBuilder, ErrorInjectingDatabase, InjectedDbError, MemoryDatabase},
     BlockLimits, LimitUsage, MegaBlockExecutionCtx, MegaBlockExecutor, MegaEvm, MegaEvmFactory,
-    MegaHardforkConfig, MegaSpecId, MegaTransaction, MegaTransactionOutcome, MegaTxEnvelope,
-    TestExternalEnvs, MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS,
+    MegaHardforkConfig, MegaSpecId, MegaTransaction, MegaTransactionNew as _,
+    MegaTransactionOutcome, MegaTxEnvelope, TestExternalEnvs, MEGA_SYSTEM_ADDRESS,
+    ORACLE_CONTRACT_ADDRESS,
 };
 use op_alloy_consensus::TxDeposit;
 use op_revm::constants::BASE_FEE_RECIPIENT;
 use revm::{
-    bytecode::opcode::{BALANCE, CALL, GAS, MSIZE, MSTORE, POP, RETURN, TIMESTAMP},
-    context::{result::ExecutionResult, BlockEnv, ContextSetters, ContextTr},
+    bytecode::opcode::{
+        BALANCE, CALL, GAS, GASPRICE, LOG0, LOG1, MSIZE, MSTORE, POP, RETURN, TIMESTAMP,
+    },
+    context::{
+        result::{EVMError, ExecutionResult},
+        tx::TxEnvBuilder,
+        BlockEnv, ContextSetters, ContextTr,
+    },
     database::State,
     handler::SYSTEM_ADDRESS,
     inspector::NoOpInspector,
@@ -1445,4 +1453,103 @@ fn assert_failed_call_leaves_no_writes(
         U256::from(!entry.finalizes()),
         "{row}: the earlier call's storage write"
     );
+}
+
+#[test]
+fn test_block_deposit_and_system_transaction_gasprice() {
+    let gasprice_logger = BytecodeBuilder::default()
+        .append(GASPRICE)
+        .push_number(0u8)
+        .append(MSTORE)
+        .push_number(32u8)
+        .push_number(0u8)
+        .append(LOG0)
+        .stop()
+        .build();
+
+    for &spec in MegaSpecId::ALL {
+        let mut db = database();
+        db.inner.set_account_code(ORACLE_CONTRACT_ADDRESS, gasprice_logger.clone());
+        db.inner.set_account_balance(MEGA_SYSTEM_ADDRESS, U256::from(SENDER_BALANCE));
+        let mut state = State::builder().with_database(db).build();
+        let mut executor = new_executor(&mut state, spec);
+
+        let deposit = deposit_tx(NEXT_SENDER, ORACLE_CONTRACT_ADDRESS, U256::ZERO, Bytes::new());
+        let system = legacy_tx(MEGA_SYSTEM_ADDRESS, 0, ORACLE_CONTRACT_ADDRESS, Bytes::new());
+        // Before MiniRex behavior activates, the same legacy envelope executes as a regular call.
+        let system_price = if spec.is_enabled(MegaSpecId::MINI_REX) { 0 } else { GAS_PRICE };
+        for (tx, expected_price) in [(&deposit, 0), (&system, system_price)] {
+            executor.execute_transaction(tx).expect("transaction must execute");
+            let receipt = executor.receipts().last().unwrap();
+            assert!(receipt.status(), "{spec:?}: transaction must succeed");
+            let [log] = receipt.logs() else { panic!("{spec:?}: expected one GASPRICE log") };
+            assert_eq!(log.address, ORACLE_CONTRACT_ADDRESS);
+            assert_eq!(
+                log.data.data.as_ref(),
+                &U256::from(expected_price).to_be_bytes::<32>(),
+                "{spec:?}"
+            );
+        }
+    }
+}
+
+/// revm 43 restores the original EIP-7702 delegation after an execution error on a reused journal.
+/// The deployed revm 40 implementation cleared it.
+/// The block executor finalizes on errors, so its next transaction reloads the original code
+/// from the database.
+#[test]
+fn test_reused_evm_restores_delegation_after_execution_error() {
+    let authority = address!("2000000000000000000000000000000000000005");
+    let original_delegate = address!("100000000000000000000000000000000000000e");
+    let delegation = Bytecode::new_eip7702(original_delegate);
+    let mut db = database();
+    db.inner.insert_account_info(
+        authority,
+        AccountInfo {
+            code_hash: delegation.hash_slow(),
+            code: Some(delegation),
+            ..Default::default()
+        },
+    );
+    db.inner.set_account_code(
+        original_delegate,
+        BytecodeBuilder::default()
+            .push_number(1u8)
+            .push_number(0u8)
+            .push_number(0u8)
+            .append(LOG1)
+            .stop()
+            .build(),
+    );
+
+    let mut state = State::builder().with_database(db).build();
+    let mut executor = new_executor(&mut state, MegaSpecId::REX6);
+    let evm = &mut executor.evm;
+
+    let authorization = RecoveredAuthorization::new_unchecked(
+        Authorization { chain_id: U256::from(CHAIN_ID), address: WRITE_THEN_FAIL, nonce: 0 },
+        RecoveredAuthority::Valid(authority),
+    );
+    let mut replacement = MegaTransaction::new(
+        TxEnvBuilder::default()
+            .caller(NEXT_SENDER)
+            .call(authority)
+            .gas_limit(TX_GAS_LIMIT)
+            .authorization_list_recovered(vec![authorization])
+            .build_fill(),
+    );
+    replacement.enveloped_tx = Some(Bytes::new());
+
+    evm.db_mut().database.inner.fail_on_account = Some(FAILING_ACCOUNT);
+    // Only the replacement delegate reads the failing account, so reaching the error proves
+    // the new delegation was applied before execution failed.
+    let error = evm.transact_one(replacement).expect_err("the replacement delegate must fail");
+    assert!(matches!(error, EVMError::Database(_)), "{error:?}");
+
+    let call = next_tx(authority);
+    let result = evm.transact_one((&call).into_tx_env()).expect("the reused EVM must recover");
+    assert!(result.is_success(), "{result:?}");
+    let [log] = result.logs() else { panic!("the original delegate must emit one log") };
+    assert_eq!(log.address, authority);
+    assert_eq!(log.data.topics(), &[B256::with_last_byte(1)]);
 }
