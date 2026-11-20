@@ -627,40 +627,40 @@ reviewer = "RealiCZ (cz)"
 # (test_rex5_sandbox_balance_precheck_ignores_gas_price).
 # ─────────────────────────────────────────────────────────────────────────────
 
-# --- crates/mega-evm/src/evm/execution.rs:1774 ---
+# --- crates/mega-evm/src/evm/execution.rs:1757 ---
 
 [[suppress]]
 kind = "line"
 category = "equivalent"
 file = "crates/mega-evm/src/evm/execution.rs"
-line = 1774
+line = 1757
 column = 1
 mutant = "spec-gate let gas_remaining_before = match (&action, ctx.spec.is_enabled(MegaSpecId::MINI_REX)) { -> let gas_remaining_before = match (&action, ctx.spec.is_enabled(MegaSpecId::EQUIVALENCE)) {"
-justification = "Unobservable in the window: the inspected-return path reads gas into the same local snapshot and passes it to the same `after_frame_run`, which returns before reading it in the alias window (execution.rs:509). Neither the normal nor the intercepted callback can observe the snapshot."
+justification = "Unobservable in the window: the inspected-return path reads gas into the same local snapshot and passes it to the same `after_frame_run`, which returns before reading it in the alias window. Neither the normal nor the intercepted callback can observe the snapshot."
 reviewer = "RealiCZ (cz)"
 
-# --- crates/mega-evm/src/evm/execution.rs:1586 ---
+# --- crates/mega-evm/src/evm/execution.rs:1569 ---
 
 [[suppress]]
 kind = "line"
 category = "equivalent"
 file = "crates/mega-evm/src/evm/execution.rs"
-line = 1586
+line = 1569
 column = 1
 mutant = "spec-gate if self.ctx_ref().spec.is_enabled(MegaSpecId::REX4) { -> if self.ctx_ref().spec.is_enabled(MegaSpecId::REX3) {"
-justification = "Reachable check, unobservable state: this line clears a volatile-access disable on frame return. A disable is created only by `AccessControlInterceptor::handle_disable` (system/intercept.rs:357), whose `ACTIVATION_SPEC` is `MegaSpecId::REX4` (system/intercept.rs:340), and the tx-start reset sets the depth to `None`. At REX3 `disable_depth` is therefore always `None`, so `enable_access_if_returning` has nothing to clear; a normal REX3 transaction cannot build the state this clears. Producing one by calling the public `disable_access` from a callback is outside this proof."
+justification = "Reachable check, unobservable state: this line clears a volatile-access disable on frame return. A disable is created only by `AccessControlInterceptor::handle_disable`, whose interceptor activates at `MegaSpecId::REX4`, and the tx-start reset sets the depth to `None`. At REX3 `disable_depth` is therefore always `None`, so `enable_access_if_returning` has nothing to clear; a normal REX3 transaction cannot build the state this clears. Producing one by calling the public `disable_access` from a callback is outside this proof."
 reviewer = "RealiCZ (cz)"
 
-# --- crates/mega-evm/src/evm/execution.rs:1539 ---
+# --- crates/mega-evm/src/evm/execution.rs:1522 ---
 
 [[suppress]]
 kind = "line"
 category = "equivalent"
 file = "crates/mega-evm/src/evm/execution.rs"
-line = 1539
+line = 1522
 column = 1
 mutant = "spec-gate let gas_remaining_before = match (&action, context.spec.is_enabled(MegaSpecId::MINI_REX)) { -> let gas_remaining_before = match (&action, context.spec.is_enabled(MegaSpecId::EQUIVALENCE)) {"
-justification = "Unobservable in the window: the value recorded here is a local snapshot consumed only by `after_frame_run` (execution.rs:1557). In the alias window that consumer returns before reading it (`!is_enabled(MINI_REX)` at execution.rs:509), and `process_next_action` never receives the snapshot."
+justification = "Unobservable in the window: the value recorded here is a local snapshot consumed only by `after_frame_run`. In the alias window that consumer returns before reading it (the `!is_enabled(MINI_REX)` guard), and `process_next_action` never receives the snapshot."
 reviewer = "RealiCZ (cz)"
 
 # --- crates/mega-evm/src/evm/host.rs:639 ---
