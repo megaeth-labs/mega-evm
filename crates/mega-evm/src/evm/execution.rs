@@ -748,7 +748,7 @@ where
         self.run_transaction(evm, Self::execution)
     }
 
-    /// Accounts for MegaETH's intrinsic gas and resource usage before deducting the caller.
+    /// Accounts for `MegaETH`'s intrinsic gas and resource usage before deducting the caller.
     ///
     /// REX5+ adds a final initial+floor gas validation after all Mega-side dynamic storage gas
     /// has been accounted for. Pre-REX5 specs keep the historical mid-sequence check exactly
@@ -978,7 +978,7 @@ where
         Ok(initial_and_floor_gas)
     }
 
-    /// All gas remaining after MegaETH's intrinsic charges belongs to the first frame.
+    /// All gas remaining after `MegaETH`'s intrinsic charges belongs to the first frame.
     fn tx_gas(&self, evm: &mut Self::Evm, init_and_floor_gas: &InitialAndFloorGas) -> GasTracker {
         let gas_limit = evm.ctx().tx().gas_limit();
         let remaining = gas_limit.saturating_sub(init_and_floor_gas.initial_regular_gas);
