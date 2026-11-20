@@ -9,23 +9,21 @@ Similar to go-ethereum's `evm` command, `mega-evme` provides full control over t
 
 ## Installation
 
-```bash
-cargo build --release -p mega-evme
-# Binary: target/release/mega-evme
-```
+Building requires Foundry's `forge`.
 
-### Prebuilt binary
-
-Every release also attaches a prebuilt `mega-evme` (Linux x86_64, built on `ubuntu-24.04`) and a `SHA256SUMS` file to its [GitHub Release](https://github.com/megaeth-labs/mega-evm/releases).
-Download both, verify the checksum, and make the binary executable:
+From GitHub:
 
 ```bash
-sha256sum --check --ignore-missing SHA256SUMS
-chmod +x mega-evme
-./mega-evme --version
+cargo install --git https://github.com/megaeth-labs/mega-evm --locked mega-evme
 ```
 
-The same binary is published to the MegaETH artifact registry for internal use.
+From a Git checkout:
+
+```bash
+git clone --recursive https://github.com/megaeth-labs/mega-evm
+cd mega-evm
+cargo install --locked --path bin/mega-evme
+```
 
 ## Commands
 
