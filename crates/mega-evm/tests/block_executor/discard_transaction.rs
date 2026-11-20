@@ -35,12 +35,12 @@ use alloy_primitives::{address, hex, Address, Bytes, Signature, TxKind, B256, U2
 use mega_evm::{
     test_utils::{BytecodeBuilder, ErrorInjectingDatabase, InjectedDbError, MemoryDatabase},
     BlockLimits, LimitUsage, MegaBlockExecutionCtx, MegaBlockExecutor, MegaEvm, MegaEvmFactory,
-    MegaHardforkConfig, MegaSpecId, MegaTransaction, MegaTransactionNew as _,
+    MegaHaltReason, MegaHardforkConfig, MegaSpecId, MegaTransaction, MegaTransactionNew as _,
     MegaTransactionOutcome, MegaTxEnvelope, TestExternalEnvs, MEGA_SYSTEM_ADDRESS,
     ORACLE_CONTRACT_ADDRESS,
 };
 use op_alloy_consensus::TxDeposit;
-use op_revm::constants::BASE_FEE_RECIPIENT;
+use op_revm::{constants::BASE_FEE_RECIPIENT, OpHaltReason};
 use revm::{
     bytecode::opcode::{
         BALANCE, CALL, GAS, GASPRICE, LOG0, LOG1, MSIZE, MSTORE, POP, RETURN, TIMESTAMP,
@@ -51,6 +51,7 @@ use revm::{
         BlockEnv, ContextSetters, ContextTr,
     },
     database::State,
+    database_interface::bal::EvmDatabaseError,
     handler::SYSTEM_ADDRESS,
     inspector::NoOpInspector,
     primitives::{StorageKey, StorageValue},
@@ -1596,4 +1597,59 @@ fn test_block_rejects_post_exec_transaction_without_state_change() {
         assert_eq!(account.nonce, 0, "{spec:?}: nonce changed on rejection");
         assert_eq!(account.balance, balance, "{spec:?}: balance changed on rejection");
     }
+}
+
+#[test]
+fn test_invalid_legacy_transaction_discards_journal_once() {
+    let mut state = State::builder().with_database(database()).build();
+    let mut executor = new_executor(&mut state, MegaSpecId::REX6);
+    let evm = &mut executor.evm;
+    let call = next_tx(RETURN_MSIZE);
+    let mut invalid: MegaTransaction = (&call).into_tx_env();
+    invalid.base.gas_limit = 0;
+
+    let id = evm.ctx.journal_ref().transaction_id.get();
+    let error = evm.transact_one(invalid).expect_err("the intrinsic gas check must fail");
+
+    assert!(matches!(error, EVMError::Transaction(_)), "{error:?}");
+    // The retained journal advances once per attempt, including a validation error.
+    assert_eq!(evm.ctx.journal_ref().transaction_id.get(), id + 1);
+    assert!(evm.transact_one((&call).into_tx_env()).unwrap().is_success());
+}
+
+#[test]
+fn test_failed_deposit_recovery_advances_journal_once_per_attempt() {
+    let mut state = State::builder().with_database(database()).build();
+    let mut executor = new_executor(&mut state, MegaSpecId::REX6);
+    let evm = &mut executor.evm;
+    let deposit = deposit_tx(NEXT_SENDER, RETURN_MSIZE, U256::ZERO, Bytes::new());
+    let mut invalid: MegaTransaction = (&deposit).into_tx_env();
+    invalid.base.gas_limit = 0;
+
+    // Gas validation rejects the deposit before the caller is loaded. The recovery reload
+    // is therefore the first read of the sender and surfaces the injected database error.
+    evm.db_mut().database.inner.fail_on_account = Some(NEXT_SENDER);
+    let id = evm.ctx.journal_ref().transaction_id.get();
+    let error = evm.transact_one(invalid.clone()).expect_err("the recovery read must fail");
+    let EVMError::Database(EvmDatabaseError::Database(InjectedDbError(message))) = error else {
+        panic!("expected the injected sender read error, got {error:?}");
+    };
+    assert_eq!(message, format!("injected basic() error for {NEXT_SENDER}"));
+    assert_eq!(evm.ctx.journal_ref().transaction_id.get(), id + 1, "discard after failed recovery");
+
+    evm.db_mut().database.inner.fail_on_account = None;
+    let recovered = evm.transact_one(invalid).expect("retry must produce a failed-deposit halt");
+    assert!(matches!(
+        recovered,
+        ExecutionResult::Halt { reason: MegaHaltReason::Base(OpHaltReason::FailedDeposit), .. }
+    ));
+    assert_eq!(
+        evm.ctx.journal_ref().transaction_id.get(),
+        id + 2,
+        "commit after successful recovery"
+    );
+
+    // The errored attempt consumed no nonce. Only the recovered deposit bumped it.
+    let call = legacy_tx(NEXT_SENDER, 1, RETURN_MSIZE, Bytes::new());
+    assert!(evm.transact_one((&call).into_tx_env()).unwrap().is_success());
 }
