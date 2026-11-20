@@ -45,9 +45,9 @@ This is the single most important correctness concern in mega-evm.
   Follow the existing pattern: `#[cfg(not(feature = "std"))] use alloc as std;`.
 - New workspace dependencies should use `default-features = false` — features are opted-in explicitly.
 - **Release-blocking dependencies.**
-  A crate that gets published must not depend on an unpublished crate.
-  `cargo publish -p <crate> --locked --dry-run` has to resolve at release time.
-  Flag a new dependency that would break the next release's resolution.
+  crates.io publishing is paused while the OP crates are git-pinned (see the root `Cargo.toml`).
+  When it resumes, a crate that gets published must not depend on an unpublished crate, and `cargo publish -p <crate> --locked --dry-run` has to resolve at release time.
+  Until then, flag a new git dependency outside the pinned OP set: each one is another crate that must reach a registry before publishing can resume.
 
 ## Tests
 

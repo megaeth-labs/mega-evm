@@ -15,10 +15,12 @@ A specialized Ethereum Virtual Machine (EVM) implementation tailored for MegaETH
 
 ## Installation
 
-Install the CLI tool from crates.io:
+crates.io publishing is paused, and the last release there is 1.7.2.
+Install the CLI tool from a release tag instead, taking the latest tag from [Releases](https://github.com/megaeth-labs/mega-evm/releases).
+This builds from the repository, so it needs Foundry (`forge`) on `PATH`.
 
 ```bash
-cargo install mega-evme --locked
+cargo install --git https://github.com/megaeth-labs/mega-evm --tag vX.Y.Z --locked mega-evme
 ```
 
 The `--locked` flag ensures the exact tested dependency versions are used.

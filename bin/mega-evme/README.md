@@ -27,10 +27,12 @@ A command-line tool for executing and debugging EVM bytecode, similar to go-ethe
 
 ## Installation
 
-Install from crates.io:
+crates.io publishing is paused, and the last release there is 1.7.2.
+Install it from a release tag instead, taking the latest tag from [Releases](https://github.com/megaeth-labs/mega-evm/releases).
+This builds from the repository, so it needs Foundry (`forge`) on `PATH`.
 
 ```bash
-cargo install mega-evme --locked
+cargo install --git https://github.com/megaeth-labs/mega-evm --tag vX.Y.Z --locked mega-evme
 ```
 
 Or build from source:

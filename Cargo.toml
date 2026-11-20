@@ -135,7 +135,7 @@ mega-system-contracts = { path = "./crates/system-contracts", version = "1.7.3",
 # since taking these crates over (its `op-revm` still carries 20.0.0, which on crates.io targets
 # revm 38 — so a `version` alongside `git` would resolve to an incompatible crate). GitHub tags
 # are the release channel until the monorepo's crate versions move past the handed-over ones;
-# the publish workflow's pre-flight check aborts a crates.io release before any upload.
+# until then on-release.yml publishes no crates, and crates.io stays at 1.7.2.
 op-revm = { git = "https://github.com/ethereum-optimism/optimism", rev = "f67d87cd5c9992b62d215c043917b94e3f019629", default-features = false }
 revm = { version = "=40.0.3", default-features = false }
 revm-inspectors = { version = "=0.40.1", default-features = false }
