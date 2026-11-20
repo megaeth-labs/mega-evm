@@ -18,11 +18,20 @@ use std::{
     panic::{catch_unwind, AssertUnwindSafe},
 };
 
-use alloy_consensus::{transaction::Recovered, Sealed, Signed, Transaction as _, TxLegacy};
-use alloy_eips::eip7702::{Authorization, RecoveredAuthority, RecoveredAuthorization};
-use alloy_evm::{block::BlockExecutor, EvmEnv, EvmFactory, IntoTxEnv};
+use alloy_consensus::{
+    transaction::{Recovered, SignerRecoverable},
+    Sealed, Signed, Transaction as _, TxLegacy,
+};
+use alloy_eips::{
+    eip7702::{Authorization, RecoveredAuthority, RecoveredAuthorization},
+    Decodable2718,
+};
+use alloy_evm::{
+    block::{BlockExecutor, BlockValidationError},
+    EvmEnv, EvmFactory, IntoTxEnv,
+};
 use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
-use alloy_primitives::{address, Address, Bytes, Signature, TxKind, B256, U256};
+use alloy_primitives::{address, hex, Address, Bytes, Signature, TxKind, B256, U256};
 use mega_evm::{
     test_utils::{BytecodeBuilder, ErrorInjectingDatabase, InjectedDbError, MemoryDatabase},
     BlockLimits, LimitUsage, MegaBlockExecutionCtx, MegaBlockExecutor, MegaEvm, MegaEvmFactory,
@@ -1552,4 +1561,39 @@ fn test_reused_evm_restores_delegation_after_execution_error() {
     let [log] = result.logs() else { panic!("the original delegate must emit one log") };
     assert_eq!(log.address, authority);
     assert_eq!(log.data.topics(), &[B256::with_last_byte(1)]);
+}
+
+/// Block execution rejects a post-execution envelope and leaves the zero address unchanged.
+/// The deployed engine accepted such a transaction once per chain when the zero address was
+/// funded and its nonce was zero.
+#[test]
+fn test_block_rejects_post_exec_transaction_without_state_change() {
+    let raw = hex!("7dc3012ac0");
+    let envelope = MegaTxEnvelope::decode_2718(&mut raw.as_slice()).expect("decode PostExec");
+    let signer = envelope.recover_signer().expect("recover PostExec sender");
+    assert_eq!(signer, Address::ZERO);
+    let tx = Recovered::new_unchecked(envelope, signer);
+
+    let balance = U256::from(SENDER_BALANCE);
+    for &spec in MegaSpecId::ALL {
+        let mut db = database();
+        db.inner.set_account_balance(signer, balance);
+        db.inner.set_account_nonce(signer, 0);
+        let mut state = State::builder().with_database(db).build();
+        let mut executor = new_executor(&mut state, spec);
+
+        let error = executor
+            .execute_transaction(&tx)
+            .expect_err("the post-execution envelope must fail block execution");
+        assert!(
+            matches!(error.as_validation(), Some(BlockValidationError::InvalidTx { .. })),
+            "{spec:?}: expected invalid transaction, got {error:?}"
+        );
+        assert!(executor.receipts().is_empty(), "{spec:?}: unexpected receipt");
+        drop(executor);
+
+        let account = state.basic(signer).unwrap().expect("funded zero address");
+        assert_eq!(account.nonce, 0, "{spec:?}: nonce changed on rejection");
+        assert_eq!(account.balance, balance, "{spec:?}: balance changed on rejection");
+    }
 }

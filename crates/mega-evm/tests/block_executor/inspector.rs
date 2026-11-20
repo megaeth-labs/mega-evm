@@ -18,7 +18,7 @@ use mega_evm::{
     TestExternalEnvs,
 };
 use revm::{
-    bytecode::opcode::{ADD, CALL, GAS, JUMPDEST, LOG1, MSTORE, PUSH0, SLOAD, SSTORE},
+    bytecode::opcode::{ADD, ADDRESS, CALL, GAS, JUMPDEST, LOG1, MSTORE, PUSH0, SLOAD, SSTORE},
     context::{result::ExecutionResult, BlockEnv, CfgEnv, ContextTr, JournalTr},
     database::State,
     interpreter::{
@@ -435,6 +435,7 @@ fn assert_call_trace_for_limited_log(
     expected_gas: u64,
     expected_log_count: usize,
     expected_data_len: usize,
+    expected_last_topic: B256,
 ) {
     let mut db = MemoryDatabase::default()
         .account_code(CONTRACT, bytecode)
@@ -477,7 +478,7 @@ fn assert_call_trace_for_limited_log(
     assert_eq!(trace.logs.len(), expected_log_count);
     let log = trace.logs.last().unwrap();
     assert_eq!(log.address, Some(CONTRACT));
-    assert_eq!(log.topics.as_deref(), Some(&[B256::ZERO][..]));
+    assert_eq!(log.topics.as_deref(), Some(&[expected_last_topic][..]));
     let data = log.data.as_ref().expect("trace log data");
     assert_eq!(data.len(), expected_data_len);
     assert!(data.iter().all(|byte| *byte == 0));
@@ -499,21 +500,24 @@ fn test_call_trace_keeps_log_that_exceeds_compute_gas_limit() {
         code = code.append(JUMPDEST);
     }
     let code = code.append(PUSH0).append(PUSH0).append(PUSH0).append(LOG1).stop().build();
-    assert_call_trace_for_limited_log(code, LimitKind::ComputeGas, 200_043_152, 1, 0);
+    assert_call_trace_for_limited_log(code, LimitKind::ComputeGas, 200_043_152, 1, 0, B256::ZERO);
 }
 
 #[test]
 fn test_call_trace_keeps_log_that_exceeds_data_size_limit() {
     // The 400th log pushes the transaction past the Rex6 data limit.
     let mut code = BytecodeBuilder::default();
-    for _ in 0..400 {
+    for _ in 0..399 {
         code = code.append(PUSH0).push_number(32_768u16).append(PUSH0).append(LOG1);
     }
+    // Distinguish the halting log from the earlier logs without changing gas.
+    let code = code.append(ADDRESS).push_number(32_768u16).append(PUSH0).append(LOG1);
     assert_call_trace_for_limited_log(
         code.stop().build(),
         LimitKind::DataSize,
         1_155_301_520,
         400,
         32_768,
+        CONTRACT.into_word(),
     );
 }
