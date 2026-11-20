@@ -13,10 +13,9 @@ name: On Release
 # no crates are published. To resume once those crates are on crates.io,
 # restore the `crates` job from PR #424.
 #
-# Release assets are paused as well. Releases here are immutable once
-# published, and this workflow runs only after publishing, so attaching the
-# binary to the Release fails (HTTP 422). The binary goes to the registry
-# only until the release pipeline attaches assets before it publishes.
+# `release-settle.yml` builds mega-evme and `release-publish` attaches it with
+# SHA256SUMS (`asset_files`) before the Release is published, because Releases
+# are immutable once published; this workflow keeps the registry upload.
 #
 # Rehearse on a tag ref (the job must run on a tag ref):
 #   gh workflow run on-release.yml --ref vX.Y.Z -f dry_run=true
