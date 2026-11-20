@@ -175,11 +175,9 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, NoOpInspector, ExtEnvs
     ///
     /// A new `Evm` instance configured with the provided context and inspector.
     pub fn new(mut context: MegaContext<DB, ExtEnvs>) -> Self {
-        // Settle EIP-8037 here as well as before each transaction, so the snapshot taken below and
-        // everything read back through it describe the configuration transactions will actually
-        // run with. See `context::force_amsterdam_eip8037_off` for why the flag is not a caller's
-        // to set.
-        self::context::force_amsterdam_eip8037_off(&mut context.inner.cfg);
+        // Keep the public config snapshot consistent with the Amsterdam gas flags pinned at
+        // transaction entry.
+        self::context::force_amsterdam_gas_flags_off(&mut context.inner.cfg);
 
         let spec = context.mega_spec();
         let mega_cfg = context.cfg().clone().into_megaeth_cfg(spec);

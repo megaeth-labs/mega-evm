@@ -165,6 +165,7 @@ fn intrinsic_compute_gas(tx: &MegaTransaction) -> u64 {
     mega_evm::revm::interpreter::gas::calculate_initial_tx_gas_for_tx(
         tx,
         MegaSpecId::REX5.into_eth_spec(),
+        None,
     )
     .initial_regular_gas
 }

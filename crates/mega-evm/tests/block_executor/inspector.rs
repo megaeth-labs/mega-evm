@@ -334,6 +334,7 @@ impl<CTX: ContextTr, INTR: InterpreterTypes> Inspector<CTX, INTR> for SkipCreate
                 gas: Gas::new(inputs.gas_limit()),
             },
             address: None,
+            charged_create_state_gas: false,
         })
     }
 

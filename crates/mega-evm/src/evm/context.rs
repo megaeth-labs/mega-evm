@@ -407,8 +407,8 @@ impl<DB: Database, ExtEnvTypes: ExternalEnvTypes> MegaContext<DB, ExtEnvTypes> {
     ///
     /// Skipping that pin does not skip `MegaETH`'s own consensus pins:
     ///
-    /// - EIP-8037 (Amsterdam state gas) is forced off before every transaction runs, wherever the
-    ///   configuration came from — see [`force_amsterdam_eip8037_off`].
+    /// - EIP-8037 and EIP-2780 are forced off before every transaction runs, wherever the
+    ///   configuration came from — see [`force_amsterdam_gas_flags_off`].
     /// - Under `MINI_REX` and later, the contract size and initcode size limits fill in when the
     ///   configuration leaves them unset.
     ///
@@ -738,7 +738,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
     ///
     /// DB-dependent pre-frame usage may still be recorded later during pre-execution.
     pub(crate) fn on_new_tx(&mut self) {
-        force_amsterdam_eip8037_off(&mut self.inner.cfg);
+        force_amsterdam_gas_flags_off(&mut self.inner.cfg);
 
         self.reset_volatile_data_access();
 
@@ -853,10 +853,9 @@ enum CfgIntent {
     Declared,
 }
 
-/// Forces EIP-8037 (Amsterdam state gas) off on the configuration a transaction is about to run
-/// with, whatever a caller put there.
+/// Forces the Amsterdam state gas and runtime gas flags off before transaction execution.
 ///
-/// `CfgEnv::enable_amsterdam_eip8037` is a free-standing switch in revm 40: the sites that split a
+/// `CfgEnv::enable_amsterdam_eip8037` is a free-standing switch in revm: the sites that split a
 /// charge into regular gas plus state gas — `SSTORE` on a fresh slot, the `CREATE` account and
 /// code-deposit charge, the new-account cost of a value-bearing `CALL`, the EIP-7702 authority
 /// refund, and the transaction's initial gas / reservoir split — read the flag alone and do not
@@ -876,6 +875,9 @@ enum CfgIntent {
 /// transaction. Turning the split on would charge those operations a second time, and the second
 /// charge would land in a reservoir none of the four resource dimensions reads.
 ///
+/// EIP-2780 moves some intrinsic costs into a state-dependent runtime gas phase. Its flag can
+/// likewise enable that phase independently of the configured spec.
+///
 /// Called from [`MegaContext::on_new_tx`], which every execution path passes through — the
 /// transaction path via `MegaHandler::before_run`, system calls via `Handler::run_system_call` —
 /// and which runs before anything reads the flag. Forcing the value at the point of use rather
@@ -884,8 +886,9 @@ enum CfgIntent {
 /// moves it across the spec relabel, `set_spec_and_mainnet_gas_params` ORs it back on for an
 /// Amsterdam-or-later spec), so a per-entry-point pin has to be re-derived every time one of them
 /// is rewired or a new path appears, and covers nothing a caller does to a live context.
-pub(crate) fn force_amsterdam_eip8037_off<SPEC>(cfg: &mut CfgEnv<SPEC>) {
+pub(crate) fn force_amsterdam_gas_flags_off<SPEC>(cfg: &mut CfgEnv<SPEC>) {
     cfg.enable_amsterdam_eip8037 = false;
+    cfg.enable_amsterdam_eip2780 = false;
 }
 
 /// A convenient trait to convert a `CfgEnv<OpSpecId>` into a `CfgEnv<SpecId>`.
@@ -918,7 +921,7 @@ impl IntoOpCfgEnv for CfgEnv<MegaSpecId> {
     /// This method relabels the specification type and carries every other field of the
     /// caller's configuration — the gas schedule included — into the `OpStack` shape. It is a
     /// relabel and nothing more: the fields `MegaETH` does not let a caller choose are settled
-    /// where they are read, not here (EIP-8037 by [`force_amsterdam_eip8037_off`]).
+    /// where they are read, not here (EIP-8037 and EIP-2780 by [`force_amsterdam_gas_flags_off`]).
     ///
     /// # Returns
     ///
@@ -947,7 +950,7 @@ impl IntoMegaethCfgEnv for CfgEnv<OpSpecId> {
     /// given `spec` and carries every other field — the gas schedule included — unchanged, so a
     /// configuration handed to the EVM reads back as the caller wrote it. Reading back a
     /// configuration the EVM has run at least one transaction with also reads back EIP-8037 off,
-    /// because [`force_amsterdam_eip8037_off`] settles it on the context itself.
+    /// because [`force_amsterdam_gas_flags_off`] settles it on the context itself.
     ///
     /// # Arguments
     ///
@@ -1008,7 +1011,7 @@ mod tests {
         cfg.disable_base_fee = true;
         cfg.enable_amsterdam_eip8037 = true;
         cfg.amsterdam_eip7708_disabled = true;
-        cfg.amsterdam_eip7708_delayed_burn_disabled = true;
+        cfg.amsterdam_eip8246_delayed_clear_disabled = true;
         cfg
     }
 
@@ -1031,7 +1034,7 @@ mod tests {
             "a relabel carries every field, this one included"
         );
         assert!(op_cfg.amsterdam_eip7708_disabled);
-        assert!(op_cfg.amsterdam_eip7708_delayed_burn_disabled);
+        assert!(op_cfg.amsterdam_eip8246_delayed_clear_disabled);
 
         // Whole-struct equality on the round trip: with every input field off its default, a
         // field dropped on either leg reverts to a default and trips this assert.

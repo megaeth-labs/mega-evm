@@ -13,6 +13,7 @@ use op_revm::{
 };
 use revm::{
     context::{
+        journaled_state::JournalCheckpoint,
         result::{ExecutionResult, FromStringError, InvalidTransaction, ResultGas},
         transaction::{AccessListItemTr, AuthorizationTr, TransactionType},
         Block, Cfg, ContextError, ContextTr, FrameStack, JournalTr, LocalContextTr, Transaction,
@@ -22,7 +23,7 @@ use revm::{
         execution::create_init_frame,
         instructions::InstructionProvider,
         post_execution::{build_result_gas, output as post_execution_output},
-        pre_execution::validate_account_nonce_and_code,
+        pre_execution::{validate_account_nonce_and_code, PreExecutionOutput},
         EthFrame, EvmTr, EvmTrError, FrameInitOrResult, FrameResult, FrameTr, Handler,
         ItemOrResult,
     },
@@ -35,7 +36,8 @@ use revm::{
         interpreter::EthInterpreter,
         interpreter_action::FrameInit,
         CallInput, CallInputs, CallOutcome, CallScheme, CallValue, CreateOutcome, FrameInput, Gas,
-        InitialAndFloorGas, InstructionResult, InterpreterAction, InterpreterResult, SharedMemory,
+        GasTracker, InitialAndFloorGas, InstructionResult, InterpreterAction, InterpreterResult,
+        SharedMemory,
     },
     primitives::CALL_STACK_LIMIT,
     Inspector, Journal,
@@ -156,24 +158,55 @@ where
         Ok(())
     }
 
-    /// The hook to be called in `revm::handler::Handler::execution` and
-    /// `revm::inspector::InspectorHandler::inspect_execution` to check if the initial gas exceeds
-    /// the tx gas limit, if so, we halt with out of gas.
-    #[inline]
+    /// Preserves the historical pre-frame halt when Mega's intrinsic storage gas exceeds
+    /// the transaction gas limit. Pre-execution writes have already been applied.
     fn before_execution(
         &self,
         evm: &mut EVM,
         init_and_floor_gas: &InitialAndFloorGas,
-    ) -> Result<Option<FrameResult>, ERROR> {
-        // Check if the initial gas exceeds the tx gas limit, if so, we halt with out of gas
-        let ctx = evm.ctx();
-        let tx = ctx.tx();
-        if tx.gas_limit() < init_and_floor_gas.initial_regular_gas {
-            // If not sufficient gas, we halt with out of gas
-            let oog_frame_result = gen_oog_frame_result(tx.kind(), tx.gas_limit());
-            return Ok(Some(oog_frame_result));
+    ) -> Option<FrameResult> {
+        let tx = evm.ctx_ref().tx();
+        (tx.gas_limit() < init_and_floor_gas.initial_regular_gas)
+            .then(|| gen_oog_frame_result(tx.kind(), tx.gas_limit()))
+    }
+
+    fn run_transaction(
+        &mut self,
+        evm: &mut EVM,
+        execute: impl FnOnce(
+            &mut Self,
+            &mut EVM,
+            JournalCheckpoint,
+            &mut GasTracker,
+        ) -> Result<Option<FrameResult>, ERROR>,
+    ) -> Result<ExecutionResult<MegaHaltReason>, ERROR>
+    where
+        EVM: EvmTr<Frame = FRAME>,
+        FRAME: FrameTr<FrameResult = FrameResult, FrameInit = FrameInit>,
+        Self: Handler<Evm = EVM, Error = ERROR, HaltReason = MegaHaltReason>,
+    {
+        self.before_run(evm)?;
+        let init_and_floor_gas = self.validate(evm)?;
+        let mut gas = self.tx_gas(evm, &init_and_floor_gas);
+        let mut refund = 0;
+        let mut frame_result = None;
+
+        if let Some(pre_execution) = self.pre_execution(evm, &mut gas)? {
+            refund = pre_execution.eip7702_refund as i64;
+            frame_result = if let Some(result) = self.before_execution(evm, &init_and_floor_gas) {
+                evm.ctx().journal_mut().checkpoint_commit();
+                Some(result)
+            } else {
+                execute(self, evm, pre_execution.checkpoint, &mut gas)?
+            };
         }
-        Ok(None)
+
+        let mut frame_result = match frame_result {
+            Some(result) => result,
+            None => self.runtime_oog_result(evm, &init_and_floor_gas, &mut gas)?,
+        };
+        let result_gas = self.post_execution(evm, &mut frame_result, init_and_floor_gas, refund)?;
+        self.execution_result(evm, frame_result, result_gas)
     }
 }
 
@@ -588,7 +621,7 @@ where
                 init_and_floor_gas: &mut InitialAndFloorGas,
             ) -> Result<(), Self::Error>;
             fn reimburse_caller(&self, evm: &mut Self::Evm, exec_result: &mut <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult) -> Result<(), Self::Error>;
-            fn refund(&self, evm: &mut Self::Evm, exec_result: &mut <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult, eip7702_refund: i64);
+            fn refund(&self, evm: &mut Self::Evm, exec_result: &mut <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult, eip7702_refund: i64) -> Result<(), Self::Error>;
         }
     }
 
@@ -627,10 +660,10 @@ where
     fn pre_execution(
         &self,
         evm: &mut Self::Evm,
-        init_and_floor_gas: &mut InitialAndFloorGas,
-    ) -> Result<u64, Self::Error> {
-        self.validate_against_state_and_deduct_caller(evm, init_and_floor_gas)?;
+        gas: &mut GasTracker,
+    ) -> Result<Option<PreExecutionOutput>, Self::Error> {
         self.load_accounts(evm)?;
+        let checkpoint = evm.ctx().journal_mut().checkpoint();
         // EIP-7702 authority state-growth handling, split by spec era. Only type-4 txs reach
         // either branch, and no exempt (system-originated) tx is type-4 here — system txs are
         // legacy-typed pre-promotion / deposit-typed post-promotion, and a type-4 system caller is
@@ -652,12 +685,12 @@ where
                 // pre-frame dimension (`DataSize`/`KVUpdate`/`ComputeGas`/`StateGrowth`) that could
                 // trigger that halt — including compute overflows and any dimension added later —
                 // with no risk of the check and the halt disagreeing. (It is false for both
-                // `WithinLimit` and `Exempt`, matching the halt path.) `Ok(0)` forgoes the
+                // `WithinLimit` and `Exempt`, matching the halt path.) A zero refund forgoes the
                 // existing-authority EIP-7702 refund (`post_execution::refund` records it
                 // unconditionally) — the intended all-or-nothing consequence of skipping the whole
                 // list (see `test_rex6_authority_state_growth_overflow_forgoes_refund`).
                 if evm.ctx().additional_limit.borrow().limit_exceeded() {
-                    return Ok(0);
+                    return Ok(Some(PreExecutionOutput { eip7702_refund: 0, checkpoint }));
                 }
             } else if evm.ctx().spec.is_enabled(MegaSpecId::REX5) {
                 // REX5 runs the authority state-growth scan here in pre-execution; REX6 folds it
@@ -666,7 +699,11 @@ where
             }
         }
 
-        self.apply_eip7702_auth_list(evm, init_and_floor_gas)
+        let Some(eip7702_refund) = self.apply_eip7702_auth_list(evm, gas)? else {
+            evm.ctx().journal_mut().checkpoint_revert(checkpoint);
+            return Ok(None);
+        };
+        Ok(Some(PreExecutionOutput { eip7702_refund, checkpoint }))
     }
 
     fn run_system_call(
@@ -686,8 +723,14 @@ where
 
         // dummy values that are not used.
         let init_and_floor_gas = InitialAndFloorGas::new(0, 0);
+        let mut gas = self.tx_gas(evm, &init_and_floor_gas);
+        let checkpoint = evm.ctx().journal_mut().checkpoint();
         // call execution then output (no post_execution).
-        match self.execution(evm, &init_and_floor_gas).and_then(|exec_result| {
+        match self.execution(evm, checkpoint, &mut gas).and_then(|exec_result| {
+            let exec_result = match exec_result {
+                Some(result) => result,
+                None => self.runtime_oog_result(evm, &init_and_floor_gas, &mut gas)?,
+            };
             // System calls have no intrinsic gas; build ResultGas from the frame result.
             // Mirrors revm-handler 20.0.3 `Handler::run_system_call`.
             let gas = exec_result.gas();
@@ -703,16 +746,7 @@ where
         &mut self,
         evm: &mut Self::Evm,
     ) -> Result<ExecutionResult<Self::HaltReason>, Self::Error> {
-        self.before_run(evm)?;
-
-        let mut init_and_floor_gas = self.validate(evm)?;
-        let eip7702_refund = self.pre_execution(evm, &mut init_and_floor_gas)? as i64;
-        let mut exec_result = self.execution(evm, &init_and_floor_gas)?;
-        let result_gas =
-            self.post_execution(evm, &mut exec_result, init_and_floor_gas, eip7702_refund)?;
-
-        // Prepare the output
-        self.execution_result(evm, exec_result, result_gas)
+        self.run_transaction(evm, Self::execution)
     }
 
     /// This function copies the logic from `revm::handler::Handler::validate` to and
@@ -942,7 +976,15 @@ where
             }
         }
 
+        self.validate_against_state_and_deduct_caller(evm, &mut initial_and_floor_gas)?;
         Ok(initial_and_floor_gas)
+    }
+
+    /// All gas remaining after MegaETH's intrinsic charges belongs to the first frame.
+    fn tx_gas(&self, evm: &mut Self::Evm, init_and_floor_gas: &InitialAndFloorGas) -> GasTracker {
+        let gas_limit = evm.ctx().tx().gas_limit();
+        let remaining = gas_limit.saturating_sub(init_and_floor_gas.initial_regular_gas);
+        GasTracker::new(gas_limit, remaining, 0)
     }
 
     /// Builds the first frame of a call transaction without reading its target.
@@ -957,9 +999,8 @@ where
     fn first_frame_input(
         &mut self,
         evm: &mut Self::Evm,
-        gas_limit: u64,
-        reservoir: u64,
-    ) -> Result<FrameInit, Self::Error> {
+        gas: &mut GasTracker,
+    ) -> Result<Option<FrameInit>, Self::Error> {
         let ctx = evm.ctx_mut();
         let mut memory = SharedMemory::new_with_buffer(ctx.local().shared_memory_buffer().clone());
         memory.set_memory_limit(ctx.cfg().memory_limit());
@@ -970,7 +1011,7 @@ where
                 let tx = ctx.tx();
                 FrameInput::Call(Box::new(CallInputs {
                     input: CallInput::Bytes(tx.input().clone()),
-                    gas_limit,
+                    gas_limit: gas.remaining(),
                     target_address,
                     bytecode_address: target_address,
                     known_bytecode: Default::default(),
@@ -979,41 +1020,20 @@ where
                     scheme: CallScheme::Call,
                     is_static: false,
                     return_memory_offset: 0..0,
-                    reservoir,
+                    reservoir: gas.reservoir(),
                     charged_new_account_state_gas: false,
                 }))
             }
             TxKind::Create => {
                 ctx.first_frame_code_pending = false;
-                create_init_frame(ctx, gas_limit, reservoir)?
+                let Some(frame_input) = create_init_frame(ctx, gas)? else {
+                    return Ok(None);
+                };
+                frame_input
             }
         };
 
-        Ok(FrameInit { depth: 0, memory, frame_input })
-    }
-
-    /// This function copies the logic from `revm::handler::Handler::execution` to and
-    /// add new account storage gas
-    #[inline]
-    fn execution(
-        &mut self,
-        evm: &mut Self::Evm,
-        init_and_floor_gas: &InitialAndFloorGas,
-    ) -> Result<FrameResult, Self::Error> {
-        if let Some(oog_frame_result) = self.before_execution(evm, init_and_floor_gas)? {
-            return Ok(oog_frame_result);
-        }
-
-        let gas_limit = evm.ctx().tx().gas_limit() - init_and_floor_gas.initial_regular_gas;
-        // Create first frame action
-        let first_frame_input = self.first_frame_input(evm, gas_limit, 0)?;
-
-        // Run execution loop
-        let mut frame_result = self.run_exec_loop(evm, first_frame_input)?;
-
-        // Handle last frame result
-        self.last_frame_result(evm, 0, &mut frame_result)?;
-        Ok(frame_result)
+        Ok(Some(FrameInit { depth: 0, memory, frame_input }))
     }
 
     fn reward_beneficiary(
@@ -1062,8 +1082,8 @@ where
     fn last_frame_result(
         &mut self,
         evm: &mut Self::Evm,
-        original_reservoir: u64,
         frame_result: &mut <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult,
+        gas: &mut GasTracker,
     ) -> Result<(), Self::Error> {
         let is_mini_rex = evm.ctx().spec.is_enabled(MegaSpecId::MINI_REX);
         if is_mini_rex {
@@ -1075,7 +1095,7 @@ where
         // This will finalize gas accounting according to REVM's rules:
         // - Spends all gas_limit
         // - Only refunds remaining gas if is_ok_or_revert()
-        self.op.last_frame_result(evm, original_reservoir, frame_result)?;
+        self.op.last_frame_result(evm, frame_result, gas)?;
 
         // After REVM's gas accounting, we need to return the rescued gas from additional limits.
         if is_mini_rex {
@@ -1172,16 +1192,12 @@ where
         // revm clears the slot here. Clear it before op-revm's failed-deposit handling, whose own
         // errors would otherwise return before the clear.
         *evm.ctx().error() = Ok(());
+        let failed_deposit =
+            error.is_tx_error() && evm.ctx().tx().tx_type() == DEPOSIT_TRANSACTION_TYPE;
         let result = self.op.catch_error(evm, error);
-        if result.is_err() {
-            // op-revm reverts and commits a failed deposit itself, but leaves any other failed
-            // call's journal as it was, including writes made outside its frames (a transaction's
-            // nonce bump and fee) and those of frames that completed before the error. Revert them
-            // here, as revm's mainnet handler does, so no entry point can hand them on: one that
-            // finalizes would report them as the next call's, and the `_one` entry points keep the
-            // journal for the caller's next call. A pre-REX5 keyless deployment's sandbox merge
-            // writes the state map without journal entries and is beyond this revert; only a
-            // finalize drops it.
+        if failed_deposit && result.is_err() {
+            // op-revm discards other failed transactions itself. The failed-deposit path can
+            // return a database error while loading the sender, before it finishes cleanup.
             evm.ctx().journal_mut().discard_tx();
         }
         // The run ends here on the error path, with a result (a failed deposit) or without one.
@@ -1260,38 +1276,7 @@ where
         &mut self,
         evm: &mut Self::Evm,
     ) -> Result<ExecutionResult<Self::HaltReason>, Self::Error> {
-        self.before_run(evm)?;
-
-        let mut init_and_floor_gas = self.validate(evm)?;
-        let eip7702_refund = self.pre_execution(evm, &mut init_and_floor_gas)? as i64;
-        let mut frame_result = self.inspect_execution(evm, &init_and_floor_gas)?;
-        let result_gas =
-            self.post_execution(evm, &mut frame_result, init_and_floor_gas, eip7702_refund)?;
-        self.execution_result(evm, frame_result, result_gas)
-    }
-
-    /// This function copies the logic from `Handler::execution` to add
-    /// new account storage gas and early OOG check with inspector support.
-    #[inline]
-    fn inspect_execution(
-        &mut self,
-        evm: &mut Self::Evm,
-        init_and_floor_gas: &InitialAndFloorGas,
-    ) -> Result<FrameResult, Self::Error> {
-        if let Some(oog_frame_result) = self.before_execution(evm, init_and_floor_gas)? {
-            return Ok(oog_frame_result);
-        }
-
-        let gas_limit = evm.ctx().tx().gas_limit() - init_and_floor_gas.initial_regular_gas;
-        // Create first frame action
-        let first_frame_input = self.first_frame_input(evm, gas_limit, 0)?;
-
-        // Run execution loop with inspector
-        let mut frame_result = self.inspect_run_exec_loop(evm, first_frame_input)?;
-
-        // Handle last frame result
-        self.last_frame_result(evm, 0, &mut frame_result)?;
-        Ok(frame_result)
+        self.run_transaction(evm, Self::inspect_execution)
     }
 }
 

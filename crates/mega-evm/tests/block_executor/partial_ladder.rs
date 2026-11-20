@@ -128,7 +128,7 @@ struct RecordingStateHook {
 }
 
 impl OnStateHook for RecordingStateHook {
-    fn on_state(&mut self, state: &EvmState) {
+    fn on_state(&mut self, state: EvmState) {
         self.accounts.lock().unwrap().extend(state.keys().copied());
     }
 }
