@@ -9,14 +9,17 @@ use alloy_consensus::{Signed, TxLegacy};
 use alloy_evm::{block::BlockExecutor, EvmEnv};
 use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
 use alloy_primitives::{address, Address, Bytes, Signature, TxKind, B256, U256};
+use alloy_rpc_types_trace::geth::CallConfig;
+use alloy_sol_types::SolError;
 use mega_evm::{
     test_utils::{BytecodeBuilder, GasInspector, MemoryDatabase},
-    BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutorFactory, MegaEvmFactory,
-    MegaHardforkConfig, MegaSpecId, MegaTxEnvelope, TestExternalEnvs,
+    BlockLimits, EvmTxRuntimeLimits, LimitKind, MegaBlockExecutionCtx, MegaBlockExecutorFactory,
+    MegaEvmFactory, MegaHardforkConfig, MegaLimitExceeded, MegaSpecId, MegaTxEnvelope,
+    TestExternalEnvs,
 };
 use revm::{
-    bytecode::opcode::{ADD, CALL, GAS, PUSH0, SLOAD, SSTORE},
-    context::{BlockEnv, ContextTr, JournalTr},
+    bytecode::opcode::{ADD, CALL, GAS, JUMPDEST, LOG1, MSTORE, PUSH0, SLOAD, SSTORE},
+    context::{result::ExecutionResult, BlockEnv, CfgEnv, ContextTr, JournalTr},
     database::State,
     interpreter::{
         CallInputs, CallOutcome, CreateInputs, CreateOutcome, Gas, InstructionResult,
@@ -24,6 +27,8 @@ use revm::{
     },
     Inspector,
 };
+
+use revm_inspectors::tracing::{TracingInspector, TracingInspectorConfig};
 
 const CALLER: Address = address!("2000000000000000000000000000000000000002");
 const CONTRACT: Address = address!("1000000000000000000000000000000000000001");
@@ -422,4 +427,93 @@ fn test_inspector_early_return_create_with_additional_limits() {
 
     let (_, receipts) = block_result.unwrap();
     assert_eq!(receipts.receipts.len(), 1, "Should have 1 receipt");
+}
+
+fn assert_call_trace_for_limited_log(
+    bytecode: Bytes,
+    expected_kind: LimitKind,
+    expected_gas: u64,
+    expected_log_count: usize,
+    expected_data_len: usize,
+) {
+    let mut db = MemoryDatabase::default()
+        .account_code(CONTRACT, bytecode)
+        .account_balance(CALLER, U256::from(1_000_000_000_000_000_000u64));
+    let mut state = State::builder().with_database(&mut db).build();
+    let spec = MegaSpecId::REX6;
+    let factory = MegaBlockExecutorFactory::new(
+        MegaHardforkConfig::default().with_all_activated_through(spec),
+        MegaEvmFactory::new().with_external_env_factory(TestExternalEnvs::<Infallible>::new()),
+        OpAlloyReceiptBuilder::default(),
+    );
+    let env = EvmEnv::new(
+        CfgEnv::new_with_spec(spec),
+        BlockEnv { gas_limit: 10_000_000_000, ..Default::default() },
+    );
+    let limits =
+        BlockLimits::no_limits().with_tx_runtime_limits(EvmTxRuntimeLimits::from_spec(spec));
+    let block = MegaBlockExecutionCtx::new(B256::ZERO, None, Bytes::new(), limits);
+    let call_config = CallConfig::default().with_log();
+    let inspector =
+        TracingInspector::new(TracingInspectorConfig::from_geth_call_config(&call_config));
+    let mut executor = factory.create_executor_with_inspector(&mut state, block, env, inspector);
+
+    let tx = create_transaction(0, 2_000_000_000);
+    let outcome =
+        executor.execute_transaction_without_commit(&tx).expect("transaction must be included");
+    let result = &outcome.inner.result_and_state.result;
+    let ExecutionResult::Revert { output, .. } = result else {
+        panic!("the LOG1 must hit a resource limit and revert: {result:?}");
+    };
+    let limit = MegaLimitExceeded::abi_decode(output).expect("resource limit revert");
+    assert_eq!(limit.kind, expected_kind.as_u8());
+    assert_eq!(result.tx_gas_used(), expected_gas);
+    assert!(result.logs().is_empty());
+
+    let trace =
+        executor.evm().inspector.geth_builder().geth_call_traces(call_config, result.tx_gas_used());
+    assert_eq!(trace.error.as_deref(), Some("execution reverted"));
+    assert_eq!(trace.gas_used, U256::from(expected_gas));
+    assert_eq!(trace.logs.len(), expected_log_count);
+    let log = trace.logs.last().unwrap();
+    assert_eq!(log.address, Some(CONTRACT));
+    assert_eq!(log.topics.as_deref(), Some(&[B256::ZERO][..]));
+    let data = log.data.as_ref().expect("trace log data");
+    assert_eq!(data.len(), expected_data_len);
+    assert!(data.iter().all(|byte| *byte == 0));
+
+    executor.commit_tx_result(outcome).expect("reverted transaction must produce a receipt");
+    let [receipt] = executor.receipts() else { panic!("expected one receipt") };
+    assert!(!receipt.status());
+    assert_eq!(receipt.cumulative_gas_used(), expected_gas);
+    assert!(receipt.logs().is_empty());
+}
+
+#[test]
+fn test_call_trace_keeps_log_that_exceeds_compute_gas_limit() {
+    // Expand memory and pad with JUMPDESTs to just below the Rex6 compute limit.
+    // The single LOG1 charges the remainder and is the only log the tracer sees.
+    let mut code =
+        BytecodeBuilder::default().append(PUSH0).push_bytes([0x9b, 0xdd, 0xc0]).append(MSTORE);
+    for _ in 0..1_040 {
+        code = code.append(JUMPDEST);
+    }
+    let code = code.append(PUSH0).append(PUSH0).append(PUSH0).append(LOG1).stop().build();
+    assert_call_trace_for_limited_log(code, LimitKind::ComputeGas, 200_043_152, 1, 0);
+}
+
+#[test]
+fn test_call_trace_keeps_log_that_exceeds_data_size_limit() {
+    // The 400th log pushes the transaction past the Rex6 data limit.
+    let mut code = BytecodeBuilder::default();
+    for _ in 0..400 {
+        code = code.append(PUSH0).push_number(32_768u16).append(PUSH0).append(LOG1);
+    }
+    assert_call_trace_for_limited_log(
+        code.stop().build(),
+        LimitKind::DataSize,
+        1_155_301_520,
+        400,
+        32_768,
+    );
 }

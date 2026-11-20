@@ -43,6 +43,8 @@ thiserror.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+alloy-rpc-types-trace.workspace = true
+
 # CodSpeed drop-in: `codspeed-criterion-compat` re-exports criterion's API, so
 # `use criterion::...` in the benches is unchanged. Under a normal `cargo bench`
 # it behaves exactly like criterion; under `cargo codspeed` it runs each bench

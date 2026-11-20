@@ -3059,6 +3059,7 @@ dependencies = [
  "alloy-op-evm",
  "alloy-op-hardforks",
  "alloy-primitives",
+ "alloy-rpc-types-trace",
  "alloy-sol-types",
  "auto_impl",
  "bitflags",
