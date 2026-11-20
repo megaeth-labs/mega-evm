@@ -27,20 +27,21 @@ A command-line tool for executing and debugging EVM bytecode, similar to go-ethe
 
 ## Installation
 
-Install it from GitHub (building it requires Foundry's `forge`):
+Building requires Foundry's `forge`.
+
+From GitHub:
 
 ```bash
 cargo install --git https://github.com/megaeth-labs/mega-evm --locked mega-evme
 ```
 
-Or build from source:
+From a Git checkout:
 
 ```bash
-cargo build --release -p mega-evme
-# The binary will be at target/release/mega-evme
+git clone --recursive https://github.com/megaeth-labs/mega-evm
+cd mega-evm
+cargo install --locked --path bin/mega-evme
 ```
-
-The `--locked` flag ensures the exact tested dependency versions are used.
 
 ## Commands
 
