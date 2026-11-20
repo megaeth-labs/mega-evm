@@ -3,7 +3,7 @@ name: On Release
 # Publish targets for a mega-evm release. Runs when the release pipeline
 # publishes the GitHub Release (release-publish creates it after the tag),
 # and on demand for a rehearsal: dispatch with an existing tag and
-# dry_run=true runs the job with nothing published or uploaded.
+# dry_run=true runs the job with nothing uploaded.
 #
 # Target:
 #   mega-evme — the CLI binary to the MegaETH artifact registry
@@ -11,7 +11,7 @@ name: On Release
 # crates.io publishing is paused. The OP crates are pinned to a git revision
 # (see the root Cargo.toml), and `cargo publish` rejects git dependencies, so
 # no crates are published. To resume once those crates are on crates.io,
-# restore the `crates` job from the commit that removed it.
+# restore the `crates` job from PR #424.
 #
 # Release assets are paused as well. Releases here are immutable once
 # published, and this workflow runs only after publishing, so attaching the
@@ -23,7 +23,7 @@ name: On Release
 # The tag being released is always the run's own ref: the environment
 # authorises that ref, so nothing else may be checked out or published.
 #
-# Credentials (GCP_AUTH_KEY) live in the `release` environment, whose
+# The credential (GCP_AUTH_KEY) lives in the `release` environment, whose
 # deployment policy admits the default branch, release branches and v*
 # tags; the job below runs in it.
 
@@ -33,7 +33,7 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: "Verify and build everything; publish and upload nothing"
+        description: "Verify and build mega-evme; upload nothing"
         required: false
         type: boolean
         default: true

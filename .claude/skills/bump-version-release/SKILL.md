@@ -19,7 +19,7 @@ Releases are made by the org release pipeline (megaeth-labs/.github). Two decisi
 4. **Targets** — automatic on the Release: `on-release.yml` uploads `mega-evme` to the MegaETH artifact registry, in the `release` environment.
    crates.io publishing is paused while the OP crates are git-pinned (see the root `Cargo.toml`), so no crates are published.
    Release assets are paused: Releases are immutable once published, so `on-release.yml` attaches nothing to them.
-   Rehearse it first on an existing tag, dispatching on that tag's ref: `gh workflow run on-release.yml --ref vX.Y.Z -f dry_run=true`.
+   Rehearse `on-release.yml` first on an existing tag, dispatching on that tag's ref: `gh workflow run on-release.yml --ref vX.Y.Z -f dry_run=true`.
    The tag being released is always the run's own ref; there is no separate tag input.
    The publish credential, `GCP_AUTH_KEY`, lives in the `release` environment, whose deployment policy admits `main`, `release-v*` branches and `v*` tags.
 

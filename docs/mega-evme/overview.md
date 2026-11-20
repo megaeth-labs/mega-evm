@@ -9,9 +9,20 @@ Similar to go-ethereum's `evm` command, `mega-evme` provides full control over t
 
 ## Installation
 
+Building requires Foundry's `forge`.
+
+From GitHub:
+
 ```bash
-cargo build --release -p mega-evme
-# Binary: target/release/mega-evme
+cargo install --git https://github.com/megaeth-labs/mega-evm --locked mega-evme
+```
+
+From a Git checkout:
+
+```bash
+git clone --recursive https://github.com/megaeth-labs/mega-evm
+cd mega-evm
+cargo install --locked --path bin/mega-evme
 ```
 
 ## Commands

@@ -15,7 +15,7 @@ A specialized Ethereum Virtual Machine (EVM) implementation tailored for MegaETH
 
 ## Installation
 
-Building requires Foundry's `forge`.
+Building `mega-evme` requires Foundry's `forge`.
 
 From GitHub:
 
