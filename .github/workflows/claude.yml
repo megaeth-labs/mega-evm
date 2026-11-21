@@ -59,6 +59,9 @@ jobs:
     concurrency:
       group: claude-pr-review-${{ github.event.pull_request.number || github.event.issue.number }}-${{ github.event_name == 'pull_request' && 'code' || 'comment' }}
       cancel-in-progress: false
+    # A PR comment may start a reconcile round only from a member, collaborator or
+    # the mega-putin agent: the job mints an App token and checks out the PR head
+    # before the action's own permission check runs.
     if: |
       (github.event_name == 'pull_request' &&
        (github.event.action == 'opened' ||
@@ -68,6 +71,10 @@ jobs:
       (github.event_name == 'issue_comment' &&
        github.event.issue.pull_request != null &&
        github.event.comment.user.login != 'mega-maxwell[bot]' &&
+       (github.event.comment.author_association == 'MEMBER' ||
+        github.event.comment.author_association == 'COLLABORATOR' ||
+        github.event.comment.author_association == 'OWNER' ||
+        github.event.comment.user.login == 'mega-putin[bot]') &&
        !contains(github.event.comment.body, 'claude-review:skip'))
     runs-on: ubuntu-24.04
     timeout-minutes: 30
