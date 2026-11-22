@@ -130,6 +130,8 @@ mega-system-contracts = { path = "./crates/system-contracts", version = "1.7.3",
 # (revm 43.0.3, alloy-evm 0.39.0). This keeps a single source identity for `OpTxEnvelope`,
 # receipt and hardfork types. Use git and rev without a version because monorepo crate versions
 # can match crates.io releases built against a different revm version.
+# Git dependencies block `cargo publish`, so `on-release.yml` publishes no crates and crates.io
+# stays at 1.7.2.
 op-revm = { git = "https://github.com/ethereum-optimism/optimism", rev = "f84988888034b4692715e528a1d9fc69de511eab", default-features = false }
 revm = { version = "=43.0.3", default-features = false }
 revm-inspectors = { version = "=0.44.3", default-features = false }
