@@ -1114,7 +1114,7 @@ class DiffInventory(GateCase):
             shutil.copy(SCRIPTS / name, scripts)
         (self.tmp / "Cargo.toml").write_text(
             '[package]\nname = "mega-evm"\nversion = "0.1.0"\nedition = "2021"\n'
-            '[lib]\npath = "crates/mega-evm/src/lib.rs"\n')
+            '[lib]\npath = "crates/mega-evm/src/lib.rs"\n[workspace]\n')
         source = self.tmp / "crates/mega-evm/src/lib.rs"
         source.parent.mkdir(parents=True)
         stable = "pub fn unchanged() -> u64 { 1234 }\n"

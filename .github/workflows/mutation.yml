@@ -347,6 +347,10 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+      - name: Install cargo-mutants
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants@27.1.0
       - name: Test the gate and the driver's guards
         run: python3 -m unittest discover -s scripts -p 'test_*.py' -v
 
