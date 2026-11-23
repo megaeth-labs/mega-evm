@@ -218,6 +218,7 @@ The fields an RPC receipt adds beside the consensus encoding — `contractAddres
 
 For `--block`, verification calls `eth_getBlockReceipts` by block number and matches each receipt to its `transactionIndex` in the body.
 For a block with unique hashes, replay falls back to `eth_getTransactionReceipt` for each hash when the block receipt request fails or returns `null`.
+This includes a block receipt response missing from an offline capture.
 A returned list must pass admission and authentication.
 A block with repeated hashes requires `eth_getBlockReceipts`.
 If the call is unavailable, the receipt verdicts are unverified and the run exits `3`.
@@ -502,8 +503,8 @@ If the write fails, it is reported on stderr like any other failure, next to the
 
 Replay mode. Requires neither `--rpc` nor network access.
 
-The envelope at `<PATH>` is loaded and serves as the only source of JSON-RPC responses.
-A request absent from the fixture yields a local RPC error.
+The envelope at `<PATH>` is read-only and serves as the only source of JSON-RPC responses.
+A request missing from the file fails locally without reaching the network.
 For a block with unique hashes, a missing block receipt entry can use the per-hash receipt entries in the same fixture.
 
 Bucket-capacity data is read from the fixture envelope, so `--bucket-capacity` is neither required nor accepted with `--rpc.replay-file`.

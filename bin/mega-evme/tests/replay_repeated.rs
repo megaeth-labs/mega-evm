@@ -107,6 +107,10 @@ impl RepeatedBlock {
     }
 
     async fn serve(&self, server: &MockRpcServer) {
+        self.serve_with_receipt(server, self.receipts.last().expect("by-hash receipt")).await;
+    }
+
+    async fn serve_with_receipt(&self, server: &MockRpcServer, receipt: &Value) {
         let number = format!("0x{:x}", self.number);
         server
             .respond_method_params_json(
@@ -117,13 +121,7 @@ impl RepeatedBlock {
             )
             .await;
         server.respond_method_json("eth_getTransactionByHash", self.transaction.clone(), 3).await;
-        server
-            .respond_method_json(
-                "eth_getTransactionReceipt",
-                self.receipts.last().expect("by-hash receipt").clone(),
-                3,
-            )
-            .await;
+        server.respond_method_json("eth_getTransactionReceipt", receipt.clone(), 3).await;
     }
 
     async fn serve_receipts(&self, server: &MockRpcServer) {
@@ -356,14 +354,20 @@ async fn test_repeated_hash_offline_miss_cannot_use_a_by_hash_receipt() {
         DoctoredEnvelope::load(&path).drop_entry(&key).write_to_temp("repeated_receipt_miss");
 
     let run = replay(BLOCK, &["--rpc.replay-file", legacy.to_str().expect("legacy path")]);
-    std::fs::remove_file(legacy).expect("remove temporary envelope");
+    std::fs::remove_file(&legacy).expect("remove temporary envelope");
 
     assert_eq!(run.code(), 3, "{}\n{}", run.stdout, run.stderr);
     let lines = run.results();
     assert_eq!(lines.len(), 2);
+    let hint = format!(
+        "hint: re-capture with `mega-evme replay --block {BLOCK} --verify-receipt \
+         --rpc <URL> --rpc.capture-file {}`",
+        legacy.display(),
+    );
     for line in lines {
         let error = line["verification"]["error"].as_str().expect("receipt remains unverified");
         assert!(error.contains("cache miss") && error.contains("eth_getBlockReceipts"), "{line}");
+        assert!(error.contains(&hint), "expected {hint:?} in {line}");
     }
 }
 
@@ -416,31 +420,69 @@ fn block_with_mid_body_abort() -> RepeatedBlock {
     block
 }
 
+const OCCURRENCES: [(usize, &str); 2] = [(0, "0x5208"), (1, "0xa410")];
+
+async fn mock_by_hash_occurrence(index: usize) -> (MockRpcServer, String) {
+    let server = mock_chain().await;
+    let mut block = RepeatedBlock::new(BLOCK, &chain::parent_hash(), &[true, true]);
+    let receipt = &block.receipts[index];
+    block.transaction["transactionIndex"] = receipt["transactionIndex"].clone();
+    block.serve_with_receipt(&server, receipt).await;
+    let hash = block.transaction["hash"].as_str().expect("transaction hash").to_owned();
+    (server, hash)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_repeated_hash_single_transaction_uses_the_occurrence_returned_by_hash() {
+    for (index, cumulative_gas) in OCCURRENCES {
+        let (server, hash) = mock_by_hash_occurrence(index).await;
+
+        let run: Run = common::mega_evme()
+            .args([
+                "replay",
+                "--verify-receipt",
+                "--json",
+                "--rpc",
+                &server.uri(),
+                "--rpc.no-cache-file",
+            ])
+            .arg(hash)
+            .output()
+            .expect("run mega-evme")
+            .into();
+
+        assert_eq!(run.code(), 0, "index={index}: {}\n{}", run.stdout, run.stderr);
+        let summary = run.summary();
+        assert_eq!(summary["receipt"]["transactionIndex"], format!("0x{index:x}"), "{summary}");
+        assert_eq!(summary["receipt"]["cumulativeGasUsed"], cumulative_gas, "{summary}");
+        assert_eq!(summary["verification"], json!({"match": true}), "{summary}");
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn test_repeated_hash_in_tx_file_uses_the_occurrence_returned_by_hash() {
-    let server = mock_chain().await;
-    let block = RepeatedBlock::new(BLOCK, &chain::parent_hash(), &[true, true]);
-    block.serve(&server).await;
-    let dir = tempfile::tempdir().expect("target list directory");
-    let list = dir.path().join("targets.txt");
-    let tx_hash = block.transaction["hash"].as_str().expect("transaction hash");
-    std::fs::write(&list, format!("{tx_hash}\n{tx_hash}\n")).expect("write the two requests");
+    for (index, cumulative_gas) in OCCURRENCES {
+        let (server, hash) = mock_by_hash_occurrence(index).await;
+        let dir = tempfile::tempdir().expect("target list directory");
+        let list = dir.path().join("targets.txt");
+        std::fs::write(&list, format!("{hash}\n{hash}\n")).expect("write the two requests");
 
-    let run: Run = common::mega_evme()
-        .args(["replay", "--tx-file"])
-        .arg(list)
-        .args(["--verify-receipt", "--json", "--rpc", &server.uri(), "--rpc.no-cache-file"])
-        .output()
-        .expect("run mega-evme")
-        .into();
+        let run: Run = common::mega_evme()
+            .args(["replay", "--tx-file"])
+            .arg(list)
+            .args(["--verify-receipt", "--json", "--rpc", &server.uri(), "--rpc.no-cache-file"])
+            .output()
+            .expect("run mega-evme")
+            .into();
 
-    assert_eq!(run.code(), 0, "{}\n{}", run.stdout, run.stderr);
-    let lines = run.results();
-    assert_eq!(lines.len(), 1);
-    assert_eq!(lines[0]["tx_index"], 1);
-    assert_eq!(lines[0]["verification"], json!({"match": true}));
-    assert_eq!(server.received_method_count("eth_getBlockReceipts").await, 0);
-    assert_eq!(server.received_method_count("eth_getTransactionReceipt").await, 1);
+        assert_eq!(run.code(), 0, "index={index}: {}\n{}", run.stdout, run.stderr);
+        let summary = run.summary();
+        assert_eq!(summary["tx_index"], index, "{summary}");
+        assert_eq!(summary["receipt"]["cumulativeGasUsed"], cumulative_gas, "{summary}");
+        assert_eq!(summary["verification"], json!({"match": true}), "{summary}");
+        assert_eq!(server.received_method_count("eth_getBlockReceipts").await, 0);
+        assert_eq!(server.received_method_count("eth_getTransactionReceipt").await, 1);
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -562,6 +604,23 @@ async fn test_block_rejects_malformed_receipt_in_returned_list() {
     block.serve_receipts(&server).await;
 
     assert_block_receipts_unverified(&server, 1, "Invalid eth_getBlockReceipts result").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_repeated_receipts_reject_inconsistent_gas_used() {
+    let server = mock_chain().await;
+    let mut block = RepeatedBlock::new(BLOCK, &chain::parent_hash(), &[true, true]);
+    block.serve(&server).await;
+    // RPC gasUsed sits outside the receipt encoding committed to by the header.
+    block.receipts[0]["gasUsed"] = json!("0x1");
+    block.serve_receipts(&server).await;
+
+    assert_block_receipts_unverified(
+        &server,
+        2,
+        "reports gasUsed 1, but the block's committed cumulative gas",
+    )
+    .await;
 }
 
 async fn assert_block_receipts_unverified(server: &MockRpcServer, count: usize, reason: &str) {
