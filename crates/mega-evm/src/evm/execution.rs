@@ -1042,10 +1042,10 @@ enum PrecompileHold {
 ///
 /// The price does not tell whether the input passes the checks a precompile makes after its gas
 /// check, so an input priced past the allowance and within the forward is the stop even when
-/// those checks would fail the call. A call revm refuses on its caller's account — a value it
-/// cannot fund — runs no precompile, and revm answers it as without the limit: the answer given
-/// without running is not given in its place, which a comparison of the caller's balance with the
-/// value decides, as revm's transfer does.
+/// those checks would fail the call. If the caller is loaded in this transaction and cannot fund
+/// the value, revm answers with `OutOfFunds` before invoking the precompile.
+/// A caller unknown to this transaction takes the crossing path. Only an inspector can supply
+/// such a caller, for which revm's raw transfer may return `OutOfFunds`.
 ///
 /// A precompile the engine cannot price is run on the allowance and sees it as its gas limit
 /// ([`Clamped`](PrecompileHold::Clamped), with what was taken off the forward); its answer gets the

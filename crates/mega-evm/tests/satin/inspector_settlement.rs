@@ -639,6 +639,22 @@ fn test_a_retargeted_value_calls_upfront_charge_comes_back_at_the_new_targets_pr
     }
 }
 
+/// An inspector loads the empty substitute before revm moves the value, so the start counts
+/// the substitute's write record and its state growth.
+#[test]
+fn test_a_retargeted_value_call_counts_the_loaded_empty_target() {
+    let code = value_call(EMPTY).append(POP).stop().build();
+    let tx = to(CONTRACT, 0, Bytes::new(), GAS_LIMITS[0]);
+    let inspector = Retargets { from: EMPTY, code: Bytecode::default(), answer: None };
+    let outcome = inspected(db(code), minimal_envs(), tx, inspector);
+
+    assert!(outcome.result.is_success(), "{:?}", outcome.result);
+    assert_eq!(outcome.state[&RETARGET].info.balance, U256::ONE);
+    assert!(!holds_something(&outcome, EMPTY));
+    assert_eq!(outcome.usage.write_records, 2, "the sender and substitute each make a record");
+    assert_eq!(outcome.usage.state_growth, 1, "the substitute becomes a new account");
+}
+
 /* ---------- a success rewritten into a failure ---------- */
 
 /// The data Foundry's `expectRevert` gives a call that did not revert.
