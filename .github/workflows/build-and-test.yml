@@ -23,6 +23,16 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.7.1
+      - uses: jdx/mise-action@v2
+        with:
+          install: false
+          cache: false
+      - name: Attest system contract bytecode
+        run: mise run system-contracts:attest
+      - name: Check generated system contract constants
+        run: cargo run --quiet --locked -p system-contract-artifacts -- check
       - name: Run cargo-sort
         run: |
           cargo install cargo-sort

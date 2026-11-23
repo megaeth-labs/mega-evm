@@ -1,10 +1,9 @@
 //! System contracts for the `MegaETH` EVM.
 //!
 //! This crate provides bytecode constants for system contracts used by mega-evm.
-//! When building from the repository with Foundry installed, the build script validates that
-//! the pre-generated constants match the compiled Solidity source.
-//! When building from a published crate (without Foundry), the pre-generated constants are used
-//! directly.
+//! Repository builds check the constants against the versioned JSON artifacts.
+//! Published crates embed the same constants and omit the JSON artifacts.
+//! The required CI lint job attests the latest artifacts against the Solidity source.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![warn(missing_docs)]

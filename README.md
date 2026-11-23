@@ -15,7 +15,7 @@ A specialized Ethereum Virtual Machine (EVM) implementation tailored for MegaETH
 
 ## Installation
 
-Building `mega-evme` requires Foundry's `forge`.
+The Rust build embeds checked-in system-contract bytecode.
 
 From GitHub:
 
@@ -51,6 +51,16 @@ git submodule update --init --recursive
 ```bash
 cargo build
 ```
+
+Cargo checks the system-contract artifacts against the checked-in Rust constants when the artifacts are present.
+The check is read-only.
+Published crates use the same embedded constants.
+
+### System contracts
+
+Run `mise run system-contracts:attest` with Foundry v1.7.1 and initialized submodules to verify that Solidity deployment reproduces the latest checked-in artifacts.
+After updating versioned artifacts and their latest aliases, run `mise run system-contracts:generate` to regenerate the Rust constants.
+The required `lint` CI job runs the Solidity attestation and checks that the Rust constants match the artifacts.
 
 ### Testing
 

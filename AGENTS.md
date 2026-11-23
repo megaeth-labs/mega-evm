@@ -34,11 +34,13 @@ cargo codspeed build -p mega-evm --bench <target> && cargo codspeed run   # inst
 # no_std check (run against riscv target)
 cargo check -p mega-evm --target riscv64imac-unknown-none-elf --no-default-features
 
-# System contracts (requires Foundry)
-cd crates/system-contracts && forge build
+# System contracts
+mise run system-contracts:attest          # attest Solidity bytecode (requires Foundry)
+mise run system-contracts:generate        # regenerate Rust constants from checked-in artifacts
+(cd crates/system-contracts && forge test) # run Solidity tests (requires Foundry)
 ```
 
-Git submodules are required — clone with `--recursive` or run `git submodule update --init --recursive`.
+Initialize git submodules for the Foundry commands with `git submodule update --init --recursive`, or clone with `--recursive`.
 
 ## Workspace Structure
 
@@ -183,8 +185,10 @@ They are deployed idempotently during `pre_execution_changes()` in `block/execut
 
 Key design aspects:
 
-- Solidity sources in `crates/system-contracts/contracts/`, compiled by Foundry, with Rust ABI bindings generated via `alloy-sol-types`.
-- Bytecode is versioned and hash-verified at build time (`crates/system-contracts/build.rs`).
+- Solidity sources live in `crates/system-contracts/contracts/`, with Rust ABI bindings generated via `alloy-sol-types`.
+- Cargo builds use the checked-in Rust constants and check them against the versioned artifacts when present, without writing to the source tree or invoking Foundry.
+- The required `lint` CI job uses `mise run system-contracts:attest` to check that Foundry reproduces the latest bytecode artifacts and checks that the generated Rust constants match the artifacts.
+- Run `mise run system-contracts:generate` after updating the artifacts to regenerate the Rust constants.
 - The **MEGA_SYSTEM_ADDRESS** can call whitelisted system contracts as deposit-like transactions — no signature or fee required.
   This is how the sequencer updates oracle storage.
 - **Any system contract modification requires a new spec** to preserve backward compatibility.
