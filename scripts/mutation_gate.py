@@ -708,6 +708,8 @@ def cmd_merge_runs(args: argparse.Namespace) -> int:
     diff = getattr(args, "scope", "full") == "diff"
     for i, run in enumerate(present):
         try:
+            if diff:
+                load_run(run)
             run_outcomes, run_selection, end_time, run_failed = read_record(run)
             if diff:
                 # A follow-up can select field deletions from other shards despite
@@ -717,7 +719,7 @@ def cmd_merge_runs(args: argparse.Namespace) -> int:
                 run_outcomes = [o for o in run_outcomes
                                 if o.get("scenario") == "Baseline" or outcome_name(o) in own]
         except (UnreadableRecord, ResultsError) as err:
-            failed.append(str(err))
+            failed.append(f"{run}: {err}" if diff else str(err))
             finished = False
             continue
         if run_failed:
@@ -864,6 +866,7 @@ def cmd_report(args: argparse.Namespace) -> int:
     # stopped run must never pass, even when everything it tested was caught; what
     # it did test is still reported, read without the completeness checks.
     note = None
+    merged_diff = False
     status_path = getattr(args, "status", None)
     if status_path:
         run_status = read_status(Path(status_path))
@@ -873,6 +876,19 @@ def cmd_report(args: argparse.Namespace) -> int:
             return 2
         if run_status.get("status") != "complete":
             note = incomplete_note(run_status)
+        merged_diff = not full and "shards" in run_status
+
+    if merged_diff:
+        failures = []
+        for followup in (args.recheck, getattr(args, "mega_eest", None)):
+            if followup and (failure := Path(followup) / RUN_FAILED_NOTE).is_file():
+                failures.append(failure.read_text().strip())
+        if failures:
+            details = "\n".join(f"- {failure}" for failure in failures)
+            incomplete = f"{note}\n\n" if note else ""
+            write_report(f"{title} — ❌ FAIL\n\n{incomplete}"
+                         f"**Shard follow-up results cannot be scored.**\n\n{details}\n", args)
+            return 2
 
     try:
         anchors = suppressed_anchors(args.suppressions)

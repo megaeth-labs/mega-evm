@@ -1749,6 +1749,26 @@ class MergeRuns(GateCase):
     def test_no_runs_writes_nothing(self) -> None:
         self.assertFalse(self.merge_runs(self.tmp / "absent").exists())
 
+    def test_diff_recheck_cannot_borrow_another_shards_baseline(self) -> None:
+        self.assert_diff_followup_requires_its_own_baseline("recheck")
+
+    def test_diff_mega_eest_cannot_borrow_another_shards_baseline(self) -> None:
+        self.assert_diff_followup_requires_its_own_baseline("mega-eest")
+
+    def assert_diff_followup_requires_its_own_baseline(self, phase: str) -> None:
+        kind = "Timeout" if phase == "recheck" else "MissedMutant"
+        runs = []
+        for i, name in enumerate((MISSED, TIMEOUT)):
+            self.results(f"shard-{i}/mutants.out", outcomes=outcomes_json(mutant(name, kind)))
+            runs.append(self.results(
+                f"shard-{i}/{phase}/mutants.out",
+                outcomes=outcomes_json(mutant(name, "CaughtMutant"),
+                                       baseline="Success" if i == 0 else None)))
+        joined = self.tmp / "joined" / phase / "mutants.out"
+        gate.cmd_merge_runs(Namespace(out=str(joined), scope="diff", runs=map(str, runs)))
+        with self.assertRaisesRegex(gate.ResultsError, rf"shard-1/{phase}.*no baseline outcome"):
+            gate.load_run(joined)
+
 
 if __name__ == "__main__":
     unittest.main()
