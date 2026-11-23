@@ -30,6 +30,8 @@ jobs:
           install: false
           cache: false
       - name: Attest system contract bytecode
+        env:
+          MISE_AUTO_INSTALL: "false"
         run: mise run system-contracts:attest
       - name: Check generated system contract constants
         run: cargo run --quiet --locked -p system-contract-artifacts -- check
