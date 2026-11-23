@@ -1050,6 +1050,18 @@ class DriverRun(GateCase):
         self.assertEqual((out / "status").read_text(),
                          "MUTANTS-STATUS status=partial expected=1 outcomes=1\n")
 
+    def test_diff_shard_status_identifies_the_run_and_selection(self) -> None:
+        head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=SCRIPTS.parent,
+                                       text=True).strip()
+        run, _, out = self.drive("diff", "HEAD", main=outcomes_json(mutant(CAUGHT, "CaughtMutant")),
+                                 env={"MUTANTS_SHARD": "2/4", "GITHUB_RUN_ID": "7",
+                                      "GITHUB_RUN_ATTEMPT": "3"})
+        self.assertEqual(run.returncode, 0, run.stderr)
+        status = gate.read_status(out / "status")
+        self.assertEqual(status, {"status": "complete", "expected": "1", "outcomes": "1",
+                                  "head": head, "base": head, "shard-index": "2",
+                                  "shard-count": "4", "run-id": "7", "run-attempt": "3"})
+
     def test_a_re_check_the_budget_stops_is_recorded_and_refused(self) -> None:
         run, _, out = self.drive(
             "file", "crates/mega-evm/src/a.rs",
@@ -1491,6 +1503,8 @@ class Merge(GateCase):
         else:
             shard.mkdir(parents=True)
         if status is not None:
+            if name.isdigit():
+                status += f" head=tested base=base shard-index={name} shard-count=4 run-id=7 run-attempt=2"
             status_file(shard / "status", status)
         return shard
 
@@ -1503,7 +1517,8 @@ class Merge(GateCase):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             code = gate.cmd_merge(Namespace(inventory=str(inventory), out=str(self.tmp / "merged"),
-                                            scope=scope, shards=[str(s) for s in shards]))
+                                            scope=scope, shards=[str(s) for s in shards],
+                                            head="tested", base="base", run_id="7", run_attempt="2"))
         self.assertEqual(code, 0)
         return out.getvalue()
 
@@ -1666,6 +1681,31 @@ class Merge(GateCase):
         self.assertEqual(code, 1, text)
         self.assertIn("shard 2: `invalid-results`", text)
 
+    def assert_diff_shard_metadata_mismatch(self, original: str, replacement: str) -> None:
+        shards = [self.empty_diff_shard(str(i)) for i in range(4)]
+        status = shards[1] / "status"
+        status.write_text(status.read_text().replace(original, replacement))
+        summary = self.merge(*shards, scope="diff", names=())
+        code, report = self.merged("diff")
+        self.assertEqual(code, 1, report)
+        self.assertIn("shard 1: `foreign-artifact`", report)
+        self.assertIn(original.split("=")[0], summary)
+
+    def test_diff_join_rejects_a_foreign_tested_sha(self) -> None:
+        self.assert_diff_shard_metadata_mismatch("head=tested", "head=other")
+
+    def test_diff_join_rejects_a_foreign_base_sha(self) -> None:
+        self.assert_diff_shard_metadata_mismatch("base=base", "base=other")
+
+    def test_diff_join_rejects_a_duplicate_shard_index(self) -> None:
+        self.assert_diff_shard_metadata_mismatch("shard-index=1", "shard-index=0")
+
+    def test_diff_join_rejects_a_foreign_run(self) -> None:
+        self.assert_diff_shard_metadata_mismatch("run-id=7", "run-id=8")
+
+    def test_diff_join_rejects_an_old_attempt(self) -> None:
+        self.assert_diff_shard_metadata_mismatch("run-attempt=2", "run-attempt=1")
+
     def test_a_budget_stopped_diff_shard_fails_even_with_every_outcome(self) -> None:
         self.merge(self.shard("0", "status=complete expected=1 outcomes=1",
                               mutant(CAUGHT, "CaughtMutant")),
@@ -1768,6 +1808,68 @@ class MergeRuns(GateCase):
         gate.cmd_merge_runs(Namespace(out=str(joined), scope="diff", runs=map(str, runs)))
         with self.assertRaisesRegex(gate.ResultsError, rf"shard-1/{phase}.*no baseline outcome"):
             gate.load_run(joined)
+
+
+class DiffJoin(GateCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.shell = bash5()
+        if self.shell is None:
+            self.skipTest("needs bash 5")
+        self.scripts = self.tmp / "checkout/scripts"
+        self.scripts.mkdir(parents=True)
+        for name in ("mutation_test.sh", "mutation_gate.py", "mutation_join.sh"):
+            shutil.copy(SCRIPTS / name, self.scripts)
+        git = ["git", "-C", str(self.scripts.parent)]
+        subprocess.run([*git, "init", "-q"], check=True)
+        subprocess.run([*git, "-c", "user.name=Test", "-c", "user.email=test@example.com",
+                        "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-qm", "fixture"],
+                       check=True)
+        self.head = subprocess.check_output([*git, "rev-parse", "HEAD"], text=True).strip()
+        self.work = self.tmp / "work"
+        self.input = self.work / "shards"
+        self.output = self.work / "report"
+        self.input.mkdir(parents=True)
+        self.output.mkdir()
+        bin_dir = self.tmp / "bin"
+        bin_dir.mkdir()
+        cargo = bin_dir / "cargo"
+        cargo.write_text('#!/bin/sh\nif [ "$2" = --version ]; then exit 0; fi\nprintf "%s\\n" "$INVENTORY"\n')
+        cargo.chmod(0o755)
+        self.env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}",
+                    "MUTATION_INPUT_DIR": str(self.input), "MUTATION_OUTPUT_DIR": str(self.output),
+                    "GITHUB_RUN_ID": "7", "GITHUB_RUN_ATTEMPT": "2", "GITHUB_STEP_SUMMARY": "/dev/null",
+                    "INVENTORY": TIMEOUT}
+
+    def join(self, **env: str) -> subprocess.CompletedProcess:
+        return subprocess.run([self.shell, str(self.scripts / "mutation_join.sh"), "diff", "HEAD"],
+                              cwd=self.work, env={**self.env, **env}, text=True,
+                              capture_output=True, timeout=60)
+
+    def timeout_with_recheck(self) -> Path:
+        for i in range(4):
+            path = f"work/shards/mutation-results-shard-{i}"
+            if i == 0:
+                primary = self.results(f"{path}/mutants.out", outcomes=outcomes_json(
+                    mutant(TIMEOUT, "Timeout")))
+            else:
+                primary = self.results(f"{path}/mutants.out",
+                                       files={gate.NO_MUTANTS_NOTE: "INFO No mutants to filter\n"})
+            count = int(i == 0)
+            status_file(primary.parent / "status",
+                        f"status=complete expected={count} outcomes={count} head={self.head} "
+                        f"base={self.head} shard-index={i} shard-count=4 run-id=7 run-attempt=2")
+        return self.results("work/shards/mutation-results-shard-0/recheck/mutants.out",
+                            outcomes=outcomes_json(mutant(TIMEOUT, "CaughtMutant")))
+
+    def test_second_join_rejects_stale_output_after_the_recheck_is_removed(self) -> None:
+        recheck = self.timeout_with_recheck()
+        first = self.join()
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        shutil.rmtree(recheck.parent)
+        second = self.join()
+        self.assertNotEqual(second.returncode, 0, second.stdout + second.stderr)
+        self.assertIn("output directory is not empty", second.stderr)
 
 
 if __name__ == "__main__":

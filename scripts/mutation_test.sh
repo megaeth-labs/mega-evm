@@ -206,6 +206,7 @@ FOLLOWUP_STOPPED=""
 # Set once this run has cleared the previous results; until then there is
 # nothing of this run's to count.
 CLEARED=""
+STATUS_METADATA=""
 
 # shellcheck disable=SC2329 # the EXIT trap below runs it
 finish() {
@@ -242,7 +243,7 @@ finish() {
     [[ -n "$counted" ]] || status=error
     [[ "$status" == complete && -n "$FOLLOWUP_STOPPED" ]] && status=followup-stopped
     if [[ "$cmd" == diff && "$status" == complete ]] && ((rc != 0)); then status=error; fi
-    local line="MUTANTS-STATUS status=$status expected=$expected outcomes=$outcomes"
+    local line="MUTANTS-STATUS status=$status expected=$expected outcomes=$outcomes$STATUS_METADATA"
     mkdir -p "$OUT_DIR"
     echo "$line" > "$OUT_DIR/status"
     echo
@@ -509,6 +510,13 @@ case "$cmd" in
             mutatable_diff "$base" > "$diff_file"
             run_mutants --in-diff "$diff_file" --list --colors never
             exit 0
+        fi
+        if [[ -n "${MUTANTS_SHARD:-}" ]]; then
+            head="$(git rev-parse HEAD)"
+            base="$(git rev-parse --verify "${base}^{commit}")"
+            STATUS_METADATA=" head=$head base=$base shard-index=${MUTANTS_SHARD%/*} shard-count=${MUTANTS_SHARD#*/}"
+            if [[ -n "${GITHUB_RUN_ID:-}" ]]; then STATUS_METADATA+=" run-id=$GITHUB_RUN_ID"; fi
+            if [[ -n "${GITHUB_RUN_ATTEMPT:-}" ]]; then STATUS_METADATA+=" run-attempt=$GITHUB_RUN_ATTEMPT"; fi
         fi
         diff_file="$OUT_DIR.diff"
         mkdir -p "$(dirname "$diff_file")"

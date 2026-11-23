@@ -143,25 +143,38 @@ jobs:
         with:
           tool: cargo-mutants@27.1.0
 
+      - name: Create fresh join directories
+        id: paths
+        run: |
+          staging="$(mktemp -d "$RUNNER_TEMP/mutation-XXXXXXXX")"
+          mkdir "$staging/shards" "$staging/report"
+          echo "input=$staging/shards" >> "$GITHUB_OUTPUT"
+          echo "output=$staging/report" >> "$GITHUB_OUTPUT"
+
       - name: Download shard results
         # Let the scorer name the missing shards even when nothing downloaded.
         continue-on-error: true
         uses: actions/download-artifact@v4
         with:
           pattern: mutation-results-shard-*
-          path: shards
+          path: ${{ steps.paths.outputs.input }}
 
       - name: Merge, score and gate
+        env:
+          MUTATION_INPUT_DIR: ${{ steps.paths.outputs.input }}
+          MUTATION_OUTPUT_DIR: ${{ steps.paths.outputs.output }}
         run: scripts/mutation_join.sh diff "${{ github.event.pull_request.base.sha }}"
 
       - name: Require successful shard jobs
         # The merge detects failed runs in their artifacts. A job can also fail
         # after it uploaded a complete run, so check the matrix conclusion too.
         if: needs.cargo-mutants.result != 'success'
+        env:
+          MUTATION_OUTPUT_DIR: ${{ steps.paths.outputs.output }}
         run: |
           printf '%s\n' '## 🧬 Mutation testing — ❌ FAIL' '' \
             'At least one shard job failed after producing results. See the shard jobs in this workflow run.' \
-            | tee mutation-report.md >> "$GITHUB_STEP_SUMMARY"
+            | tee "$MUTATION_OUTPUT_DIR/mutation-report.md" >> "$GITHUB_STEP_SUMMARY"
           exit 1
 
       - name: Upsert PR comment
@@ -170,12 +183,14 @@ jobs:
         if: always()
         continue-on-error: true
         uses: actions/github-script@v7
+        env:
+          MUTATION_OUTPUT_DIR: ${{ steps.paths.outputs.output }}
         with:
           script: |
             const fs = require('fs');
             let body;
             try {
-              body = fs.readFileSync('mutation-report.md', 'utf8');
+              body = fs.readFileSync(require('path').join(process.env.MUTATION_OUTPUT_DIR, 'mutation-report.md'), 'utf8');
             } catch {
               body = '## 🧬 Mutation testing\n\nNo report produced: the mutation run failed before the gate scored it. See the job log.';
             }
@@ -199,18 +214,11 @@ jobs:
             }
 
       - name: Upload mutation artifacts
-        if: always()
+        if: always() && steps.paths.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: mutation-results
-          path: |
-            target/mutants/mutants.out
-            target/mutants/status
-            target/mutants/unplanned.txt
-            target/mutants/recheck/mutants.out
-            target/mutants/mega-eest/mutants.out
-            inventory.txt
-            mutation-report.md
+          path: ${{ steps.paths.outputs.output }}
           if-no-files-found: ignore
 
   cargo-mutants-full:
@@ -234,28 +242,32 @@ jobs:
         with:
           tool: cargo-mutants@27.1.0
 
+      - name: Create fresh join directories
+        id: paths
+        run: |
+          staging="$(mktemp -d "$RUNNER_TEMP/mutation-XXXXXXXX")"
+          mkdir "$staging/shards" "$staging/report"
+          echo "input=$staging/shards" >> "$GITHUB_OUTPUT"
+          echo "output=$staging/report" >> "$GITHUB_OUTPUT"
+
       - name: Download shard results
         uses: actions/download-artifact@v4
         with:
           pattern: mutation-results-shard-*
-          path: shards
+          path: ${{ steps.paths.outputs.input }}
 
       - name: Merge, score and gate
+        env:
+          MUTATION_INPUT_DIR: ${{ steps.paths.outputs.input }}
+          MUTATION_OUTPUT_DIR: ${{ steps.paths.outputs.output }}
         run: scripts/mutation_join.sh full
 
       - name: Upload mutation artifacts
-        if: always()
+        if: always() && steps.paths.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: mutation-results
-          path: |
-            target/mutants/mutants.out
-            target/mutants/status
-            target/mutants/unplanned.txt
-            target/mutants/recheck/mutants.out
-            target/mutants/mega-eest/mutants.out
-            inventory.txt
-            mutation-report.md
+          path: ${{ steps.paths.outputs.output }}
           if-no-files-found: ignore
 
   # ── cargo-mutants: the test gates' own infrastructure ──────────────────────

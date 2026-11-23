@@ -471,6 +471,7 @@ SHARD_CAUSES = {
     "no-artifact": "it uploaded no results",
     "unreadable": "its results cannot be read (a record cut off while it was written)",
     "invalid-results": "its results do not show that it finished",
+    "foreign-artifact": "its run identity or shard index does not match this join",
 }
 BUDGET_STATES = ("partial", "not-started", "followup-stopped")
 
@@ -587,6 +588,10 @@ def copy_logs(source: Path, out: Path, prefix: str, outcomes: list[dict]) -> lis
 
 def cmd_merge(args: argparse.Namespace) -> int:
     diff = getattr(args, "scope", "full") == "diff"
+    if diff and (not args.head or not args.base or len(args.shards) != 4):
+        print("ERROR: a diff join requires the tested SHA, base SHA and four shard paths",
+              file=sys.stderr)
+        return 2
     inventory_path = Path(args.inventory)
     if not inventory_path.is_file():
         print(f"ERROR: missing mutant inventory at {inventory_path}", file=sys.stderr)
@@ -617,6 +622,19 @@ def cmd_merge(args: argparse.Namespace) -> int:
             shard_states.append((status or {}).get("status", "no-status"))
         line = " ".join(f"{k}={v}" for k, v in status.items()) if status else shard_states[-1]
         print(f"| `{shard}` | {line} |")
+        if diff:
+            if status is None:
+                shard_plans.append(None)
+                continue
+            identity = {"head": args.head, "base": args.base, "shard-index": str(i),
+                        "shard-count": "4", "run-id": args.run_id, "run-attempt": args.run_attempt}
+            mismatches = [f"{key} expected {value!r}, got {status.get(key)!r}"
+                          for key, value in identity.items() if status.get(key) != value]
+            if mismatches:
+                shard_states[-1] = "foreign-artifact"
+                shard_plans.append(None)
+                print(f"| `{shard}` | {'; '.join(mismatches)} |")
+                continue
         plan = (status or {}).get("expected", "")
         shard_plans.append(int(plan) if plan.isdigit() else None)
         shard_results = shard / "mutants.out"
@@ -1170,6 +1188,10 @@ def main() -> int:
     pg.add_argument("--out", required=True)
     pg.add_argument("--scope", choices=("diff", "full"), default="full",
                     help="allow an empty diff inventory and verify each diff shard's results")
+    pg.add_argument("--head", help="tested SHA expected by the diff join")
+    pg.add_argument("--base", help="base SHA expected by the diff join")
+    pg.add_argument("--run-id", help="GitHub run ID expected by the diff join")
+    pg.add_argument("--run-attempt", help="GitHub run attempt expected by the diff join")
     pg.add_argument("shards", nargs="*", help="one directory per shard: mutants.out/ + status")
     pg.set_defaults(func=cmd_merge)
 
