@@ -28,7 +28,8 @@ print(probe_version)
 PY
 )
 
-if mise run system-contracts:attest "$crate_dir" >"$scratch/attest.log" 2>&1; then
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$scratch/target}"
+if cargo run --locked -p system-contract-artifacts -- attest "$crate_dir" >"$scratch/attest.log" 2>&1; then
     cat "$scratch/attest.log"
     echo "Attestation accepted a changed KeylessDeploy.version()" >&2
     exit 1

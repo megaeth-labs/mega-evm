@@ -1,6 +1,6 @@
 //! Pins the code hashes and latest aliases for the checked-in system contracts.
 
-use std::{fs, path::Path};
+use std::{collections::BTreeSet, fs, io, path::Path};
 
 use mega_system_contracts::{
     access_control, alloy_primitives::b256, keyless_deploy, limit_control, oracle,
@@ -8,7 +8,7 @@ use mega_system_contracts::{
 };
 
 #[test]
-fn test_versioned_artifact_hashes_are_frozen() {
+fn test_versioned_artifact_hashes_are_frozen() -> io::Result<()> {
     let cases = [
         (
             (
@@ -75,9 +75,31 @@ fn test_versioned_artifact_hashes_are_frozen() {
             sequencer_registry::V2_0_0_CODE_HASH,
         ),
     ];
-    for ((contract, version, expected), actual) in cases {
+    for &((contract, version, expected), actual) in &cases {
         assert_eq!(actual, expected, "{contract} v{version} code hash changed");
     }
+
+    let artifacts = Path::new(env!("CARGO_MANIFEST_DIR")).join("artifacts");
+    if artifacts.is_dir() {
+        let expected: BTreeSet<_> = cases
+            .into_iter()
+            .map(|((contract, version, _), _)| (contract.to_owned(), version.to_owned()))
+            .collect();
+        let mut actual = BTreeSet::new();
+        for entry in fs::read_dir(artifacts)? {
+            let filename = entry?.file_name();
+            let versioned = filename
+                .to_str()
+                .and_then(|name| name.strip_suffix(".json"))
+                .and_then(|stem| stem.split_once('-'))
+                .filter(|&(_, version)| version != "latest");
+            if let Some((contract, version)) = versioned {
+                actual.insert((contract.to_owned(), version.to_owned()));
+            }
+        }
+        assert_eq!(actual, expected, "Versioned artifacts must match the literal hash table");
+    }
+    Ok(())
 }
 
 #[test]

@@ -4,7 +4,7 @@
 
 This crate exports versioned system-contract bytecode and typed ABI bindings.
 Cargo builds use the checked-in Rust constants.
-In a repository checkout, the build script requires the JSON artifacts, checks their self-hashes, verifies that each latest alias matches a versioned artifact on version and hash, and compares the artifacts with the generated Rust sources.
+In a repository checkout, the build script requires the JSON artifacts, checks their self-hashes and filename versions, verifies that each latest alias matches a versioned artifact on version and hash, and compares the artifacts with the generated Rust sources.
 These checks are read-only.
 Published crates ship the constants and ABI interfaces.
 The generated headers deliberately retain the historical wording `updated automatically by build.rs` to preserve the frozen file bytes.
@@ -21,9 +21,19 @@ The generated headers deliberately retain the historical wording `updated automa
 ## Updating system contracts
 
 Preserve historical artifacts for spec traceability.
-For an intentional new version, add `artifacts/<Name>-X.Y.Z.json` and update `artifacts/<Name>-latest.json` with the corresponding spec change.
-Run `mise run system-contracts:attest` with Foundry v1.7.1 and initialized submodules to check that the Solidity deployments reproduce the latest checked-in artifacts.
+For an intentional new version, update the contract's `version()` and make the corresponding spec change.
+From `crates/system-contracts/`, run the deployment script with Foundry v1.7.1 and initialized submodules, replacing `<Name>` with the contract name.
+
+```bash
+forge script scripts/<Name>Bytecode.s.sol:Save<Name>Bytecode --sig "run()"
+```
+
+The script writes `artifacts/<Name>.json`.
+Move it to `artifacts/<Name>-X.Y.Z.json`, using the JSON's `version` for `X.Y.Z`.
+Point the `artifacts/<Name>-latest.json` symlink at the new file.
+From the repository root, run `mise run system-contracts:attest` to verify that the Solidity deployments reproduce the latest checked-in artifacts.
 Attestation first checks that the configured contracts, latest artifact aliases, deployment scripts, and top-level Solidity sources name the same contracts.
+It prints the Forge version and requires v1.7.1 in CI.
 It compiles in a temporary Foundry project with solc 0.8.30 and `evm_version = "osaka"` from `foundry.toml`.
 It checks the SequencerRegistry storage layout against the Rust slot constants in the same project.
 Run `mise run system-contracts:generate` to regenerate `src/generated/` from the artifacts.

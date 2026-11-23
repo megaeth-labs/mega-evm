@@ -7,7 +7,7 @@ use std::{
 };
 
 use alloy_primitives::{hex, keccak256, Bytes, B256};
-use anyhow::{ensure, Context, Result};
+use anyhow::{anyhow, ensure, Context, Result};
 use semver::Version;
 use serde::Deserialize;
 
@@ -64,14 +64,34 @@ impl Contract {
             let entry = entry?;
             let filename = entry.file_name();
             let filename = filename.to_string_lossy();
-            if filename.starts_with(&prefix) &&
-                filename.ends_with(".json") &&
-                !filename.contains("-latest")
-            {
-                versions.push(ContractArtifact::read(&entry.path())?);
+            let Some(filename_version) =
+                filename.strip_prefix(&prefix).and_then(|name| name.strip_suffix(".json"))
+            else {
+                continue;
+            };
+            if filename_version == "latest" {
+                continue;
             }
+
+            let version = Version::parse(filename_version)
+                .map_err(|err| anyhow!("Invalid version in artifact filename {filename}: {err}"))?;
+            let artifact = ContractArtifact::read(&entry.path())?;
+            ensure!(
+                version == artifact.version,
+                "Version mismatch for artifact {filename}: filename says {version}, JSON says {}",
+                artifact.version
+            );
+            versions.push(artifact);
         }
         versions.sort_by(|a, b| a.version.cmp(&b.version));
+        for pair in versions.windows(2) {
+            ensure!(
+                pair[0].version != pair[1].version,
+                "Duplicate artifact version {} for {}",
+                pair[0].version,
+                self.name
+            );
+        }
         Ok(versions)
     }
 }

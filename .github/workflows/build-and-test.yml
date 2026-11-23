@@ -14,7 +14,7 @@ concurrency:
 jobs:
   lint:
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
         with:
@@ -25,20 +25,18 @@ jobs:
         uses: foundry-rs/foundry-toolchain@b00af27efadbc7b4ca8b82abbd903b17cc874d2a # v1
         with:
           version: v1.7.1
-      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2.4.4
-        with:
-          install: false
-          cache: false
       - name: Attest system contract bytecode
         env:
-          MISE_AUTO_INSTALL: "false"
-        run: mise run system-contracts:attest
+          CARGO_TARGET_DIR: ${{ runner.temp }}/system-contract-artifacts
+        run: cargo run --locked -p system-contract-artifacts -- attest
       - name: Attestation negative control
         env:
-          MISE_AUTO_INSTALL: "false"
+          CARGO_TARGET_DIR: ${{ runner.temp }}/system-contract-artifacts
         run: bash .github/scripts/check_system_contract_attestation.sh
       - name: Check generated system contract constants
-        run: cargo run --quiet --locked -p system-contract-artifacts -- check
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/system-contract-artifacts
+        run: cargo run --locked -p system-contract-artifacts -- check
       - name: Run cargo-sort
         run: |
           cargo install cargo-sort

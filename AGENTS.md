@@ -44,14 +44,15 @@ Initialize git submodules for the Foundry commands with `git submodule update --
 
 ## Workspace Structure
 
-| Crate                   | Path                      | Purpose                                                                                     |
-| ----------------------- | ------------------------- | ------------------------------------------------------------------------------------------- |
-| `mega-evm`              | `crates/mega-evm`         | Core EVM implementation                                                                     |
-| `mega-system-contracts` | `crates/system-contracts` | Solidity system contracts with Rust bindings (Foundry-based)                                |
-| `mega-state-test`       | `crates/mega-state-test`  | State-test fixtures + runner library (EEST-compatible, published; imported as `state_test`) |
-| `state-test`            | `crates/state-test`       | Thin CLI front-end over `mega-state-test` (not published)                                   |
-| `mega-evme`             | `bin/mega-evme`           | CLI tool for EVM execution (`run`, `tx`, `replay`, `cache`)                                 |
-| `mega-t8n`              | `bin/mega-t8n`            | Standalone state transition (t8n) tool                                                      |
+| Crate                       | Path                      | Purpose                                                                                     |
+| --------------------------- | ------------------------- | ------------------------------------------------------------------------------------------- |
+| `mega-evm`                  | `crates/mega-evm`         | Core EVM implementation                                                                     |
+| `mega-system-contracts`     | `crates/system-contracts` | Versioned system-contract bytecode and Rust ABI bindings                                    |
+| `system-contract-artifacts` | `tools/system-contracts`  | Attests Solidity deployments and regenerates the checked-in Rust bytecode constants         |
+| `mega-state-test`           | `crates/mega-state-test`  | State-test fixtures + runner library (EEST-compatible, published; imported as `state_test`) |
+| `state-test`                | `crates/state-test`       | Thin CLI front-end over `mega-state-test` (not published)                                   |
+| `mega-evme`                 | `bin/mega-evme`           | CLI tool for EVM execution (`run`, `tx`, `replay`, `cache`)                                 |
+| `mega-t8n`                  | `bin/mega-t8n`            | Standalone state transition (t8n) tool                                                      |
 
 ## Architecture
 

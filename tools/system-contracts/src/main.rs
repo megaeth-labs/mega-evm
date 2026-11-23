@@ -11,6 +11,8 @@ mod storage_layout;
 
 use artifact_checks::{check_generated, generated_sources, ContractArtifact, CONTRACTS};
 
+const EXPECTED_FOUNDRY_VERSION: &str = "1.7.1";
+
 fn main() -> Result<()> {
     let crate_dir = Path::new("crates/system-contracts");
     match env::args().nth(1).as_deref() {
@@ -34,11 +36,7 @@ fn main() -> Result<()> {
 
 fn attest(crate_dir: &Path) -> Result<()> {
     check_inventory(crate_dir)?;
-    let forge = Command::new("forge")
-        .arg("--version")
-        .output()
-        .context("Could not run forge. Install Foundry v1.7.1 and put forge on PATH.")?;
-    ensure!(forge.status.success(), "forge --version failed: {}", forge.status);
+    check_forge_version()?;
 
     let artifacts = crate_dir.join("artifacts");
     let project = tempfile::tempdir()?;
@@ -63,7 +61,8 @@ fn attest(crate_dir: &Path) -> Result<()> {
             "{name} contract bytecode mismatch with artifacts/{name}-latest.json.\n\
              Expected version {} and code hash {:#x}.\n\
              Compiled version {} and code hash {:#x}.\n\
-             For an intentional upgrade, add a versioned artifact and update the latest alias.",
+             For an intentional upgrade, see \"Updating system contracts\" in \
+             crates/system-contracts/AGENTS.md.",
             expected.version,
             expected.code_hash,
             compiled.version,
@@ -74,6 +73,24 @@ fn attest(crate_dir: &Path) -> Result<()> {
     }
     storage_layout::attest(project.path())?;
     println!("Attested {attested} of {} system contracts", CONTRACTS.len());
+    Ok(())
+}
+
+fn check_forge_version() -> Result<()> {
+    let forge = Command::new("forge").arg("--version").output().with_context(|| {
+        format!("Could not run forge. Install Foundry v{EXPECTED_FOUNDRY_VERSION} and put forge on PATH.")
+    })?;
+    ensure!(forge.status.success(), "forge --version failed: {}", forge.status);
+
+    let stdout = String::from_utf8_lossy(&forge.stdout);
+    let first_line = stdout.lines().next().unwrap_or("<no version reported>");
+    let version = first_line.strip_prefix("forge Version: ").unwrap_or(first_line).trim();
+    println!("Forge version: {version}");
+    if version != EXPECTED_FOUNDRY_VERSION {
+        let message = format!("Expected Forge {EXPECTED_FOUNDRY_VERSION}, found {version}");
+        ensure!(env::var_os("CI").is_none(), "{message}");
+        eprintln!("warning: {message}");
+    }
     Ok(())
 }
 

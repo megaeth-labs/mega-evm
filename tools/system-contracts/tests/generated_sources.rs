@@ -58,3 +58,30 @@ fn test_generate_restores_stale_constants_from_artifacts() -> Result<()> {
     assert_eq!(fs::read(generated)?, expected);
     Ok(())
 }
+
+#[test]
+fn test_invalid_artifact_version_is_rejected_before_writing() -> Result<()> {
+    let repo = contract_fixture()?;
+    let artifacts = repo.path().join("crates/system-contracts/artifacts");
+    let filename = "SequencerRegistry-1.0.1.json";
+    fs::copy(artifacts.join("SequencerRegistry-1.0.0.json"), artifacts.join(filename))?;
+    let generated = repo.path().join(ORACLE_SOURCE);
+    let stale_contents = "// Stale constants\n";
+    fs::write(&generated, stale_contents)?;
+
+    for operation in ["generate", "check"] {
+        let result = Command::new(env!("CARGO_BIN_EXE_system-contract-artifacts"))
+            .arg(operation)
+            .current_dir(repo.path())
+            .output()?;
+
+        let stderr = String::from_utf8(result.stderr)?;
+        assert!(!result.status.success(), "{operation}: {stderr}");
+        assert!(
+            stderr.contains(&format!("Version mismatch for artifact {filename}")),
+            "{operation}: {stderr}"
+        );
+        assert_eq!(fs::read_to_string(&generated)?, stale_contents, "{operation}");
+    }
+    Ok(())
+}
