@@ -527,12 +527,11 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> revm::context_interface::Host
         }
     }
 
-    /// Hands the inner context the lifecycle's end, and ends the start ledger with it: every start
-    /// settled, or what is open discarded.
+    /// Hands the inner context the lifecycle's end, and closes its start accounting with it.
     #[inline]
     fn frame_lifecycle_end(&mut self, end: LifecycleEnd) {
         self.inner.frame_lifecycle_end(end);
-        self.additional_limit.ledger_mut().end(end == LifecycleEnd::Settled);
+        self.additional_limit.end_frame_lifecycle(end == LifecycleEnd::Settled);
     }
 }
 

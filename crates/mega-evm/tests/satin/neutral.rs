@@ -188,18 +188,31 @@ fn test_neutral_creation_matches_op_revm() {
 
 /// A `CREATE` from a contract whose nonce is at its maximum. On Osaka, where EIP-8037 is off, the
 /// opcode starts the creation without the address it would take, and revm refuses it before the
-/// bump; on Amsterdam the opcode refuses it itself. Either way nothing is created and nothing is
-/// counted, and the run is op-revm's.
+/// bump; on Amsterdam the opcode refuses it itself. Either way the destination stays out of the
+/// witness, and the first access to it still pays the cold surcharge.
 #[test]
-fn test_neutral_creation_from_a_nonce_at_its_maximum_matches_op_revm() {
-    let code = BytecodeBuilder::default().create(U256::ZERO, [STOP]).return_top().build();
+fn test_neutral_creation_from_a_nonce_at_its_maximum_matches_ethereum() {
+    let created = CALLEE.create(u64::MAX);
     for fork in FORKS {
-        let db = funded().account_code(CALLEE, code.clone()).account_nonce(CALLEE, u64::MAX);
-        let outcome = run_both(fork, db, call(Bytes::new(), U256::ZERO));
-        assert!(outcome.0.result.is_success(), "{fork:?}: {:?}", outcome.0.result);
-        assert_eq!(outcome.0.result.output(), Some(&Bytes::from(vec![0; 32])), "{fork:?}");
-        assert_eq!(outcome.0.state[&CALLEE].info.nonce, u64::MAX, "{fork:?}: not bumped");
-        assert_same(fork, outcome);
+        let gas = [0, 1, 2].map(|probes| {
+            let mut code = BytecodeBuilder::default().create(U256::ZERO, [STOP]);
+            for _ in 0..probes {
+                code = code.push_address(created).append_many([BALANCE, POP]);
+            }
+            let db = funded()
+                .account_code(CALLEE, code.return_top().build())
+                .account_nonce(CALLEE, u64::MAX);
+            let outcome = run_against_ethereum(fork, db, call(Bytes::new(), U256::ZERO));
+            assert!(outcome.0.result.is_success(), "{fork:?}: {:?}", outcome.0.result);
+            assert_eq!(outcome.0.result.output(), Some(&Bytes::from(vec![0; 32])), "{fork:?}");
+            assert_eq!(outcome.0.state[&CALLEE].info.nonce, u64::MAX, "{fork:?}: not bumped");
+            assert_eq!(outcome.0.state.contains_key(&created), probes != 0, "{fork:?}: witness");
+            let gas = outcome.0.result.tx_gas_used();
+            assert_same(fork, outcome);
+            gas
+        });
+        let cold_cost = neutral_cfg(fork).unwrap().gas_params.cold_account_additional_cost();
+        assert_eq!((gas[1] - gas[0]) - (gas[2] - gas[1]), cold_cost, "{fork:?}: cold");
     }
 }
 

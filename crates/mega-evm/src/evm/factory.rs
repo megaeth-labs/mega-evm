@@ -211,7 +211,8 @@ mod tests {
             EvmEnv { cfg_env, block_env: evm_env().block_env },
         );
         let runs_with = |evm: &MegaEvm<MemoryDatabase, NoOpInspector>| {
-            (evm.ctx().mega_cfg().clone(), evm.ctx().cfg().clone())
+            assert_eq!(Evm::chain_id(evm), 4326);
+            (Evm::cfg_env(evm).clone(), evm.ctx().cfg().clone())
         };
         assert_eq!(runs_with(&evm), (exported.clone(), op_view.clone()));
         let on_chain = |mut tx: MegaTransaction| {

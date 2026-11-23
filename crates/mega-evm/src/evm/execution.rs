@@ -1092,7 +1092,7 @@ fn hold_detained_precompile<DB: Database, ExtEnvs: ExternalEnvTypes>(
     if price <= allowance || price > inputs.gas_limit {
         return PrecompileHold::Unheld;
     }
-    let caller = ctx.journal_ref().state.get(&inputs.caller);
+    let caller = ctx.accounts().loaded(inputs.caller);
     let unfunded = inputs
         .value
         .transfer()
@@ -1850,6 +1850,98 @@ mod tests {
         assert_eq!((held, ran_on), (PrecompileHold::Unheld, 3 * PRICE));
         let (held, ran_on) = hold(PRICE - 1, &priced, &map, TARGET, 3 * PRICE);
         assert_eq!((held, ran_on), (PrecompileHold::Unheld, 3 * PRICE));
+    }
+
+    #[test]
+    fn test_precompile_detention_ignores_a_caller_from_an_earlier_journal_transaction() {
+        use crate::test_utils::{op_transaction, zero_fee_l1_block_info};
+        use alloy_op_evm::OpTx;
+        use revm::{context::TxEnv, ExecuteEvm};
+
+        const KZG: Address = crate::kzg_point_evaluation::ADDRESS;
+        const PRICE: u64 = crate::kzg_point_evaluation::GAS_COST;
+
+        struct RetargetPrecompileCaller;
+
+        impl Inspector<MegaContext<MemoryDatabase>> for RetargetPrecompileCaller {
+            fn call(
+                &mut self,
+                ctx: &mut MegaContext<MemoryDatabase>,
+                inputs: &mut CallInputs,
+            ) -> Option<revm::interpreter::CallOutcome> {
+                if inputs.bytecode_address == KZG {
+                    assert!(ctx.journal_ref().state.contains_key(&TARGET));
+                    assert!(!ctx.accounts().is_loaded(TARGET));
+                    inputs.caller = TARGET;
+                    ctx.detention.reset(PRICE - 1, PRICE - 1);
+                    ctx.detention.mark_before_execution(VolatileDataAccess::TIMESTAMP);
+                }
+                None
+            }
+        }
+
+        let db = MemoryDatabase::default()
+            .account_balance(CALLER, U256::from(10u64.pow(18)))
+            .account_balance(KZG, U256::ONE);
+        let ctx = MegaContext::new(db, MegaSpecId::SATIN).with_chain(zero_fee_l1_block_info());
+        let mut evm = MegaEvm::new(ctx).with_inspector(RetargetPrecompileCaller);
+        let tx = |to, value, nonce| {
+            OpTx(op_transaction(TxEnv {
+                caller: CALLER,
+                kind: TxKind::Call(to),
+                value,
+                nonce,
+                gas_limit: 3 * PRICE +
+                    history_gas(crate::TX_BODY_SIZE + crate::WRITE_RECORD_SIZE).unwrap(),
+                ..Default::default()
+            }))
+        };
+        assert!(evm.transact_one(tx(TARGET, U256::ZERO, 0)).unwrap().is_success());
+        let outcome = evm.execute_transaction(tx(KZG, U256::ONE, 1)).unwrap();
+        assert!(
+            matches!(
+                outcome.limit_exceeded,
+                Some(LimitCheck::ExceedsLimit { kind: LimitKind::ComputeGas, .. })
+            ),
+            "{:?}",
+            outcome.result
+        );
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "every decided start has returned")]
+    fn test_transaction_settlement_rejects_an_open_child_start() {
+        use crate::test_utils::{op_transaction, zero_fee_l1_block_info};
+        use alloy_op_evm::OpTx;
+        use revm::{context::TxEnv, interpreter::CallOutcome};
+
+        struct LeaveChildOpen;
+
+        impl Inspector<MegaContext<MemoryDatabase>> for LeaveChildOpen {
+            fn call_end(
+                &mut self,
+                ctx: &mut MegaContext<MemoryDatabase>,
+                _inputs: &CallInputs,
+                _outcome: &mut CallOutcome,
+            ) {
+                ctx.additional_limit.open_start(1, None);
+            }
+        }
+
+        let db = MemoryDatabase::default()
+            .account_balance(CALLER, U256::from(10u64.pow(18)))
+            .account_code(TARGET, Bytes::from_static(&[revm::bytecode::opcode::STOP]));
+        let ctx = MegaContext::new(db, MegaSpecId::SATIN).with_chain(zero_fee_l1_block_info());
+        let mut evm = MegaEvm::new(ctx).with_inspector(LeaveChildOpen);
+        let tx = OpTx(op_transaction(TxEnv {
+            caller: CALLER,
+            kind: TxKind::Call(TARGET),
+            gas_limit: 100_000 + history_gas(crate::TX_BODY_SIZE).unwrap(),
+            ..Default::default()
+        }));
+        let outcome = evm.execute_transaction(tx).unwrap();
+        assert!(outcome.result.is_success());
     }
 
     /// op-revm's size-limited precompiles in the Satin set — the BN254 pairing and the BLS12-381

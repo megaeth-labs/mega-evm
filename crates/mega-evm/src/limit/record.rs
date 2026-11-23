@@ -300,7 +300,7 @@ impl<'a> Accounts<'a> {
 
     /// The account at `address` as the transaction loaded it and holds it now: `None` for one
     /// the transaction has not loaded, which it has not changed either.
-    fn loaded(&self, address: Address) -> Option<&'a Account> {
+    pub(crate) fn loaded(&self, address: Address) -> Option<&'a Account> {
         let transaction_id = self.journal.transaction_id;
         self.journal.state.get(&address).filter(|account| account.transaction_id == transaction_id)
     }
@@ -987,15 +987,16 @@ mod tests {
         }
 
         // Slots that held a value at the start, loaded before the creation as only a tool loads
-        // them: the deletion makes the record of the one that still holds it, and the one the
+        // them: the deletion makes the records of those that still hold it, and the one the
         // transaction wrote since keeps the record its write made. Neither refills or falls.
         let held = MemoryDatabase::default()
             .account_storage(fresh, U256::from(8), U256::from(4))
-            .account_storage(fresh, U256::from(9), U256::from(5));
+            .account_storage(fresh, U256::from(9), U256::from(5))
+            .account_storage(fresh, U256::from(10), U256::from(6));
         let mut loaded = Journal::new(held.account_balance(SENDER, U256::from(10)));
         loaded.load_account(SENDER).unwrap();
         loaded.load_account(fresh).unwrap();
-        for key in [8, 9] {
+        for key in [8, 9, 10] {
             loaded.sload(fresh, U256::from(key)).unwrap();
         }
         let spec = loaded.cfg.spec;
@@ -1003,8 +1004,8 @@ mod tests {
         loaded.sstore(fresh, U256::from(8), U256::from(6)).unwrap();
         loaded.selfdestruct(fresh, OTHER, false).unwrap();
         let parts = Accounts::of(&loaded).destroyed_parts(fresh, false).unwrap();
-        assert_eq!(parts, DestroyedParts { leaf: false, code: 0, slots: vec![], deleted: 1 });
-        assert_eq!(parts.counted(), Counted::records(1, 0, false));
+        assert_eq!(parts, DestroyedParts { leaf: false, code: 0, slots: vec![], deleted: 2 });
+        assert_eq!(parts.counted(), Counted::records(2, 0, false));
 
         // An account the transaction did not create is an ordinary deletion.
         let mut older = journal();
@@ -1108,6 +1109,12 @@ mod tests {
         let logged = before(&journal, OTHER, DESTRUCTED);
         journal.log(Log::new_unchecked(OTHER, vec![], Bytes::new()));
         assert_eq!(made(&journal, logged), (RecordDelta::NONE, Counted::NONE), "a contract's log");
+        journal.log(Log::new_unchecked(OTHER, vec![ETH_TRANSFER_LOG_TOPIC], Bytes::new()));
+        assert_eq!(
+            made(&journal, logged),
+            (RecordDelta::NONE, Counted::NONE),
+            "a contract's log carrying the transfer topic"
+        );
 
         let itself = before(&journal, SENDER, SENDER);
         journal.load_account_mut(SENDER).unwrap().data.bump_nonce();
