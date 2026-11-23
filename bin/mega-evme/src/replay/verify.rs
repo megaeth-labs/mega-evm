@@ -457,11 +457,9 @@ fn compare_log(index: usize, onchain: &Log, replay: &Log) -> Option<LogFieldMism
 /// pruned below the endpoint's retention height — is an [`ReplayError::RpcError`]
 /// so the target is reported as unverified rather than as a mismatch. So is a
 /// receipt that describes a different transaction than the one requested: the
-/// identity check runs here, at the one seam every mode fetches through, so no
-/// caller can compare against or anchor to a receipt it never asked for. And so
-/// is a receipt whose logs bloom is not the bloom of its own logs, checked here
-/// for the same reason: a receipt that contradicts itself describes no
-/// execution, and its logs could otherwise match while its bloom is forged.
+/// receipt is admitted only if its transaction hash and logs bloom agree with
+/// the request and its logs. Whole-block requests apply the same checks to the
+/// receipts served for each body index.
 pub(super) async fn fetch_receipt<P>(provider: &P, tx_hash: B256) -> Result<OpTransactionReceipt>
 where
     P: Provider<op_alloy_network::Optimism>,
@@ -476,13 +474,41 @@ where
                  the endpoint, or the endpoint has pruned its receipt"
             ))
         })?;
+    validate_receipt(&receipt, tx_hash)?;
+    Ok(receipt)
+}
+
+/// Authenticate the transaction hash and bloom of a served receipt.
+fn validate_receipt(receipt: &OpTransactionReceipt, tx_hash: B256) -> Result<()> {
     check_transaction_identity(receipt.inner.transaction_hash, tx_hash)
         .map_err(ReplayError::RpcError)?;
-    let envelope = onchain_envelope(&receipt);
+    let envelope = onchain_envelope(receipt);
     let logs: Vec<Log> = envelope.logs().iter().map(|log| log.inner.clone()).collect();
     coherence::require_receipt_bloom(tx_hash, *envelope.logs_bloom(), &logs)
-        .map_err(|incoherence| ReplayError::RpcError(incoherence.to_string()))?;
-    Ok(receipt)
+        .map_err(|incoherence| ReplayError::RpcError(incoherence.to_string()))
+}
+
+/// Admit a receipt returned by a block receipt request for its body position.
+pub(super) fn validate_block_receipt(
+    receipt: &OpTransactionReceipt,
+    tx_hash: B256,
+    block_hash: B256,
+    index: usize,
+) -> Result<()> {
+    validate_receipt(receipt, tx_hash)?;
+    check_inclusion(receipt.block_hash(), block_hash).map_err(ReplayError::RpcError)?;
+    validate_receipt_index(receipt, index)
+}
+
+/// Confirm that the receipt describes the requested occurrence of its hash.
+fn validate_receipt_index(receipt: &OpTransactionReceipt, index: usize) -> Result<()> {
+    if receipt.inner.transaction_index != Some(index as u64) {
+        return Err(ReplayError::RpcError(format!(
+            "receipt for transaction {} reports transactionIndex {:?}, expected body index {index}",
+            receipt.inner.transaction_hash, receipt.inner.transaction_index,
+        )));
+    }
+    Ok(())
 }
 
 /// A target's on-chain receipt, fetched once and admitted for every consumer of
@@ -504,7 +530,8 @@ pub(super) struct ReceiptEvidence {
 
 impl ReceiptEvidence {
     /// Fetch the receipt of `tx_hash` and admit it for a replay of the block
-    /// `replayed_block_hash`.
+    /// `replayed_block_hash`. When the block lists the hash more than once,
+    /// the receipt must also agree with the by-hash transaction's body index.
     ///
     /// Every way the receipt question can go unanswered — a transport failure, a
     /// pruned receipt, a receipt describing another transaction, a receipt
@@ -515,6 +542,7 @@ impl ReceiptEvidence {
         provider: &P,
         tx_hash: B256,
         replayed_block_hash: B256,
+        repeated_index: Option<usize>,
     ) -> Result<Self>
     where
         P: Provider<op_alloy_network::Optimism>,
@@ -522,6 +550,9 @@ impl ReceiptEvidence {
         let receipt = fetch_receipt(provider, tx_hash).await?;
         check_inclusion(receipt.block_hash(), replayed_block_hash)
             .map_err(ReplayError::RpcError)?;
+        if let Some(index) = repeated_index {
+            validate_receipt_index(&receipt, index)?;
+        }
         Ok(Self { receipt })
     }
 
