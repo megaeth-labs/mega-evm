@@ -204,7 +204,8 @@ These checks guard every change to the Satin engine.
 
 ### Mutation testing
 
-- Four parallel `cargo-mutants gate shard k/4` jobs mutate the lines a pull request changes.
+- The driver decides whether the diff touches mutatable source before CI starts the four parallel `cargo-mutants gate shard k/4` jobs.
+  When that decision explicitly skips the matrix, the `cargo-mutants gate` reports **Nothing to test**.
   The `cargo-mutants gate` join scores them against the unsharded diff inventory from the same base and fails on a surviving mutant that no reviewed suppression covers.
   Reference point, the pull request that brought the Satin skeleton: 115 mutants, 49 caught, 0 survived, 1 suppressed, 65 unviable, in 7m41s on CI and 4m12s on a 15-core laptop with `JOBS=8`.
   That population is the diff against `a8f8c7c9`, the last commit of the legacy core, and it is reproduced by `scripts/mutation_test.sh diff a8f8c7c9` followed by `python3 scripts/mutation_gate.py report --results target/mutants/mutants.out --recheck target/mutants/recheck/mutants.out --suppressions mutants/suppressions.toml`.
@@ -216,9 +217,11 @@ These checks guard every change to the Satin engine.
   The pass costs nothing while the tests catch every mutant; otherwise the warm-up, cargo-mutants' baseline, one copy of `./target` and, per mutant, two incremental builds of mega-evm and one plain run of the cases (about three minutes on a 4-vCPU runner, estimated, not measured), plus any struct-field mutant in the run's scope (`mutants/README.md` has the details).
 - Each shard is bounded to 330 minutes, and the driver's own budget (`MUTANTS_BUDGET`, 300 minutes) stops it early enough to upload what it tested.
   The join uses the inventory and each shard's `MUTANTS-STATUS` to name missing, failed or budget-stopped shards and fail the gate.
+  The PR join also checks the download outcome and artifact identity, including the tested revision, base, shard index and GitHub run attempt.
   The driver builds the tests once before the mutants (the warm build) and CI builds incrementally (`CARGO_INCREMENTAL=1`), so each mutant recompiles only what its mutation changed.
   The nightly full run also uses four shards (`scripts/mutation_test.sh full --shard k/4`).
   Both joins use `scripts/mutation_join.sh` to list the inventory, merge the primary and follow-up runs, and score the result in the corresponding scope.
+  The PR join verifies each follow-up's own baseline and completion before counting its outcomes.
   A line suppression is anchored to one mutant (`file`, `line`, `column` and its text); one whose mutant moves gates it again, and the hygiene job names where its text went.
 - The gate has a second scope, for its own infrastructure: `.cargo/mutants-infra.toml` and `scripts/mutation_test.sh infra` mutate the scenario runner (`crates/mega-evm/src/test_utils/scenario.rs`) against `mega-evm`'s tests.
   The production scope excludes test helpers as noise, so that code is otherwise never mutated, though the benches and later tests rest on it.
