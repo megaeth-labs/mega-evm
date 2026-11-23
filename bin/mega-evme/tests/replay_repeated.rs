@@ -372,6 +372,51 @@ async fn test_repeated_hash_offline_miss_cannot_use_a_by_hash_receipt() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn test_unique_block_offline_receipt_miss_shows_both_recapture_commands() {
+    let server = mock_chain().await;
+    let block = RepeatedBlock::new(BLOCK, &chain::parent_hash(), &[true]);
+    block.serve(&server).await;
+    block.serve_receipts(&server).await;
+    let dir = tempfile::tempdir().expect("capture directory");
+    let path = dir.path().join("capture.json");
+    let path = path.to_str().expect("capture path");
+    let captured: Run = common::mega_evme()
+        .args([
+            "replay",
+            "--block",
+            &BLOCK.to_string(),
+            "--rpc",
+            &server.uri(),
+            "--rpc.capture-file",
+            path,
+            "--json",
+        ])
+        .output()
+        .expect("capture a block without receipts")
+        .into();
+    assert_eq!(captured.code(), 0, "{}\n{}", captured.stdout, captured.stderr);
+
+    let run = replay(BLOCK, &["--rpc.replay-file", path]);
+
+    assert_eq!(run.code(), 3, "{}\n{}", run.stdout, run.stderr);
+    let results = run.results();
+    assert_eq!(results.len(), 1, "{}", run.stdout);
+    let hash = block.transaction["hash"].as_str().expect("transaction hash");
+    let block_hint = format!(
+        "mega-evme replay --block {BLOCK} --verify-receipt --rpc <URL> --rpc.capture-file {path}"
+    );
+    let tx_hint =
+        format!("mega-evme replay {hash} --verify-receipt --rpc <URL> --rpc.capture-file {path}");
+    for line in results {
+        let verification = &line["verification"];
+        assert!(verification.get("match").is_none(), "{line}");
+        let error = verification["error"].as_str().expect("receipt is unverified");
+        assert!(error.contains(&block_hint), "missing block recapture command: {error}");
+        assert!(error.contains(&tx_hint), "missing transaction recapture command: {error}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn test_without_repeated_hashes_an_unsupported_method_falls_back_by_hash() {
     let server = mock_chain().await;
     let block = RepeatedBlock::new(BLOCK, &chain::parent_hash(), &[true]);

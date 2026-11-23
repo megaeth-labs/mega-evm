@@ -1853,7 +1853,13 @@ where
                 .and_then(|receipts| admit_block_receipts(block, body, receipts)),
             Err(reason) if repeated_hashes.is_empty() => {
                 debug!(block = number, %reason, "Falling back to receipts by hash");
-                return fetch_receipts_by_hash(provider, targets, block, repeated_hashes).await;
+                let mut receipts =
+                    fetch_receipts_by_hash(provider, targets, block, repeated_hashes).await;
+                for error in receipts.values_mut().filter_map(|receipt| receipt.as_mut().err()) {
+                    error.push('\n');
+                    error.push_str(&reason);
+                }
+                return receipts;
             }
             Err(reason) => Err(ReplayError::RpcError(reason)),
         };

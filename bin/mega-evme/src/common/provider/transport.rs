@@ -555,14 +555,20 @@ impl tower::Service<RequestPacket> for ReplayTransport {
             let path = self.cache_file_path.display().to_string();
             let method = r.method().to_string();
             let params = r.params().map_or_else(|| "null".to_string(), |p| p.get().to_string());
-            let command = if method == "eth_getBlockReceipts" {
-                let block = serde_json::from_str::<(BlockId,)>(&params)
-                    .ok()
-                    .and_then(|(block,)| block.as_u64())
-                    .map_or_else(|| "<N>".to_owned(), |number| number.to_string());
-                format!("mega-evme replay --block {block} --verify-receipt")
-            } else {
-                "mega-evme replay <tx>".to_owned()
+            let command = match method.as_str() {
+                "eth_getBlockReceipts" => {
+                    let block = serde_json::from_str::<(BlockId,)>(&params)
+                        .ok()
+                        .and_then(|(block,)| block.as_u64())
+                        .map_or_else(|| "<N>".to_owned(), |number| number.to_string());
+                    format!("mega-evme replay --block {block} --verify-receipt")
+                }
+                "eth_getTransactionReceipt" => {
+                    let hash = serde_json::from_str::<(B256,)>(&params)
+                        .map_or_else(|_| "<tx>".to_owned(), |(hash,)| format!("{hash:#x}"));
+                    format!("mega-evme replay {hash} --verify-receipt")
+                }
+                _ => "mega-evme replay <tx>".to_owned(),
             };
             let msg = format!(
                 "cache miss in offline replay file '{path}': method={method}, params={params}\n\

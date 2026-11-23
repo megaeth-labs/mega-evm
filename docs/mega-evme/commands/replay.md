@@ -585,6 +585,8 @@ Other fixtures use the suite key `replay_<tx_hash>`.
 The fixture content and format match the single-transaction [`--dump-fixture`](#--dump-fixture-file) path (same EEST schema, same sorted `megaEnv`, same self-validation via `state-test`).
 The directory is created if it does not exist.
 Existing files are refused unless `--overwrite` is also set — a refused overwrite is a failed dump for that target, not a skip.
+If a transaction eligible for dumping appears once in each of two blocks, both `--block` runs use the same filename and suite key, so a shared directory causes the second run to refuse the existing file or replace it with `--overwrite`.
+Use a separate output directory per block to keep both fixtures.
 
 Per-target gating mirrors the single-transaction rules, but records a skip instead of failing the run.
 The fixture draft is built against the pre-commit state (same moment as the single-transaction dump) and only written after the block finishes successfully — a commit-time rejection or finish failure never creates or replaces a fixture file.
