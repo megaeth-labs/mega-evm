@@ -46,7 +46,7 @@ FEATURES="satin-price-override,test-utils"
 SNAPSHOT_SKIPPED="snapshot comparison skipped"
 
 cd "$(dirname "$0")/.." || exit 1
-OUT_DIR="${OUT_DIR:-target/price-grid}"
+OUT_DIR="${OUT_DIR-target/price-grid}"
 
 shard=""
 list_only=false
@@ -119,10 +119,24 @@ if $list_only; then
     exit 0
 fi
 
-rm -rf "$OUT_DIR"
-mkdir -p "$OUT_DIR"
+# Resolve aliases and ".." before removing the previous run's output. Compare file identities
+# too, since the working tree may be on a case-insensitive filesystem.
+python3 - "$OUT_DIR" <<'PY' || exit 2
+from pathlib import Path
+import sys
+
+repo = Path.cwd()
+try:
+    target = Path(sys.argv[1]).resolve()
+    if target.exists() and any(target.samefile(path) for path in (repo, *repo.parents)):
+        raise ValueError("output directory is the repository or one of its parents")
+except (OSError, RuntimeError, ValueError) as error:
+    sys.exit(f"error: unsafe OUT_DIR {sys.argv[1]!r}: {error}")
+PY
+rm -rf -- "$OUT_DIR" || exit 1
+mkdir -p -- "$OUT_DIR" || exit 1
 # The tests run in their package's directory, so the guard file is named by its absolute path.
-out_abs="$(cd "$OUT_DIR" && pwd)"
+out_abs="$(cd -- "$OUT_DIR" && pwd)" || exit 1
 
 echo "Building the test binaries with --features $FEATURES"
 if ! cargo test -p mega-evm --features "$FEATURES" --locked --no-run; then

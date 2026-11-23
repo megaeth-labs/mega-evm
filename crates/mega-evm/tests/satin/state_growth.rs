@@ -1202,6 +1202,35 @@ fn test_an_authorization_list_is_held_to_the_state_growth_it_would_add() {
     );
 }
 
+/// An existing empty authority needs no state-growth budget, while entries that cannot apply
+/// need no write-record budget.
+#[test]
+fn test_authorization_limits_count_only_new_accounts_and_applicable_entries() {
+    let db = funded()
+        .account_code(A, Bytes::from_static(&[STOP]))
+        .account_nonce(AUTHORITY_1, 0)
+        .account_code(AUTHORITY_2, Bytes::from_static(&[STOP]));
+    let apply = |authority, nonce| {
+        authorizing_call(CALLER, A, U256::ZERO, room(0), DELEGATE, &[(authority, nonce)])
+    };
+
+    let existing = execute_under(db.clone(), apply(AUTHORITY_1, 0), growth(0));
+    assert!(existing.result.is_success(), "{:?}", existing.result);
+    assert_eq!(existing.state[&AUTHORITY_1].info.nonce, 1);
+    assert_eq!((existing.usage.write_records, existing.usage.state_growth), (1, 0));
+
+    for (authority, nonce) in [(AUTHORITY_1, 1), (AUTHORITY_2, 0)] {
+        let skipped = execute_under(
+            db.clone(),
+            apply(authority, nonce),
+            growth(0).with_tx_kv_update_limit(0),
+        );
+        assert!(skipped.result.is_success(), "{authority}: {:?}", skipped.result);
+        assert_eq!(skipped.state[&authority].info.nonce, 0, "{authority}");
+        assert_eq!(skipped.usage.write_records, 0, "{authority}");
+    }
+}
+
 /// A deposit's caller, created before its first frame, is one account of state growth on the
 /// transaction: it outlives a stop of the first frame, and the first frame's budget is what it
 /// leaves — under a limit of two, one fresh slot fits and the second stops the frame.

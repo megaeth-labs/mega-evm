@@ -838,6 +838,14 @@ impl AdditionalLimit {
         &mut self.ledger
     }
 
+    /// At the lifecycle's end, every decided start has returned or is discarded with the
+    /// failed transaction.
+    pub(crate) fn end_frame_lifecycle(&mut self, settled: bool) {
+        debug_assert!(!settled || self.decided.is_empty(), "every decided start has returned");
+        self.decided.clear();
+        self.ledger.end(settled);
+    }
+
     /* What the settled transaction reports */
 
     /// The history gas the last settled transaction spent.
@@ -925,6 +933,81 @@ fn is_the_revert_of(result: &FrameResult, stop: &LimitCheck) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_a_child_database_error_discards_decided_starts() {
+        use crate::{
+            test_utils::{
+                op_transaction, zero_fee_l1_block_info, BytecodeBuilder, ErrorInjectingDatabase,
+                MemoryDatabase,
+            },
+            MegaContext, MegaEvm, MegaSpecId,
+        };
+        use alloy_op_evm::OpTx;
+        use revm::{
+            bytecode::opcode::{POP, PUSH0, SLOAD, STOP},
+            context::TxEnv,
+            primitives::{address, TxKind, U256},
+            ExecuteEvm,
+        };
+
+        let sender = address!("00000000000000000000000000000000000e0001");
+        let parent = address!("00000000000000000000000000000000000e0002");
+        let child = address!("00000000000000000000000000000000000e0003");
+        let db = MemoryDatabase::default()
+            .account_balance(sender, U256::from(10u64.pow(18)))
+            .account_code(
+                parent,
+                BytecodeBuilder::default().call(child, U256::ZERO).append(POP).stop().build(),
+            )
+            .account_code(child, revm::primitives::Bytes::from_static(&[PUSH0, SLOAD, STOP]));
+        let mut db = ErrorInjectingDatabase::new(db);
+        db.fail_on_storage = Some((child, U256::ZERO));
+        let ctx = MegaContext::new(db, MegaSpecId::SATIN).with_chain(zero_fee_l1_block_info());
+        let mut evm = MegaEvm::new(ctx);
+        let tx = OpTx(op_transaction(TxEnv {
+            caller: sender,
+            kind: TxKind::Call(parent),
+            gas_limit: 1_000_000 + crate::history_gas(crate::TX_BODY_SIZE).unwrap(),
+            ..Default::default()
+        }));
+        let error = evm.transact_one(tx).expect_err("the child's read fails");
+        assert!(format!("{error:?}").contains("injected storage()"), "{error:?}");
+        assert!(evm.ctx().additional_limit.decided.is_empty());
+    }
+
+    #[test]
+    fn test_combining_counts_keeps_the_transfer_log_in_either_operand() {
+        let logs = Counted::records(0, 0, true);
+        let records = Counted::records(1, 0, false);
+        let combined = Counted::records(1, 0, true);
+        assert_eq!(logs.plus(records), combined);
+        assert_eq!(records.plus(logs), combined);
+    }
+
+    #[test]
+    fn test_a_deposit_caller_over_the_limit_leaves_no_first_frame_growth() {
+        let mut layer =
+            AdditionalLimit::new(EvmTxRuntimeLimits::no_limits().with_tx_state_growth_limit(0));
+        layer.begin_transaction(TxClass::Deposit, 0);
+        layer.count_created_caller();
+        assert_eq!(layer.first_frame_pools().get(STATE_GROWTH_POOL), 0);
+    }
+
+    #[test]
+    fn test_a_limit_crossing_saturates_its_reported_usage() {
+        let mut layer = AdditionalLimit::new(EvmTxRuntimeLimits::no_limits());
+        layer.begin_transaction(TxClass::Ordinary, u64::MAX);
+        assert_eq!(
+            layer.admit_hint(1),
+            LimitCheck::ExceedsLimit {
+                kind: LimitKind::DataSize,
+                limit: u64::MAX,
+                used: u64::MAX,
+                frame_local: false,
+            }
+        );
+    }
 
     /// A count is none exactly when it adds and takes back nothing in every pool: `NONE` and the
     /// default are, and so is a count of no records or no bytes; a count that adds or takes back
