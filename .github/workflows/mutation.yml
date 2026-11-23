@@ -1,8 +1,8 @@
 name: Mutation Testing
 
 # All mutation-testing CI lives here. Four concerns, one file:
-#   * cargo-mutants gate   — generic operators (diff-scoped on PRs, full nightly
-#                            in four shards)
+#   * cargo-mutants gate   — generic operators (diff-scoped on PRs, full nightly,
+#                            both in four shards with a single scoring job)
 #   * infrastructure gate  — the same operators on the code that implements the
 #                            test gates, which the production scope excludes
 #   * suppression hygiene  — flag suppressions that no longer match a live mutant
@@ -31,47 +31,47 @@ permissions:
   pull-requests: write # to upsert the result comments
 
 jobs:
-  # ── cargo-mutants: diff-scoped gate on PRs, full-crate run nightly ──────────
-  # A PR runs one diff-scoped job. The full-crate run (nightly, dispatch) does not
-  # fit in one job, so it runs as four fresh shards (`cargo mutants --shard k/4`:
-  # consecutive slices of the mutant list) and `cargo-mutants-full` scores them
-  # together against the full inventory, so a missing or stopped shard shows as
-  # untested mutants rather than vanishing from the report.
-  cargo-mutants:
-    name: ${{ matrix.shard == 'diff' && 'cargo-mutants gate' || format('cargo-mutants shard {0}', matrix.shard) }}
+  mutation-scope:
+    name: Mutation diff scope
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
-    # Diff-scoped PR runs finish in minutes; a full-crate shard needs much longer
-    # headroom. MUTANTS_BUDGET (below) stops the run itself before this limit, so
-    # a run that cannot finish still scores and uploads its results.
+    timeout-minutes: 10
+    outputs:
+      mutate: ${{ steps.scope.outputs.mutate }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Decide whether to run the diff shards
+        id: scope
+        run: scripts/mutation_test.sh changed "${{ github.event.pull_request.base.sha }}" >> "$GITHUB_OUTPUT"
+
+  # ── cargo-mutants: diff-scoped gate on PRs, full-crate run nightly ──────────
+  # Both runs use four cargo-mutants shards (consecutive slices of the mutant
+  # list). Their join scores against the unsharded inventory so a shard that
+  # fails or runs out of time leaves untested mutants in the report.
+  cargo-mutants:
+    needs: mutation-scope
+    if: |
+      !cancelled() &&
+      (github.event_name != 'pull_request' ||
+        (needs.mutation-scope.result == 'success' && needs.mutation-scope.outputs.mutate == 'true'))
+    name: ${{ github.event_name == 'pull_request' && format('cargo-mutants gate shard {0}', matrix.shard) || format('cargo-mutants shard {0}', matrix.shard) }}
+    runs-on: ubuntu-24.04
+    # MUTANTS_BUDGET stops the driver early enough to upload partial results.
     timeout-minutes: 330
     strategy:
       fail-fast: false
       matrix:
-        shard: ${{ fromJSON(github.event_name == 'pull_request' && '["diff"]' || '["0/4", "1/4", "2/4", "3/4"]') }}
+        shard: ["0/4", "1/4", "2/4", "3/4"]
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
           fetch-depth: 0 # need base history for the diff
 
-      - name: Decide whether the run builds
-        # A PR that changes no mutatable source has nothing to mutate, and the
-        # driver skips its warm build. The Rust cache is then neither restored
-        # (nothing would use it) nor saved: the save would store a target with
-        # nothing compiled in it, and a later run of this PR that hit that entry
-        # would rebuild every dependency without ever saving a better one.
-        id: scope
-        run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            scripts/mutation_test.sh changed "${{ github.event.pull_request.base.sha }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "mutate=true" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          cache: ${{ steps.scope.outputs.mutate }}
 
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
@@ -107,42 +107,108 @@ jobs:
           CARGO_INCREMENTAL: "1"
           # Seconds from the driver's start (300 min), the follow-up runs included.
           # Leaves the job's 330-minute limit room for setup, the driver's stop grace
-          # period, scoring, upload and the cache save.
+          # period, upload and the cache save.
           MUTANTS_BUDGET: "18000"
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            scripts/mutation_test.sh diff "${{ github.event.pull_request.base.sha }}"
+            MUTANTS_SHARD="${{ matrix.shard }}" scripts/mutation_test.sh diff "${{ github.event.pull_request.base.sha }}"
           else
             scripts/mutation_test.sh full --shard "${{ matrix.shard }}"
           fi
 
-      - name: Score and gate
-        # Shards are scored together by cargo-mutants-full.
-        if: github.event_name == 'pull_request'
+      - name: Include the PR driver log and diff
+        if: always() && github.event_name == 'pull_request'
         run: |
-          python3 scripts/mutation_gate.py report \
-            --results target/mutants/mutants.out \
-            --recheck target/mutants/recheck/mutants.out \
-            --mega-eest target/mutants/mega-eest/mutants.out \
-            --status target/mutants/status \
-            --suppressions mutants/suppressions.toml \
-            --comment mutation-report.md \
-            --summary "$GITHUB_STEP_SUMMARY"
+          for file in target/mutants.log target/mutants.diff; do
+            if [ -f "$file" ]; then
+              mkdir -p target/mutants
+              cp "$file" target/mutants/
+            fi
+          done
+
+      - name: Upload shard results
+        # The artifact holds this shard's mutants.out/, status and follow-up runs
+        # (recheck/, mega-eest/) at its root.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutation-results-shard-${{ strategy.job-index }}
+          path: target/mutants
+          overwrite: ${{ github.event_name == 'pull_request' }}
+          if-no-files-found: ignore
+
+  cargo-mutants-gate:
+    name: cargo-mutants gate
+    needs: [mutation-scope, cargo-mutants]
+    if: ${{ !cancelled() && github.event_name == 'pull_request' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # list the diff against the same base as the shards
+
+      - name: Install Rust
+        if: needs.mutation-scope.result == 'success' && needs.mutation-scope.outputs.mutate == 'true'
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+
+      - name: Install cargo-mutants
+        if: needs.mutation-scope.result == 'success' && needs.mutation-scope.outputs.mutate == 'true'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants@27.1.0
+
+      - name: Create fresh join directories
+        id: paths
+        run: |
+          staging="$(mktemp -d "$RUNNER_TEMP/mutation-XXXXXXXX")"
+          mkdir "$staging/shards" "$staging/report"
+          echo "input=$staging/shards" >> "$GITHUB_OUTPUT"
+          echo "output=$staging/report" >> "$GITHUB_OUTPUT"
+
+      - name: Download shard results
+        id: download
+        if: needs.mutation-scope.result == 'success' && needs.mutation-scope.outputs.mutate == 'true'
+        # Carry the raw outcome into the join so it can publish a failure reason.
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: mutation-results-shard-*
+          path: ${{ steps.paths.outputs.input }}
+
+      - name: Merge, score and gate
+        env:
+          MUTATION_INPUT_DIR: ${{ steps.paths.outputs.input }}
+          MUTATION_OUTPUT_DIR: ${{ steps.paths.outputs.output }}
+          MUTATION_SCOPE_OUTCOME: ${{ needs.mutation-scope.result }}
+          MUTATION_NEEDED: ${{ needs.mutation-scope.outputs.mutate }}
+          MUTATION_MATRIX_OUTCOME: ${{ needs.cargo-mutants.result }}
+          MUTATION_DOWNLOAD_OUTCOME: ${{ steps.download.outcome }}
+        run: scripts/mutation_join.sh diff "${{ github.event.pull_request.base.sha }}"
 
       - name: Upsert PR comment
         # Fork / Dependabot PRs run with a read-only token, so commenting fails;
         # don't let that fail the gate job.
-        if: always() && github.event_name == 'pull_request'
+        if: always()
         continue-on-error: true
         uses: actions/github-script@v7
+        env:
+          MUTATION_PATHS_OUTCOME: ${{ steps.paths.outcome }}
+          MUTATION_OUTPUT_DIR: ${{ steps.paths.outputs.output }}
         with:
           script: |
             const fs = require('fs');
-            let body;
-            try {
-              body = fs.readFileSync('mutation-report.md', 'utf8');
-            } catch {
-              body = '## 🧬 Mutation testing\n\nNo report produced: the mutation run failed before the gate scored it. See the job log.';
+            const path = require('path');
+            const output = process.env.MUTATION_OUTPUT_DIR;
+            let body = '## 🧬 Mutation testing\n\nNo report produced: the mutation run failed before the gate scored it. See the job log.';
+            if (process.env.MUTATION_PATHS_OUTCOME === 'success' && output && path.isAbsolute(output)) {
+              try {
+                body = fs.readFileSync(path.join(output, 'mutation-report.md'), 'utf8');
+              } catch {
+                // Keep the fallback when scoring did not write a readable report.
+              }
             }
             const marker = '<!-- mutation-testing-report -->';
             body = `${marker}\n${body}`;
@@ -164,31 +230,11 @@ jobs:
             }
 
       - name: Upload mutation artifacts
-        if: always() && github.event_name == 'pull_request'
+        if: always() && steps.paths.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: mutation-results
-          path: |
-            target/mutants/mutants.out
-            target/mutants/status
-            target/mutants/recheck/mutants.out
-            target/mutants/mega-eest/mutants.out
-            target/mutants.diff
-            target/mutants.log
-            target/mutants/recheck.log
-            target/mutants/mega-eest.log
-            target/mutants/mega-eest-warmup.log
-            mutation-report.md
-          if-no-files-found: ignore
-
-      - name: Upload shard results
-        # The artifact holds this shard's mutants.out/, status and follow-up runs
-        # (recheck/, mega-eest/) at its root.
-        if: always() && github.event_name != 'pull_request'
-        uses: actions/upload-artifact@v4
-        with:
-          name: mutation-results-shard-${{ strategy.job-index }}
-          path: target/mutants
+          path: ${{ steps.paths.outputs.output }}
           if-no-files-found: ignore
 
   cargo-mutants-full:
@@ -212,54 +258,32 @@ jobs:
         with:
           tool: cargo-mutants@27.1.0
 
+      - name: Create fresh join directories
+        id: paths
+        run: |
+          staging="$(mktemp -d "$RUNNER_TEMP/mutation-XXXXXXXX")"
+          mkdir "$staging/shards" "$staging/report"
+          echo "input=$staging/shards" >> "$GITHUB_OUTPUT"
+          echo "output=$staging/report" >> "$GITHUB_OUTPUT"
+
       - name: Download shard results
         uses: actions/download-artifact@v4
         with:
           pattern: mutation-results-shard-*
-          path: shards
-
-      - name: List the full inventory
-        # The mutants the shards' `full` runs test, from the driver itself.
-        run: |
-          scripts/mutation_test.sh list > inventory.txt
-          echo "inventory: $(wc -l < inventory.txt) mutants"
+          path: ${{ steps.paths.outputs.input }}
 
       - name: Merge, score and gate
-        run: |
-          # One directory per shard of the cargo-mutants matrix (by job index), so
-          # that a shard which uploaded nothing is named in the report.
-          shards=(shards/mutation-results-shard-{0..3})
-          python3 scripts/mutation_gate.py merge --inventory inventory.txt \
-            --out target/mutants "${shards[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
-          # The shards' re-checks and Mega EEST runs, which the report reads for the
-          # mutants that timed out and the ones the tests missed.
-          python3 scripts/mutation_gate.py merge-runs --out target/mutants/recheck/mutants.out \
-            "${shards[@]/%//recheck/mutants.out}"
-          python3 scripts/mutation_gate.py merge-runs --out target/mutants/mega-eest/mutants.out \
-            "${shards[@]/%//mega-eest/mutants.out}"
-          python3 scripts/mutation_gate.py report \
-            --results target/mutants/mutants.out \
-            --recheck target/mutants/recheck/mutants.out \
-            --mega-eest target/mutants/mega-eest/mutants.out \
-            --status target/mutants/status \
-            --scope full \
-            --suppressions mutants/suppressions.toml \
-            --comment mutation-report.md \
-            --summary "$GITHUB_STEP_SUMMARY"
+        env:
+          MUTATION_INPUT_DIR: ${{ steps.paths.outputs.input }}
+          MUTATION_OUTPUT_DIR: ${{ steps.paths.outputs.output }}
+        run: scripts/mutation_join.sh full
 
       - name: Upload mutation artifacts
-        if: always()
+        if: always() && steps.paths.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: mutation-results
-          path: |
-            target/mutants/mutants.out
-            target/mutants/status
-            target/mutants/unplanned.txt
-            target/mutants/recheck/mutants.out
-            target/mutants/mega-eest/mutants.out
-            inventory.txt
-            mutation-report.md
+          path: ${{ steps.paths.outputs.output }}
           if-no-files-found: ignore
 
   # ── cargo-mutants: the test gates' own infrastructure ──────────────────────
@@ -339,6 +363,10 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+      - name: Install cargo-mutants
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants@27.1.0
       - name: Test the gate and the driver's guards
         run: python3 -m unittest discover -s scripts -p 'test_*.py' -v
 

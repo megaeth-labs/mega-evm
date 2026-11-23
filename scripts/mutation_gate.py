@@ -470,6 +470,8 @@ SHARD_CAUSES = {
                  "or crashed)",
     "no-artifact": "it uploaded no results",
     "unreadable": "its results cannot be read (a record cut off while it was written)",
+    "invalid-results": "its results do not show that it finished",
+    "foreign-artifact": "its run identity or shard index does not match this join",
 }
 BUDGET_STATES = ("partial", "not-started", "followup-stopped")
 
@@ -503,6 +505,9 @@ def incomplete_note(status: dict[str, str]) -> str:
                 f"outcomes that do not fit the inventory.{listed}")
     budget_only = all(s in BUDGET_STATES for _, s in problems)
     if state == "partial" and budget_only:
+        if outcomes == expected:
+            return (f"**Incomplete run** — the time budget ran out after all {outcomes} "
+                    f"planned outcomes were recorded but before the run finished.{tail}{listed}")
         return (f"**Incomplete run** — the time budget ran out after {outcomes} of {expected} "
                 f"planned mutants; the rest were not tested.{tail}{listed}")
     if state == "not-started" and budget_only:
@@ -582,8 +587,17 @@ def copy_logs(source: Path, out: Path, prefix: str, outcomes: list[dict]) -> lis
 
 
 def cmd_merge(args: argparse.Namespace) -> int:
-    inventory = [ANSI.sub("", m) for m in read_lines(Path(args.inventory))]
-    if not inventory:
+    diff = getattr(args, "scope", "full") == "diff"
+    if diff and (not args.head or not args.base or len(args.shards) != 4):
+        print("ERROR: a diff join requires the tested SHA, base SHA and four shard paths",
+              file=sys.stderr)
+        return 2
+    inventory_path = Path(args.inventory)
+    if not inventory_path.is_file():
+        print(f"ERROR: missing mutant inventory at {inventory_path}", file=sys.stderr)
+        return 2
+    inventory = [ANSI.sub("", m) for m in read_lines(inventory_path)]
+    if not inventory and not diff:
         print(f"ERROR: empty mutant inventory at {args.inventory}", file=sys.stderr)
         return 2
     planned = Counter(inventory)
@@ -608,19 +622,42 @@ def cmd_merge(args: argparse.Namespace) -> int:
             shard_states.append((status or {}).get("status", "no-status"))
         line = " ".join(f"{k}={v}" for k, v in status.items()) if status else shard_states[-1]
         print(f"| `{shard}` | {line} |")
+        if diff:
+            if status is None:
+                shard_plans.append(None)
+                continue
+            identity = {"head": args.head, "base": args.base, "shard-index": str(i),
+                        "shard-count": "4", "run-id": args.run_id, "run-attempt": args.run_attempt}
+            mismatches = [f"{key} expected {value!r}, got {status.get(key)!r}"
+                          for key, value in identity.items() if status.get(key) != value]
+            if mismatches:
+                shard_states[-1] = "foreign-artifact"
+                shard_plans.append(None)
+                print(f"| `{shard}` | {'; '.join(mismatches)} |")
+                continue
         plan = (status or {}).get("expected", "")
         shard_plans.append(int(plan) if plan.isdigit() else None)
+        shard_results = shard / "mutants.out"
         try:
-            shard_outcomes, _, end_time, _ = read_record(shard / "mutants.out")
+            shard_outcomes, selection, end_time, _ = read_record(shard_results)
         except UnreadableRecord as err:
             # Named, whatever its status line says; the other shards are still reported.
             shard_states[-1] = "unreadable"
             print(f"| `{shard}` | unreadable: {err} |")
             finished = False
             continue
+        if diff and shard_states[-1] == "complete":
+            try:
+                load_run(shard_results)
+                if len(selection) != shard_plans[-1]:
+                    raise ResultsError("the status and results disagree on the shard's mutant count")
+            except ResultsError as err:
+                shard_states[-1] = "invalid-results"
+                print(f"| `{shard}` | invalid results: {err} |")
+                continue
         if shard_outcomes and not end_time:
             finished = False
-        for o in copy_logs(shard / "mutants.out", results, f"shard{i}", shard_outcomes):
+        for o in copy_logs(shard_results, results, f"shard{i}", shard_outcomes):
             outcomes.append(o)
             name = outcome_name(o)
             if name is not None:
@@ -647,11 +684,19 @@ def cmd_merge(args: argparse.Namespace) -> int:
         state = "error"
     elif tested == expected and "followup-stopped" in shard_states:
         state = "followup-stopped"
+    elif diff and (not shard_states or "partial" in shard_states or "not-started" in shard_states):
+        state = "partial" if tested else "not-started"
     else:
         state = "complete" if tested == expected else "partial" if tested else "not-started"
     # The merged record says it finished only when every shard's did and the run is complete;
     # the report reads anything else as what was tested, under the status's note.
-    write_record(results, outcomes, inventory, "merged" if state == "complete" and finished else None)
+    if state == "complete" and not inventory:
+        results.mkdir(parents=True, exist_ok=True)
+        (results / "outcomes.json").unlink(missing_ok=True)
+        (results / "mutants.json").write_text("[]\n")
+    else:
+        write_record(results, outcomes, inventory,
+                     "merged" if state == "complete" and finished else None)
     (out / "unplanned.txt").write_text("".join(f"{m}\n" for m in unplanned + duplicated))
     line = (f"MUTANTS-STATUS status={state} expected={expected} outcomes={tested} "
             f"unplanned={len(unplanned)} duplicated={len(duplicated)} "
@@ -678,11 +723,21 @@ def cmd_merge_runs(args: argparse.Namespace) -> int:
     selection: list[str] = []
     finished = True
     failed: list[str] = []
+    diff = getattr(args, "scope", "full") == "diff"
     for i, run in enumerate(present):
         try:
+            if diff:
+                load_run(run)
             run_outcomes, run_selection, end_time, run_failed = read_record(run)
-        except UnreadableRecord as err:
-            failed.append(str(err))
+            if diff:
+                # A follow-up can select field deletions from other shards despite
+                # its regex filters. Only the shard that owns a mutant may decide it.
+                own = set(read_selection(run.parent.parent / "mutants.out") or [])
+                run_selection = [name for name in run_selection if name in own]
+                run_outcomes = [o for o in run_outcomes
+                                if o.get("scenario") == "Baseline" or outcome_name(o) in own]
+        except (UnreadableRecord, ResultsError) as err:
+            failed.append(f"{run}: {err}" if diff else str(err))
             finished = False
             continue
         if run_failed:
@@ -829,6 +884,7 @@ def cmd_report(args: argparse.Namespace) -> int:
     # stopped run must never pass, even when everything it tested was caught; what
     # it did test is still reported, read without the completeness checks.
     note = None
+    merged_diff = False
     status_path = getattr(args, "status", None)
     if status_path:
         run_status = read_status(Path(status_path))
@@ -838,6 +894,19 @@ def cmd_report(args: argparse.Namespace) -> int:
             return 2
         if run_status.get("status") != "complete":
             note = incomplete_note(run_status)
+        merged_diff = not full and "shards" in run_status
+
+    if merged_diff:
+        failures = []
+        for followup in (args.recheck, getattr(args, "mega_eest", None)):
+            if followup and (failure := Path(followup) / RUN_FAILED_NOTE).is_file():
+                failures.append(failure.read_text().strip())
+        if failures:
+            details = "\n".join(f"- {failure}" for failure in failures)
+            incomplete = f"{note}\n\n" if note else ""
+            write_report(f"{title} — ❌ FAIL\n\n{incomplete}"
+                         f"**Shard follow-up results cannot be scored.**\n\n{details}\n", args)
+            return 2
 
     try:
         anchors = suppressed_anchors(args.suppressions)
@@ -1117,11 +1186,19 @@ def main() -> int:
     pg.add_argument("--inventory", required=True,
                     help="file of all mutant lines of the run (cargo mutants --list)")
     pg.add_argument("--out", required=True)
+    pg.add_argument("--scope", choices=("diff", "full"), default="full",
+                    help="allow an empty diff inventory and verify each diff shard's results")
+    pg.add_argument("--head", help="tested SHA expected by the diff join")
+    pg.add_argument("--base", help="base SHA expected by the diff join")
+    pg.add_argument("--run-id", help="GitHub run ID expected by the diff join")
+    pg.add_argument("--run-attempt", help="GitHub run attempt expected by the diff join")
     pg.add_argument("shards", nargs="*", help="one directory per shard: mutants.out/ + status")
     pg.set_defaults(func=cmd_merge)
 
     pf = sub.add_parser("merge-runs", help="combine the shards' re-check or Mega EEST runs")
     pf.add_argument("--out", required=True)
+    pf.add_argument("--scope", choices=("diff", "full"), default="full",
+                    help="for diff shards, keep only follow-up outcomes owned by each primary run")
     pf.add_argument("runs", nargs="*", help="one mutants.out directory per shard")
     pf.set_defaults(func=cmd_merge_runs)
 

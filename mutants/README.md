@@ -22,15 +22,16 @@ It never reads `.cargo/mutants.toml`, and a change to `mutants/suppressions.toml
 | `.cargo/mutants.toml` | Canonical `cargo-mutants` config for the production scope (nextest, excludes, timeouts). |
 | `.cargo/mutants-infra.toml` | Config for the infrastructure scope (no helper exclusion). |
 | `mutants/suppressions.toml` | Reviewed equivalent / dead-code mutants excluded from gating, in either scope. |
-| `scripts/mutation_test.sh` | Driver: `diff <base>`, `full`, `file <glob>`, `infra`; `list` prints the mutant set the runs use, `changed <base>` whether a diff run builds; `MUTANTS_SHARD=k/n` runs one shard. |
-| `scripts/mutation_gate.py` | Scores a run, applies suppressions, gates the PR; merges the shards of the nightly full run. |
+| `scripts/mutation_test.sh` | Runs `diff <base>`, `full`, `file <glob>` or `infra`. Use `diff <base> --list` and `list` for the inventories, `changed <base>` to check whether a diff run builds, and `MUTANTS_SHARD=k/n` for one shard. |
+| `scripts/mutation_join.sh` | Lists the inventory, merges four shards and scores the joined result for either scope. |
+| `scripts/mutation_gate.py` | Merges shard results, applies suppressions and scores the run. |
 | `scripts/test_mutation_gate.py` | Tests of the scorer and the driver's guards (`python3 -m unittest discover -s scripts -p 'test_*.py'`). |
-| `.github/workflows/mutation.yml` | Diff-scoped PR gate + result comment; sharded nightly full run; the infrastructure job. |
+| `.github/workflows/mutation.yml` | Four PR diff shards with one gate and result comment, four nightly full shards with one score, and the infrastructure job. |
 
 ## Local use
 
 ```bash
-# Mutate only what your branch changed (what CI runs on a PR):
+# Mutate the PR's diff in one local run:
 scripts/mutation_test.sh diff origin/main
 python3 scripts/mutation_gate.py report --results target/mutants/mutants.out \
         --recheck target/mutants/recheck/mutants.out --mega-eest target/mutants/mega-eest/mutants.out \
@@ -45,13 +46,21 @@ python3 scripts/mutation_gate.py report --results target/mutants-infra/mutants.o
         --recheck target/mutants-infra/recheck/mutants.out --status target/mutants-infra/status \
         --suppressions mutants/suppressions.toml
 
-# Shard k of n of a large run (cargo-mutants' --shard), each into its own directory:
-MUTANTS_SHARD=0/4 OUT_DIR=target/mutants-0 scripts/mutation_test.sh diff origin/main
+# Run and score the four shards with fresh directories outside the checkout:
+base="$(git rev-parse origin/main)"
+staging="$(mktemp -d)"
+mkdir "$staging/shards" "$staging/report"
+for k in {0..3}; do
+    MUTANTS_SHARD="$k/4" OUT_DIR="$staging/shards/mutation-results-shard-$k" \
+        scripts/mutation_test.sh diff "$base"
+done
+MUTATION_INPUT_DIR="$staging/shards" MUTATION_OUTPUT_DIR="$staging/report" \
+    scripts/mutation_join.sh diff "$base"
 ```
 
 The driver needs bash 5 or later and Python 3.11 or later on `PATH`; it refuses to start under an older bash (macOS's `/bin/bash` is 3.2), and under an older Python (macOS's `python3` is 3.9) the gate's scripts say so and exit before anything is mutated.
 The gate's own tests run with `python3 -m unittest discover -s scripts -p 'test_*.py'`, on the same Python; an older one runs a single test in their place, which fails with the reason.
-When to shard is in `REVIEW.md` (Test gates, Mutation testing).
+The workflow installs the pinned cargo-mutants in the self-test job so the inventory comparison runs against the real binary.
 
 ## Build speed and the time budget
 
@@ -59,10 +68,11 @@ Every mutant rebuilds `mega-evm` and all of its test binaries, so the run's cost
 The driver first builds the unmutated tests into `./target` (the warm build), which `copy_target` copies into each scratch build directory.
 With incremental compilation, each mutant build then reuses everything the mutation did not touch.
 Cargo builds the dev profile incrementally by default, but `actions-rust-lang/setup-rust-toolchain` exports `CARGO_INCREMENTAL=0`, so the workflow sets `CARGO_INCREMENTAL=1` on the mutation steps.
-A PR that changes no mutatable source has nothing to mutate: the driver skips its warm build and still runs cargo-mutants, which says it has nothing to mutate and builds nothing, so the gate passes on its word.
-The workflow asks the driver first (`scripts/mutation_test.sh changed <base>`) and then neither restores nor saves the Rust cache, so a target with nothing compiled in it is never cached.
+The workflow runs `scripts/mutation_test.sh changed <base>` once before scheduling the diff shards.
+When the driver says the diff changes no mutatable source, CI skips the matrix and the `cargo-mutants gate` reports **Nothing to test**.
+A failed scope decision or an unexpected skip fails that check.
 
-`MUTANTS_BUDGET=<seconds>` bounds a run, counted from the driver's start and covering the warm build, cargo-mutants and the re-check of timed-out mutants.
+`MUTANTS_BUDGET=<seconds>` bounds each shard, counted from the driver's start and covering the warm build, cargo-mutants, the timeout re-check and the Mega EEST pass.
 When it runs out, the driver interrupts the running phase; cargo-mutants stops its in-flight mutants and keeps every outcome already recorded, and the driver exits 0 so that what was tested can still be scored and uploaded.
 A re-check the budget stops is recorded in its results (`run-failed.txt`), which the gate refuses.
 The driver's last line, also written to `target/mutants/status`, says how far the run got:
@@ -76,14 +86,24 @@ MUTANTS-STATUS status=<complete|partial|not-started|followup-stopped|baseline-fa
 `baseline-failed` (the unmutated tree does not build or pass its tests) and `error` (the run itself failed) exit non-zero.
 `mutation_gate.py report --status target/mutants/status` fails the gate unless the status is `complete`, while still reporting what was tested; with `complete`, it reads the results fail-closed as below.
 
-The nightly full-crate run does not fit in one job, so CI splits it into four fresh shards (`scripts/mutation_test.sh full --shard k/4`, consecutive slices of the mutant list).
-The `cargo-mutants-full` job lists the full inventory with the driver's own mutant set (`scripts/mutation_test.sh list`), combines the shards with `mutation_gate.py merge` (and their re-checks and Mega EEST runs with `mutation_gate.py merge-runs`), and scores the result as a full run (`mutation_gate.py report --scope full`, which titles it a full-run score rather than a diff score).
-The merged record keeps the contract the gate reads: the inventory as `mutants.json`, every shard's outcomes in `outcomes.json`, finished only when every shard finished.
+For pull requests that change mutatable source and for nightly or dispatched full runs, CI runs four parallel shards that each take a consecutive slice of the driver's mutant list.
+The `cargo-mutants gate` job lists the diff inventory with `scripts/mutation_test.sh diff <base> --list` against the same base as the shards.
+The `cargo-mutants full run` job lists the full inventory with `scripts/mutation_test.sh list`.
+Both join jobs call `scripts/mutation_join.sh`, which combines the primary runs with `mutation_gate.py merge`, the re-checks and Mega EEST runs with `merge-runs`, and scores the joined result with `report` in the corresponding scope.
+CI downloads each run into a fresh directory outside the checkout and scores it into a separate empty directory.
+The join refuses a non-empty report directory so an earlier join's follow-up files cannot contribute evidence.
+The PR join requires a successful download and validates each shard's tested SHA, base SHA, index and count, along with the GitHub run ID and attempt in CI.
+Use **Re-run all jobs** to reproduce a PR gate in a new attempt so all four artifacts carry the current attempt.
+The PR shard artifact includes the main driver's log and the exact diff alongside its status and results.
+The merged record holds the inventory in `mutants.json` and combines the shard outcomes in `outcomes.json`.
+A complete empty diff needs only the empty inventory.
 Each shard's own status is folded into the combined status, and the report names every shard that did not complete and why.
 A shard whose budget ran out makes the combined status `partial` (or `not-started`), one whose baseline failed makes it `baseline-failed`, and one that errored, ended without a status line (cancelled or killed by the job timeout) or uploaded nothing makes it `error`.
-Every shard outcome is kept.
+A diff shard that claims to be complete must show a finished run with a successful baseline or evidence of an empty selection.
 A shard whose results cannot be read (a record cut off while it was written) is named as `unreadable` and makes the combined status `error`; the other shards are still reported, and a follow-up run whose record cannot be read is refused like one that exited abnormally.
 A shard's re-check and Mega EEST pass are not sharded again: they take the shard's mutants by name, and a shard applied after that selection would cut their own short list (see below).
+The diff join takes a follow-up outcome from the shard that ran the mutant in its primary pass, since cargo-mutants can include extra struct-field deletions in a follow-up.
+Each contributing diff follow-up must prove its own successful baseline and completion before the join combines its outcomes.
 An outcome for a mutant the inventory does not list, a second outcome for one mutant, or shard plans that do not add up to the inventory mean the shards and the inventory were built from different mutant sets: the combined status is `mismatch`, and `unplanned.txt` lists the outcomes that do not fit.
 Only `complete` passes the gate.
 A cancelled run is not scored.
