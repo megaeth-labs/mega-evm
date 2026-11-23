@@ -116,6 +116,16 @@ jobs:
             scripts/mutation_test.sh full --shard "${{ matrix.shard }}"
           fi
 
+      - name: Include the PR driver log and diff
+        if: always() && github.event_name == 'pull_request'
+        run: |
+          for file in target/mutants.log target/mutants.diff; do
+            if [ -f "$file" ]; then
+              mkdir -p target/mutants
+              cp "$file" target/mutants/
+            fi
+          done
+
       - name: Upload shard results
         # The artifact holds this shard's mutants.out/, status and follow-up runs
         # (recheck/, mega-eest/) at its root.
@@ -124,6 +134,7 @@ jobs:
         with:
           name: mutation-results-shard-${{ strategy.job-index }}
           path: target/mutants
+          overwrite: ${{ github.event_name == 'pull_request' }}
           if-no-files-found: ignore
 
   cargo-mutants-gate:
