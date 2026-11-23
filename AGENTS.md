@@ -188,7 +188,7 @@ Key design aspects:
 
 - Solidity sources live in `crates/system-contracts/contracts/`, with Rust ABI bindings generated via `alloy-sol-types`.
 - Cargo builds use the checked-in Rust constants and check them against the versioned artifacts when present, without writing to the source tree or invoking Foundry.
-- The required `lint` CI job uses `mise run system-contracts:attest` to check the contract inventory, reproduce the latest bytecode for the pinned Osaka EVM target, and compare the SequencerRegistry storage layout with the Rust slot constants.
+- The required `lint` CI job uses `cargo run --locked -p system-contract-artifacts -- attest` to check the contract inventory, reproduce the latest bytecode for the pinned Osaka EVM target, and compare the SequencerRegistry storage layout with the Rust slot constants.
 - The job also checks the generated Rust constants and requires attestation to reject a changed Solidity version in a temporary copy.
 - Rust tests pin the code hashes and latest versions in a literal table.
 - Run `mise run system-contracts:generate` after updating the artifacts to regenerate the Rust constants.
