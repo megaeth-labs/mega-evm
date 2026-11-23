@@ -111,8 +111,8 @@ pub struct Cmd {
     pub dump_fixture: Option<std::path::PathBuf>,
 
     /// Dump a self-validating EEST state-test fixture for every successfully
-    /// replayed target into `<DIR>/<tx_hash>.json`. When a block repeats a hash,
-    /// its fixtures include the block number and transaction index in the filename.
+    /// replayed target into `<DIR>/<tx_hash>.json`. For each repeated hash,
+    /// use `<DIR>/<tx_hash>-<block_number>-<tx_index>.json` for its copies.
     ///
     /// Batch mode only (`--tx-file` / `--block`). Per-target gating mirrors the
     /// single-transaction dump: fidelity-gate failures and BLOCKHASH readers are
@@ -381,7 +381,7 @@ impl<'a> kernel::TargetLifecycle for SingleTxLifecycle<'a> {
                 self.executed_spec,
                 self.block,
                 dumpable,
-                fixture::FixtureInputs { mega_env, result, reproduced },
+                fixture::FixtureInputs { mega_env, result, reproduced, repeated_index: None },
             )
             .map_err(ReplayError::from)
         });

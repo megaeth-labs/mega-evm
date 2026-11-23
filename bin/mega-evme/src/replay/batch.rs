@@ -15,11 +15,11 @@
 //!
 //! Receipt verification and fixture dumps need additional receipt evidence.
 //! In whole-block mode one `eth_getBlockReceipts` request supplies receipts
-//! by body index, including every occurrence of a repeated hash. For a body
-//! with unique hashes only, a method-not-found response or a missing offline
-//! entry falls back to `eth_getTransactionReceipt` for each target. Explicit
-//! hash targets always use that by-hash call. Missing evidence is an RPC
-//! failure and exits `3`.
+//! by body index, including every occurrence of a repeated hash. A body with
+//! unique hashes can use `eth_getTransactionReceipt` when the block receipt
+//! request fails or returns null. A returned list must pass admission and
+//! authentication. Explicit hash targets always use the by-hash call.
+//! Missing evidence is an RPC failure and exits `3`.
 //!
 //! `--verify-block` (whole-block mode only) adds one verdict per block, after
 //! the block's target lines. The served body is authenticated against the
@@ -40,7 +40,7 @@ use std::{
 use alloy_consensus::{transaction::Recovered, BlockHeader};
 use alloy_primitives::{Bytes, B256};
 use alloy_provider::Provider;
-use alloy_rpc_types_eth::Block;
+use alloy_rpc_types_eth::{Block, BlockId};
 use mega_evm::{
     alloy_evm::EvmEnv,
     revm::{context::result::ExecutionResult, inspector::NoOpInspector, DatabaseRef},
@@ -49,6 +49,7 @@ use mega_evm::{
 use op_alloy_consensus::OpReceiptEnvelope;
 use op_alloy_rpc_types::{OpTransactionReceipt, Transaction};
 use serde::Serialize;
+use serde_json::value::RawValue;
 use state_test::types::MegaEnv;
 use tracing::{debug, info, warn};
 
@@ -584,6 +585,7 @@ struct FixtureDraftHook<'a> {
     block: &'a Block<Transaction>,
     /// On-chain receipts prefetched for this block's targets, keyed by body index.
     onchain_receipts: &'a IndexedReceipts,
+    /// Hashes with multiple body positions and position-suffixed fixture names.
     repeated_hashes: &'a HashSet<B256>,
 }
 
@@ -1720,24 +1722,17 @@ impl FixtureDraftHook<'_> {
                 mega_env: dump.mega_env.clone(),
                 result: exec_result,
                 reproduced,
+                repeated_index: self
+                    .repeated_hashes
+                    .contains(&target.tx_hash)
+                    .then_some(target.tx_index),
             },
         ) {
             Ok(draft) => draft,
             Err(e) => return DeferredFixture::Report(fixture_report_from_build_err(e)),
         };
 
-        // The kernel has authenticated this hash. Include the occurrence's
-        // position when the hash alone would give two fixtures the same path.
-        let tx_hash = target_tx.inner.inner.tx_hash();
-        let path = if self.repeated_hashes.contains(&target.tx_hash) {
-            dump.dir.join(format!(
-                "{tx_hash:#x}-{}-{}.json",
-                self.block.header.number(),
-                target.tx_index
-            ))
-        } else {
-            dump.dir.join(format!("{tx_hash:#x}.json"))
-        };
+        let path = dump.dir.join(draft.file_name());
         // Fast-path courtesy: refuse overwrite before carrying a ready draft so the
         // harvest path never confuses a finish failure with an overwrite refusal.
         // Correctness against a concurrent creator is still enforced at materialize
@@ -1836,36 +1831,37 @@ where
 {
     if whole_block {
         let number = block.header.number();
-        let fetched = provider.get_block_receipts(number.into()).await;
-        match fetched {
-            // A legacy envelope or endpoint can still answer these requests by hash
-            // when each hash has exactly one occurrence in the block.
-            Err(error)
-                if repeated_hashes.is_empty() &&
-                    (crate::common::is_offline_cache_miss(&error) ||
-                        error
-                            .as_error_resp()
-                            .is_some_and(|response| response.code == -32601)) => {}
-            fetched => {
-                let receipts = match fetched {
-                    Ok(Some(receipts)) => admit_block_receipts(block, body, receipts),
-                    Ok(None) => Err(ReplayError::RpcError(format!(
-                        "eth_getBlockReceipts returned no receipts for block {number}"
-                    ))),
-                    Err(error) => Err(ReplayError::RpcError(format!(
-                        "eth_getBlockReceipts failed for block {number}: {error}"
-                    ))),
-                };
-                return match receipts {
-                    Ok(receipts) => receipts,
-                    Err(error) => {
-                        let message = receipt_error_message(error);
-                        warn!(block = number, %message, "Could not verify the block's on-chain receipts");
-                        targets.keys().map(|&index| (index, Err(message.clone()))).collect()
-                    }
-                };
+        // Decode the list after the call so a malformed list is rejected as receipt data.
+        let response = provider
+            .client()
+            .request::<_, Option<Box<RawValue>>>("eth_getBlockReceipts", (BlockId::number(number),))
+            .await;
+        let fetched = match response {
+            Ok(Some(raw)) => Ok(raw),
+            Ok(None) => {
+                Err(format!("eth_getBlockReceipts returned no receipts for block {number}"))
             }
-        }
+            Err(error) => Err(format!("eth_getBlockReceipts failed for block {number}: {error}")),
+        };
+        let receipts = match fetched {
+            Ok(raw) => serde_json::from_str(raw.get())
+                .map_err(|error| {
+                    ReplayError::RpcError(format!(
+                        "Invalid eth_getBlockReceipts result for block {number}: {error}"
+                    ))
+                })
+                .and_then(|receipts| admit_block_receipts(block, body, receipts)),
+            Err(reason) if repeated_hashes.is_empty() => {
+                debug!(block = number, %reason, "Falling back to receipts by hash");
+                return fetch_receipts_by_hash(provider, targets, block, repeated_hashes).await;
+            }
+            Err(reason) => Err(ReplayError::RpcError(reason)),
+        };
+        return receipts.unwrap_or_else(|error| {
+            let message = receipt_error_message(error);
+            warn!(block = number, %message, "Could not verify the block's on-chain receipts");
+            targets.keys().map(|&index| (index, Err(message.clone()))).collect()
+        });
     }
 
     fetch_receipts_by_hash(provider, targets, block, repeated_hashes).await

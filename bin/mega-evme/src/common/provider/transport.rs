@@ -519,14 +519,6 @@ where
 #[error("{0}")]
 struct OfflineCacheMiss(String);
 
-/// Whether the request was absent from an offline replay envelope.
-pub(crate) fn is_offline_cache_miss(error: &TransportError) -> bool {
-    matches!(
-        error.as_transport_err(),
-        Some(TransportErrorKind::Custom(error)) if error.is::<OfflineCacheMiss>()
-    )
-}
-
 /// A transport that serves RPC responses from a [`TransportCache`] and
 /// returns a typed error when a single request is absent. Used for offline replay — no
 /// network I/O, no retry layer.

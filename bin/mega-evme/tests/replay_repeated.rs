@@ -3,11 +3,12 @@
 mod common;
 
 use alloy_consensus::{proofs::ordered_trie_root_with_encoder, Sealable};
+use alloy_primitives::B256;
 use mega_evm::{
     alloy_eips::Encodable2718,
     op_alloy_consensus::{OpTxEnvelope, TxDeposit},
 };
-use op_alloy_rpc_types::OpTransactionReceipt;
+use op_alloy_rpc_types::{OpTransactionReceipt, Transaction};
 use serde_json::{json, Value};
 
 use common::{mock_chain as chain, MockRpcServer, Run};
@@ -33,18 +34,17 @@ impl RepeatedBlock {
             ..Default::default()
         };
         let tx = OpTxEnvelope::Deposit(deposit.clone().seal_slow());
-        let tx_hash = tx.tx_hash();
-        let block_number = format!("0x{number:x}");
-        let mut receipts: Vec<_> = statuses
+        let mut transaction = serde_json::to_value(deposit).expect("deposit transaction");
+        transaction["type"] = json!("0x7e");
+        transaction["hash"] = json!(tx.tx_hash());
+        transaction["gasPrice"] = json!("0x0");
+        let receipts = statuses
             .iter()
             .enumerate()
             .map(|(index, &success)| {
                 let mut receipt = chain::receipt_json();
                 receipt["type"] = json!("0x7e");
                 receipt["status"] = json!(if success { "0x1" } else { "0x0" });
-                receipt["transactionHash"] = json!(tx_hash);
-                receipt["transactionIndex"] = json!(format!("0x{index:x}"));
-                receipt["blockNumber"] = json!(&block_number);
                 receipt["from"] = json!(DEPOSIT_FROM);
                 receipt["effectiveGasPrice"] = json!("0x0");
                 receipt["depositNonce"] = json!(format!("0x{index:x}"));
@@ -53,39 +53,55 @@ impl RepeatedBlock {
                 receipt
             })
             .collect();
+        Self::from_transaction(number, parent_hash, transaction, receipts)
+    }
+
+    fn from_transaction(
+        number: u64,
+        parent_hash: &str,
+        mut transaction: Value,
+        mut receipts: Vec<Value>,
+    ) -> Self {
+        let tx: Transaction =
+            serde_json::from_value(transaction.clone()).expect("body transaction");
+        let tx = &tx.inner.inner;
+        let tx_hash = tx.tx_hash();
+        let block_number = format!("0x{number:x}");
+        for (index, receipt) in receipts.iter_mut().enumerate() {
+            receipt["transactionHash"] = json!(tx_hash);
+            receipt["transactionIndex"] = json!(format!("0x{index:x}"));
+            receipt["blockNumber"] = json!(&block_number);
+        }
+
         let receipt_envelopes: Vec<_> = receipts
             .iter()
             .map(|receipt| {
                 let rpc: OpTransactionReceipt =
-                    serde_json::from_value(receipt.clone()).expect("deposit receipt");
+                    serde_json::from_value(receipt.clone()).expect("transaction receipt");
                 let envelope: mega_evm::op_alloy_consensus::OpReceiptEnvelope<_> =
                     rpc.inner.inner.into();
                 envelope.map_logs(|log| log.inner).encoded_2718()
             })
             .collect();
-        let transactions = vec![&tx; statuses.len()];
+        let transactions = vec![tx; receipts.len()];
         let mut block =
-            chain::block_json(number, parent_hash, json!(vec![tx_hash; statuses.len()]));
+            chain::block_json(number, parent_hash, json!(vec![tx_hash; receipts.len()]));
         block["transactionsRoot"] =
             json!(ordered_trie_root_with_encoder(&transactions, |tx, out| tx.encode_2718(out)));
         block["receiptsRoot"] =
             json!(ordered_trie_root_with_encoder(&receipt_envelopes, |receipt, out| {
                 out.extend_from_slice(receipt);
             }));
-        block["gasUsed"] = json!(format!("0x{:x}", 21_000 * statuses.len()));
+        block["gasUsed"] = receipts.last().expect("last receipt")["cumulativeGasUsed"].clone();
         let block = common::sealed_block(block);
 
         for receipt in &mut receipts {
             receipt["blockHash"] = block["hash"].clone();
         }
 
-        let mut transaction = serde_json::to_value(deposit).expect("deposit transaction");
-        transaction["type"] = json!("0x7e");
-        transaction["hash"] = json!(tx_hash);
         transaction["blockHash"] = block["hash"].clone();
         transaction["blockNumber"] = json!(&block_number);
-        transaction["transactionIndex"] = json!(format!("0x{:x}", statuses.len() - 1));
-        transaction["gasPrice"] = json!("0x0");
+        transaction["transactionIndex"] = json!(format!("0x{:x}", receipts.len() - 1));
 
         Self { number, block, transaction, receipts }
     }
@@ -369,10 +385,7 @@ async fn test_without_repeated_hashes_an_unsupported_method_falls_back_by_hash()
 #[tokio::test(flavor = "multi_thread")]
 async fn test_repeated_hash_abort_is_attributed_to_the_exact_occurrence() {
     let server = mock_chain().await;
-    let mut block = RepeatedBlock::new(BLOCK, &chain::parent_hash(), &[true, true, true]);
-    // The first deposit fits. Once it used 21,000 gas, the next cannot start.
-    block.block["gasLimit"] = json!("0x186a0");
-    block.block = common::sealed_block(block.block);
+    let block = block_with_mid_body_abort();
     block.serve(&server).await;
 
     let run: Run = common::mega_evme()
@@ -387,10 +400,20 @@ async fn test_repeated_hash_abort_is_attributed_to_the_exact_occurrence() {
     assert_eq!(lines.len(), 3);
     assert_eq!(lines[0]["tx_index"], 0);
     assert_eq!(lines[0]["success"], true);
+    assert_eq!(lines[1]["block_number"], BLOCK);
     assert_eq!(lines[1]["tx_index"], 1);
     assert_eq!(lines[1]["error"]["kind"], "execution");
+    assert_eq!(lines[2]["block_number"], BLOCK);
     assert_eq!(lines[2]["tx_index"], 2);
     assert_eq!(lines[2]["error"]["kind"], "rpc");
+}
+
+fn block_with_mid_body_abort() -> RepeatedBlock {
+    let mut block = RepeatedBlock::new(BLOCK, &chain::parent_hash(), &[true, true, true]);
+    // The first deposit fits. Once it uses 21,000 gas, the next cannot start.
+    block.block["gasLimit"] = json!("0x186a0");
+    block.block = common::sealed_block(block.block);
+    block
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -418,4 +441,320 @@ async fn test_repeated_hash_in_tx_file_uses_the_occurrence_returned_by_hash() {
     assert_eq!(lines[0]["verification"], json!({"match": true}));
     assert_eq!(server.received_method_count("eth_getBlockReceipts").await, 0);
     assert_eq!(server.received_method_count("eth_getTransactionReceipt").await, 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_unique_body_falls_back_on_block_receipt_rpc_error() {
+    let server = mock_chain().await;
+    let block = RepeatedBlock::new(BLOCK, &chain::parent_hash(), &[true]);
+    block.serve(&server).await;
+    server.respond_jsonrpc_error(-32004, "Method not supported", 10).await;
+
+    let run = replay(BLOCK, &["--rpc", &server.uri(), "--rpc.no-cache-file"]);
+
+    assert_eq!(run.code(), 0, "{}\n{}", run.stdout, run.stderr);
+    assert_eq!(run.summary()["verification"], json!({"match": true}));
+    assert_eq!(server.received_method_count("eth_getTransactionReceipt").await, 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_unique_body_falls_back_on_null_block_receipts() {
+    let server = mock_chain().await;
+    let block = RepeatedBlock::new(BLOCK, &chain::parent_hash(), &[true]);
+    block.serve(&server).await;
+    server.respond_method_json("eth_getBlockReceipts", Value::Null, 2).await;
+
+    let run = replay(BLOCK, &["--rpc", &server.uri(), "--rpc.no-cache-file"]);
+
+    assert_eq!(run.code(), 0, "{}\n{}", run.stdout, run.stderr);
+    assert_eq!(run.summary()["verification"], json!({"match": true}));
+    assert_eq!(server.received_method_count("eth_getTransactionReceipt").await, 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_repeated_body_rejects_block_receipt_rpc_error() {
+    let server = mock_chain().await;
+    let block = RepeatedBlock::new(BLOCK, &chain::parent_hash(), &[true, true]);
+    block.serve(&server).await;
+    server.respond_jsonrpc_error(-32004, "Method not supported", 10).await;
+
+    assert_block_receipts_unverified(&server, 2, "Method not supported").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_repeated_body_rejects_null_block_receipts() {
+    let server = mock_chain().await;
+    let block = RepeatedBlock::new(BLOCK, &chain::parent_hash(), &[true, true]);
+    block.serve(&server).await;
+    server.respond_method_json("eth_getBlockReceipts", Value::Null, 2).await;
+
+    assert_block_receipts_unverified(&server, 2, "eth_getBlockReceipts returned no receipts").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_unique_body_rejects_receipt_with_wrong_block_hash() {
+    let server = mock_chain().await;
+    let mut block = RepeatedBlock::new(BLOCK, &chain::parent_hash(), &[true]);
+    block.serve(&server).await;
+    block.receipts[0]["blockHash"] = json!(B256::repeat_byte(0x99));
+    block.serve_receipts(&server).await;
+
+    assert_block_receipts_unverified(&server, 1, "receipt block hash").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_block_rejects_receipt_list_of_wrong_length() {
+    let server = mock_chain().await;
+    let mut block = RepeatedBlock::new(BLOCK, &chain::parent_hash(), &[true]);
+    block.serve(&server).await;
+    block.receipts.clear();
+    block.serve_receipts(&server).await;
+
+    assert_block_receipts_unverified(&server, 1, "whose body lists 1 transactions").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_block_rejects_receipt_without_transaction_index() {
+    let server = mock_chain().await;
+    let mut block = RepeatedBlock::new(BLOCK, &chain::parent_hash(), &[true]);
+    block.serve(&server).await;
+    block.receipts[0].as_object_mut().expect("receipt object").remove("transactionIndex");
+    block.serve_receipts(&server).await;
+
+    assert_block_receipts_unverified(&server, 1, "transactionIndex None, expected body index 0")
+        .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_block_rejects_receipt_for_another_transaction_hash() {
+    let server = mock_chain().await;
+    let mut block = RepeatedBlock::new(BLOCK, &chain::parent_hash(), &[true]);
+    block.serve(&server).await;
+    block.receipts[0]["transactionHash"] = json!(B256::repeat_byte(0x99));
+    block.serve_receipts(&server).await;
+
+    assert_block_receipts_unverified(&server, 1, "receipt of a different transaction").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_block_rejects_malformed_receipt_in_returned_list() {
+    let server = mock_chain().await;
+    let mut block = RepeatedBlock::new(BLOCK, &chain::parent_hash(), &[true]);
+    block.serve(&server).await;
+    block.receipts[0]["transactionHash"] = json!("invalid hash");
+    block.serve_receipts(&server).await;
+
+    assert_block_receipts_unverified(&server, 1, "Invalid eth_getBlockReceipts result").await;
+}
+
+async fn assert_block_receipts_unverified(server: &MockRpcServer, count: usize, reason: &str) {
+    let run = replay(BLOCK, &["--rpc", &server.uri(), "--rpc.no-cache-file"]);
+
+    assert_eq!(run.code(), 3, "{}\n{}", run.stdout, run.stderr);
+    let lines = run.results();
+    assert_eq!(lines.len(), count, "{}", run.stdout);
+    for line in lines {
+        let verdict = line["verification"]["error"].as_str().expect("receipt remains unverified");
+        assert!(verdict.contains(reason), "expected {reason:?} in {line}");
+    }
+    assert_eq!(server.received_method_count("eth_getTransactionReceipt").await, 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_by_hash_rejects_repeated_target_without_index() {
+    let server = mock_chain().await;
+    let mut block = RepeatedBlock::new(BLOCK, &chain::parent_hash(), &[true, true]);
+    block.transaction.as_object_mut().expect("transaction object").remove("transactionIndex");
+    block.serve(&server).await;
+
+    assert_hash_targets_unverified(&server, &block, "transactionIndex None", true);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_by_hash_rejects_repeated_target_index_outside_body() {
+    let server = mock_chain().await;
+    let mut block = RepeatedBlock::new(BLOCK, &chain::parent_hash(), &[true, true]);
+    block.transaction["transactionIndex"] = json!("0x3");
+    block.serve(&server).await;
+
+    assert_hash_targets_unverified(&server, &block, "transactionIndex Some(3)", true);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_by_hash_rejects_repeated_target_index_of_another_hash() {
+    let server = mock_chain().await;
+    let mut block = RepeatedBlock::new(BLOCK, &chain::parent_hash(), &[true, true]);
+    let (other, _) = chain::tx_identity();
+    block.block["transactions"].as_array_mut().expect("body hash list").push(json!(other));
+    block.transaction["transactionIndex"] = json!("0x2");
+    block.serve(&server).await;
+
+    assert_hash_targets_unverified(&server, &block, "transactionIndex Some(2)", true);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_by_hash_rejects_receipt_for_a_different_occurrence_of_target() {
+    let server = mock_chain().await;
+    let mut block = RepeatedBlock::new(BLOCK, &chain::parent_hash(), &[true, true]);
+    block.receipts[1]["transactionIndex"] = json!("0x0");
+    block.serve(&server).await;
+
+    assert_hash_targets_unverified(
+        &server,
+        &block,
+        "transactionIndex Some(0), expected body index 1",
+        false,
+    );
+}
+
+fn assert_hash_targets_unverified(
+    server: &MockRpcServer,
+    block: &RepeatedBlock,
+    reason: &str,
+    expect_block_hint: bool,
+) {
+    let dir = tempfile::tempdir().expect("target list directory");
+    let list = dir.path().join("targets.txt");
+    let tx_hash = block.transaction["hash"].as_str().expect("transaction hash");
+    std::fs::write(&list, format!("{tx_hash}\n")).expect("write the target list");
+
+    for target_args in [vec![tx_hash], vec!["--tx-file", list.to_str().expect("target list path")]]
+    {
+        let run: Run = common::mega_evme()
+            .args([
+                "replay",
+                "--verify-receipt",
+                "--json",
+                "--rpc",
+                &server.uri(),
+                "--rpc.no-cache-file",
+            ])
+            .args(&target_args)
+            .output()
+            .expect("run mega-evme")
+            .into();
+
+        assert_eq!(run.code(), 3, "case={target_args:?}: {}\n{}", run.stdout, run.stderr);
+        assert!(run.stdout.contains(reason), "case={target_args:?}: {}", run.stdout);
+        if expect_block_hint {
+            assert!(run.stdout.contains("use --block"), "case={target_args:?}: {}", run.stdout);
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_repeated_hash_abort_prints_block_and_index_in_text() {
+    let server = mock_chain().await;
+    let block = block_with_mid_body_abort();
+    block.serve(&server).await;
+    let hash = block.transaction["hash"].as_str().expect("transaction hash");
+
+    let run: Run = common::mega_evme()
+        .args([
+            "replay",
+            "--block",
+            &BLOCK.to_string(),
+            "--rpc",
+            &server.uri(),
+            "--rpc.no-cache-file",
+        ])
+        .output()
+        .expect("run mega-evme")
+        .into();
+
+    assert_eq!(run.code(), 1, "{}\n{}", run.stdout, run.stderr);
+    for index in [1, 2] {
+        let header = format!("=== Transaction {hash} (block {BLOCK}, index {index}) ===");
+        assert!(
+            run.stdout.lines().any(|line| line == header),
+            "missing {header} in {}",
+            run.stdout
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_repeated_system_transaction_dumps_distinct_fixture_names_and_suite_keys() {
+    let server = mock_chain().await;
+    let block = repeated_system_transaction_block();
+    block.serve(&server).await;
+    block.serve_receipts(&server).await;
+    let fixtures = tempfile::tempdir().expect("fixtures directory");
+
+    let run: Run = common::mega_evme()
+        .args([
+            "replay",
+            "--block",
+            &BLOCK.to_string(),
+            "--rpc",
+            &server.uri(),
+            "--rpc.no-cache-file",
+            "--json",
+            "--dump-fixture-dir",
+        ])
+        .arg(fixtures.path())
+        .output()
+        .expect("run mega-evme")
+        .into();
+
+    assert_eq!(run.code(), 0, "{}\n{}", run.stdout, run.stderr);
+    let hash = block.transaction["hash"].as_str().expect("transaction hash");
+    let lines = run.results();
+    assert_eq!(lines.len(), 2, "{}", run.stdout);
+    assert_eq!(std::fs::read_dir(fixtures.path()).expect("fixture files").count(), 2);
+    for (index, line) in lines.iter().enumerate() {
+        let stem = format!("{hash}-{BLOCK}-{index}");
+        let path = fixtures.path().join(format!("{stem}.json"));
+        assert_eq!(line["fixture"]["path"], json!(path), "{line}");
+        let contents = std::fs::read(&path).expect("dumped fixture file");
+        let fixture: Value = serde_json::from_slice(&contents).expect("fixture suite JSON");
+        let keys: Vec<_> = fixture.as_object().expect("suite object").keys().collect();
+        assert_eq!(keys, [&format!("replay_{stem}")], "fixture at index {index}");
+    }
+}
+
+fn repeated_system_transaction_block() -> RepeatedBlock {
+    // A signed legacy Oracle write from mainnet block 3,224,158 in the replay corpus.
+    const SYSTEM_FROM: &str = "0xa887dcb9d5f39ef79272801d05abdf707cfbbd1d";
+    const ORACLE: &str = "0x6342000000000000000000000000000000000001";
+    let transaction = json!({
+        "hash": "0xc3463dc66f777f2a44f1f1a8f85505317a21401423382ff5b81d33441f3ad345",
+        "type": "0x0",
+        "chainId": "0x10e6",
+        "nonce": "0x0",
+        "gas": "0x3d5720",
+        "gasPrice": "0x0",
+        "to": ORACLE,
+        "from": SYSTEM_FROM,
+        "value": "0x0",
+        "input": concat!(
+            "0x01caec13",
+            "0000000000000000000000000000000000000000000000000000000000000040",
+            "0000000000000000000000000000000000000000000000000000000000000080",
+            "0000000000000000000000000000000000000000000000000000000000000001",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "0000000000000000000000000000000000000000000000000000000000000001",
+            "0000000000000000000000000000000000000000000000000006462fd8646618",
+        ),
+        "r": "0x23fa5ff5197505d1191b3f940598479c6b9e8a77dd2e920447ec9f4c9bbbf39a",
+        "s": "0x68c7f78ebd06d1eb01c58f8e300b7262753b194aa5f78c1b5871dec953a124ff",
+        "v": "0x21f0",
+    });
+    let mut cumulative = 0;
+    // The first call writes an empty slot. The second writes the existing value.
+    let receipts = [2_054_582_u64, 47_510]
+        .into_iter()
+        .map(|gas_used| {
+            cumulative += gas_used;
+            let mut receipt = chain::receipt_json();
+            receipt["type"] = json!("0x0");
+            receipt["cumulativeGasUsed"] = json!(format!("0x{cumulative:x}"));
+            receipt["gasUsed"] = json!(format!("0x{gas_used:x}"));
+            receipt["from"] = json!(SYSTEM_FROM);
+            receipt["to"] = json!(ORACLE);
+            receipt["effectiveGasPrice"] = json!("0x0");
+            receipt
+        })
+        .collect();
+    RepeatedBlock::from_transaction(BLOCK, &chain::parent_hash(), transaction, receipts)
 }

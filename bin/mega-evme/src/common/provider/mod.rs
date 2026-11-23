@@ -18,8 +18,6 @@
 mod cache_store;
 mod transport;
 
-pub(crate) use transport::is_offline_cache_miss;
-
 use std::{
     fs,
     path::{Path, PathBuf},
