@@ -228,7 +228,7 @@ line = 1515
 column = 25
 mutant = "replace += with *= in simulate_authorization_list"
 justification = "The simulated nonce changes only after an authority is accepted. Once accepted, that authority contributes to the distinct-authority totals regardless of which of its later entries match. Application checks the nonces independently."
-reviewer = "Pending review"
+reviewer = "RealiCZ"
 
 # --- From<MegaSpecId> for EthSpecId (equivalent while revm's default is Osaka) -----
 # `MegaSpecId` has the single variant SATIN, which maps to OSAKA. revm 40's
@@ -274,7 +274,7 @@ line = 523
 column = 32
 mutant = "replace < with <= in AdditionalLimit::first_frame_pools"
 justification = "At the only different input, zero remaining budget, clamping returns zero just as casting it to u64 does."
-reviewer = "Pending review"
+reviewer = "RealiCZ"
 
 [[suppress]]
 kind = "line"
@@ -284,7 +284,7 @@ line = 525
 column = 28
 mutant = "replace > with == in AdditionalLimit::first_frame_pools"
 justification = "Before the first frame, the net contains only nonnegative counts from the body and pre-execution. Subtracting it from a u64 limit cannot exceed u64::MAX, and at u64::MAX both branches yield the same value."
-reviewer = "Pending review"
+reviewer = "RealiCZ"
 
 [[suppress]]
 kind = "line"
@@ -294,7 +294,7 @@ line = 525
 column = 28
 mutant = "replace > with >= in AdditionalLimit::first_frame_pools"
 justification = "At the only different input, u64::MAX remaining budget, capping and casting both return u64::MAX."
-reviewer = "Pending review"
+reviewer = "RealiCZ"
 
 [[suppress]]
 kind = "line"
@@ -304,7 +304,7 @@ line = 531
 column = 37
 mutant = "replace < with <= in AdditionalLimit::first_frame_pools"
 justification = "At the only different input the remaining budget equals the cap, so both branches set the same budget."
-reviewer = "Pending review"
+reviewer = "RealiCZ"
 
 [[suppress]]
 kind = "line"
@@ -314,7 +314,7 @@ line = 919
 column = 21
 mutant = "replace > with >= in positive"
 justification = "At the only different input, u64::MAX, both branches return u64::MAX."
-reviewer = "Pending review"
+reviewer = "RealiCZ"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # crates/mega-evm/src/block/ survivors.
