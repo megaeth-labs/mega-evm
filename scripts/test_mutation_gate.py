@@ -981,6 +981,7 @@ class DriverRun(GateCase):
     ends with a MUTANTS-STATUS line, as main's driver does, and keeps this branch's re-check."""
 
     def drive(self, *args: str, main: dict | None = None, recheck: dict | None = None,
+              main_exit: int = 0,
               env: dict[str, str] | None = None) -> tuple[subprocess.CompletedProcess, Path, Path]:
         shell = bash5()
         if shell is None:
@@ -989,7 +990,7 @@ class DriverRun(GateCase):
         runs.mkdir(exist_ok=True)
         if main is not None:
             self.results("runs/main", outcomes=main)
-        (runs / "main.exit").write_text("0\n")
+        (runs / "main.exit").write_text(f"{main_exit}\n")
         if recheck is not None:
             self.results("runs/recheck", outcomes=recheck)
         (runs / "recheck.exit").write_text("0\n")
@@ -1042,6 +1043,13 @@ class DriverRun(GateCase):
                          "MUTANTS-STATUS status=not-started expected=unknown outcomes=0")
         self.assertIn("ran out", run.stdout)
 
+    def test_diff_run_stopped_at_its_final_outcome_reports_a_budget_stop(self) -> None:
+        run, _, out = self.drive("diff", "HEAD", main=outcomes_json(mutant(CAUGHT, "CaughtMutant")),
+                                 main_exit=124, env={"MUTANTS_BUDGET": "3600"})
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual((out / "status").read_text(),
+                         "MUTANTS-STATUS status=partial expected=1 outcomes=1\n")
+
     def test_a_re_check_the_budget_stops_is_recorded_and_refused(self) -> None:
         run, _, out = self.drive(
             "file", "crates/mega-evm/src/a.rs",
@@ -1069,6 +1077,63 @@ class DriverRun(GateCase):
         self.assertEqual((runs / "main.argv").read_text().strip(),
                          "--list --colors never --package mega-evm")
         self.assertFalse((runs / "warm.argv").exists())
+
+    def test_diff_listing_passes_the_diff_and_shard_without_running(self) -> None:
+        run, runs, out = self.drive("diff", "HEAD", "--list", env={"MUTANTS_SHARD": "2/4"})
+        self.assertEqual(run.returncode, 0, run.stderr)
+        args = ShardDriver.argv(runs, "main")
+        self.assertIn("--in-diff", args)
+        self.assertIn("--list", args)
+        self.assertEqual(args[args.index("--colors") + 1], "never")
+        self.assertEqual(args[args.index("--shard") + 1], "2/4")
+        self.assertFalse((runs / "warm.argv").exists())
+        self.assertFalse(out.parent.exists())
+
+
+class DiffInventory(GateCase):
+    def test_diff_inventory_equals_the_union_of_four_shard_lists(self) -> None:
+        shell = bash5()
+        if shell is None or shutil.which("cargo-mutants") is None:
+            self.skipTest("needs bash 5 and cargo-mutants")
+
+        scripts = self.tmp / "scripts"
+        scripts.mkdir()
+        for name in ("mutation_test.sh", "mutation_gate.py"):
+            shutil.copy(SCRIPTS / name, scripts)
+        (self.tmp / "Cargo.toml").write_text(
+            '[package]\nname = "mega-evm"\nversion = "0.1.0"\nedition = "2021"\n'
+            '[lib]\npath = "crates/mega-evm/src/lib.rs"\n')
+        source = self.tmp / "crates/mega-evm/src/lib.rs"
+        source.parent.mkdir(parents=True)
+        stable = "pub fn unchanged() -> u64 { 1234 }\n"
+        source.write_text(stable)
+        git = ["git", "-C", str(self.tmp)]
+        subprocess.run([*git, "init", "-q"], check=True)
+
+        def commit() -> None:
+            subprocess.run([*git, "add", "Cargo.toml", str(source)], check=True)
+            subprocess.run([*git, "-c", "user.name=Test", "-c", "user.email=test@example.com",
+                            "-c", "commit.gpgsign=false", "commit", "-qm", "fixture"], check=True)
+
+        commit()
+        source.write_text(stable + "".join(f"pub fn changed_{i}() -> u64 {{ {10 + i} }}\n"
+                                          for i in range(4)))
+        commit()
+
+        def list_diff(shard: str = "") -> list[str]:
+            run = subprocess.run(
+                [shell, str(scripts / "mutation_test.sh"), "diff", "HEAD^", "--list"],
+                cwd=self.tmp, capture_output=True, text=True, timeout=60,
+                env={**os.environ, "MUTANTS_SHARD": shard, "JOBS": "1"})
+            self.assertEqual(run.returncode, 0, run.stderr)
+            return run.stdout.splitlines()
+
+        inventory = list_diff()
+        self.assertEqual(len(inventory), 8, inventory)
+        self.assertTrue(all("replace changed_" in name for name in inventory), inventory)
+        by_shard = [list_diff(f"{i}/4") for i in range(4)]
+        self.assertEqual([len(shard) for shard in by_shard], [2, 2, 2, 2])
+        self.assertCountEqual(inventory, [name for shard in by_shard for name in shard])
 
 
 class ShardDriver(GateCase):
@@ -1429,20 +1494,24 @@ class Merge(GateCase):
             status_file(shard / "status", status)
         return shard
 
-    def merge(self, *shards: Path) -> str:
+    def merge(self, *shards: Path, scope: str = "full", names: tuple[str, ...] | None = None) -> str:
         inventory = self.tmp / "inventory.txt"
         # `cargo mutants --list` output, with the colour codes CI can leave in it.
-        inventory.write_text(f"\x1b[33m{CAUGHT}\x1b[0m\n{MISSED}\n{UNVIABLE}\n")
+        if names is None:
+            names = (f"\x1b[33m{CAUGHT}\x1b[0m", MISSED, UNVIABLE)
+        inventory.write_text("".join(f"{name}\n" for name in names))
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             code = gate.cmd_merge(Namespace(inventory=str(inventory), out=str(self.tmp / "merged"),
-                                            shards=[str(s) for s in shards]))
+                                            scope=scope, shards=[str(s) for s in shards]))
         self.assertEqual(code, 0)
         return out.getvalue()
 
-    def merged(self) -> tuple[int, str]:
+    def merged(self, scope: str = "full") -> tuple[int, str]:
         merged = self.tmp / "merged"
-        return self.report(merged / "mutants.out", status=merged / "status", scope="full")
+        return self.report(merged / "mutants.out", status=merged / "status", scope=scope,
+                           recheck=merged / "recheck/mutants.out",
+                           mega_eest=merged / "mega-eest/mutants.out")
 
     def status(self) -> str:
         return (self.tmp / "merged" / "status").read_text().strip()
@@ -1570,6 +1639,70 @@ class Merge(GateCase):
             code = gate.cmd_merge(Namespace(inventory=str(self.tmp / "inventory.txt"),
                                             out=str(self.tmp / "merged"), shards=[]))
         self.assertEqual(code, 2)
+
+    def empty_diff_shard(self, name: str) -> Path:
+        shard = self.shard(name, "status=complete expected=0 outcomes=0")
+        self.results(f"{name}/mutants.out", files={gate.NO_MUTANTS_NOTE: "INFO Diff file is empty\n"})
+        return shard
+
+    def test_four_complete_empty_diff_shards_pass(self) -> None:
+        self.merge(*(self.empty_diff_shard(str(i)) for i in range(4)), scope="diff", names=())
+        code, text = self.merged("diff")
+        self.assertEqual(code, 0, text)
+        self.assertIn("**Nothing to test**", text)
+
+    def test_an_empty_diff_with_a_missing_shard_fails_and_names_it(self) -> None:
+        self.merge(self.empty_diff_shard("0"), self.tmp / "1", self.empty_diff_shard("2"),
+                   self.empty_diff_shard("3"), scope="diff", names=())
+        code, text = self.merged("diff")
+        self.assertEqual(code, 1, text)
+        self.assertIn("shard 1: `no-artifact`", text)
+
+    def test_an_empty_diff_shard_needs_evidence_it_finished(self) -> None:
+        self.merge(self.empty_diff_shard("0"), self.empty_diff_shard("1"),
+                   self.shard("2", "status=complete expected=0 outcomes=0"),
+                   self.empty_diff_shard("3"), scope="diff", names=())
+        code, text = self.merged("diff")
+        self.assertEqual(code, 1, text)
+        self.assertIn("shard 2: `invalid-results`", text)
+
+    def test_a_budget_stopped_diff_shard_fails_even_with_every_outcome(self) -> None:
+        self.merge(self.shard("0", "status=complete expected=1 outcomes=1",
+                              mutant(CAUGHT, "CaughtMutant")),
+                   self.shard("1", "status=partial expected=1 outcomes=1",
+                              mutant(MISSED, "CaughtMutant")),
+                   self.shard("2", "status=complete expected=1 outcomes=1",
+                              mutant(UNVIABLE, "Unviable")),
+                   self.empty_diff_shard("3"), scope="diff")
+        code, text = self.merged("diff")
+        self.assertEqual(code, 1, text)
+        self.assertIn("shard 1: `partial` — its time budget ran out", text)
+
+    def test_four_diff_shards_score_like_the_same_results_unsharded(self) -> None:
+        primary = (mutant(CAUGHT, "CaughtMutant"), mutant(MISSED, "MissedMutant"),
+                   mutant(UNVIABLE, "Unviable"), mutant(TIMEOUT, "Timeout"))
+        shards = [self.shard(str(i), "status=complete expected=1 outcomes=1", outcome)
+                  for i, outcome in enumerate(primary)]
+        self.merge(*shards, scope="diff", names=(CAUGHT, MISSED, TIMEOUT, UNVIABLE))
+        rechecked = mutant(TIMEOUT, "MissedMutant")
+        self.results("3/recheck/mutants.out", outcomes=outcomes_json(rechecked))
+        killed = (MISSED, "CaughtMutant", eest_log(EEST_FAIL))
+        killed_after_recheck = (TIMEOUT, "CaughtMutant", eest_log(EEST_FAIL))
+        self.eest_results("1/mega-eest/mutants.out", killed)
+        # cargo-mutants can include a field deletion even when a follow-up's
+        # regex never asked for it. Only its owning shard's verdict should count.
+        self.eest_results("3/mega-eest/mutants.out", killed_after_recheck,
+                          (MISSED, "MissedMutant", None))
+        for followup in ("recheck", "mega-eest"):
+            suffix = f"{followup}/mutants.out"
+            gate.cmd_merge_runs(Namespace(out=str(self.tmp / "merged" / suffix), scope="diff",
+                                          runs=[str(s / suffix) for s in shards]))
+        unsharded = self.results("unsharded/main", outcomes=outcomes_json(*primary))
+        recheck = self.results("unsharded/recheck", outcomes=outcomes_json(rechecked))
+        eest = self.eest_results("unsharded/mega-eest", killed, killed_after_recheck)
+        expected = self.report(unsharded, recheck=recheck, mega_eest=eest)
+        self.assertEqual(expected[0], 0, expected[1])
+        self.assertEqual(self.merged("diff"), expected)
 
 
 class MergeRuns(GateCase):

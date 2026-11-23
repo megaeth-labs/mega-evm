@@ -2,7 +2,9 @@
 # Mutation-testing driver for mega-evm.
 #
 # Subcommands:
-#   diff  <base-ref>   Mutate only lines changed vs <base-ref> (PR gate mode).
+#   diff  <base-ref> [--list]
+#                      Mutate only lines changed vs <base-ref> (PR gate mode).
+#                      With --list, print that mutant set without running it.
 #   full  [args...]    Mutate the whole mega-evm crate (nightly mode; slow).
 #                      Extra arguments go to cargo-mutants (e.g. `-f <file>`,
 #                      `--shard k/n`).
@@ -64,10 +66,9 @@
 # fails the gate on anything but complete.
 #
 # MUTANTS_SHARD=k/n runs only shard k (0-based) of n of whichever mutant set the
-# subcommand selects (cargo-mutants' own --shard), for a diff too large for one
-# job; give each shard its own OUT_DIR and gate each one. See REVIEW.md. The
-# nightly full run passes `--shard k/n` to `full` instead, and
-# `mutation_gate.py merge` scores the shards together.
+# subcommand selects (cargo-mutants' own --shard); give each shard its own
+# OUT_DIR and score the shards together against the unsharded inventory.
+# The nightly full run passes `--shard k/n` to `full` instead.
 #
 # In the production scope (diff, full, file), a mutant the tests missed — in
 # the run, or in the re-check of one that timed out — is run once more against
@@ -178,8 +179,7 @@ if [[ "$cmd" == list ]]; then
     exec cargo mutants --list --colors never "${PKG_ARGS[@]}" "${EXCLUDE_ARGS[@]}" "$@"
 fi
 
-# A listing (`infra --list`, which the suppression-hygiene job reads) writes no
-# results and has no status.
+# A listing (`diff --list` or `infra --list`) writes no results and has no status.
 LISTING=""
 [[ " $* " == *" --list "* ]] && LISTING=1
 
@@ -229,7 +229,7 @@ finish() {
             [[ "$expected" == "$outcomes" ]] && status=complete
             ;;
         stopped)
-            if [[ "$expected" == "$outcomes" ]]; then
+            if [[ "$cmd" != diff && "$expected" == "$outcomes" ]]; then
                 status=complete
             elif ((outcomes > 0)); then
                 status=partial
@@ -241,6 +241,7 @@ finish() {
     esac
     [[ -n "$counted" ]] || status=error
     [[ "$status" == complete && -n "$FOLLOWUP_STOPPED" ]] && status=followup-stopped
+    if [[ "$cmd" == diff && "$status" == complete ]] && ((rc != 0)); then status=error; fi
     local line="MUTANTS-STATUS status=$status expected=$expected outcomes=$outcomes"
     mkdir -p "$OUT_DIR"
     echo "$line" > "$OUT_DIR/status"
@@ -501,7 +502,14 @@ run_missed_against_mega_eest() {
 
 case "$cmd" in
     diff)
-        base="${1:?usage: mutation_test.sh diff <base-ref>}"
+        base="${1:?usage: mutation_test.sh diff <base-ref> [--list]}"
+        if [[ -n "$LISTING" ]]; then
+            diff_file="$(mktemp)"
+            trap 'rm -f "$diff_file"' EXIT
+            mutatable_diff "$base" > "$diff_file"
+            run_mutants --in-diff "$diff_file" --list --colors never
+            exit 0
+        fi
         diff_file="$OUT_DIR.diff"
         mkdir -p "$(dirname "$diff_file")"
         mutatable_diff "$base" > "$diff_file"
@@ -525,7 +533,7 @@ case "$cmd" in
         run_mutants "${FILE_ARGS[@]}" "$@"
         ;;
     *)
-        echo "usage: mutation_test.sh {diff <base-ref>|full [args...]|file <glob>|infra [args...]|list [--all] [args...]|changed <base-ref>}" >&2
+        echo "usage: mutation_test.sh {diff <base-ref> [--list]|full [args...]|file <glob>|infra [args...]|list [--all] [args...]|changed <base-ref>}" >&2
         exit 2
         ;;
 esac

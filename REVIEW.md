@@ -204,7 +204,8 @@ These checks guard every change to the Satin engine.
 
 ### Mutation testing
 
-- The `cargo-mutants gate` job mutates the lines a pull request changes and fails on a surviving mutant that no reviewed suppression covers.
+- Four parallel `cargo-mutants gate shard k/4` jobs mutate the lines a pull request changes.
+  The `cargo-mutants gate` join scores them against the unsharded diff inventory from the same base and fails on a surviving mutant that no reviewed suppression covers.
   Reference point, the pull request that brought the Satin skeleton: 115 mutants, 49 caught, 0 survived, 1 suppressed, 65 unviable, in 7m41s on CI and 4m12s on a 15-core laptop with `JOBS=8`.
   That population is the diff against `a8f8c7c9`, the last commit of the legacy core, and it is reproduced by `scripts/mutation_test.sh diff a8f8c7c9` followed by `python3 scripts/mutation_gate.py report --results target/mutants/mutants.out --recheck target/mutants/recheck/mutants.out --suppressions mutants/suppressions.toml`.
   Take the numbers from that pair, not from `cargo mutants` on its own: the driver turns the function-scoped suppressions into `--exclude-re` before generation, and the gate filters the line-scoped ones after the run, so the bare command reports a different population and a different survivor count.
@@ -213,12 +214,12 @@ These checks guard every change to the Satin engine.
   The suite is fetched and its adapter built on the unmutated tree first, which must pass; a warm-up or a run that fails as a run, or that the budget stops, is recorded in its results, which the gate refuses.
   The mutants run one at a time, each with the machine's parallelism for the cases.
   The pass costs nothing while the tests catch every mutant; otherwise the warm-up, cargo-mutants' baseline, one copy of `./target` and, per mutant, two incremental builds of mega-evm and one plain run of the cases (about three minutes on a 4-vCPU runner, estimated, not measured), plus any struct-field mutant in the run's scope (`mutants/README.md` has the details).
-- The job is bounded to 330 minutes, and the driver's own budget (`MUTANTS_BUDGET`, 300 minutes) stops the run before that, so a run that cannot finish still scores and uploads what it tested; the driver's `MUTANTS-STATUS` line says how far it got, and the gate (`report --status`) fails anything but a complete run.
+- Each shard is bounded to 330 minutes, and the driver's own budget (`MUTANTS_BUDGET`, 300 minutes) stops it early enough to upload what it tested.
+  The join uses the inventory and each shard's `MUTANTS-STATUS` to name missing, failed or budget-stopped shards and fail the gate.
   The driver builds the tests once before the mutants (the warm build) and CI builds incrementally (`CARGO_INCREMENTAL=1`), so each mutant recompiles only what its mutation changed.
-  The nightly full run is four shards (`scripts/mutation_test.sh full --shard k/4`), merged against the full inventory (`mutation_gate.py merge`, and `merge-runs` for their re-checks and Mega EEST runs) and scored as a full run.
+  The nightly full run also uses four shards (`scripts/mutation_test.sh full --shard k/4`).
+  Both joins use `scripts/mutation_join.sh` to list the inventory, merge the primary and follow-up runs, and score the result in the corresponding scope.
   A line suppression is anchored to one mutant (`file`, `line`, `column` and its text); one whose mutant moves gates it again, and the hygiene job names where its text went.
-  Shard a series whose diff lists more than 1,000 mutants (`cargo mutants --list --in-diff <diff> --package mega-evm`): at the reference rate that is about an hour, and the rate falls as the test suite grows.
-  Run shard `k` of `n` with `MUTANTS_SHARD=k/n OUT_DIR=target/mutants-k scripts/mutation_test.sh diff <base>` and gate each shard with `scripts/mutation_gate.py report`; the pull request that first needs it adds a shard matrix to the job, and every shard must pass.
 - The gate has a second scope, for its own infrastructure: `.cargo/mutants-infra.toml` and `scripts/mutation_test.sh infra` mutate the scenario runner (`crates/mega-evm/src/test_utils/scenario.rs`) against `mega-evm`'s tests.
   The production scope excludes test helpers as noise, so that code is otherwise never mutated, though the benches and later tests rest on it.
   The two scopes are disjoint and the production one keeps its exclusions; a suppression may belong to either, and the suppression-hygiene job lists both scopes into its mutant universe.
