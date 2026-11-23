@@ -52,15 +52,17 @@ git submodule update --init --recursive
 cargo build
 ```
 
-Cargo checks the system-contract artifacts against the checked-in Rust constants when the artifacts are present.
+Cargo checks the system-contract artifacts against the checked-in Rust constants in a repository checkout.
 The check is read-only.
 Published crates use the same embedded constants.
 
 ### System contracts
 
-Run `mise run system-contracts:attest` with Foundry v1.7.1 and initialized submodules to verify that Solidity deployment reproduces the latest checked-in artifacts.
+Run `mise run system-contracts:attest` with Foundry v1.7.1 and initialized submodules.
+Attestation checks the contract inventory, reproduces the latest deployed bytecode with the pinned Osaka EVM target, and checks the SequencerRegistry storage layout.
 After updating versioned artifacts and their latest aliases, run `mise run system-contracts:generate` to regenerate the Rust constants.
-The required `lint` CI job runs the Solidity attestation and checks that the Rust constants match the artifacts.
+The required `lint` CI job runs attestation, checks that changing a Solidity version in a temporary copy makes attestation fail, and verifies that the Rust constants match the artifacts.
+Rust tests pin each versioned artifact's code hash and the version selected by each latest alias.
 
 ### Testing
 

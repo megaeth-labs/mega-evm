@@ -69,7 +69,7 @@ This is the single most important correctness concern in mega-evm.
 - **Storage-layout parity.**
   Where Rust mirrors a Solidity storage layout, add a parity test against that layout.
   A field reordering should fail a test instead of drifting silently into a consensus bug.
-  CI must attest the latest system-contract bytecode against the Solidity source and verify that the embedded Rust constants match the checked-in artifacts.
+  CI must attest the latest system-contract bytecode and the SequencerRegistry storage slots against the Solidity source and verify that the embedded Rust constants match the checked-in artifacts.
   `build.rs` must track artifact and generated-source changes with `rerun-if-changed`.
   A test asserting a constant against itself is tautological.
 - **Would this test still pass if the behavior it claims to check regressed?**

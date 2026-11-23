@@ -33,7 +33,12 @@ run = "prettier --write 'docs/**/*.md' '*.md'"
 
 [tasks."system-contracts:attest"]
 description = "Attest the latest system contract artifacts against Solidity using Foundry"
-run = "cargo run --quiet --locked -p system-contract-artifacts -- attest"
+usage = 'arg "[crate-dir]" default="crates/system-contracts"'
+run = '''
+target_dir=$(mktemp -d)
+trap 'rm -rf -- "$target_dir"' EXIT
+CARGO_TARGET_DIR="$target_dir" cargo run --quiet --locked -p system-contract-artifacts -- attest "${usage_crate_dir?}"
+'''
 
 [tasks."system-contracts:generate"]
 description = "Regenerate system contract Rust constants from checked-in artifacts"

@@ -22,10 +22,10 @@ jobs:
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
       - name: Install Foundry
-        uses: foundry-rs/foundry-toolchain@v1
+        uses: foundry-rs/foundry-toolchain@b00af27efadbc7b4ca8b82abbd903b17cc874d2a # v1
         with:
           version: v1.7.1
-      - uses: jdx/mise-action@v2
+      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2.4.4
         with:
           install: false
           cache: false
@@ -33,6 +33,10 @@ jobs:
         env:
           MISE_AUTO_INSTALL: "false"
         run: mise run system-contracts:attest
+      - name: Attestation negative control
+        env:
+          MISE_AUTO_INSTALL: "false"
+        run: bash .github/scripts/check_system_contract_attestation.sh
       - name: Check generated system contract constants
         run: cargo run --quiet --locked -p system-contract-artifacts -- check
       - name: Run cargo-sort
@@ -69,8 +73,6 @@ jobs:
           submodules: recursive
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
-      - name: Install Foundry
-        uses: foundry-rs/foundry-toolchain@v1
       - name: Install RISC-V target
         run: rustup target add riscv64imac-unknown-none-elf
       - name: Check for riscv64imac-unknown-none-elf target

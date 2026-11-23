@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{ensure, Result};
 
 mod artifact_checks;
 
@@ -14,7 +14,12 @@ fn main() -> Result<()> {
         println!("cargo::rerun-if-changed=src/generated");
         artifact_checks::check_generated(crate_dir)?;
     } else {
-        // Published packages ship the generated Rust files without the JSON artifacts.
+        ensure!(
+            !crate_dir.join("scripts").try_exists()? &&
+                !crate_dir.join("foundry.toml").try_exists()?,
+            "System contract checkout is missing artifacts/. Restore the checked-in artifacts."
+        );
+        // Published and vendored packages contain the generated Rust sources and ABI interfaces.
         println!("cargo::rerun-if-changed=build.rs");
     }
     Ok(())

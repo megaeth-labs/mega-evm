@@ -61,5 +61,9 @@ fn test_limit_control_constants_are_self_consistent() {
 #[test]
 fn test_sequencer_registry_constants_are_self_consistent() {
     use mega_system_contracts::sequencer_registry::*;
-    assert_code_hashes!((LATEST_CODE, LATEST_CODE_HASH), (V1_0_0_CODE, V1_0_0_CODE_HASH));
+    assert_code_hashes!(
+        (LATEST_CODE, LATEST_CODE_HASH),
+        (V1_0_0_CODE, V1_0_0_CODE_HASH),
+        (V2_0_0_CODE, V2_0_0_CODE_HASH),
+    );
 }
