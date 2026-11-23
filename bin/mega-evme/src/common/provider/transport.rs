@@ -514,13 +514,8 @@ where
     }
 }
 
-/// A request missing from an offline replay envelope.
-#[derive(Debug, thiserror::Error)]
-#[error("{0}")]
-struct OfflineCacheMiss(String);
-
 /// A transport that serves RPC responses from a [`TransportCache`] and
-/// returns a typed error when a single request is absent. Used for offline replay — no
+/// returns `BackendGone` on cache miss. Used for offline replay — no
 /// network I/O, no retry layer.
 #[derive(Debug, Clone)]
 pub(super) struct ReplayTransport {
@@ -565,7 +560,7 @@ impl tower::Service<RequestPacket> for ReplayTransport {
             );
             // Custom error so the message propagates. Safe: retry layer is never
             // installed on the replay path.
-            return Box::pin(async move { Err(TransportErrorKind::custom(OfflineCacheMiss(msg))) });
+            return Box::pin(async move { Err(TransportErrorKind::custom_str(&msg)) });
         }
 
         // Batch miss: BackendGone (not Custom, avoids retry).

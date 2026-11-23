@@ -458,6 +458,23 @@ async fn test_unique_body_falls_back_on_block_receipt_rpc_error() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn test_unique_body_falls_back_on_block_receipt_transport_error() {
+    let server = mock_chain().await;
+    let block = RepeatedBlock::new(BLOCK, &chain::parent_hash(), &[true]);
+    block.serve(&server).await;
+    // The block receipt request is the only request without a method-specific mock.
+    server.respond_status_n_times(503, 1, 10).await;
+
+    let run =
+        replay(BLOCK, &["--rpc", &server.uri(), "--rpc.no-cache-file", "--rpc.max-retries", "0"]);
+
+    assert_eq!(run.code(), 0, "{}\n{}", run.stdout, run.stderr);
+    assert_eq!(run.summary()["verification"], json!({"match": true}));
+    assert_eq!(server.received_method_count("eth_getBlockReceipts").await, 1);
+    assert_eq!(server.received_method_count("eth_getTransactionReceipt").await, 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn test_unique_body_falls_back_on_null_block_receipts() {
     let server = mock_chain().await;
     let block = RepeatedBlock::new(BLOCK, &chain::parent_hash(), &[true]);
