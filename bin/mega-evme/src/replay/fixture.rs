@@ -95,6 +95,8 @@ pub(crate) struct FixtureInputs<'a> {
     pub result: &'a ExecutionResult<MegaHaltReason>,
     /// Proof that `result` passed the fidelity gate.
     pub reproduced: ReproducedAnchor,
+    /// Body index when a batch fixture's transaction hash repeats in its block.
+    pub repeated_index: Option<usize>,
 }
 
 /// Proof that a replay reproduced the on-chain receipt it is anchored to.
@@ -239,8 +241,15 @@ pub(crate) struct FixtureDraft {
     /// Logs root observed during the full replay (already equal to the on-chain
     /// receipt's logs root), cross-checked against the isolated run before writing.
     actual_logs_root: B256,
-    /// Suite key (transaction hash) under which the unit is stored.
-    name: String,
+    /// Common stem of the batch filename and the suite key.
+    file_stem: String,
+}
+
+impl FixtureDraft {
+    /// File name for this draft when writing it to a batch directory.
+    pub(super) fn file_name(&self) -> String {
+        format!("{}.json", self.file_stem)
+    }
 }
 
 /// Build a fixture draft from the replayed target transaction.
@@ -266,7 +275,8 @@ where
     DB::Error: Display,
 {
     let DumpableTx(target_tx) = target_tx;
-    let FixtureInputs { mega_env, result, reproduced: ReproducedAnchor(()) } = inputs;
+    let FixtureInputs { mega_env, result, reproduced: ReproducedAnchor(()), repeated_index } =
+        inputs;
 
     let actual_gas = result.tx_gas_used();
     let actual_status = execution_status(result).to_string();
@@ -295,11 +305,13 @@ where
         extra: BTreeMap::new(),
     };
 
-    // The suite key names the transaction the unit was isolated from.
-    // `tx_hash()` is the cached hash seeded from the served `hash` field, and it
-    // is a verified value here: `verify::authenticate_transaction` admits no
-    // transaction whose served field disagrees with what its body hashes to.
-    let name = format!("replay_{:#x}", target_tx.inner.inner.tx_hash());
+    // The kernel authenticated the hash. Include the occurrence when that hash
+    // would otherwise give multiple fixtures the same filename and suite key.
+    let tx_hash = target_tx.inner.inner.tx_hash();
+    let file_stem = match repeated_index {
+        Some(index) => format!("{tx_hash:#x}-{}-{index}", block.header.number()),
+        None => format!("{tx_hash:#x}"),
+    };
 
     Ok(FixtureDraft {
         unit,
@@ -309,7 +321,7 @@ where
         actual_halt_reason,
         actual_output,
         actual_logs_root,
-        name,
+        file_stem,
     })
 }
 
@@ -376,7 +388,8 @@ pub(crate) fn finalize_and_write(
         Test::for_dump(executed.state_root, executed.logs_root, executed.gas_used, executed.status);
     unit.post = BTreeMap::from([(draft.spec, vec![test])]);
 
-    let suite = TestSuite(BTreeMap::from([(draft.name, unit)]));
+    let suite_key = format!("replay_{}", draft.file_stem);
+    let suite = TestSuite(BTreeMap::from([(suite_key, unit)]));
     let json = serde_json::to_string_pretty(&suite)
         .map_err(|e| ReplayError::Other(format!("failed to serialize fixture: {e}")))?;
 
@@ -792,7 +805,12 @@ mod tests {
             MegaSpecId::REX6,
             &Block::default(),
             dumpable,
-            FixtureInputs { mega_env: MegaEnv::default(), result: &result, reproduced },
+            FixtureInputs {
+                mega_env: MegaEnv::default(),
+                result: &result,
+                reproduced,
+                repeated_index: None,
+            },
         )
         .err()
         .expect("the pre-state read fails");

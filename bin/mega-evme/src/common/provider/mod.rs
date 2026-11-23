@@ -90,7 +90,8 @@ pub struct RpcArgs {
 
     /// Replay from a previously captured JSON-RPC fixture file (offline).
     /// Cannot be used with `--rpc`.
-    /// Any RPC miss is a hard error; the file is never written.
+    /// A request missing from the file fails locally without reaching the network.
+    /// The file is read-only.
     /// Cannot be used with --rpc.capture-file, --rpc.cache-dir, --rpc.clear-cache,
     /// --rpc.no-cache-file, or --rpc.cache-max-entries.
     #[arg(

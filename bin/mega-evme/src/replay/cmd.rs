@@ -63,7 +63,8 @@ pub struct Cmd {
 
     /// Replay every transaction of the given block (decimal or `0x`-prefixed hex).
     ///
-    /// Same batch semantics and restrictions as `--tx-file`.
+    /// Reports each transaction in body order, including repeated hashes.
+    /// Same batch restrictions as `--tx-file`.
     #[arg(long = "block", value_name = "N", value_parser = batch::parse_block_number)]
     pub block: Option<u64>,
 
@@ -110,7 +111,8 @@ pub struct Cmd {
     pub dump_fixture: Option<std::path::PathBuf>,
 
     /// Dump a self-validating EEST state-test fixture for every successfully
-    /// replayed target into `<DIR>/<tx_hash>.json`.
+    /// replayed target into `<DIR>/<tx_hash>.json`. For each repeated hash,
+    /// use `<DIR>/<tx_hash>-<block_number>-<tx_index>.json` for its copies.
     ///
     /// Batch mode only (`--tx-file` / `--block`). Per-target gating mirrors the
     /// single-transaction dump: fidelity-gate failures and BLOCKHASH readers are
@@ -123,8 +125,8 @@ pub struct Cmd {
 
     /// Replace existing files when writing fixtures with `--dump-fixture-dir`.
     ///
-    /// Without this flag, a target whose `<DIR>/<tx_hash>.json` already exists is
-    /// reported as an infrastructure error for that target.
+    /// Without this flag, an existing destination is reported as an
+    /// infrastructure error for that target.
     ///
     /// Only meaningful alongside `--dump-fixture-dir` (a single-file
     /// `--dump-fixture` always replaces its destination), so it is rejected
@@ -134,10 +136,10 @@ pub struct Cmd {
 
     /// Verify every replayed transaction against its on-chain receipt.
     ///
-    /// Fetches the receipt of each target and compares every consensus field of
-    /// it: the success status, the gas used, the block-cumulative gas used, the
-    /// receipt type, a deposit receipt's nonce and version, and the emitted logs
-    /// (count plus each log's address, topics, and data). The verdict is
+    /// Fetches receipts by body index for `--block` and by hash for hash targets.
+    /// Compares every consensus field of the receipt: the success status, the gas used, the
+    /// block-cumulative gas used, the receipt type, a deposit receipt's nonce and version, and
+    /// the emitted logs (count plus each log's address, topics, and data). The verdict is
     /// reported per transaction, and a mismatch makes the run exit non-zero. A
     /// target whose receipt cannot be fetched, contradicts itself (a logs bloom
     /// that is not the bloom of its logs), or describes a different inclusion
@@ -191,6 +193,8 @@ struct ReplayContext {
     block: Block<Transaction>,
     chain_id: u64,
     preceding_tx_hashes: Vec<B256>,
+    /// Body position selected by the RPC when its hash occurs more than once.
+    repeated_index: Option<usize>,
 }
 
 /// What the command was asked to replay, resolved from the target argument group.
@@ -377,7 +381,7 @@ impl<'a> kernel::TargetLifecycle for SingleTxLifecycle<'a> {
                 self.executed_spec,
                 self.block,
                 dumpable,
-                fixture::FixtureInputs { mega_env, result, reproduced },
+                fixture::FixtureInputs { mega_env, result, reproduced, repeated_index: None },
             )
             .map_err(ReplayError::from)
         });
@@ -858,32 +862,44 @@ impl Cmd {
         // the body must contain it. A body that does not list the target would
         // silently make every transaction of the block count as preceding and
         // execute the target after the whole block.
-        let mut preceding_tx_hashes = vec![];
+        let mut preceding_tx_hashes = Vec::new();
+        let mut repeated_index = None;
         if !is_pending {
-            let mut found = false;
-            for hash in block.transactions.hashes() {
-                if hash == tx_hash {
-                    found = true;
-                    break;
-                }
-                preceding_tx_hashes.push(hash);
-            }
+            let body: Vec<_> = block.transactions.hashes().collect();
+            let mut occurrences = body
+                .iter()
+                .enumerate()
+                .filter_map(|(index, hash)| (*hash == tx_hash).then_some(index));
+            let first = occurrences.next();
             coherence::require_body_membership(
                 block_number,
                 block.hash(),
                 tx_hash,
-                found,
-                // The target reached this block through its own inclusion claim,
-                // which the anchor guard above already matched to the fetched
-                // block.
+                first.is_some(),
                 MembershipClaim::ResolvedInclusion,
             )
             .map_err(incoherent_endpoint)?;
+            if occurrences.next().is_some() {
+                repeated_index = Some(
+                    coherence::repeated_tx_index(&body, tx_hash, target_tx.transaction_index)
+                        .map_err(ReplayError::RpcError)?,
+                );
+            }
+            let index = repeated_index.or(first).expect("membership check guarantees an index");
+            preceding_tx_hashes.extend_from_slice(&body[..index]);
         }
 
         debug!(chain_id, preceding_count = preceding_tx_hashes.len(), "Replay context ready");
 
-        Ok(ReplayContext { tx_hash, target_tx, parent_block, block, chain_id, preceding_tx_hashes })
+        Ok(ReplayContext {
+            tx_hash,
+            target_tx,
+            parent_block,
+            block,
+            chain_id,
+            preceding_tx_hashes,
+            repeated_index,
+        })
     }
 
     /// Build the external environment and (for capture mode) the envelope snapshot.
@@ -995,7 +1011,15 @@ impl Cmd {
         // the transaction does not exist, so it is a retryable infrastructure
         // failure rather than an execution verdict.
         let receipt_evidence = if self.dump_fixture.is_some() || self.verify_receipt {
-            Some(verify::ReceiptEvidence::admit(provider, ctx.tx_hash, ctx.block.hash()).await?)
+            Some(
+                verify::ReceiptEvidence::admit(
+                    provider,
+                    ctx.tx_hash,
+                    ctx.block.hash(),
+                    ctx.repeated_index,
+                )
+                .await?,
+            )
         } else {
             None
         };
@@ -1093,14 +1117,7 @@ impl Cmd {
         P: Provider<op_alloy_network::Optimism> + Clone + std::fmt::Debug + 'static,
     {
         let (body, body_len) = if ctx.target_tx.block_number.is_some() {
-            // The kernel walks the body in order and stops once the last
-            // requested target has committed. It is handed the body *up to and
-            // including* the target rather than the whole body, which keeps the
-            // walk exactly the preceding-then-target sequence this path has
-            // always executed: the membership guard resolved the target's
-            // position from the first occurrence of its hash, and a body that
-            // (incoherently) listed that hash twice would otherwise make the
-            // kernel run the target a second time.
+            // The kernel only needs the body prefix ending at the selected index.
             let body: Vec<kernel::BodyEntry<'_>> = ctx
                 .preceding_tx_hashes
                 .iter()
@@ -1120,7 +1137,7 @@ impl Cmd {
             // so looking it up again would ask the endpoint a second time.
             (vec![kernel::BodyEntry::Served { tx_hash: ctx.tx_hash, tx: &ctx.target_tx }], 1)
         };
-        let targets: HashSet<B256> = core::iter::once(ctx.tx_hash).collect();
+        let targets = HashSet::from([body.len() - 1]);
 
         let overrides = OnceCell::new();
         let mut lifecycle = SingleTxLifecycle {

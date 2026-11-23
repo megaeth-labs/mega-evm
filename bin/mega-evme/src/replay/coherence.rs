@@ -507,6 +507,23 @@ pub(super) fn require_receipt_gas(
     Ok(())
 }
 
+/// Resolve a by-hash target when the hash occurs at several body positions.
+pub(super) fn repeated_tx_index(
+    body: &[B256],
+    hash: B256,
+    reported: Option<u64>,
+) -> Result<usize, String> {
+    if let Some(index) = reported.and_then(|index| usize::try_from(index).ok()) {
+        if body.get(index) == Some(&hash) {
+            return Ok(index);
+        }
+    }
+    Err(format!(
+        "transaction {hash} occurs more than once in the block, but the by-hash lookup \
+         reported transactionIndex {reported:?}; use --block to replay every occurrence"
+    ))
+}
+
 /// Require that the block body lists a target the endpoint placed in this block.
 ///
 /// A body that does not list the target contradicts the placement it was queued
