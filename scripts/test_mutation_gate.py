@@ -25,6 +25,7 @@ import tempfile
 import unittest
 from argparse import Namespace
 from pathlib import Path
+from textwrap import dedent
 
 SCRIPTS = Path(__file__).resolve().parent
 
@@ -761,13 +762,17 @@ class DiffScope(unittest.TestCase):
         self.assertEqual(self.ls_files(match.group(1)), rust)
 
 
-def bash5() -> str | None:
-    """A bash 5 or newer, if this machine has one."""
-    for shell in (shutil.which("bash"), "/opt/homebrew/bin/bash", "/usr/local/bin/bash",
-                  "/usr/bin/bash", "/bin/bash"):
-        if shell and Path(shell).exists() and (DriverGuard.bash_major(shell) or 0) >= 5:
-            return shell
-    return None
+def bash_major(shell: str) -> int | None:
+    """The bash major version `shell` is, or None when it is not bash."""
+    out = subprocess.run([shell, "-c", 'echo "${BASH_VERSION:-}"'], capture_output=True,
+                         text=True, timeout=30).stdout.strip()
+    return int(out.split(".")[0]) if out else None
+
+
+# The join invokes the driver through its env-based Bash shebang.
+BASH = shutil.which("bash")
+requires_bash5 = unittest.skipUnless(
+    BASH and (bash_major(BASH) or 0) >= 5, "needs bash 5 or newer on PATH")
 
 
 # A stand-in for `cargo mutants`: it writes the results the test prepared for the run it is asked
@@ -805,14 +810,12 @@ exit "$(cat "$FAKE_RUNS/$run.exit")"
 """
 
 
+@requires_bash5
 class DriverRecheck(GateCase):
     """scripts/mutation_test.sh re-runs a timed-out mutant alone and carries a failed re-check's
     exit into its results, which the gate then refuses."""
 
     def drive(self, recheck_exit: int, recheck: dict | None) -> tuple[int, str, Path]:
-        shell = bash5()
-        if shell is None:
-            self.skipTest("no bash 5 or newer on this machine")
         runs = self.tmp / "runs"
         self.results("runs/main", outcomes=outcomes_json(
             mutant(CAUGHT, "CaughtMutant"), mutant(TIMEOUT, "Timeout")))
@@ -828,7 +831,7 @@ class DriverRecheck(GateCase):
         out = self.tmp / "out" / "mutants"
         env = {"PATH": f"{bin_dir}:/usr/bin:/bin", "FAKE_RUNS": str(runs), "OUT_DIR": str(out),
                "JOBS": "1", "SUPPRESS": str(self.tmp / "no-suppressions.toml")}
-        run = subprocess.run([shell, str(DriverGuard.DRIVER), "file", "crates/mega-evm/src/a.rs"],
+        run = subprocess.run([BASH, str(DriverGuard.DRIVER), "file", "crates/mega-evm/src/a.rs"],
                              capture_output=True, text=True, timeout=120, env=env)
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertIn("Re-checking 1 timed-out mutant(s) one at a time", run.stderr)
@@ -857,6 +860,7 @@ class DriverRecheck(GateCase):
         self.assertIn("exited abnormally (cargo-mutants exited 1)", text)
 
 
+@requires_bash5
 class DriverMegaEest(GateCase):
     """scripts/mutation_test.sh runs a mutant the tests missed against Mega EEST, with mega-evm's
     `mega_eest` test alone, after the suite passed on the unmutated tree, and carries a failed
@@ -865,9 +869,6 @@ class DriverMegaEest(GateCase):
     def drive(self, *, warmup_exit: int = 0, eest_exit: int = 0,
               eest: list[tuple[str, str, str | None]] | None = None,
               env: dict[str, str] | None = None) -> tuple[int, str, Path, Path]:
-        shell = bash5()
-        if shell is None:
-            self.skipTest("no bash 5 or newer on this machine")
         runs = self.tmp / "runs"
         self.results("runs/main", outcomes=outcomes_json(
             mutant(CAUGHT, "CaughtMutant"), mutant(MISSED, "MissedMutant")))
@@ -887,7 +888,7 @@ class DriverMegaEest(GateCase):
         stub.chmod(0o755)
         out = self.tmp / "out" / "mutants"
         run = subprocess.run(
-            [shell, str(DriverGuard.DRIVER), "file", "crates/mega-evm/src/a.rs"],
+            [BASH, str(DriverGuard.DRIVER), "file", "crates/mega-evm/src/a.rs"],
             capture_output=True, text=True, timeout=120,
             env={"PATH": f"{bin_dir}:/usr/bin:/bin", "FAKE_RUNS": str(runs), "OUT_DIR": str(out),
                  "JOBS": "1", "SUPPRESS": str(self.tmp / "no-suppressions.toml"),
@@ -976,6 +977,7 @@ exec "$@"
 """
 
 
+@requires_bash5
 class DriverRun(GateCase):
     """scripts/mutation_test.sh builds the tests first, bounds its phases by MUTANTS_BUDGET and
     ends with a MUTANTS-STATUS line, as main's driver does, and keeps this branch's re-check."""
@@ -983,9 +985,6 @@ class DriverRun(GateCase):
     def drive(self, *args: str, main: dict | None = None, recheck: dict | None = None,
               main_exit: int = 0,
               env: dict[str, str] | None = None) -> tuple[subprocess.CompletedProcess, Path, Path]:
-        shell = bash5()
-        if shell is None:
-            self.skipTest("no bash 5 or newer on this machine")
         runs = self.tmp / "runs"
         runs.mkdir(exist_ok=True)
         if main is not None:
@@ -1003,7 +1002,7 @@ class DriverRun(GateCase):
             (bin_dir / "python3").symlink_to(sys.executable)
         out = self.tmp / "out" / "mutants"
         run = subprocess.run(
-            [shell, str(DriverGuard.DRIVER), *args], capture_output=True, text=True, timeout=120,
+            [BASH, str(DriverGuard.DRIVER), *args], capture_output=True, text=True, timeout=120,
             env={"PATH": f"{bin_dir}:/usr/bin:/bin", "FAKE_RUNS": str(runs), "OUT_DIR": str(out),
                  "JOBS": "1", "SUPPRESS": str(self.tmp / "no-suppressions.toml"),
                  "MUTANTS_MEGA_EEST": "0", **(env or {})})
@@ -1102,11 +1101,11 @@ class DriverRun(GateCase):
         self.assertFalse(out.parent.exists())
 
 
+@requires_bash5
 class DiffInventory(GateCase):
     def test_diff_inventory_equals_the_union_of_four_shard_lists(self) -> None:
-        shell = bash5()
-        if shell is None or shutil.which("cargo-mutants") is None:
-            self.skipTest("needs bash 5 and cargo-mutants")
+        if shutil.which("cargo-mutants") is None:
+            self.skipTest("needs cargo-mutants")
 
         scripts = self.tmp / "scripts"
         scripts.mkdir()
@@ -1134,7 +1133,7 @@ class DiffInventory(GateCase):
 
         def list_diff(shard: str = "") -> list[str]:
             run = subprocess.run(
-                [shell, str(scripts / "mutation_test.sh"), "diff", "HEAD^", "--list"],
+                [BASH, str(scripts / "mutation_test.sh"), "diff", "HEAD^", "--list"],
                 cwd=self.tmp, capture_output=True, text=True, timeout=60,
                 env={**os.environ, "MUTANTS_SHARD": shard, "JOBS": "1"})
             self.assertEqual(run.returncode, 0, run.stderr)
@@ -1148,14 +1147,12 @@ class DiffInventory(GateCase):
         self.assertCountEqual(inventory, [name for shard in by_shard for name in shard])
 
 
+@requires_bash5
 class ShardDriver(GateCase):
     """Runs the driver's sharded full run with the fake cargo, recording each run's arguments."""
 
     def drive_shard(self, *shard: str, timed_out: str = TIMEOUT, missed: str = MISSED,
                     env: dict[str, str] | None = None) -> tuple[subprocess.CompletedProcess, Path]:
-        shell = bash5()
-        if shell is None:
-            self.skipTest("no bash 5 or newer on this machine")
         runs = self.tmp / "runs"
         runs.mkdir(exist_ok=True)
         # The first run: one mutant timed out, one missed; the re-check misses the timed-out one,
@@ -1179,7 +1176,7 @@ class ShardDriver(GateCase):
         stub.chmod(0o755)
         out = self.tmp / "out" / "mutants"
         run = subprocess.run(
-            [shell, str(DriverGuard.DRIVER), "full", *shard], capture_output=True, text=True, timeout=120,
+            [BASH, str(DriverGuard.DRIVER), "full", *shard], capture_output=True, text=True, timeout=120,
             env={"PATH": f"{bin_dir}:/usr/bin:/bin", "FAKE_RUNS": str(runs), "OUT_DIR": str(out),
                  "JOBS": "1", "SUPPRESS": str(self.tmp / "no-suppressions.toml"),
                  "MEGA_EEST_SCRIPT": str(stub), **(env or {})})
@@ -1257,12 +1254,9 @@ class FollowUpSelectionAgainstCargoMutants(ShardDriver):
         return out
 
     def test_every_requested_mutant_is_selected_in_every_shard(self) -> None:
-        shell = bash5()
-        if shell is None:
-            self.skipTest("no bash 5 or newer on this machine")
         for k in range(4):
             with self.subTest(shard=k):
-                listed = subprocess.run([shell, str(DriverGuard.DRIVER), "list", "--shard", f"{k}/4"],
+                listed = subprocess.run([BASH, str(DriverGuard.DRIVER), "list", "--shard", f"{k}/4"],
                                         cwd=self.ROOT, capture_output=True, text=True, timeout=600)
                 self.assertEqual(listed.returncode, 0, listed.stderr)
                 names = [line for line in listed.stdout.splitlines() if line.strip()]
@@ -1287,15 +1281,8 @@ class DriverGuard(unittest.TestCase):
 
     DRIVER = SCRIPTS / "mutation_test.sh"
 
-    @staticmethod
-    def bash_major(shell: str) -> int | None:
-        """The bash major version `shell` is, or None when it is not bash."""
-        out = subprocess.run([shell, "-c", 'echo "${BASH_VERSION:-}"'], capture_output=True,
-                             text=True).stdout.strip()
-        return int(out.split(".")[0]) if out else None
-
     def assert_refused(self, shell: str) -> None:
-        major = self.bash_major(shell)
+        major = bash_major(shell)
         if major is not None and major >= 5:
             self.skipTest(f"{shell} is bash {major}")
         # A subcommand the driver does not have and a scratch output directory: were the guard to
@@ -1810,12 +1797,50 @@ class MergeRuns(GateCase):
             gate.load_run(joined)
 
 
+@unittest.skipUnless(shutil.which("node"), "needs Node.js to run the workflow's comment script")
+class PullRequestComment(GateCase):
+    def setUp(self) -> None:
+        super().setUp()
+        workflow = (SCRIPTS.parent / ".github/workflows/mutation.yml").read_text()
+        self.step = workflow.split("- name: Upsert PR comment\n", 1)[1].split("\n      - name:", 1)[0]
+
+    def published_body(self, outcome: str, output: str) -> str:
+        script = dedent(self.step.split("script: |\n", 1)[1])
+        harness = """
+const issues = {
+  listComments: async () => ({data: []}),
+  createComment: async ({body}) => process.stdout.write(body),
+};
+const github = {rest: {issues}};
+const context = {repo: {owner: "owner", repo: "repo"}, issue: {number: 1}};
+(async () => {
+""" + script + "})().catch(error => { console.error(error); process.exitCode = 1; });"
+        run = subprocess.run(
+            ["node", "-e", harness], cwd=self.tmp, capture_output=True, text=True, timeout=30,
+            env={**os.environ, "MUTATION_PATHS_OUTCOME": outcome, "MUTATION_OUTPUT_DIR": output})
+        self.assertEqual(run.returncode, 0, run.stderr)
+        return run.stdout
+
+    def test_comment_refuses_stale_report_without_a_successful_absolute_output(self) -> None:
+        (self.tmp / "mutation-report.md").write_text("stale verdict")
+        for outcome, output in (("skipped", ""), ("success", ""), ("success", "."),
+                                ("failure", str(self.tmp))):
+            with self.subTest(outcome=outcome, output=output):
+                self.assertIn("No report produced", self.published_body(outcome, output))
+
+    def test_comment_reads_the_report_from_a_successful_absolute_output(self) -> None:
+        output = self.tmp / "output"
+        output.mkdir()
+        (output / "mutation-report.md").write_text("current verdict")
+        self.assertEqual(self.published_body("success", str(output)),
+                         "<!-- mutation-testing-report -->\ncurrent verdict")
+        self.assertIn("MUTATION_PATHS_OUTCOME: ${{ steps.paths.outcome }}", self.step)
+
+
+@requires_bash5
 class DiffJoin(GateCase):
     def setUp(self) -> None:
         super().setUp()
-        self.shell = bash5()
-        if self.shell is None:
-            self.skipTest("needs bash 5")
         self.scripts = self.tmp / "checkout/scripts"
         self.scripts.mkdir(parents=True)
         for name in ("mutation_test.sh", "mutation_gate.py", "mutation_join.sh"):
@@ -1842,7 +1867,7 @@ class DiffJoin(GateCase):
                     "INVENTORY": TIMEOUT}
 
     def join(self, **env: str) -> subprocess.CompletedProcess:
-        return subprocess.run([self.shell, str(self.scripts / "mutation_join.sh"), "diff", "HEAD"],
+        return subprocess.run([BASH, str(self.scripts / "mutation_join.sh"), "diff", "HEAD"],
                               cwd=self.work, env={**self.env, **env}, text=True,
                               capture_output=True, timeout=60)
 

@@ -195,15 +195,20 @@ jobs:
         continue-on-error: true
         uses: actions/github-script@v7
         env:
+          MUTATION_PATHS_OUTCOME: ${{ steps.paths.outcome }}
           MUTATION_OUTPUT_DIR: ${{ steps.paths.outputs.output }}
         with:
           script: |
             const fs = require('fs');
-            let body;
-            try {
-              body = fs.readFileSync(require('path').join(process.env.MUTATION_OUTPUT_DIR, 'mutation-report.md'), 'utf8');
-            } catch {
-              body = '## 🧬 Mutation testing\n\nNo report produced: the mutation run failed before the gate scored it. See the job log.';
+            const path = require('path');
+            const output = process.env.MUTATION_OUTPUT_DIR;
+            let body = '## 🧬 Mutation testing\n\nNo report produced: the mutation run failed before the gate scored it. See the job log.';
+            if (process.env.MUTATION_PATHS_OUTCOME === 'success' && output && path.isAbsolute(output)) {
+              try {
+                body = fs.readFileSync(path.join(output, 'mutation-report.md'), 'utf8');
+              } catch {
+                // Keep the fallback when scoring did not write a readable report.
+              }
             }
             const marker = '<!-- mutation-testing-report -->';
             body = `${marker}\n${body}`;
