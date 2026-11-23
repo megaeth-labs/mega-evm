@@ -1871,6 +1871,31 @@ class DiffJoin(GateCase):
         self.assertNotEqual(second.returncode, 0, second.stdout + second.stderr)
         self.assertIn("output directory is not empty", second.stderr)
 
+    def test_failed_download_refuses_even_complete_shards(self) -> None:
+        self.timeout_with_recheck()
+        result = self.join(MUTATION_DOWNLOAD_OUTCOME="failure")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("Artifact download did not succeed", result.stdout)
+        self.assertNotIn("✅ PASS", result.stdout)
+
+    def test_successful_no_run_decision_passes_without_artifacts(self) -> None:
+        result = self.join(MUTATION_SCOPE_OUTCOME="success", MUTATION_NEEDED="false",
+                           MUTATION_MATRIX_OUTCOME="skipped", MUTATION_DOWNLOAD_OUTCOME="skipped")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("**Nothing to test**", result.stdout)
+
+    def test_failed_scope_decision_refuses_even_complete_shards(self) -> None:
+        self.timeout_with_recheck()
+        result = self.join(MUTATION_SCOPE_OUTCOME="failure", MUTATION_NEEDED="false")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("Diff scope decision did not succeed", result.stdout)
+
+    def test_unexpected_matrix_skip_refuses_even_complete_shards(self) -> None:
+        self.timeout_with_recheck()
+        result = self.join(MUTATION_MATRIX_OUTCOME="skipped")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("The shard jobs did not run", result.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

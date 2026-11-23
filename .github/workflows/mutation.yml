@@ -31,11 +31,31 @@ permissions:
   pull-requests: write # to upsert the result comments
 
 jobs:
+  mutation-scope:
+    name: Mutation diff scope
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      mutate: ${{ steps.scope.outputs.mutate }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Decide whether to run the diff shards
+        id: scope
+        run: scripts/mutation_test.sh changed "${{ github.event.pull_request.base.sha }}" >> "$GITHUB_OUTPUT"
+
   # ── cargo-mutants: diff-scoped gate on PRs, full-crate run nightly ──────────
   # Both runs use four cargo-mutants shards (consecutive slices of the mutant
   # list). Their join scores against the unsharded inventory so a shard that
   # fails or runs out of time leaves untested mutants in the report.
   cargo-mutants:
+    needs: mutation-scope
+    if: |
+      !cancelled() &&
+      (github.event_name != 'pull_request' ||
+        (needs.mutation-scope.result == 'success' && needs.mutation-scope.outputs.mutate == 'true'))
     name: ${{ github.event_name == 'pull_request' && format('cargo-mutants gate shard {0}', matrix.shard) || format('cargo-mutants shard {0}', matrix.shard) }}
     runs-on: ubuntu-24.04
     # MUTANTS_BUDGET stops the driver early enough to upload partial results.
@@ -50,24 +70,8 @@ jobs:
           submodules: recursive
           fetch-depth: 0 # need base history for the diff
 
-      - name: Decide whether the run builds
-        # A PR that changes no mutatable source has nothing to mutate, and the
-        # driver skips its warm build. The Rust cache is then neither restored
-        # (nothing would use it) nor saved: the save would store a target with
-        # nothing compiled in it, and a later run of this PR that hit that entry
-        # would rebuild every dependency without ever saving a better one.
-        id: scope
-        run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            scripts/mutation_test.sh changed "${{ github.event.pull_request.base.sha }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "mutate=true" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          cache: ${{ steps.scope.outputs.mutate }}
 
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
@@ -124,7 +128,7 @@ jobs:
 
   cargo-mutants-gate:
     name: cargo-mutants gate
-    needs: cargo-mutants
+    needs: [mutation-scope, cargo-mutants]
     if: ${{ !cancelled() && github.event_name == 'pull_request' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -134,11 +138,13 @@ jobs:
           fetch-depth: 0 # list the diff against the same base as the shards
 
       - name: Install Rust
+        if: needs.mutation-scope.result == 'success' && needs.mutation-scope.outputs.mutate == 'true'
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           cache: false
 
       - name: Install cargo-mutants
+        if: needs.mutation-scope.result == 'success' && needs.mutation-scope.outputs.mutate == 'true'
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-mutants@27.1.0
@@ -152,7 +158,9 @@ jobs:
           echo "output=$staging/report" >> "$GITHUB_OUTPUT"
 
       - name: Download shard results
-        # Let the scorer name the missing shards even when nothing downloaded.
+        id: download
+        if: needs.mutation-scope.result == 'success' && needs.mutation-scope.outputs.mutate == 'true'
+        # Carry the raw outcome into the join so it can publish a failure reason.
         continue-on-error: true
         uses: actions/download-artifact@v4
         with:
@@ -163,19 +171,11 @@ jobs:
         env:
           MUTATION_INPUT_DIR: ${{ steps.paths.outputs.input }}
           MUTATION_OUTPUT_DIR: ${{ steps.paths.outputs.output }}
+          MUTATION_SCOPE_OUTCOME: ${{ needs.mutation-scope.result }}
+          MUTATION_NEEDED: ${{ needs.mutation-scope.outputs.mutate }}
+          MUTATION_MATRIX_OUTCOME: ${{ needs.cargo-mutants.result }}
+          MUTATION_DOWNLOAD_OUTCOME: ${{ steps.download.outcome }}
         run: scripts/mutation_join.sh diff "${{ github.event.pull_request.base.sha }}"
-
-      - name: Require successful shard jobs
-        # The merge detects failed runs in their artifacts. A job can also fail
-        # after it uploaded a complete run, so check the matrix conclusion too.
-        if: needs.cargo-mutants.result != 'success'
-        env:
-          MUTATION_OUTPUT_DIR: ${{ steps.paths.outputs.output }}
-        run: |
-          printf '%s\n' '## 🧬 Mutation testing — ❌ FAIL' '' \
-            'At least one shard job failed after producing results. See the shard jobs in this workflow run.' \
-            | tee "$MUTATION_OUTPUT_DIR/mutation-report.md" >> "$GITHUB_STEP_SUMMARY"
-          exit 1
 
       - name: Upsert PR comment
         # Fork / Dependabot PRs run with a read-only token, so commenting fails;

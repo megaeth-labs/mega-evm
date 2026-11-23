@@ -23,9 +23,37 @@ fi
 
 identity=()
 cd "$output"
+
+finish_gate() {
+    local verdict=$1 message=$2
+    printf '## 🧬 Mutation testing — %s\n\n%s\n' "$verdict" "$message" \
+        | tee mutation-report.md | tee -a "$summary"
+}
+
+fail_gate() {
+    finish_gate '❌ FAIL' "$1"
+    exit 1
+}
+
 case "$scope" in
     diff)
         base="${2:?usage: mutation_join.sh diff <base-ref>}"
+        matrix="${MUTATION_MATRIX_OUTCOME-success}"
+        if [[ "${MUTATION_SCOPE_OUTCOME-success}" != success ]]; then
+            fail_gate 'Diff scope decision did not succeed.'
+        fi
+        case "${MUTATION_NEEDED-true}" in
+            false)
+                [[ "$matrix" == skipped ]] || fail_gate 'The shard jobs ran despite the no-run decision.'
+                finish_gate '✅ PASS' '**Nothing to test**. The diff changes no mutatable source.'
+                exit 0
+                ;;
+            true) ;;
+            *) fail_gate 'Diff scope decision did not say whether mutation testing was needed.' ;;
+        esac
+        [[ "$matrix" != skipped ]] || fail_gate 'The shard jobs did not run despite a mutatable diff.'
+        [[ "${MUTATION_DOWNLOAD_OUTCOME-success}" == success ]] \
+            || fail_gate 'Artifact download did not succeed. Shard results may be incomplete.'
         head="$(git -C "$checkout" rev-parse HEAD)"
         base="$(git -C "$checkout" rev-parse --verify "${base}^{commit}")"
         identity=(--head "$head" --base "$base")
@@ -47,15 +75,24 @@ echo "inventory: $(wc -l < inventory.txt) mutants"
 shards=("$input"/mutation-results-shard-{0..3})
 python3 "$scripts/mutation_gate.py" merge --scope "$scope" "${identity[@]}" --inventory inventory.txt \
     --out target/mutants "${shards[@]}" | tee -a "$summary"
-python3 "$scripts/mutation_gate.py" merge-runs --scope "$scope" \
-    --out target/mutants/recheck/mutants.out "${shards[@]/%//recheck/mutants.out}"
-python3 "$scripts/mutation_gate.py" merge-runs --scope "$scope" \
-    --out target/mutants/mega-eest/mutants.out "${shards[@]/%//mega-eest/mutants.out}"
+if [[ "$scope" == full ]] || grep -q '^MUTANTS-STATUS status=complete ' target/mutants/status; then
+    python3 "$scripts/mutation_gate.py" merge-runs --scope "$scope" \
+        --out target/mutants/recheck/mutants.out "${shards[@]/%//recheck/mutants.out}"
+    python3 "$scripts/mutation_gate.py" merge-runs --scope "$scope" \
+        --out target/mutants/mega-eest/mutants.out "${shards[@]/%//mega-eest/mutants.out}"
+fi
+status=0
 python3 "$scripts/mutation_gate.py" report --scope "$scope" \
     --results target/mutants/mutants.out \
     --recheck target/mutants/recheck/mutants.out \
     --mega-eest target/mutants/mega-eest/mutants.out \
     --status target/mutants/status \
     --suppressions "$scripts/../mutants/suppressions.toml" \
-    --comment mutation-report.md \
-    --summary "$summary"
+    --comment mutation-report.md > /dev/null || status=$?
+if [[ "$scope" == diff && "$status" == 0 && "$matrix" != success ]]; then
+    fail_gate 'At least one shard job failed after producing results. See the shard jobs in this workflow run.'
+fi
+if [[ -f mutation-report.md ]]; then
+    tee -a "$summary" < mutation-report.md
+fi
+exit "$status"
