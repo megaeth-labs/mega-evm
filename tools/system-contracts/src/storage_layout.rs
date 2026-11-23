@@ -7,6 +7,7 @@ use anyhow::{ensure, Context, Result};
 use serde::Deserialize;
 
 #[path = "../../../crates/system-contracts/src/sequencer_registry/storage_slots.rs"]
+#[expect(unreachable_pub, reason = "The shared constants are public in mega-system-contracts")]
 mod storage_slots;
 
 /// The Solidity field name ↔ Rust slot constant pairs that must agree with Foundry's reported
