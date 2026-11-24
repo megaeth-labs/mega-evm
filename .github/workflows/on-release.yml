@@ -78,6 +78,8 @@ jobs:
 
       # Foundry and the submodules stay for release lines whose build.rs still runs forge.
       - uses: foundry-rs/foundry-toolchain@b00af27efadbc7b4ca8b82abbd903b17cc874d2a # v1
+        with:
+          cache: false
 
       - name: Build mega-evme
         run: cargo build --release --locked -p mega-evme

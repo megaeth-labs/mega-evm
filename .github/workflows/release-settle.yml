@@ -156,10 +156,14 @@ jobs:
           command: target/release/mega-evme --version
           version: ${{ steps.version.outputs.version }}
 
+      # Release assets are permanent, so the file name carries its target triple.
+      - name: Stage the release file
+        run: cp target/release/mega-evme mega-evme-x86_64-unknown-linux-gnu
+
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-files
-          path: target/release/mega-evme
+          path: mega-evme-x86_64-unknown-linux-gnu
           if-no-files-found: error
 
   publish:
@@ -205,4 +209,4 @@ jobs:
           version_pattern: toml
           changelog_file: CHANGELOG.md
           asset_files: |
-            release-files/mega-evme
+            release-files/mega-evme-x86_64-unknown-linux-gnu

@@ -22,7 +22,8 @@ Candidate and settle PRs need one each of the `spec:`, `comp:` and `api:` labels
    A blank version only refreshes every eligible release branch.
    The workflow's only input is `version`; the commit, release branch and version file are computed by the route and the action, so pass no `commit`.
 3. **Publish**, on either path — `mega-evme` is built and its version checked first.
-   Then approve the pending `release` deployment: it creates the annotated tag `vX.Y.Z` and publishes the GitHub Release with `mega-evme` and `SHA256SUMS` attached.
+   Then approve the pending `release` deployment: it creates the annotated tag `vX.Y.Z` and publishes the GitHub Release with `mega-evme-x86_64-unknown-linux-gnu` and `SHA256SUMS` attached.
+   If the build fails, publish does not run and no tag is created.
    The dispatch or the merge is not the approval.
 4. **Targets** — automatic on the published Release: `on-release.yml` uploads `mega-evme` to the MegaETH artifact registry, in the `release` environment.
    The registry job builds its own `mega-evme` from the tag, independently of the Release download.
@@ -32,6 +33,7 @@ Candidate and settle PRs need one each of the `spec:`, `comp:` and `api:` labels
    The tag being released is always the run's own ref; there is no separate tag input.
 5. **Recover** a partial publication:
    - Tag present but no published Release: if the tag is on the settle PR merge, rerun the original push-triggered settle run; if it is on the candidate merge, redispatch settle with the same version on `main`.
+   - A rerun rebuilds `mega-evme` before publish resumes.
    - A finished Release cannot be backfilled.
    - Only the registry failed: after fixing the cause, `gh workflow run on-release.yml --ref vX.Y.Z -f dry_run=false`.
    - A broken target workflow in the tagged tree needs a new release.
