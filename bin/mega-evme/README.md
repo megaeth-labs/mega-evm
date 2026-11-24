@@ -27,7 +27,7 @@ A command-line tool for executing and debugging EVM bytecode, similar to go-ethe
 
 ## Installation
 
-Building requires Foundry's `forge`.
+The Rust build uses checked-in system-contract bytecode.
 
 From GitHub:
 

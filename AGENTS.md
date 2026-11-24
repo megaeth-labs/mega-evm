@@ -34,22 +34,25 @@ cargo codspeed build -p mega-evm --bench <target> && cargo codspeed run   # inst
 # no_std check (run against riscv target)
 cargo check -p mega-evm --target riscv64imac-unknown-none-elf --no-default-features
 
-# System contracts (requires Foundry)
-cd crates/system-contracts && forge build
+# System contracts
+mise run system-contracts:attest          # attest Solidity bytecode (requires Foundry)
+mise run system-contracts:generate        # regenerate Rust constants from checked-in artifacts
+(cd crates/system-contracts && forge test) # run Solidity tests (requires Foundry)
 ```
 
-Git submodules are required — clone with `--recursive` or run `git submodule update --init --recursive`.
+Initialize git submodules for the Foundry commands with `git submodule update --init --recursive`, or clone with `--recursive`.
 
 ## Workspace Structure
 
-| Crate                   | Path                      | Purpose                                                                                     |
-| ----------------------- | ------------------------- | ------------------------------------------------------------------------------------------- |
-| `mega-evm`              | `crates/mega-evm`         | Core EVM implementation                                                                     |
-| `mega-system-contracts` | `crates/system-contracts` | Solidity system contracts with Rust bindings (Foundry-based)                                |
-| `mega-state-test`       | `crates/mega-state-test`  | State-test fixtures + runner library (EEST-compatible, published; imported as `state_test`) |
-| `state-test`            | `crates/state-test`       | Thin CLI front-end over `mega-state-test` (not published)                                   |
-| `mega-evme`             | `bin/mega-evme`           | CLI tool for EVM execution (`run`, `tx`, `replay`, `cache`)                                 |
-| `mega-t8n`              | `bin/mega-t8n`            | Standalone state transition (t8n) tool                                                      |
+| Crate                       | Path                      | Purpose                                                                                     |
+| --------------------------- | ------------------------- | ------------------------------------------------------------------------------------------- |
+| `mega-evm`                  | `crates/mega-evm`         | Core EVM implementation                                                                     |
+| `mega-system-contracts`     | `crates/system-contracts` | Versioned system-contract bytecode and Rust ABI bindings                                    |
+| `system-contract-artifacts` | `tools/system-contracts`  | Attests Solidity deployments and regenerates the checked-in Rust bytecode constants         |
+| `mega-state-test`           | `crates/mega-state-test`  | State-test fixtures + runner library (EEST-compatible, published; imported as `state_test`) |
+| `state-test`                | `crates/state-test`       | Thin CLI front-end over `mega-state-test` (not published)                                   |
+| `mega-evme`                 | `bin/mega-evme`           | CLI tool for EVM execution (`run`, `tx`, `replay`, `cache`)                                 |
+| `mega-t8n`                  | `bin/mega-t8n`            | Standalone state transition (t8n) tool                                                      |
 
 ## Architecture
 
@@ -183,8 +186,12 @@ They are deployed idempotently during `pre_execution_changes()` in `block/execut
 
 Key design aspects:
 
-- Solidity sources in `crates/system-contracts/contracts/`, compiled by Foundry, with Rust ABI bindings generated via `alloy-sol-types`.
-- Bytecode is versioned and hash-verified at build time (`crates/system-contracts/build.rs`).
+- Solidity sources live in `crates/system-contracts/contracts/`, with Rust ABI bindings generated via `alloy-sol-types`.
+- Cargo builds use the checked-in Rust constants and check them against the versioned artifacts when present, without writing to the source tree or invoking Foundry.
+- The required `lint` CI job uses `cargo run --locked -p system-contract-artifacts -- attest` to check the contract inventory, reproduce the latest bytecode for the pinned Osaka EVM target, and compare the SequencerRegistry storage layout with the Rust slot constants.
+- The job also checks the generated Rust constants and requires attestation to reject a changed Solidity version in a temporary copy.
+- Rust tests pin the code hashes and latest versions in a literal table.
+- Run `mise run system-contracts:generate` after updating the artifacts to regenerate the Rust constants.
 - The **MEGA_SYSTEM_ADDRESS** can call whitelisted system contracts as deposit-like transactions — no signature or fee required.
   This is how the sequencer updates oracle storage.
 - **Any system contract modification requires a new spec** to preserve backward compatibility.

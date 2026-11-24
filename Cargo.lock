@@ -3157,6 +3157,7 @@ version = "1.7.3"
 dependencies = [
  "alloy-primitives",
  "alloy-sol-types",
+ "anyhow",
  "semver 1.0.28",
  "serde",
  "serde_json",
@@ -5161,6 +5162,19 @@ checksum = "8e1d1b10ced5ca923a1fcb8d03e96b8d3268065d724548c0211415ff6ac6bac4"
 dependencies = [
  "core-foundation-sys",
  "libc",
+]
+
+[[package]]
+name = "system-contract-artifacts"
+version = "1.7.3"
+dependencies = [
+ "alloy-primitives",
+ "anyhow",
+ "semver 1.0.28",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "walkdir",
 ]
 
 [[package]]

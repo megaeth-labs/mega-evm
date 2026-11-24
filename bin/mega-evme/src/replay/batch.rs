@@ -8,14 +8,18 @@
 //! executes each block exactly once while recording the result of every target it
 //! passes through.
 //!
-//! Every RPC call issued by a plain batch replay has the same shape as the
-//! single-transaction path (`eth_getTransactionByHash`, `eth_getBlockByNumber`
-//! with hash-only bodies, and the state reads behind [`EvmeState::new_forked`]),
-//! so an offline envelope captured by single-transaction replays serves batch
-//! runs without a miss. `--verify-receipt` and `--dump-fixture-dir` are the
-//! exception: both fetch `eth_getTransactionReceipt` for *every* target of a
-//! block, including the non-targets a single-transaction capture never asked
-//! about. Offline, those come back as `rpc` entries and the run exits `3`.
+//! Plain batch replay uses the same RPC calls as single-transaction replay:
+//! `eth_getTransactionByHash`, `eth_getBlockByNumber` with hash-only bodies,
+//! and the state reads needed to fork the parent. Offline envelopes work for
+//! either mode when they cover every required call.
+//!
+//! Receipt verification and fixture dumps need additional receipt evidence.
+//! In whole-block mode one `eth_getBlockReceipts` request supplies receipts
+//! by body index, including every occurrence of a repeated hash. A body with
+//! unique hashes can use `eth_getTransactionReceipt` when the block receipt
+//! request fails or returns null. A returned list must pass admission and
+//! authentication. Explicit hash targets always use the by-hash call.
+//! Missing evidence is an RPC failure and exits `3`.
 //!
 //! `--verify-block` (whole-block mode only) adds one verdict per block, after
 //! the block's target lines. The served body is authenticated against the
@@ -36,15 +40,16 @@ use std::{
 use alloy_consensus::{transaction::Recovered, BlockHeader};
 use alloy_primitives::{Bytes, B256};
 use alloy_provider::Provider;
-use alloy_rpc_types_eth::Block;
+use alloy_rpc_types_eth::{Block, BlockId};
 use mega_evm::{
     alloy_evm::EvmEnv,
     revm::{context::result::ExecutionResult, inspector::NoOpInspector, DatabaseRef},
     MegaHaltReason, MegaHardforks, MegaSpecId, MegaTxEnvelope,
 };
 use op_alloy_consensus::OpReceiptEnvelope;
-use op_alloy_rpc_types::Transaction;
+use op_alloy_rpc_types::{OpTransactionReceipt, Transaction};
 use serde::Serialize;
+use serde_json::value::RawValue;
 use state_test::types::MegaEnv;
 use tracing::{debug, info, warn};
 
@@ -76,7 +81,8 @@ pub(super) struct ReportArgs {
     /// whole-block run (`--block`), whose targets are the whole body.
     pub verify_block: bool,
     /// When set, dump a self-validating fixture for every successful target into
-    /// this directory as `<DIR>/<tx_hash>.json`.
+    /// this directory. Fixtures for repeated hashes include the block number
+    /// and body index in their names.
     pub dump_fixture_dir: Option<PathBuf>,
     /// Replace existing fixture files under [`Self::dump_fixture_dir`].
     pub overwrite: bool,
@@ -235,13 +241,21 @@ impl BatchEntry {
             Self::Failed(tx) => tx.tx_hash,
         }
     }
+
+    /// Index of a target placed in the block body.
+    const fn tx_index(&self) -> Option<usize> {
+        match self {
+            Self::Executed(tx) => Some(tx.tx_index),
+            Self::Failed(tx) => tx.tx_index,
+        }
+    }
 }
 
 /// A target transaction that ran to completion.
 struct ExecutedTx {
     tx_hash: B256,
     block_number: u64,
-    tx_index: u64,
+    tx_index: usize,
     exec_result: ExecutionResult<MegaHaltReason>,
     exec_time: Duration,
     receipt: OpTxReceipt,
@@ -254,6 +268,7 @@ struct ExecutedTx {
 /// A target transaction that hit an infrastructure failure.
 struct FailedTx {
     tx_hash: B256,
+    tx_index: Option<usize>,
     kind: BatchErrorKind,
     message: String,
 }
@@ -508,6 +523,8 @@ struct JobTarget {
     /// Inclusion block hash from `eth_getTransactionByHash` (`--tx-file`).
     /// `None` for `--block` targets, which come from the body itself.
     inclusion_hash: Option<B256>,
+    /// Body index for a block target, or the index reported by the by-hash lookup.
+    tx_index: Option<u64>,
 }
 
 /// One block's worth of work.
@@ -566,8 +583,10 @@ struct FixtureDraftHook<'a> {
     executed_spec: MegaSpecId,
     /// Block the targets belong to.
     block: &'a Block<Transaction>,
-    /// On-chain receipts prefetched for this block's targets, keyed by hash.
-    onchain_receipts: &'a BTreeMap<B256, std::result::Result<ReceiptFacts, String>>,
+    /// On-chain receipts prefetched for this block's targets, keyed by body index.
+    onchain_receipts: &'a IndexedReceipts,
+    /// Hashes with multiple body positions and position-suffixed fixture names.
+    repeated_hashes: &'a HashSet<B256>,
 }
 
 impl kernel::TargetLifecycle for FixtureDraftHook<'_> {
@@ -614,7 +633,7 @@ impl kernel::TargetLifecycle for FixtureDraftHook<'_> {
 struct BatchResultLine<'a> {
     tx_hash: B256,
     block_number: u64,
-    tx_index: u64,
+    tx_index: usize,
     #[serde(flatten)]
     summary: &'a ExecutionSummary,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -637,6 +656,10 @@ struct BatchBlockLine<'a> {
 #[derive(Serialize)]
 struct BatchErrorLine<'a> {
     tx_hash: B256,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    block_number: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tx_index: Option<usize>,
     error: BatchErrorBody<'a>,
 }
 
@@ -708,7 +731,12 @@ where
                     // is no separate inclusion claim to reconcile later.
                     targets: targets
                         .into_iter()
-                        .map(|hash| JobTarget { hash, inclusion_hash: None })
+                        .enumerate()
+                        .map(|(index, hash)| JobTarget {
+                            hash,
+                            inclusion_hash: None,
+                            tx_index: Some(index as u64),
+                        })
                         .collect(),
                 }]
             }
@@ -724,7 +752,7 @@ where
             for failure in failures {
                 let entry = BatchEntry::Failed(failure);
                 tally.record(&entry);
-                emit(&entry, report.json);
+                emit(&entry, report.json, None);
             }
             jobs
         }
@@ -735,6 +763,10 @@ where
         // Whole-block mode fetched the block before queuing the job, so its
         // authenticated hash is known even when the block never executes.
         let pinned_hash = job.block.as_ref().map(Block::hash);
+        let repeated_block = job.block.as_ref().and_then(|block| {
+            let mut seen = HashSet::new();
+            block.transactions.hashes().any(|hash| !seen.insert(hash)).then_some(number)
+        });
         let outcome = replay_block(provider, chain_id, job, external_envs.clone(), &report).await;
         for entry in outcome.entries {
             if let BatchEntry::Executed(tx) = &entry {
@@ -746,7 +778,7 @@ where
                 }
             }
             tally.record(&entry);
-            emit(&entry, report.json);
+            emit(&entry, report.json, repeated_block);
         }
         // Root-cause class of a non-target abort is not on any per-target line.
         if let Some(kind) = outcome.uncounted_abort {
@@ -817,11 +849,13 @@ where
         match provider.get_transaction_by_hash(*hash).await {
             Err(e) => failures.push(FailedTx {
                 tx_hash: *hash,
+                tx_index: None,
                 kind: BatchErrorKind::Rpc,
                 message: format!("Failed to fetch transaction: {e}"),
             }),
             Ok(None) => failures.push(FailedTx {
                 tx_hash: *hash,
+                tx_index: None,
                 kind: BatchErrorKind::NotFound,
                 message: "Transaction not found".to_string(),
             }),
@@ -839,18 +873,23 @@ where
             // genuinely pending one is a definitive answer about it, which
             // batch mode reports as its own class.
             Ok(Some(tx)) => match verify::authenticate_transaction(&tx, *hash) {
-                Err(message) => {
-                    failures.push(FailedTx { tx_hash: *hash, kind: BatchErrorKind::Rpc, message })
-                }
+                Err(message) => failures.push(FailedTx {
+                    tx_hash: *hash,
+                    tx_index: None,
+                    kind: BatchErrorKind::Rpc,
+                    message,
+                }),
                 Ok(_) => match coherence::classify_placement(tx.block_number, tx.block_hash) {
                     Ok(TargetPlacement::Mined { number, inclusion_hash }) => {
-                        grouped
-                            .entry(number)
-                            .or_default()
-                            .push(JobTarget { hash: *hash, inclusion_hash: Some(inclusion_hash) });
+                        grouped.entry(number).or_default().push(JobTarget {
+                            hash: *hash,
+                            inclusion_hash: Some(inclusion_hash),
+                            tx_index: tx.transaction_index,
+                        });
                     }
                     Ok(TargetPlacement::Pending) => failures.push(FailedTx {
                         tx_hash: *hash,
+                        tx_index: None,
                         kind: BatchErrorKind::Pending,
                         message: "Transaction is pending (no block number)".to_string(),
                     }),
@@ -912,35 +951,33 @@ impl BlockReplayOutcome {
 /// index, then targets the block cannot place (inclusion/membership failures)
 /// last, in job input order.
 fn order_block_entries(
-    entries: Vec<BatchEntry>,
+    mut entries: Vec<BatchEntry>,
     job_targets: &[JobTarget],
     block_tx_order: Option<&[B256]>,
 ) -> Vec<BatchEntry> {
-    if entries.len() <= 1 {
+    if entries.iter().all(|entry| entry.tx_index().is_some()) {
+        entries.sort_by_key(BatchEntry::tx_index);
         return entries;
     }
-    let mut by_hash: HashMap<B256, BatchEntry> = HashMap::with_capacity(entries.len());
-    for entry in entries {
-        by_hash.insert(entry.tx_hash(), entry);
-    }
-    let mut ordered = Vec::with_capacity(by_hash.len());
-    if let Some(block_txs) = block_tx_order {
-        for hash in block_txs {
-            if let Some(entry) = by_hash.remove(hash) {
-                ordered.push(entry);
-            }
+    // A hash target that failed its inclusion check has no admitted position.
+    // Preserve its place in the stream when the fetched body still lists it.
+    let mut body_positions = HashMap::new();
+    if let Some(body) = block_tx_order {
+        for (index, hash) in body.iter().enumerate() {
+            body_positions.entry(*hash).or_insert(index);
         }
     }
-    // Residual targets (absent from the body, or no body order available) keep
-    // the job's input order — the documented absent-last placement.
-    for target in job_targets {
-        if let Some(entry) = by_hash.remove(&target.hash) {
-            ordered.push(entry);
+    let job_positions: HashMap<_, _> =
+        job_targets.iter().enumerate().map(|(index, target)| (target.hash, index)).collect();
+    entries.sort_by_key(|entry| {
+        let hash = entry.tx_hash();
+        if let Some(index) = entry.tx_index().or_else(|| body_positions.get(&hash).copied()) {
+            (false, index)
+        } else {
+            (true, job_positions.get(&hash).copied().unwrap_or(usize::MAX))
         }
-    }
-    // Defensive: anything not listed on the job (should not happen).
-    ordered.extend(by_hash.into_values());
-    ordered
+    });
+    entries
 }
 
 /// Replay one block, reporting an entry for every target it was asked about.
@@ -984,6 +1021,7 @@ where
         );
     }
 
+    let whole_block = block.is_some();
     let block = match block {
         Some(block) => block,
         None => match fetch_block(provider, number).await {
@@ -1026,39 +1064,46 @@ where
     // executed results at return time so a later-index inclusion failure cannot
     // precede an earlier target's result line.
     let fetched = block.hash();
-    let body_txs: HashSet<B256> = block_tx_order.iter().copied().collect();
+    let mut body_positions = HashMap::with_capacity(block_tx_order.len());
+    let mut repeated_hashes = HashSet::new();
+    for (index, hash) in block_tx_order.iter().enumerate() {
+        if body_positions.insert(*hash, index).is_some() {
+            repeated_hashes.insert(*hash);
+        }
+    }
     let mut entries = Vec::with_capacity(job_targets.len());
-    let mut active: Vec<B256> = Vec::new();
+    let mut active = BTreeMap::new();
     for target in &job_targets {
-        // A target carrying an inclusion claim must anchor to the fetched block
-        // before its membership is worth asking about. A target queued without
-        // one (`--block` takes its targets from the body) only has to still be
-        // listed — that arm is defensive, and a residual absence is an
-        // unanswered view of this height, not a definitive not-found.
-        let claim = match target.inclusion_hash {
-            Some(reported) => {
-                if let Err(incoherence) =
-                    coherence::require_inclusion_anchor(number, fetched, reported)
-                {
-                    entries
-                        .push(BatchEntry::Failed(incoherent_endpoint(target.hash, &incoherence)));
-                    continue;
-                }
-                MembershipClaim::ResolvedInclusion
+        let (index, claim) = if let Some(reported) = target.inclusion_hash {
+            if let Err(incoherence) = coherence::require_inclusion_anchor(number, fetched, reported)
+            {
+                entries.push(BatchEntry::Failed(incoherent_endpoint(target.hash, &incoherence)));
+                continue;
             }
-            None => MembershipClaim::QueuedAgainstBlock,
+            (body_positions.get(&target.hash).copied(), MembershipClaim::ResolvedInclusion)
+        } else {
+            let index = target.tx_index.expect("whole-block target has a body index") as usize;
+            let listed = block_tx_order.get(index) == Some(&target.hash);
+            (listed.then_some(index), MembershipClaim::QueuedAgainstBlock)
         };
-        if let Err(incoherence) = coherence::require_body_membership(
-            number,
-            fetched,
-            target.hash,
-            body_txs.contains(&target.hash),
-            claim,
-        ) {
+        if let Err(incoherence) =
+            coherence::require_body_membership(number, fetched, target.hash, index.is_some(), claim)
+        {
             entries.push(BatchEntry::Failed(incoherent_endpoint(target.hash, &incoherence)));
             continue;
         }
-        active.push(target.hash);
+        let index = if target.inclusion_hash.is_some() && repeated_hashes.contains(&target.hash) {
+            match coherence::repeated_tx_index(&block_tx_order, target.hash, target.tx_index) {
+                Ok(index) => index,
+                Err(message) => {
+                    entries.push(failure(target.hash, BatchErrorKind::Rpc, message));
+                    continue;
+                }
+            }
+        } else {
+            index.expect("membership check guarantees an index")
+        };
+        active.insert(index, target.hash);
     }
     // Every target either failed an inclusion/membership check or was a
     // `--block` target already taken from the body. Nothing left to execute.
@@ -1134,7 +1179,15 @@ where
     // each feature below.
     let need_receipts = verify_receipt || dump_dir.is_some();
     let onchain_receipts = if need_receipts {
-        fetch_target_receipts(provider, &targets, &block).await
+        fetch_target_receipts(
+            provider,
+            &targets,
+            &block,
+            &block_tx_order,
+            &repeated_hashes,
+            whole_block,
+        )
+        .await
     } else {
         BTreeMap::new()
     };
@@ -1181,7 +1234,7 @@ where
             }
         };
 
-    let target_set: HashSet<B256> = targets.iter().copied().collect();
+    let target_set = targets.keys().copied().collect();
     // Prefer the already-collected body order so stream ordering and the kernel
     // walk the same sequence.
     let body: Vec<kernel::BodyEntry<'_>> = block_tx_order
@@ -1199,6 +1252,7 @@ where
         executed_spec,
         block: &block,
         onchain_receipts: &onchain_receipts,
+        repeated_hashes: &repeated_hashes,
     };
     let run = kernel::execute_until_targets(
         provider,
@@ -1251,20 +1305,10 @@ where
     // the block started; the harvested targets are appended to it here.
     harvest_entries(&mut entries, finish, &loop_outcome, &onchain_receipts, verify_receipt, number);
 
-    // Any active target that produced no entry sat behind an abort (or is a
-    // residual not-in-body case for `--block`, which has no inclusion claim).
-    // They are appended in block transaction-index order, keeping the run's
-    // ascending (block, index) order; a target the block does not contain has
-    // no index and keeps its input position among the active set.
-    let uncounted_abort = attribute_unreported(
-        &mut entries,
-        &loop_outcome,
-        &block_tx_order,
-        &target_set,
-        &targets,
-        number,
-        fetched,
-    );
+    // Attribute an abort to the exact body position that raised it, then
+    // report the remaining unanswered targets before ordering the entries.
+    let uncounted_abort =
+        attribute_unreported(&mut entries, &loop_outcome, &targets, number, fetched);
 
     BlockReplayOutcome::ordered(
         entries,
@@ -1286,7 +1330,7 @@ fn harvest_entries(
     entries: &mut Vec<BatchEntry>,
     finish: kernel::FinishOutcome<Option<DeferredFixture>>,
     loop_outcome: &kernel::LoopOutcome,
-    onchain_receipts: &BTreeMap<B256, std::result::Result<ReceiptFacts, String>>,
+    onchain_receipts: &IndexedReceipts,
     verify_receipt: bool,
     number: u64,
 ) {
@@ -1297,8 +1341,9 @@ fn harvest_entries(
                 let target = match harvested {
                     kernel::TargetHarvest::Receipt(target) => target,
                     kernel::TargetHarvest::MissingReceipt { tx_hash, tx_index } => {
-                        entries.push(failure(
+                        entries.push(failure_at(
                             tx_hash,
+                            Some(tx_index),
                             BatchErrorKind::Execution,
                             format!("No receipt produced for transaction index {tx_index}"),
                         ));
@@ -1310,7 +1355,7 @@ fn harvest_entries(
                 // receipt, and timing stay on the result line. The verification
                 // field carries the failure; the tally counts it as rpc.
                 let verification = if verify_receipt {
-                    match onchain_receipts.get(&target.tx_hash) {
+                    match onchain_receipts.get(&target.tx_index) {
                         Some(Ok(onchain)) => Some(verify::compare(
                             onchain,
                             &ReceiptFacts::from_receipt(&target.receipt),
@@ -1364,8 +1409,8 @@ fn harvest_entries(
         kernel::FinishOutcome::Failed { error, executed } => {
             let kind = classify(&error);
             let message = error.to_string();
-            for tx_hash in executed {
-                entries.push(failure(tx_hash, kind, message.clone()));
+            for (tx_hash, index) in executed {
+                entries.push(failure_at(tx_hash, Some(index), kind, message.clone()));
             }
         }
     }
@@ -1382,19 +1427,12 @@ fn harvest_entries(
 fn attribute_unreported(
     entries: &mut Vec<BatchEntry>,
     loop_outcome: &kernel::LoopOutcome,
-    tx_hashes: &[B256],
-    target_set: &HashSet<B256>,
-    targets: &[B256],
+    targets: &BTreeMap<usize, B256>,
     number: u64,
     fetched: B256,
 ) -> Option<BatchErrorKind> {
-    let reported: HashSet<B256> = entries.iter().map(BatchEntry::tx_hash).collect();
-    let block_txs: HashSet<B256> = tx_hashes.iter().copied().collect();
-    let unreported = tx_hashes
-        .iter()
-        .filter(|hash| target_set.contains(*hash))
-        .chain(targets.iter().filter(|hash| !block_txs.contains(*hash)))
-        .filter(|hash| !reported.contains(*hash));
+    let reported: HashSet<usize> = entries.iter().filter_map(BatchEntry::tx_index).collect();
+    let unreported = targets.iter().filter(|(index, _)| !reported.contains(index));
 
     let mut uncounted_abort = None;
     match loop_outcome {
@@ -1403,31 +1441,37 @@ fn attribute_unreported(
             // remaining absence from the body is still an endpoint
             // inconsistency (the target was queued against this block), not a
             // definitive not-found.
-            for tx_hash in unreported {
+            for (index, tx_hash) in unreported {
                 let incoherence = Incoherence::AbsentFromBody {
                     number,
                     block_hash: fetched,
                     tx_hash: *tx_hash,
                     claim: MembershipClaim::ResolvedInclusion,
                 };
-                entries.push(BatchEntry::Failed(incoherent_endpoint(*tx_hash, &incoherence)));
+                entries.push(failure_at(
+                    *tx_hash,
+                    Some(*index),
+                    BatchErrorKind::Rpc,
+                    incoherence.to_string(),
+                ));
             }
         }
-        kernel::LoopOutcome::Aborted { error: e, tx_hash: aborting } => {
+        kernel::LoopOutcome::Aborted { error: e, tx_index: aborting } => {
             warn!(block = number, error = %e, "Aborted block replay; skipping its remaining targets");
             let root_kind = classify(e);
             let mut root_on_target = false;
-            for tx_hash in unreported {
-                if aborting == tx_hash {
+            for (index, tx_hash) in unreported {
+                if aborting == index {
                     // The abort is this target's own answer.
                     root_on_target = true;
-                    entries.push(failure(*tx_hash, root_kind, e.to_string()));
+                    entries.push(failure_at(*tx_hash, Some(*index), root_kind, e.to_string()));
                 } else {
                     // The abort belongs to another transaction of the block, so
                     // nothing was established about this target: it went
                     // unanswered rather than being unknown or invalid.
-                    entries.push(failure(
+                    entries.push(failure_at(
                         *tx_hash,
+                        Some(*index),
                         swept_kind(e),
                         format!("Block replay aborted before this transaction: {e}"),
                     ));
@@ -1442,7 +1486,9 @@ fn attribute_unreported(
                 // If finish failed for pending targets that already include the
                 // aborter as a Failed entry, the class is already counted.
                 let already_counted = entries.iter().any(|entry| match entry {
-                    BatchEntry::Failed(tx) => tx.tx_hash == *aborting && tx.kind == root_kind,
+                    BatchEntry::Failed(tx) => {
+                        tx.tx_index == Some(*aborting) && tx.kind == root_kind
+                    }
                     BatchEntry::Executed(_) => false,
                 });
                 // Abort-inherited fixture failures on executed targets already
@@ -1630,7 +1676,7 @@ impl FixtureDraftHook<'_> {
         // unanswered the dump fails as rpc (not a fidelity-gate skip): the run was
         // asked to write a fixture and could not obtain the receipt it needs. Genuine
         // gate skips (BLOCKHASH, unsupported shape, fidelity mismatch) stay skips.
-        let facts = match self.onchain_receipts.get(&target.tx_hash) {
+        let facts = match self.onchain_receipts.get(&target.tx_index) {
             Some(Ok(facts)) => facts,
             Some(Err(message)) => {
                 return DeferredFixture::Report(FixtureReport::rpc_error(message.clone()));
@@ -1676,21 +1722,17 @@ impl FixtureDraftHook<'_> {
                 mega_env: dump.mega_env.clone(),
                 result: exec_result,
                 reproduced,
+                repeated_index: self
+                    .repeated_hashes
+                    .contains(&target.tx_hash)
+                    .then_some(target.tx_index),
             },
         ) {
             Ok(draft) => draft,
             Err(e) => return DeferredFixture::Report(fixture_report_from_build_err(e)),
         };
 
-        // The fixture is filed under the transaction's own hash. `tx_hash()` returns
-        // the cached hash an RPC deserialization seeds from the response's `hash`
-        // field, so this name would be the endpoint's to choose — and under
-        // `--overwrite`, an unrelated target's file to replace. It is a verified
-        // value here because no transaction reaches execution without passing
-        // `verify::authenticate_transaction`, which refuses a served `hash` field
-        // that does not match the value the served body hashes to.
-        let tx_hash = target_tx.inner.inner.tx_hash();
-        let path = dump.dir.join(format!("{tx_hash:#x}.json"));
+        let path = dump.dir.join(draft.file_name());
         // Fast-path courtesy: refuse overwrite before carrying a ready draft so the
         // harvest path never confuses a finish failure with an overwrite refusal.
         // Correctness against a concurrent creator is still enforced at materialize
@@ -1772,55 +1814,131 @@ fn fixture_report_from_build_err(err: fixture::FixtureBuildError) -> FixtureRepo
     }
 }
 
-/// Fetch the on-chain receipt of every target of a block.
-///
-/// Each target maps either to the consensus facts its receipt reports, or to the
-/// message explaining why it could not be verified (the endpoint failed the
-/// call or pruned the receipt, the receipt describes a different inclusion
-/// than the block being replayed, or the block's receipts do not rebuild the
-/// receipts root its header commits to).
-///
-/// When the targets cover the whole body and every receipt was admitted, the
-/// set is authenticated against the header's `receiptsRoot`
-/// ([`coherence::require_committed_receipts`]), and each receipt's served
-/// `gasUsed`, which that root does not cover, against its share of the
-/// committed cumulative gas ([`coherence::require_receipt_gas`]). A set that
-/// fails either is endpoint data no verdict may rest on, so every receipt of the
-/// block becomes unavailable — the same unanswered class as a receipt the
-/// endpoint could not serve — instead of being compared. A partial set cannot
-/// rebuild the root and is left as fetched.
+/// A receipt verdict input or an unanswered receipt question at each target index.
+type IndexedReceipts = BTreeMap<usize, std::result::Result<ReceiptFacts, String>>;
+
+/// Fetch receipts once for a whole-block job, or resolve hash targets individually.
 async fn fetch_target_receipts<P>(
     provider: &P,
-    targets: &[B256],
+    targets: &BTreeMap<usize, B256>,
     block: &Block<Transaction>,
-) -> BTreeMap<B256, std::result::Result<ReceiptFacts, String>>
+    body: &[B256],
+    repeated_hashes: &HashSet<B256>,
+    whole_block: bool,
+) -> IndexedReceipts
+where
+    P: Provider<op_alloy_network::Optimism>,
+{
+    if whole_block {
+        let number = block.header.number();
+        // Decode the list after the call so a malformed list is rejected as receipt data.
+        let response = provider
+            .client()
+            .request::<_, Option<Box<RawValue>>>("eth_getBlockReceipts", (BlockId::number(number),))
+            .await;
+        let fetched = match response {
+            Ok(Some(raw)) => Ok(raw),
+            Ok(None) => {
+                Err(format!("eth_getBlockReceipts returned no receipts for block {number}"))
+            }
+            Err(error) => Err(format!("eth_getBlockReceipts failed for block {number}: {error}")),
+        };
+        let receipts = match fetched {
+            Ok(raw) => serde_json::from_str(raw.get())
+                .map_err(|error| {
+                    ReplayError::RpcError(format!(
+                        "Invalid eth_getBlockReceipts result for block {number}: {error}"
+                    ))
+                })
+                .and_then(|receipts| admit_block_receipts(block, body, receipts)),
+            Err(reason) if repeated_hashes.is_empty() => {
+                debug!(block = number, %reason, "Falling back to receipts by hash");
+                let mut receipts =
+                    fetch_receipts_by_hash(provider, targets, block, repeated_hashes).await;
+                for error in receipts.values_mut().filter_map(|receipt| receipt.as_mut().err()) {
+                    error.push('\n');
+                    error.push_str(&reason);
+                }
+                return receipts;
+            }
+            Err(reason) => Err(ReplayError::RpcError(reason)),
+        };
+        return receipts.unwrap_or_else(|error| {
+            let message = receipt_error_message(error);
+            warn!(block = number, %message, "Could not verify the block's on-chain receipts");
+            targets.keys().map(|&index| (index, Err(message.clone()))).collect()
+        });
+    }
+
+    fetch_receipts_by_hash(provider, targets, block, repeated_hashes).await
+}
+
+/// Match the served receipts to body positions and authenticate the resulting list.
+fn admit_block_receipts(
+    block: &Block<Transaction>,
+    body: &[B256],
+    mut receipts: Vec<OpTransactionReceipt>,
+) -> Result<IndexedReceipts> {
+    let number = block.header.number();
+    if receipts.len() != body.len() {
+        return Err(ReplayError::RpcError(format!(
+            "eth_getBlockReceipts returned {} receipts for block {number}, whose body lists {} transactions",
+            receipts.len(),
+            body.len(),
+        )));
+    }
+
+    receipts.sort_unstable_by_key(|receipt| receipt.inner.transaction_index);
+    let block_hash = block.hash();
+    let mut ordered = Vec::with_capacity(body.len());
+    let mut facts = BTreeMap::new();
+    for (index, (&hash, receipt)) in body.iter().zip(&receipts).enumerate() {
+        verify::validate_block_receipt(receipt, hash, block_hash, index)?;
+        ordered.push((hash, verify::consensus_receipt(receipt), receipt.inner.gas_used));
+        facts.insert(index, Ok(ReceiptFacts::from_onchain(receipt)));
+    }
+    authenticate_whole_body(number, block_hash, block.header.receipts_root(), &ordered)
+        .map_err(|incoherence| ReplayError::RpcError(incoherence.to_string()))?;
+    Ok(facts)
+}
+
+/// Fetch the receipts of hash targets and authenticate them as a set if they cover the body.
+async fn fetch_receipts_by_hash<P>(
+    provider: &P,
+    targets: &BTreeMap<usize, B256>,
+    block: &Block<Transaction>,
+    repeated_hashes: &HashSet<B256>,
+) -> IndexedReceipts
 where
     P: Provider<op_alloy_network::Optimism>,
 {
     let block_hash = block.hash();
     let mut receipts = BTreeMap::new();
-    let mut consensus = HashMap::with_capacity(targets.len());
-    for tx_hash in targets {
-        let fetched = match verify::ReceiptEvidence::admit(provider, *tx_hash, block_hash).await {
+    let mut ordered = Vec::with_capacity(targets.len());
+    for (&index, &hash) in targets {
+        let repeated_index = repeated_hashes.contains(&hash).then_some(index);
+        let fetched = match verify::ReceiptEvidence::admit(
+            provider,
+            hash,
+            block_hash,
+            repeated_index,
+        )
+        .await
+        {
             Ok(evidence) => {
                 let receipt = evidence.receipt();
-                consensus
-                    .insert(*tx_hash, (verify::consensus_receipt(receipt), receipt.inner.gas_used));
+                ordered.push((hash, verify::consensus_receipt(receipt), receipt.inner.gas_used));
                 Ok(ReceiptFacts::from_onchain(receipt))
             }
-            // The reported entry already carries the `rpc` kind, so the error's
-            // own "RPC error" prefix would only repeat it.
-            Err(ReplayError::RpcError(message)) => Err(message),
-            Err(e) => Err(e.to_string()),
+            Err(error) => Err(receipt_error_message(error)),
         };
         if let Err(message) = &fetched {
-            warn!(tx_hash = %tx_hash, %message, "Could not fetch the on-chain receipt");
+            warn!(tx_hash = %hash, %message, "Could not fetch the on-chain receipt");
         }
-        receipts.insert(*tx_hash, fetched);
+        receipts.insert(index, fetched);
     }
 
-    let body: Vec<B256> = block.transactions.hashes().collect();
-    if let Some(ordered) = whole_body_receipts(&body, &mut consensus) {
+    if ordered.len() == block.transactions.len() {
         let number = block.header.number();
         if let Err(incoherence) =
             authenticate_whole_body(number, block_hash, block.header.receipts_root(), &ordered)
@@ -1835,22 +1953,17 @@ where
     receipts
 }
 
+/// Use the receipt failure's message directly because the report already carries the RPC class.
+fn receipt_error_message(error: ReplayError) -> String {
+    match error {
+        ReplayError::RpcError(message) => message,
+        other => other.to_string(),
+    }
+}
+
 /// One admitted receipt of a whole body: its transaction, its consensus
 /// receipt, and the `gasUsed` the endpoint served beside it.
 type BodyReceipt = (B256, OpReceiptEnvelope, u64);
-
-/// The admitted receipts of every transaction of `body`, in body order, or
-/// `None` when any of them is missing — a body transaction that is not a
-/// target, or whose receipt was not admitted — so the set cannot rebuild the
-/// block's receipts root.
-fn whole_body_receipts(
-    body: &[B256],
-    consensus: &mut HashMap<B256, (OpReceiptEnvelope, u64)>,
-) -> Option<Vec<BodyReceipt>> {
-    body.iter()
-        .map(|hash| consensus.remove(hash).map(|(envelope, gas_used)| (*hash, envelope, gas_used)))
-        .collect()
-}
 
 /// Authenticate the receipts served for a whole body, given in body order:
 /// their consensus receipts must rebuild the header's receipts root
@@ -1952,12 +2065,26 @@ fn swept_kind(_abort_cause: &ReplayError) -> BatchErrorKind {
 /// definitive was established about the target: it stays unanswered (`rpc`),
 /// with the verdict's own wording as its message.
 fn incoherent_endpoint(tx_hash: B256, incoherence: &Incoherence) -> FailedTx {
-    FailedTx { tx_hash, kind: BatchErrorKind::Rpc, message: incoherence.to_string() }
+    FailedTx {
+        tx_hash,
+        tx_index: None,
+        kind: BatchErrorKind::Rpc,
+        message: incoherence.to_string(),
+    }
 }
 
 /// Build a failure entry.
 fn failure(tx_hash: B256, kind: BatchErrorKind, message: String) -> BatchEntry {
-    BatchEntry::Failed(FailedTx { tx_hash, kind, message })
+    failure_at(tx_hash, None, kind, message)
+}
+
+fn failure_at(
+    tx_hash: B256,
+    tx_index: Option<usize>,
+    kind: BatchErrorKind,
+    message: String,
+) -> BatchEntry {
+    BatchEntry::Failed(FailedTx { tx_hash, tx_index, kind, message })
 }
 
 /// Report the same failure for every target of a block that never started.
@@ -1972,23 +2099,22 @@ fn fail_all(
 /// Append the same failure for every remaining target, keeping any entries
 /// already recorded (for example inclusion mismatches decided earlier).
 fn fail_remaining(
-    targets: &[B256],
+    targets: &BTreeMap<usize, B256>,
     mut entries: Vec<BatchEntry>,
     kind: BatchErrorKind,
     message: &str,
 ) -> Vec<BatchEntry> {
-    let reported: HashSet<B256> = entries.iter().map(BatchEntry::tx_hash).collect();
-    for hash in targets {
-        if !reported.contains(hash) {
-            entries.push(failure(*hash, kind, message.to_string()));
-        }
-    }
+    entries.extend(
+        targets
+            .iter()
+            .map(|(&index, &hash)| failure_at(hash, Some(index), kind, message.to_string())),
+    );
     entries
 }
 
 /// Write one entry to stdout: a compact NDJSON line, or the human-readable
 /// summary used by the single-transaction path.
-fn emit(entry: &BatchEntry, json: bool) {
+fn emit(entry: &BatchEntry, json: bool, repeated_block: Option<u64>) {
     if json {
         let line = match entry {
             BatchEntry::Executed(tx) => {
@@ -2010,6 +2136,8 @@ fn emit(entry: &BatchEntry, json: bool) {
             }
             BatchEntry::Failed(tx) => serde_json::to_string(&BatchErrorLine {
                 tx_hash: tx.tx_hash,
+                block_number: repeated_block.filter(|_| tx.tx_index.is_some()),
+                tx_index: repeated_block.and(tx.tx_index),
                 error: BatchErrorBody { kind: tx.kind.as_str(), message: &tx.message },
             }),
         };
@@ -2040,7 +2168,11 @@ fn emit(entry: &BatchEntry, json: bool) {
         }
         BatchEntry::Failed(tx) => {
             println!();
-            println!("=== Transaction {} ===", tx.tx_hash);
+            if let Some((number, index)) = repeated_block.zip(tx.tx_index) {
+                println!("=== Transaction {} (block {number}, index {index}) ===", tx.tx_hash);
+            } else {
+                println!("=== Transaction {} ===", tx.tx_hash);
+            }
             println!("Error ({}): {}", tx.kind.as_str(), tx.message);
         }
     }
@@ -2364,9 +2496,9 @@ mod tests {
         let mid = B256::repeat_byte(0x22);
         let late_absent = B256::repeat_byte(0x33);
         let job_targets = vec![
-            JobTarget { hash: late_absent, inclusion_hash: Some(B256::ZERO) },
-            JobTarget { hash: early, inclusion_hash: Some(B256::ZERO) },
-            JobTarget { hash: mid, inclusion_hash: Some(B256::ZERO) },
+            JobTarget { hash: late_absent, inclusion_hash: Some(B256::ZERO), tx_index: None },
+            JobTarget { hash: early, inclusion_hash: Some(B256::ZERO), tx_index: None },
+            JobTarget { hash: mid, inclusion_hash: Some(B256::ZERO), tx_index: None },
         ];
         // Collected in the buggy pre-execution-first order: absent then results.
         let entries = vec![
@@ -2762,7 +2894,7 @@ mod tests {
         };
         let skip_reason = |onchain_gas: u64| {
             let onchain_receipts = BTreeMap::from([(
-                tx_hash,
+                0,
                 Ok(ReceiptFacts {
                     status: true,
                     gas_used: onchain_gas,
@@ -2779,12 +2911,14 @@ mod tests {
                 executed_spec: MegaSpecId::REX6,
                 block: &block,
                 onchain_receipts: &onchain_receipts,
+                repeated_hashes: &HashSet::new(),
             };
             let report = hook.prepare_fixture(
                 &dump,
                 &kernel::TargetExecution {
                     db: &mega_evm::revm::database::EmptyDB::default(),
                     tx_hash,
+                    tx_index: 0,
                     tx: &tx,
                     accessed_block_hash_count: 0,
                     result_and_state: &result_and_state,
