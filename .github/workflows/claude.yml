@@ -59,6 +59,11 @@ jobs:
     concurrency:
       group: claude-pr-review-${{ github.event.pull_request.number || github.event.issue.number }}-${{ github.event_name == 'pull_request' && 'code' || 'comment' }}
       cancel-in-progress: false
+    # A comment round runs only on a same-repo PR and for a commenter with write
+    # access (or mega-putin); the gate step enforces both before the PR head is
+    # checked out. Other bots are dropped here. The pinned claude-code-action
+    # restores .claude/CLAUDE.md and .mcp.json from the base branch, and the
+    # shared action skips unless a question or finding is open.
     if: |
       (github.event_name == 'pull_request' &&
        (github.event.action == 'opened' ||
@@ -68,6 +73,8 @@ jobs:
       (github.event_name == 'issue_comment' &&
        github.event.issue.pull_request != null &&
        github.event.comment.user.login != 'mega-maxwell[bot]' &&
+       (!endsWith(github.event.comment.user.login, '[bot]') ||
+        github.event.comment.user.login == 'mega-putin[bot]') &&
        !contains(github.event.comment.body, 'claude-review:skip'))
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -88,7 +95,34 @@ jobs:
           owner: megaeth-labs
           repositories: mega-evm
 
-      - uses: actions/checkout@v4
+      # Comment rounds run only on same-repo PRs and for commenters with write
+      # access. Runs with the App token (the job token cannot read other users'
+      # permissions) and before checkout, so a refused comment never fetches PR code.
+      - name: Authorize comment-triggered round
+        id: gate
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          EVENT: ${{ github.event_name }}
+          PR: ${{ github.event.issue.number }}
+          COMMENTER: ${{ github.event.comment.user.login }}
+        run: |
+          if [ "$EVENT" != issue_comment ]; then echo ok=true >> "$GITHUB_OUTPUT"; exit 0; fi
+          head_repo=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq '.head.repo.full_name // ""')
+          if [ "$head_repo" != "$GITHUB_REPOSITORY" ]; then
+            echo "::notice::#$PR head is '$head_repo'; comment rounds run only on same-repo PRs"
+            echo ok=false >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          if [ "$COMMENTER" != 'mega-putin[bot]' ]; then
+            perm=$(gh api "repos/$GITHUB_REPOSITORY/collaborators/$COMMENTER/permission" --jq .permission)
+            case "$perm" in admin|write) ;; *)
+              echo "::notice::$COMMENTER has '$perm'; comment rounds need write"
+              echo ok=false >> "$GITHUB_OUTPUT"; exit 0;;
+            esac
+          fi
+          echo ok=true >> "$GITHUB_OUTPUT"
+
+      - if: steps.gate.outputs.ok == 'true'
+        uses: actions/checkout@v4
         with:
           ref: ${{ github.event_name == 'issue_comment' && format('refs/pull/{0}/head', github.event.issue.number) || '' }}
           token: ${{ steps.app-token.outputs.token }}
@@ -97,7 +131,8 @@ jobs:
           fetch-depth: 1
 
       # Includes the large-PR diff fallback and App identity forwarding (.github#48).
-      - uses: megaeth-labs/.github/.github/actions/claude-pr-review@eb44b85d2d0f02ab70452935912948e4b2b29cf0
+      - if: steps.gate.outputs.ok == 'true'
+        uses: megaeth-labs/.github/.github/actions/claude-pr-review@eb44b85d2d0f02ab70452935912948e4b2b29cf0
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_identity_token: ${{ steps.app-token.outputs.token }}

@@ -9,7 +9,7 @@ Similar to go-ethereum's `evm` command, `mega-evme` provides full control over t
 
 ## Installation
 
-Building requires Foundry's `forge`.
+The Rust build uses checked-in system-contract bytecode.
 
 From GitHub:
 

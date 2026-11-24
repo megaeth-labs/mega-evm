@@ -13,10 +13,9 @@ name: On Release
 # no crates are published. To resume once those crates are on crates.io,
 # restore the `crates` job from PR #424.
 #
-# Release assets are paused as well. Releases here are immutable once
-# published, and this workflow runs only after publishing, so attaching the
-# binary to the Release fails (HTTP 422). The binary goes to the registry
-# only until the release pipeline attaches assets before it publishes.
+# `release-settle.yml` builds mega-evme and `release-publish` attaches it with
+# SHA256SUMS (`asset_files`) before the Release is published, because Releases
+# are immutable once published; this workflow keeps the registry upload.
 #
 # Rehearse on a tag ref (the job must run on a tag ref):
 #   gh workflow run on-release.yml --ref vX.Y.Z -f dry_run=true
@@ -68,7 +67,8 @@ jobs:
 
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
-          ref: ${{ env.TAG }}
+          # The run's commit, not the tag name: checkout prefers a branch named like the tag.
+          ref: ${{ github.sha }}
           submodules: recursive
           persist-credentials: false
 
@@ -76,7 +76,10 @@ jobs:
         with:
           cache: false
 
+      # Foundry and the submodules stay for release lines whose build.rs still runs forge.
       - uses: foundry-rs/foundry-toolchain@b00af27efadbc7b4ca8b82abbd903b17cc874d2a # v1
+        with:
+          cache: false
 
       - name: Build mega-evme
         run: cargo build --release --locked -p mega-evme

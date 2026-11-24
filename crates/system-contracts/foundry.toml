@@ -3,6 +3,7 @@ src = "contracts"
 out = "out"
 libs = ["lib"]
 solc_version = "0.8.30"
+evm_version = "osaka"
 optimizer = true
 optimizer_runs = 999999
 fs_permissions = [{ access = "read-write", path = "./artifacts" }]

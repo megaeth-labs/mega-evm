@@ -3050,7 +3050,7 @@ dependencies = [
 
 [[package]]
 name = "mega-evm"
-version = "1.7.3"
+version = "1.7.4"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -3085,7 +3085,7 @@ dependencies = [
 
 [[package]]
 name = "mega-evme"
-version = "1.7.3"
+version = "1.7.4"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -3125,7 +3125,7 @@ dependencies = [
 
 [[package]]
 name = "mega-state-test"
-version = "1.7.3"
+version = "1.7.4"
 dependencies = [
  "alloy-eips",
  "alloy-primitives",
@@ -3145,10 +3145,11 @@ dependencies = [
 
 [[package]]
 name = "mega-system-contracts"
-version = "1.7.3"
+version = "1.7.4"
 dependencies = [
  "alloy-primitives",
  "alloy-sol-types",
+ "anyhow",
  "semver 1.0.28",
  "serde",
  "serde_json",
@@ -3156,7 +3157,7 @@ dependencies = [
 
 [[package]]
 name = "mega-t8n"
-version = "1.7.3"
+version = "1.7.4"
 dependencies = [
  "alloy-consensus",
  "alloy-primitives",
@@ -5011,7 +5012,7 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
 name = "state-test"
-version = "1.7.3"
+version = "1.7.4"
 dependencies = [
  "clap",
  "mega-evm",
@@ -5131,6 +5132,19 @@ checksum = "8e1d1b10ced5ca923a1fcb8d03e96b8d3268065d724548c0211415ff6ac6bac4"
 dependencies = [
  "core-foundation-sys",
  "libc",
+]
+
+[[package]]
+name = "system-contract-artifacts"
+version = "1.7.4"
+dependencies = [
+ "alloy-primitives",
+ "anyhow",
+ "semver 1.0.28",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "walkdir",
 ]
 
 [[package]]

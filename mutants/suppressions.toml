@@ -130,7 +130,7 @@ reviewer = "improve-mutation-score (William Aaron Cheung)"
 kind = "line"
 category = "equivalent"
 file = "crates/mega-evm/src/limit/limit.rs"
-line = 809
+line = 815
 column = 56
 mutant = "replace && with || in AdditionalLimit::before_frame_return_result"
 justification = "Equivalent: at every <true> (last_frame_result) call has_active_frame() is already false (the frame was popped by the preceding <false> frame_return_result pass), so LAST_FRAME && !has_active == LAST_FRAME || !has_active == true; at <false> calls LAST_FRAME is false in both. Full suite (incl. all multi-frame exceed tests) green with the mutant."
@@ -397,7 +397,7 @@ reviewer = "improve-mutation-score (William Aaron Cheung)"
 kind = "line"
 category = "equivalent"
 file = "crates/mega-evm/src/evm/precompiles.rs"
-line = 136
+line = 137
 column = 49
 mutant = "replace || with && in modexp::run_osaka_legacy"
 justification = "Equivalent: weakening the first || only skips the early halt when exactly one of base_len/mod_len exceeds the EIP-7823 limit while exp_len does not. The zero-base/zero-modulus short-circuit cannot fire there (the offending length is non-zero), so control reaches upstream osaka_run, whose identical EIP-7823 check returns Err(ModexpEip7823LimitSize); the wrapper maps it to the same PrecompileOutput::halt(ModexpEip7823LimitSize, reservoir) the unmutated line returns. Full suite green with the mutant applied."
@@ -711,26 +711,26 @@ mutant = "spec-gate debug_assert!(self.spec.is_enabled(MegaSpecId::MINI_REX)); -
 justification = "`debug_assert!` only. Besides the instruction tables, the helper is called from top-level CREATE and empty-account transfer validation at evm/execution.rs:747, :821 and :844, all under the same spec gate. Relaxing the assert is compiled out in release."
 reviewer = "RealiCZ (cz)"
 
-# --- crates/mega-evm/src/evm/instructions.rs:3083 ---
+# --- crates/mega-evm/src/evm/instructions.rs:3089 ---
 
 [[suppress]]
 kind = "line"
 category = "equivalent"
 file = "crates/mega-evm/src/evm/instructions.rs"
-line = 3083
+line = 3089
 column = 1
 mutant = "spec-gate .is_enabled(MegaSpecId::REX5) && -> .is_enabled(MegaSpecId::REX4) &&"
-justification = "The gate is evaluated on MINI_REX/MINI_REX_2 CALLCODE, but its true branch is the CALL_STIPEND subtraction, and that branch is unreachable there: the wrapped handler is installed only by the mini_rex table (instructions.rs:201-203, CALLCODE assignment at :1015); from `mod rex` the entry is `forward_gas_ext::call_code` (:305) and from REX4 `volatile_data_ext::call_code` (:418); `mod rex5` inherits rex4's table (:467). On the specs that reach this line `is_enabled(REX4)`, `is_enabled(REX5)` and `is_enabled(REX6)` are all false, so `stipend_from_revm` stays 0. The macro's DELEGATECALL and STATICCALL schemes cannot satisfy the value condition at :3084 either."
+justification = "The gate is evaluated on MINI_REX/MINI_REX_2 CALLCODE, but its true branch is the CALL_STIPEND subtraction, and that branch is unreachable there: the wrapped handler is installed only by the mini_rex table (instructions.rs:201-203, CALLCODE assignment at :1015); from `mod rex` the entry is `forward_gas_ext::call_code` (:305) and from REX4 `volatile_data_ext::call_code` (:418); `mod rex5` inherits rex4's table (:467). On the specs that reach this line `is_enabled(REX4)`, `is_enabled(REX5)` and `is_enabled(REX6)` are all false, so `stipend_from_revm` stays 0. The macro's DELEGATECALL and STATICCALL schemes cannot satisfy the value condition at :3090 either."
 reviewer = "RealiCZ (cz)"
 
-# --- crates/mega-evm/src/evm/instructions.rs:3083 ---
+# --- crates/mega-evm/src/evm/instructions.rs:3089 ---
 
 [[suppress]]
 kind = "line"
 category = "equivalent"
 file = "crates/mega-evm/src/evm/instructions.rs"
-line = 3083
+line = 3089
 column = 1
 mutant = "spec-gate .is_enabled(MegaSpecId::REX5) && -> .is_enabled(MegaSpecId::REX6) &&"
-justification = "The gate is evaluated on MINI_REX/MINI_REX_2 CALLCODE, but its true branch is the CALL_STIPEND subtraction, and that branch is unreachable there: the wrapped handler is installed only by the mini_rex table (instructions.rs:201-203, CALLCODE assignment at :1015); from `mod rex` the entry is `forward_gas_ext::call_code` (:305) and from REX4 `volatile_data_ext::call_code` (:418); `mod rex5` inherits rex4's table (:467). On the specs that reach this line `is_enabled(REX4)`, `is_enabled(REX5)` and `is_enabled(REX6)` are all false, so `stipend_from_revm` stays 0. The macro's DELEGATECALL and STATICCALL schemes cannot satisfy the value condition at :3084 either."
+justification = "The gate is evaluated on MINI_REX/MINI_REX_2 CALLCODE, but its true branch is the CALL_STIPEND subtraction, and that branch is unreachable there: the wrapped handler is installed only by the mini_rex table (instructions.rs:201-203, CALLCODE assignment at :1015); from `mod rex` the entry is `forward_gas_ext::call_code` (:305) and from REX4 `volatile_data_ext::call_code` (:418); `mod rex5` inherits rex4's table (:467). On the specs that reach this line `is_enabled(REX4)`, `is_enabled(REX5)` and `is_enabled(REX6)` are all false, so `stipend_from_revm` stays 0. The macro's DELEGATECALL and STATICCALL schemes cannot satisfy the value condition at :3090 either."
 reviewer = "RealiCZ (cz)"
