@@ -144,7 +144,7 @@ revm-inspectors = { version = "=0.40.1", default-features = false }
 alloy-consensus = { version = "2.0.5", default-features = false }
 alloy-eips = { version = "2.0.5", default-features = false }
 alloy-evm = { version = "=0.36.0", default-features = false }
-alloy-hardforks = { version = "=0.4.7", default-features = false }
+alloy-hardforks = { version = "0.4.7", default-features = false }
 alloy-json-rpc = { version = "2.0.5", default-features = false }
 alloy-network = { version = "2.0.5", default-features = false }
 alloy-op-evm = { git = "https://github.com/ethereum-optimism/optimism", rev = "f67d87cd5c9992b62d215c043917b94e3f019629", default-features = false }
