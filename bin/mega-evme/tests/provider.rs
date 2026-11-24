@@ -15,7 +15,9 @@ use alloy_primitives::B256;
 use alloy_provider::Provider;
 use clap::Parser;
 use mega_evme::common::{BuildProviderOutput, EvmeError, RpcArgs};
+use rstest::rstest;
 use tempfile::tempdir;
+use wiremock::{matchers, Mock, MockServer, ResponseTemplate};
 
 mod common;
 use common::{rpc_cache_path, test_rpc_args, test_rpc_args_cached, MockRpcServer};
@@ -145,35 +147,221 @@ async fn test_build_provider_with_cache_names_file_from_fetched_chain_id() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_build_provider_invalid_url() {
-    let args = RpcArgs::parse_from(["mega-evme", "--rpc", "not a url", "--rpc.cache-size", "0"]);
+    let args = RpcArgs::parse_from([
+        "mega-evme",
+        "--rpc",
+        "http://bad host/path-secret?key=query-secret",
+        "--rpc.cache-size",
+        "0",
+    ]);
     let err = args.build_provider().await.expect_err("build_provider should fail");
     match err {
         EvmeError::RpcError(msg) => {
-            assert!(msg.contains("not a url"), "error must echo the original input, got: {msg}");
+            assert!(msg.contains("Invalid RPC URL '<redacted RPC URL>'"), "{msg}");
+            assert!(!msg.contains("path-secret") && !msg.contains("query-secret"), "{msg}");
         }
         other => panic!("expected EvmeError::RpcError, got {other:?}"),
     }
 }
 
-/// A chain-id failure reports the endpoint without the URL's userinfo.
+/// HTTP, response-decoding and JSON-RPC errors hide endpoint credentials echoed by the server.
+#[rstest]
+#[case::http(500, "failed {rpc}")]
+#[case::malformed(200, r#"{"url":"{rpc}"}"#)]
+#[case::rpc(200, r#"{"jsonrpc":"2.0","id":0,"error":{"code":-32603,"message":"failed {rpc}","data":{"url":"{rpc}"}}}"#)]
 #[tokio::test(flavor = "multi_thread")]
-async fn test_chain_id_error_omits_rpc_userinfo() {
-    let server = MockRpcServer::start().await;
-    server.respond_status_always(500).await;
-    let url = server.uri().replacen("http://", "http://alice:secret@", 1);
-    let args = RpcArgs::parse_from([
-        "mega-evme",
-        "--rpc",
-        &url,
-        "--rpc.cache-size",
-        "0",
-        "--rpc.max-retries",
-        "0",
-    ]);
-    let err = args.build_provider().await.expect_err("chain id fetch fails");
-    let msg = err.to_string();
-    assert!(msg.contains("Failed to fetch chain ID"), "{msg}");
-    assert!(!msg.contains("secret") && !msg.contains("alice"), "{msg}");
+async fn test_chain_id_error_omits_rpc_credentials(#[case] status: u16, #[case] body: &str) {
+    let server = MockServer::start().await;
+    let url = format!(
+        "{}/v2/(path-secret)?key=query-secret#fragment-secret",
+        server.uri().replacen("http://", "http://alice:userinfo-secret@", 1)
+    );
+    Mock::given(matchers::method("POST"))
+        .respond_with(ResponseTemplate::new(status).set_body_string(body.replace("{rpc}", &url)))
+        .mount(&server)
+        .await;
+    let error = test_rpc_args(&url, Some(0)).build_provider().await.expect_err("request fails");
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    let message = error.to_string();
+    assert!(message.contains("Failed to fetch chain ID"), "{message}");
+    for secret in ["alice", "userinfo-secret", "path-secret", "query-secret", "fragment-secret"] {
+        assert!(!message.contains(secret), "{message}");
+    }
+}
+
+/// JSON-RPC errors that echo configured endpoint components without a scheme, percent-encoded,
+/// or with JSON-escaped separators must never leak those secrets while keeping the error code.
+#[rstest]
+#[case::schemeless_path("unauthorized request to /v2/path-secret")]
+#[case::host_and_path("upstream {host}/v2/path-secret?key=query-secret refused")]
+#[case::query_key("invalid query parameter key=query-secret")]
+#[case::userinfo("authentication failed for alice:userinfo-secret")]
+#[case::fragment("unexpected fragment fragment-secret")]
+#[case::percent_encoded_url(
+    "bad upstream http%3A%2F%2F{host}%2Fv2%2Fpath-secret%3Fkey%3Dquery-secret"
+)]
+#[case::percent_encoded_path("unauthorized %2Fv2%2Fpath-secret")]
+#[case::escaped_separator_configured(
+    r#"{"url":"http:\/\/alice:userinfo-secret@{host}\/v2\/path-secret?key=query-secret"}"#
+)]
+#[case::escaped_separator_other(r#"{"upstream":"https:\/\/other.example\/v2\/other-secret"}"#)]
+#[tokio::test(flavor = "multi_thread")]
+async fn test_chain_id_error_redacts_schemeless_and_encoded_echo(#[case] server_msg: &str) {
+    let server = MockServer::start().await;
+    let host = server.uri().strip_prefix("http://").unwrap().to_string();
+    let url = format!(
+        "{}/v2/path-secret?key=query-secret#fragment-secret",
+        server.uri().replacen("http://", "http://alice:userinfo-secret@", 1)
+    );
+    let rendered_msg = server_msg.replace("{host}", &host);
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 0,
+        "error": { "code": -32000, "message": rendered_msg },
+    });
+    Mock::given(matchers::method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(body))
+        .mount(&server)
+        .await;
+    let error = test_rpc_args(&url, Some(0)).build_provider().await.expect_err("request fails");
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    let message = error.to_string();
+    assert!(message.contains("Failed to fetch chain ID"), "{message}");
+    assert!(message.contains("-32000"), "JSON-RPC error code must be preserved: {message}");
+    for secret in [
+        "alice",
+        "userinfo-secret",
+        "path-secret",
+        "query-secret",
+        "fragment-secret",
+        "other-secret",
+    ] {
+        assert!(!message.contains(secret), "secret {secret:?} leaked in: {message}");
+    }
+}
+
+/// Percent-decoded endpoint components and ordinary server errors alike are replaced with a
+/// local diagnostic that preserves only the JSON-RPC error code.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_chain_id_error_redacts_percent_decoded_echo_and_omits_server_message() {
+    let server = MockServer::start().await;
+    let host = server.uri().strip_prefix("http://").unwrap().to_string();
+    let url = format!("{}/v2/my%20key-secret?x=tail-secret", server.uri());
+
+    Mock::given(matchers::method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 0,
+            "error": {
+                "code": -32001,
+                "message": format!("bad upstream http://{host}/v2/my key-secret?x=tail-secret"),
+            },
+        })))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(matchers::method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 0,
+            "error": { "code": -32601, "message": "method not found" },
+        })))
+        .with_priority(2)
+        .mount(&server)
+        .await;
+
+    let leaked = test_rpc_args(&url, Some(0)).build_provider().await.expect_err("echo fails");
+    let leaked_msg = leaked.to_string();
+    assert!(
+        leaked_msg.contains("-32001") && leaked_msg.contains("server error message omitted"),
+        "{leaked_msg}"
+    );
+    for secret in ["key-secret", "tail-secret", "bad upstream"] {
+        assert!(!leaked_msg.contains(secret), "server text {secret:?} leaked in: {leaked_msg}");
+    }
+
+    let safe = test_rpc_args(&url, Some(0)).build_provider().await.expect_err("safe error fails");
+    let safe_msg = safe.to_string();
+    assert!(
+        safe_msg.contains("-32601") && safe_msg.contains("server error message omitted"),
+        "{safe_msg}"
+    );
+    assert!(!safe_msg.contains("method not found"), "{safe_msg}");
+}
+
+/// JSON-RPC server error messages and data are never forwarded: every JSON-RPC error response is
+/// replaced with a local diagnostic that preserves the numeric error code and omits all server
+/// text (whether it echoes a single key value, a single path segment, or a benign message under a
+/// short public path such as `/rpc`).
+#[rstest]
+#[case::key_value_alone(
+    "/v2/path-secret?key=query-secret",
+    -32000,
+    "invalid API key query-secret",
+    Some(serde_json::json!({"detail": "secret-data"})),
+    &["query-secret", "path-secret", "invalid API key", "secret-data"][..]
+)]
+#[case::path_segment_alone(
+    "/v2/path-secret?key=query-secret",
+    -32001,
+    "unknown project path-secret",
+    Some(serde_json::json!("secret-data")),
+    &["path-secret", "query-secret", "unknown project", "secret-data"][..]
+)]
+#[case::benign_under_short_public_path(
+    "/rpc",
+    -32005,
+    "invalid jsonrpc request: rate limit exceeded",
+    None,
+    &["invalid jsonrpc", "rate limit exceeded"][..]
+)]
+#[case::benign_not_found_under_rpc(
+    "/rpc",
+    -32601,
+    "header not found",
+    Some(serde_json::json!({"hint": "server-hint"})),
+    &["header not found", "server-hint"][..]
+)]
+#[tokio::test(flavor = "multi_thread")]
+async fn test_rpc_error_uses_local_diagnostic_and_never_echoes_server_message(
+    #[case] suffix: &str,
+    #[case] code: i64,
+    #[case] server_msg: &str,
+    #[case] server_data: Option<serde_json::Value>,
+    #[case] forbidden: &[&str],
+) {
+    let server = MockServer::start().await;
+    let url = format!("{}{suffix}", server.uri());
+    let mut err_obj = serde_json::json!({ "code": code, "message": server_msg });
+    if let Some(data) = server_data {
+        err_obj["data"] = data;
+    }
+    Mock::given(matchers::method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 0,
+            "error": err_obj,
+        })))
+        .mount(&server)
+        .await;
+
+    let error = test_rpc_args(&url, Some(0)).build_provider().await.expect_err("request fails");
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    let message = error.to_string();
+    assert!(message.contains("Failed to fetch chain ID"), "{message}");
+    assert!(
+        message.contains(&code.to_string()),
+        "JSON-RPC error code {code} must be preserved: {message}"
+    );
+    assert!(
+        message.contains("server returned an error response") &&
+            message.contains("server error message omitted"),
+        "expected local diagnostic in: {message}"
+    );
+    for text in forbidden {
+        assert!(!message.contains(text), "server text {text:?} leaked in: {message}");
+    }
 }
 
 // ─── Chain-id resolution ─────────────────────────────────────────────────────
@@ -462,19 +650,34 @@ async fn test_build_provider_auto_creates_cache_dir() {
 
 // ─── Retry layer behavior tests ──────────────────────────────────────────────
 
-/// Server fails 503 twice then succeeds; `max-retries=3` must reach success.
-/// `eth_chainId` mock at highest priority ensures `build_provider` succeeds.
+/// Status errors and nonstandard rate-limit bodies keep the dependency's retry behavior.
+#[rstest]
+#[case::http_503(503, "temporarily unavailable")]
+#[case::bare_429(200, r#"{"code":429,"message":"rate limit"}"#)]
+#[case::missing_id(200, r#"{"jsonrpc":"2.0","error":{"code":-32005,"message":"rate limit"}}"#)]
 #[tokio::test(flavor = "multi_thread")]
-async fn test_retry_layer_retries_on_503_then_succeeds() {
-    let server = MockRpcServer::start().await;
-    server.respond_eth_chain_id(4326, 1).await;
-    server.respond_status_n_times(503, 2, 2).await;
-    server.respond_jsonrpc_result("0x10e6", 3).await;
+async fn test_retry_layer_retries_transient_response_then_succeeds(
+    #[case] status: u16,
+    #[case] body: &str,
+) {
+    let server = MockServer::start().await;
+    Mock::given(matchers::method("POST"))
+        .respond_with(ResponseTemplate::new(status).set_body_string(body))
+        .up_to_n_times(2)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(matchers::method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "jsonrpc":"2.0", "id":0, "result":"0x10e6"
+        })))
+        .with_priority(2)
+        .mount(&server)
+        .await;
 
-    let BuildProviderOutput { provider, .. } =
-        test_rpc_args(&server.uri(), Some(3)).build_provider().await.expect("build_provider");
-    let block = provider.get_block_number().await.expect("must succeed after 2 retries");
-    assert_eq!(block, 0x10e6);
+    let result = test_rpc_args(&server.uri(), Some(3)).build_provider().await;
+    assert_eq!(server.received_requests().await.unwrap().len(), 3, "{result:?}");
+    assert_eq!(result.expect("must succeed after two transient errors").chain_id, 4326);
 }
 
 /// `max-retries=0` must surface the first 503 immediately, with no retries.

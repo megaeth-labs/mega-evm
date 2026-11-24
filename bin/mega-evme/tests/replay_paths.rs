@@ -61,7 +61,17 @@ impl Recording {
 
     fn result(&self, method: &str, params: &[Value]) -> Result<Value, String> {
         let block_arg = |i: usize| params.get(i).and_then(Value::as_str).unwrap_or_default();
-        let at_parent = |i: usize| block_arg(i) == format!("0x{:x}", BLOCK - 1);
+        let at_parent_number = |i: usize| block_arg(i) == format!("0x{:x}", BLOCK - 1);
+        let at_parent_hash = |i: usize| {
+            params.get(i) ==
+                Some(&json!({
+                    "blockHash": self.block.block["parentHash"],
+                    "requireCanonical": true,
+                }))
+        };
+        // The legacy 1.7.1 engine queries state by parent number; Satin binds state to the
+        // verified canonical parent hash (EIP-1898).
+        let at_parent_state = |i: usize| at_parent_number(i) || at_parent_hash(i);
         let address = || -> Result<Address, String> {
             serde_json::from_value(params[0].clone()).map_err(|e| e.to_string())
         };
@@ -96,8 +106,8 @@ impl Recording {
                 }
                 Ok(block)
             }
-            "eth_getBlockByNumber" if at_parent(0) => Ok(self.parent()),
-            "eth_getBalance" | "eth_getTransactionCount" | "eth_getCode" if at_parent(1) => {
+            "eth_getBlockByNumber" if at_parent_number(0) => Ok(self.parent()),
+            "eth_getBalance" | "eth_getTransactionCount" | "eth_getCode" if at_parent_state(1) => {
                 let account = self.account(address()?).ok_or("account not recorded")?;
                 Ok(match method {
                     "eth_getBalance" => json!(account.balance),
@@ -112,7 +122,7 @@ impl Recording {
                         .unwrap_or_else(|| "0x".to_string())),
                 })
             }
-            "eth_getStorageAt" if at_parent(2) => {
+            "eth_getStorageAt" if at_parent_state(2) => {
                 let account = self.account(address()?).ok_or("account not recorded")?;
                 let slot: U256 =
                     serde_json::from_value(params[1].clone()).map_err(|e| e.to_string())?;
@@ -206,6 +216,102 @@ fn checked(rows: &[Value], held: Option<usize>) -> Vec<usize> {
     picks.sort_unstable();
     picks.dedup();
     picks
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_replay_rejects_an_unlinked_parent_before_reading_state() {
+    for wrong_hash in [true, false] {
+        let recorded = read_block(fixtures(), BLOCK);
+        let target = recorded.block["transactions"][1]["hash"].as_str().unwrap().to_owned();
+        let recording =
+            Recording { block: recorded, parent_timestamp: None, codes: HashMap::default() };
+        let mut parent = recording.parent();
+        if wrong_hash {
+            parent["hash"] = json!(B256::repeat_byte(0x42));
+        } else {
+            parent["number"] = json!(format!("0x{:x}", BLOCK - 2));
+        }
+        let server = Server::start(recording.block).await;
+        Mock::given(matchers::body_partial_json(json!({
+            "method": "eth_getBlockByNumber", "params": [format!("0x{:x}", BLOCK - 1), false]
+        })))
+        .respond_with(move |request: &wiremock::Request| {
+            let body: Value = serde_json::from_slice(&request.body).unwrap();
+            ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0", "id": body["id"], "result": parent
+            }))
+        })
+        .with_priority(1)
+        .expect(1)
+        .mount(&server.0)
+        .await;
+        let run = run_evme(&[
+            "replay",
+            &target,
+            "--rpc",
+            &server.0.uri(),
+            "--rpc.no-cache-file",
+            "--rpc.max-retries",
+            "0",
+            "--override.spec",
+            "Satin",
+        ]);
+        assert_ne!(run.code, 0, "the mismatched parent must be rejected");
+        assert!(run.stderr.contains("parent block does not match"), "{}{}", run.stdout, run.stderr);
+        let requests = server.0.received_requests().await.unwrap();
+        assert!(
+            requests.iter().all(|request| {
+                let body: Value = serde_json::from_slice(&request.body).unwrap();
+                matches!(
+                    body["method"].as_str(),
+                    Some("eth_chainId" | "eth_getTransactionByHash" | "eth_getBlockByNumber")
+                )
+            }),
+            "a mismatched parent is rejected before reading state or receipts"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_replay_rejects_a_pending_transaction_before_fetching_blocks() {
+    let recorded = read_block(fixtures(), BLOCK);
+    let mut tx = recorded.block["transactions"][1].clone();
+    let target = tx["hash"].as_str().unwrap().to_owned();
+    tx["blockNumber"] = Value::Null;
+    tx["blockHash"] = Value::Null;
+    tx["transactionIndex"] = Value::Null;
+    let server = Server::start(recorded).await;
+    Mock::given(matchers::body_partial_json(json!({"method": "eth_getTransactionByHash"})))
+        .respond_with(move |request: &wiremock::Request| {
+            let body: Value = serde_json::from_slice(&request.body).unwrap();
+            ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0", "id": body["id"], "result": tx
+            }))
+        })
+        .with_priority(1)
+        .expect(1)
+        .mount(&server.0)
+        .await;
+    let run = run_evme(&[
+        "replay",
+        &target,
+        "--rpc",
+        &server.0.uri(),
+        "--rpc.no-cache-file",
+        "--rpc.max-retries",
+        "0",
+        "--override.spec",
+        "Satin",
+    ]);
+    assert_ne!(run.code, 0);
+    assert!(run.stderr.contains("pending"), "{}{}", run.stdout, run.stderr);
+    assert!(
+        server.0.received_requests().await.unwrap().iter().all(|request| {
+            let body: Value = serde_json::from_slice(&request.body).unwrap();
+            matches!(body["method"].as_str(), Some("eth_chainId" | "eth_getTransactionByHash"))
+        }),
+        "a pending transaction must not fetch a block or read state"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -522,7 +628,12 @@ async fn test_a_replay_stops_when_a_predecessor_account_cannot_be_read() {
     assert_ne!(run.code, 0, "a failed predecessor read is not skipped: {}", run.stdout);
     let output = format!("{}{}", run.stdout, run.stderr);
     assert!(output.contains("Block execution error"), "{output}");
-    assert!(output.contains("account not recorded"), "{output}");
+    assert!(output.contains(&MISSING.to_string()), "{output}");
+    assert!(
+        output.contains("-32000") && output.contains("server error message omitted"),
+        "{output}"
+    );
+    assert!(!output.contains("account not recorded"), "{output}");
 }
 
 /// A block of calls from one payer to contracts the test adds to the recorded block's parent
@@ -665,4 +776,455 @@ async fn test_a_replay_dump_carries_the_code_of_a_predecessors_account() {
         alloy_primitives::hex::encode_prefixed(&storer_code),
         "{summary}"
     );
+}
+
+/// Replay binds pre-state reads to the verified parent block hash (EIP-1898 with
+/// `requireCanonical: true`) rather than its height, so a reorg or inconsistent load-balanced
+/// endpoint serving different state at the parent number cannot silently feed the wrong pre-state.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_replay_reads_prestate_at_parent_hash() {
+    // PUSH0 SLOAD PUSH0 MSTORE PUSH1 0x20 PUSH0 RETURN: returns storage slot 0.
+    let reader = address!("0x8888888888888888888888888888888888888888");
+    let code = vec![0x5f, 0x54, 0x5f, 0x52, 0x60, 0x20, 0x5f, 0xf3];
+    let hash_value = U256::from(0xbeefu64);
+    let height_value = U256::from(0xdeadu64);
+
+    let mut recorded = read_block(fixtures(), BLOCK);
+    recorded
+        .prestate
+        .accounts
+        .insert(PAYER, PreAccount { balance: U256::from(10u128.pow(18)), ..PreAccount::default() });
+    let code_hash = alloy_primitives::keccak256(&code);
+    let codes = HashMap::from_iter([(code_hash, code)]);
+    recorded.prestate.accounts.insert(
+        reader,
+        PreAccount {
+            code_hash: Some(code_hash),
+            storage: BTreeMap::from([(B256::ZERO, hash_value)]),
+            ..Default::default()
+        },
+    );
+    let target = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+    recorded.block["transactions"] = json!([{
+        "type": "0x2",
+        "chainId": "0x10e6",
+        "nonce": "0x0",
+        "gas": "0x4c4b40",
+        "maxFeePerGas": "0xf4240",
+        "maxPriorityFeePerGas": "0x0",
+        "to": reader,
+        "value": "0x0",
+        "accessList": [],
+        "input": "0x",
+        "r": "0x64c0524917585101b7ffb2286d4de676ca987554b33c6f9a37e7ad7508bfbb84",
+        "s": "0xe5199cacc6e07c6a9f8c74d0b06f964ce36dd362199b1c19d866f1a6f52d510",
+        "yParity": "0x1",
+        "v": "0x1",
+        "hash": target,
+        "blockHash": recorded.block["hash"],
+        "blockNumber": recorded.block["number"],
+        "transactionIndex": "0x0",
+        "from": PAYER,
+        "gasPrice": "0xf4240",
+    }]);
+
+    let parent_hash = recorded.block["parentHash"].clone();
+    let expected_selector = json!({
+        "blockHash": parent_hash,
+        "requireCanonical": true,
+    });
+    let parent_height = format!("0x{:x}", BLOCK - 1);
+    let server = Server::with_codes(recorded, None, codes).await;
+
+    // Serve different storage at the parent height (simulating a reorg / split-view RPC).
+    Mock::given(matchers::body_partial_json(json!({
+        "method": "eth_getStorageAt",
+        "params": [reader, U256::ZERO, parent_height],
+    })))
+    .respond_with(move |request: &wiremock::Request| {
+        let body: Value = serde_json::from_slice(&request.body).unwrap();
+        ResponseTemplate::new(200).set_body_json(json!({
+            "jsonrpc": "2.0",
+            "id": body["id"],
+            "result": B256::from(height_value),
+        }))
+    })
+    .with_priority(1)
+    .mount(&server.0)
+    .await;
+
+    let run = run_evme(&[
+        "replay",
+        target,
+        "--rpc",
+        &server.0.uri(),
+        "--rpc.no-cache-file",
+        "--rpc.max-retries",
+        "0",
+        "--override.spec",
+        "Satin",
+        "--json",
+    ]);
+    assert_eq!(run.code, 0, "{}{}", run.stderr, run.stdout);
+    let summary: Value = serde_json::from_str(&run.stdout).unwrap();
+    assert_eq!(summary["success"], true, "{summary}");
+    assert_eq!(
+        summary["output"],
+        json!(B256::from(hash_value)),
+        "replay must observe the state bound to the verified parent hash, not the parent height"
+    );
+
+    let requests = server.0.received_requests().await.unwrap();
+    let mut state_reads = 0usize;
+    for request in &requests {
+        let body: Value = serde_json::from_slice(&request.body).unwrap();
+        let block_param = match body["method"].as_str() {
+            Some("eth_getBalance" | "eth_getTransactionCount" | "eth_getCode") => {
+                Some(&body["params"][1])
+            }
+            Some("eth_getStorageAt") => Some(&body["params"][2]),
+            _ => None,
+        };
+        if let Some(selector) = block_param {
+            state_reads += 1;
+            assert_eq!(
+                selector, &expected_selector,
+                "state read {} must pass EIP-1898 canonical parent hash, got {selector}",
+                body["method"]
+            );
+        }
+    }
+    assert!(state_reads > 0, "expected at least one state RPC read");
+}
+
+/// Bytecode that returns `BLOCKHASH(NUMBER - 1) || BLOCKHASH(NUMBER - 2)` (64 bytes).
+fn blockhash_ancestors_code() -> Vec<u8> {
+    vec![
+        0x60, 0x01, // PUSH1 1
+        0x43, // NUMBER
+        0x03, // SUB            -> N - 1
+        0x40, // BLOCKHASH
+        0x5f, // PUSH0
+        0x52, // MSTORE         -> mem[0x00..0x20] = BLOCKHASH(N - 1)
+        0x60, 0x02, // PUSH1 2
+        0x43, // NUMBER
+        0x03, // SUB            -> N - 2
+        0x40, // BLOCKHASH
+        0x60, 0x20, // PUSH1 0x20
+        0x52, // MSTORE         -> mem[0x20..0x40] = BLOCKHASH(N - 2)
+        0x60, 0x40, // PUSH1 0x40
+        0x5f, // PUSH0
+        0xf3, // RETURN
+    ]
+}
+
+/// Satin transaction replay resolves `BLOCKHASH` ancestors by walking `parentHash` links from the
+/// verified parent block (fetching earlier headers by hash and checking their hash and number),
+/// never by calling `eth_getBlockByNumber` for ancestor heights.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_replay_blockhash_walks_verified_ancestors_by_hash() {
+    let reader = address!("0x9999999999999999999999999999999999999999");
+    let code = blockhash_ancestors_code();
+
+    let mut recorded = read_block(fixtures(), BLOCK);
+    recorded
+        .prestate
+        .accounts
+        .insert(PAYER, PreAccount { balance: U256::from(10u128.pow(18)), ..PreAccount::default() });
+    let code_hash = alloy_primitives::keccak256(&code);
+    let codes = HashMap::from_iter([(code_hash, code)]);
+    recorded
+        .prestate
+        .accounts
+        .insert(reader, PreAccount { code_hash: Some(code_hash), ..Default::default() });
+    let target = "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff01";
+    recorded.block["transactions"] = json!([{
+        "type": "0x2",
+        "chainId": "0x10e6",
+        "nonce": "0x0",
+        "gas": "0x4c4b40",
+        "maxFeePerGas": "0xf4240",
+        "maxPriorityFeePerGas": "0x0",
+        "to": reader,
+        "value": "0x0",
+        "accessList": [],
+        "input": "0x",
+        "r": "0x64c0524917585101b7ffb2286d4de676ca987554b33c6f9a37e7ad7508bfbb84",
+        "s": "0xe5199cacc6e07c6a9f8c74d0b06f964ce36dd362199b1c19d866f1a6f52d510",
+        "yParity": "0x1",
+        "v": "0x1",
+        "hash": target,
+        "blockHash": recorded.block["hash"],
+        "blockNumber": recorded.block["number"],
+        "transactionIndex": "0x0",
+        "from": PAYER,
+        "gasPrice": "0xf4240",
+    }]);
+
+    let parent_hash: B256 = serde_json::from_value(recorded.block["parentHash"].clone()).unwrap();
+    let grandparent_hash = B256::repeat_byte(0x22);
+    let great_grandparent_hash = B256::repeat_byte(0x33);
+    let fork_parent_hash = B256::repeat_byte(0xcc);
+    let fork_grandparent_hash = B256::repeat_byte(0xdd);
+
+    let mut verified_parent = recorded.block.clone();
+    verified_parent["number"] = json!(format!("0x{:x}", BLOCK - 1));
+    verified_parent["hash"] = json!(parent_hash);
+    verified_parent["parentHash"] = json!(grandparent_hash);
+    verified_parent["transactions"] = json!([]);
+
+    let mut fork_parent = verified_parent.clone();
+    fork_parent["hash"] = json!(fork_parent_hash);
+
+    let mut verified_grandparent = recorded.block.clone();
+    verified_grandparent["number"] = json!(format!("0x{:x}", BLOCK - 2));
+    verified_grandparent["hash"] = json!(grandparent_hash);
+    verified_grandparent["parentHash"] = json!(great_grandparent_hash);
+    verified_grandparent["transactions"] = json!([]);
+
+    let mut fork_grandparent = verified_grandparent.clone();
+    fork_grandparent["hash"] = json!(fork_grandparent_hash);
+
+    let server = Server::with_codes(recorded, None, codes).await;
+
+    // First `eth_getBlockByNumber(N-1)` serves the verified parent for header validation; any
+    // subsequent by-number lookup of N-1 serves a conflicting fork header.
+    Mock::given(matchers::body_partial_json(json!({
+        "method": "eth_getBlockByNumber",
+        "params": [format!("0x{:x}", BLOCK - 1), false],
+    })))
+    .respond_with(move |request: &wiremock::Request| {
+        let body: Value = serde_json::from_slice(&request.body).unwrap();
+        ResponseTemplate::new(200).set_body_json(json!({
+            "jsonrpc": "2.0",
+            "id": body["id"],
+            "result": verified_parent,
+        }))
+    })
+    .up_to_n_times(1)
+    .with_priority(1)
+    .mount(&server.0)
+    .await;
+
+    Mock::given(matchers::body_partial_json(json!({
+        "method": "eth_getBlockByNumber",
+        "params": [format!("0x{:x}", BLOCK - 1), false],
+    })))
+    .respond_with(move |request: &wiremock::Request| {
+        let body: Value = serde_json::from_slice(&request.body).unwrap();
+        ResponseTemplate::new(200).set_body_json(json!({
+            "jsonrpc": "2.0",
+            "id": body["id"],
+            "result": fork_parent,
+        }))
+    })
+    .with_priority(2)
+    .mount(&server.0)
+    .await;
+
+    // `eth_getBlockByNumber(N-2)` serves a different fork header than the hash-walked ancestor.
+    Mock::given(matchers::body_partial_json(json!({
+        "method": "eth_getBlockByNumber",
+        "params": [format!("0x{:x}", BLOCK - 2), false],
+    })))
+    .respond_with(move |request: &wiremock::Request| {
+        let body: Value = serde_json::from_slice(&request.body).unwrap();
+        ResponseTemplate::new(200).set_body_json(json!({
+            "jsonrpc": "2.0",
+            "id": body["id"],
+            "result": fork_grandparent,
+        }))
+    })
+    .with_priority(1)
+    .mount(&server.0)
+    .await;
+
+    // `eth_getBlockByHash(grandparent_hash)` serves the verified ancestor reachable via parentHash.
+    Mock::given(matchers::body_partial_json(json!({
+        "method": "eth_getBlockByHash",
+        "params": [grandparent_hash, false],
+    })))
+    .respond_with(move |request: &wiremock::Request| {
+        let body: Value = serde_json::from_slice(&request.body).unwrap();
+        ResponseTemplate::new(200).set_body_json(json!({
+            "jsonrpc": "2.0",
+            "id": body["id"],
+            "result": verified_grandparent,
+        }))
+    })
+    .with_priority(1)
+    .mount(&server.0)
+    .await;
+
+    let run = run_evme(&[
+        "replay",
+        target,
+        "--rpc",
+        &server.0.uri(),
+        "--rpc.no-cache-file",
+        "--rpc.max-retries",
+        "0",
+        "--override.spec",
+        "Satin",
+        "--json",
+    ]);
+    assert_eq!(run.code, 0, "{}{}", run.stderr, run.stdout);
+    let summary: Value = serde_json::from_str(&run.stdout).unwrap();
+    assert_eq!(summary["success"], true, "{summary}");
+
+    let mut expected_output = Vec::with_capacity(64);
+    expected_output.extend_from_slice(parent_hash.as_slice());
+    expected_output.extend_from_slice(grandparent_hash.as_slice());
+    assert_eq!(
+        summary["output"],
+        json!(alloy_primitives::hex::encode_prefixed(&expected_output)),
+        "BLOCKHASH(N-1) and BLOCKHASH(N-2) must observe hash-walked ancestors, not by-number headers"
+    );
+
+    let requests = server.0.received_requests().await.unwrap();
+    let grandparent_num_hex = format!("0x{:x}", BLOCK - 2);
+    let parent_num_hex = format!("0x{:x}", BLOCK - 1);
+    let mut parent_by_number_calls = 0usize;
+    let mut grandparent_by_hash_calls = 0usize;
+    for request in &requests {
+        let body: Value = serde_json::from_slice(&request.body).unwrap();
+        match body["method"].as_str() {
+            Some("eth_getBlockByNumber") if body["params"][0] == grandparent_num_hex => {
+                panic!("replay must never query ancestor N-2 by block number: {body}");
+            }
+            Some("eth_getBlockByNumber") if body["params"][0] == parent_num_hex => {
+                parent_by_number_calls += 1;
+            }
+            Some("eth_getBlockByHash") if body["params"][0] == json!(grandparent_hash) => {
+                grandparent_by_hash_calls += 1;
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(
+        parent_by_number_calls, 1,
+        "N-1 should be fetched by number only once during header verification"
+    );
+    assert_eq!(
+        grandparent_by_hash_calls, 1,
+        "N-2 must be fetched once by hash along the parentHash chain"
+    );
+}
+
+/// If walking `parentHash` encounters a missing ancestor or a header whose hash or number does
+/// not match the expected link, Satin replay must fail explicitly.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_replay_blockhash_fails_on_broken_ancestor_link() {
+    let reader = address!("0x9999999999999999999999999999999999999999");
+    let code = blockhash_ancestors_code();
+    let grandparent_hash = B256::repeat_byte(0x22);
+
+    for (label, bad_grandparent) in [
+        ("wrong_hash", Some((BLOCK - 2, B256::repeat_byte(0xee)))),
+        ("wrong_number", Some((BLOCK - 3, grandparent_hash))),
+        ("missing", None),
+    ] {
+        let mut recorded = read_block(fixtures(), BLOCK);
+        recorded.prestate.accounts.insert(
+            PAYER,
+            PreAccount { balance: U256::from(10u128.pow(18)), ..PreAccount::default() },
+        );
+        let code_hash = alloy_primitives::keccak256(&code);
+        let codes = HashMap::from_iter([(code_hash, code.clone())]);
+        recorded
+            .prestate
+            .accounts
+            .insert(reader, PreAccount { code_hash: Some(code_hash), ..Default::default() });
+        let target = "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff02";
+        recorded.block["transactions"] = json!([{
+            "type": "0x2",
+            "chainId": "0x10e6",
+            "nonce": "0x0",
+            "gas": "0x4c4b40",
+            "maxFeePerGas": "0xf4240",
+            "maxPriorityFeePerGas": "0x0",
+            "to": reader,
+            "value": "0x0",
+            "accessList": [],
+            "input": "0x",
+            "r": "0x64c0524917585101b7ffb2286d4de676ca987554b33c6f9a37e7ad7508bfbb84",
+            "s": "0xe5199cacc6e07c6a9f8c74d0b06f964ce36dd362199b1c19d866f1a6f52d510",
+            "yParity": "0x1",
+            "v": "0x1",
+            "hash": target,
+            "blockHash": recorded.block["hash"],
+            "blockNumber": recorded.block["number"],
+            "transactionIndex": "0x0",
+            "from": PAYER,
+            "gasPrice": "0xf4240",
+        }]);
+
+        let mut verified_parent = recorded.block.clone();
+        verified_parent["number"] = json!(format!("0x{:x}", BLOCK - 1));
+        verified_parent["hash"] = recorded.block["parentHash"].clone();
+        verified_parent["parentHash"] = json!(grandparent_hash);
+        verified_parent["transactions"] = json!([]);
+
+        let bad_result = bad_grandparent.map(|(num, hash)| {
+            let mut b = recorded.block.clone();
+            b["number"] = json!(format!("0x{num:x}"));
+            b["hash"] = json!(hash);
+            b["parentHash"] = json!(B256::repeat_byte(0x33));
+            b["transactions"] = json!([]);
+            b
+        });
+
+        let server = Server::with_codes(recorded, None, codes).await;
+
+        Mock::given(matchers::body_partial_json(json!({
+            "method": "eth_getBlockByNumber",
+            "params": [format!("0x{:x}", BLOCK - 1), false],
+        })))
+        .respond_with(move |request: &wiremock::Request| {
+            let body: Value = serde_json::from_slice(&request.body).unwrap();
+            ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0",
+                "id": body["id"],
+                "result": verified_parent,
+            }))
+        })
+        .with_priority(1)
+        .mount(&server.0)
+        .await;
+
+        Mock::given(matchers::body_partial_json(json!({
+            "method": "eth_getBlockByHash",
+            "params": [grandparent_hash, false],
+        })))
+        .respond_with(move |request: &wiremock::Request| {
+            let body: Value = serde_json::from_slice(&request.body).unwrap();
+            let result = bad_result.clone().unwrap_or(Value::Null);
+            ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0",
+                "id": body["id"],
+                "result": result,
+            }))
+        })
+        .with_priority(1)
+        .mount(&server.0)
+        .await;
+
+        let run = run_evme(&[
+            "replay",
+            target,
+            "--rpc",
+            &server.0.uri(),
+            "--rpc.no-cache-file",
+            "--rpc.max-retries",
+            "0",
+            "--override.spec",
+            "Satin",
+        ]);
+        assert_ne!(run.code, 0, "{label}: broken ancestor link must fail replay: {}", run.stdout);
+        assert!(
+            run.stderr.contains("Ancestor block"),
+            "{label}: expected ancestor diagnostic in stderr: {}",
+            run.stderr
+        );
+    }
 }

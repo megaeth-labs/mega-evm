@@ -12,6 +12,8 @@ use clap::Parser;
 use tracing::Level;
 use tracing_subscriber::{fmt, EnvFilter};
 
+use super::sanitize_terminal_text;
+
 /// Logging configuration arguments.
 #[derive(Debug, Clone, Default, Parser)]
 pub struct LogArgs {
@@ -73,7 +75,14 @@ impl LogArgs {
                         .init();
                 }
                 Err(e) => {
-                    eprintln!("Failed to create log file '{}': {}", log_file.display(), e);
+                    eprintln!(
+                        "{}",
+                        sanitize_terminal_text(&format!(
+                            "Failed to create log file '{}': {}",
+                            log_file.display(),
+                            e
+                        ))
+                    );
                     fmt()
                         .with_env_filter(filter)
                         .with_target(show_target)

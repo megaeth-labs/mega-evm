@@ -1,6 +1,7 @@
-use std::time::Instant;
+use std::{collections::HashMap, future::IntoFuture, sync::Mutex, time::Instant};
 
 use alloy_consensus::{BlockHeader, Transaction as _};
+use alloy_eips::BlockId;
 use alloy_primitives::{B256, U256};
 use alloy_provider::Provider;
 use alloy_rpc_types_eth::Block;
@@ -17,7 +18,8 @@ use mega_evm::{
         inspector::JournalExt,
         interpreter::{CallInputs, CallOutcome, CreateInputs, CreateOutcome, Interpreter},
         primitives::{eip4844, Address, Log},
-        DatabaseRef, Inspector,
+        state::{AccountInfo, Bytecode},
+        Database, DatabaseRef, Inspector,
     },
     BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutor, MegaEvmFactory, MegaSpecId,
 };
@@ -134,8 +136,9 @@ impl Cmd {
     /// Without an override this reads the chain id, and, only on a chain that switches engines
     /// at a scheduled timestamp, the timestamp of the block the replay runs the transaction in,
     /// from the source the replay itself reads, through a provider that persists nothing: the
-    /// transaction's block, or for a pending transaction the latest block, whose environment and
-    /// schedule the replay runs it in. Under `--genesis` a chain other than the file's is refused
+    /// transaction's block, or for a pending transaction the latest block. The selected engine
+    /// decides whether it can replay a pending transaction.
+    /// Under `--genesis` a chain other than the file's is refused
     /// once the chain id is read, before an engine is picked for it.
     pub async fn engine(&self) -> Result<Engine> {
         let tx_hash = self.tx_hash();
@@ -279,7 +282,7 @@ impl Cmd {
             info!(path = %path.display(), "Provider mode: offline replay from cache file");
             self.rpc_args.build_replay_provider().await?
         } else if let Some(rpc) = &self.rpc_args.rpc_url {
-            info!(rpc = %crate::redact_rpc_url(rpc), "Provider mode: online RPC");
+            info!(rpc = %crate::display_rpc_url(rpc), "Provider mode: online RPC");
             self.rpc_args.build_provider().await?
         } else {
             return Err(ReplayError::Other(
@@ -307,19 +310,11 @@ impl Cmd {
             .ok_or(ReplayError::TransactionNotFound(tx_hash))?;
         debug!(block_number = ?target_tx.block_number, "Transaction found");
 
-        let (state_base_block, block_number, is_pending) = if let Some(n) = target_tx.block_number {
-            (n - 1, n, false)
-        } else {
-            let latest = provider
-                .get_block_number()
-                .await
-                .map_err(|e| ReplayError::RpcError(format!("RPC transport error: {e}")))?;
-            (latest, latest, true)
-        };
+        let block_number = mined_block_number(tx_hash, target_tx.block_number)?;
+        let state_base_block = block_number - 1;
         debug!(
             state_base_block = state_base_block,
             block = block_number,
-            is_pending,
             "Block numbers determined",
         );
 
@@ -333,6 +328,18 @@ impl Cmd {
             .await
             .map_err(|e| ReplayError::RpcError(format!("RPC transport error: {e}")))?
             .ok_or(ReplayError::BlockNotFound(block_number))?;
+
+        if parent_block.number() != state_base_block ||
+            parent_block.hash() != block.header.parent_hash()
+        {
+            return Err(ReplayError::Other(format!(
+                "parent block does not match block {block_number}: expected \
+                 {state_base_block} ({}), fetched {} ({})",
+                block.header.parent_hash(),
+                parent_block.number(),
+                parent_block.hash()
+            )));
+        }
 
         let preceding_tx_hashes = preceding_transactions(
             tx_hash,
@@ -426,14 +433,22 @@ impl Cmd {
             self.limits_override.as_ref().map(|limits| satin_limits(Some(limits))).transpose()?;
         debug!(chain_id = ctx.chain_id, spec = %MegaSpecId::SATIN, "Chain configuration");
 
-        info!(fork_block = ctx.parent_block.header.number(), "Forking state from parent block",);
-        let mut database = EvmeState::new_forked(
+        // Bind pre-state reads to the verified parent hash with `requireCanonical: true`
+        // (EIP-1898) rather than its height, and resolve `BLOCKHASH` queries by walking
+        // `parentHash` links from that verified parent instead of querying `eth_getBlockByNumber`.
+        let parent_block_id = BlockId::hash_canonical(ctx.parent_block.hash());
+        info!(
+            fork_block = ctx.parent_block.header.number(),
+            fork_block_hash = %ctx.parent_block.hash(),
+            "Forking state from verified parent block",
+        );
+        let state_db = EvmeState::new_forked_at(
             provider.clone(),
-            Some(ctx.parent_block.header.number()),
+            parent_block_id,
             Default::default(),
             Default::default(),
-        )
-        .await?;
+        )?;
+        let mut database = VerifiedReplayDb::new(state_db, provider.clone(), &ctx.parent_block);
 
         let block_env = retrieve_block_env(&ctx.block)?;
         trace!(?block_env, "Block environment built");
@@ -647,6 +662,156 @@ impl Cmd {
     }
 }
 
+/// Forked replay database whose `BLOCKHASH` reads are bound to the verified parent block's
+/// `parentHash` chain rather than fetched by block number from `AlloyDB`.
+#[derive(Debug)]
+struct VerifiedReplayDb<P>
+where
+    P: Provider<op_alloy_network::Optimism>,
+{
+    state: EvmeState<op_alloy_network::Optimism, P>,
+    ancestors: Mutex<VerifiedAncestorChain<P>>,
+}
+
+impl<P> VerifiedReplayDb<P>
+where
+    P: Provider<op_alloy_network::Optimism>,
+{
+    fn new(
+        state: EvmeState<op_alloy_network::Optimism, P>,
+        provider: P,
+        parent_block: &Block<Transaction>,
+    ) -> Self {
+        Self { state, ancestors: Mutex::new(VerifiedAncestorChain::new(provider, parent_block)) }
+    }
+}
+
+impl<P> Database for VerifiedReplayDb<P>
+where
+    P: Provider<op_alloy_network::Optimism> + std::fmt::Debug,
+{
+    type Error = crate::common::EvmeError;
+
+    fn basic(&mut self, address: Address) -> std::result::Result<Option<AccountInfo>, Self::Error> {
+        self.state.basic(address)
+    }
+
+    fn code_by_hash(&mut self, code_hash: B256) -> std::result::Result<Bytecode, Self::Error> {
+        self.state.code_by_hash(code_hash)
+    }
+
+    fn storage(&mut self, address: Address, index: U256) -> std::result::Result<U256, Self::Error> {
+        self.state.storage(address, index)
+    }
+
+    fn block_hash(&mut self, number: u64) -> std::result::Result<B256, Self::Error> {
+        self.ancestors.lock().expect("ancestor chain lock poisoned").resolve(number)
+    }
+}
+
+impl<P> DatabaseRef for VerifiedReplayDb<P>
+where
+    P: Provider<op_alloy_network::Optimism> + std::fmt::Debug,
+{
+    type Error = crate::common::EvmeError;
+
+    fn basic_ref(&self, address: Address) -> std::result::Result<Option<AccountInfo>, Self::Error> {
+        self.state.basic_ref(address)
+    }
+
+    fn code_by_hash_ref(&self, code_hash: B256) -> std::result::Result<Bytecode, Self::Error> {
+        self.state.code_by_hash_ref(code_hash)
+    }
+
+    fn storage_ref(&self, address: Address, index: U256) -> std::result::Result<U256, Self::Error> {
+        self.state.storage_ref(address, index)
+    }
+
+    fn block_hash_ref(&self, number: u64) -> std::result::Result<B256, Self::Error> {
+        self.ancestors.lock().expect("ancestor chain lock poisoned").resolve(number)
+    }
+}
+
+/// Lazily walks `parentHash` links from the verified parent block via `eth_getBlockByHash`,
+/// checking each fetched header's hash and number so `BLOCKHASH` can never mix forks.
+#[derive(Debug)]
+struct VerifiedAncestorChain<P> {
+    provider: P,
+    runtime: tokio::runtime::Handle,
+    parent_number: u64,
+    frontier_number: u64,
+    frontier_parent_hash: B256,
+    verified: HashMap<u64, B256>,
+}
+
+impl<P> VerifiedAncestorChain<P>
+where
+    P: Provider<op_alloy_network::Optimism>,
+{
+    fn new(provider: P, parent_block: &Block<Transaction>) -> Self {
+        let parent_number = parent_block.number();
+        let parent_hash = parent_block.hash();
+        let mut verified = HashMap::new();
+        verified.insert(parent_number, parent_hash);
+        Self {
+            provider,
+            runtime: tokio::runtime::Handle::current(),
+            parent_number,
+            frontier_number: parent_number,
+            frontier_parent_hash: parent_block.header.parent_hash(),
+            verified,
+        }
+    }
+
+    fn resolve(&mut self, number: u64) -> crate::common::Result<B256> {
+        if let Some(&hash) = self.verified.get(&number) {
+            return Ok(hash);
+        }
+        if number > self.parent_number {
+            return Err(crate::common::EvmeError::RpcError(format!(
+                "Ancestor block height {number} is not before verified parent {}",
+                self.parent_number,
+            )));
+        }
+        if self.parent_number - number >= 256 {
+            return Err(crate::common::EvmeError::RpcError(format!(
+                "Ancestor block height {number} is outside the 256-block BLOCKHASH window of \
+                 parent {}",
+                self.parent_number,
+            )));
+        }
+        while self.frontier_number > number {
+            let expected_number = self.frontier_number - 1;
+            let expected_hash = self.frontier_parent_hash;
+            let fetched = tokio::task::block_in_place(|| {
+                self.runtime.block_on(self.provider.get_block_by_hash(expected_hash).into_future())
+            })
+            .map_err(|e| {
+                crate::common::EvmeError::RpcError(format!(
+                    "Failed to fetch ancestor block {expected_number} ({expected_hash}): {e}"
+                ))
+            })?
+            .ok_or_else(|| {
+                crate::common::EvmeError::RpcError(format!(
+                    "Ancestor block {expected_number} ({expected_hash}) not found"
+                ))
+            })?;
+            if fetched.number() != expected_number || fetched.hash() != expected_hash {
+                return Err(crate::common::EvmeError::RpcError(format!(
+                    "Ancestor block mismatch at height {expected_number}: expected \
+                     {expected_number} ({expected_hash}), fetched {} ({})",
+                    fetched.number(),
+                    fetched.hash(),
+                )));
+            }
+            self.verified.insert(expected_number, expected_hash);
+            self.frontier_number = expected_number;
+            self.frontier_parent_hash = fetched.header.parent_hash();
+        }
+        Ok(*self.verified.get(&number).expect("verified chain reached target height"))
+    }
+}
+
 /// What the preceding-transaction loop does with an execution error.
 #[derive(Debug)]
 enum PredecessorError {
@@ -666,6 +831,19 @@ fn predecessor_error(error: &BlockExecutionError) -> PredecessorError {
         PredecessorError::Skip
     } else {
         PredecessorError::Propagate(ReplayError::Other(format!("Block execution error: {error}")))
+    }
+}
+
+/// A historical replay needs a mined block and its predecessor.
+fn mined_block_number(hash: B256, number: Option<u64>) -> Result<u64> {
+    match number {
+        Some(0) => Err(ReplayError::Other(format!(
+            "transaction {hash} is in genesis; replay requires a parent block"
+        ))),
+        Some(number) => Ok(number),
+        None => Err(ReplayError::Other(format!(
+            "transaction {hash} is pending; replay requires a mined transaction"
+        ))),
     }
 }
 
@@ -866,6 +1044,14 @@ mod tests {
             ),
             other => panic!("unexpected error variant: {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_replay_requires_a_mined_block_with_a_predecessor() {
+        let hash = B256::repeat_byte(1);
+        assert!(mined_block_number(hash, None).unwrap_err().to_string().contains("pending"));
+        assert!(mined_block_number(hash, Some(0)).unwrap_err().to_string().contains("genesis"));
+        assert_eq!(mined_block_number(hash, Some(1)).unwrap(), 1);
     }
 
     #[test]
