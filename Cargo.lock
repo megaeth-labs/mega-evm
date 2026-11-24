@@ -3157,6 +3157,7 @@ version = "1.7.3"
 dependencies = [
  "alloy-primitives",
  "alloy-sol-types",
+ "anyhow",
  "semver 1.0.28",
  "serde",
  "serde_json",
@@ -5168,6 +5169,7 @@ name = "system-contract-artifacts"
 version = "1.7.3"
 dependencies = [
  "alloy-primitives",
+ "anyhow",
  "semver 1.0.28",
  "serde",
  "serde_json",

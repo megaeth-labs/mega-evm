@@ -1,10 +1,9 @@
 //! Command-line checks for the generated system contract sources.
 
-use std::{error::Error, fs, path::Path, process::Command};
+use std::{fs, path::Path, process::Command};
 
+use anyhow::Result;
 use tempfile::TempDir;
-
-type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
 const ORACLE_SOURCE: &str = "crates/system-contracts/src/generated/oracle_artifacts.rs";
 

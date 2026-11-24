@@ -1,32 +1,19 @@
 //! Developer commands for attesting Solidity bytecode and regenerating Rust sources.
 
-use std::{
-    collections::BTreeSet,
-    env, fs,
-    path::Path,
-    process::{self, Command},
-};
+use std::{collections::BTreeSet, env, fs, path::Path, process::Command};
 
+use anyhow::{bail, ensure, Context, Result};
 use walkdir::WalkDir;
 
 #[path = "../../../crates/system-contracts/artifact_checks.rs"]
 mod artifact_checks;
 mod storage_layout;
 
-use artifact_checks::{
-    check_generated, ensure, generated_sources, with_context, ContractArtifact, Result, CONTRACTS,
-};
+use artifact_checks::{check_generated, generated_sources, ContractArtifact, CONTRACTS};
 
 const EXPECTED_FOUNDRY_VERSION: &str = "1.7.1";
 
-fn main() {
-    if let Err(err) = run() {
-        eprintln!("Error: {err}");
-        process::exit(1);
-    }
-}
-
-fn run() -> Result<()> {
+fn main() -> Result<()> {
     let crate_dir = Path::new("crates/system-contracts");
     match env::args().nth(1).as_deref() {
         Some("attest") => {
@@ -38,13 +25,12 @@ fn run() -> Result<()> {
             let sources = generated_sources(crate_dir)?;
             fs::create_dir_all(crate_dir.join("src/generated"))?;
             for (path, content) in sources {
-                fs::write(&path, content).map_err(|err| {
-                    with_context(format_args!("Could not write {}", path.display()), err)
-                })?;
+                fs::write(&path, content)
+                    .with_context(|| format!("Could not write {}", path.display()))?;
             }
             Ok(())
         }
-        _ => Err("Usage: system-contract-artifacts <attest [crate-dir]|check|generate>".into()),
+        _ => bail!("Usage: system-contract-artifacts <attest [crate-dir]|check|generate>"),
     }
 }
 
@@ -65,9 +51,7 @@ fn attest(crate_dir: &Path) -> Result<()> {
             .args(["script", &script, "--sig", "run()"])
             .current_dir(project.path())
             .status()
-            .map_err(|err| {
-                with_context(format_args!("Could not execute forge script for {name}"), err)
-            })?;
+            .with_context(|| format!("Could not execute forge script for {name}"))?;
         ensure!(status.success(), "Forge script for {name} failed: {status}");
 
         let compiled =
@@ -93,11 +77,8 @@ fn attest(crate_dir: &Path) -> Result<()> {
 }
 
 fn check_forge_version() -> Result<()> {
-    let forge = Command::new("forge").arg("--version").output().map_err(|err| {
-        with_context(
-            format_args!("Could not run forge. Install Foundry v{EXPECTED_FOUNDRY_VERSION} and put forge on PATH."),
-            err,
-        )
+    let forge = Command::new("forge").arg("--version").output().with_context(|| {
+        format!("Could not run forge. Install Foundry v{EXPECTED_FOUNDRY_VERSION} and put forge on PATH.")
     })?;
     ensure!(forge.status.success(), "forge --version failed: {}", forge.status);
 
@@ -126,18 +107,15 @@ fn check_inventory(crate_dir: &Path) -> Result<()> {
     ] {
         let directory = crate_dir.join(directory);
         let mut names = BTreeSet::new();
-        for entry in fs::read_dir(&directory).map_err(|err| {
-            with_context(
-                format_args!("Could not list {} for attestation", directory.display()),
-                err,
-            )
-        })? {
+        for entry in fs::read_dir(&directory)
+            .with_context(|| format!("Could not list {} for attestation", directory.display()))?
+        {
             let entry = entry?;
             let filename = entry.file_name();
             let filename = filename.to_string_lossy();
             if filename.ends_with(extension) {
                 let path = entry.path();
-                let name = filename.strip_suffix(suffix).ok_or_else(|| {
+                let name = filename.strip_suffix(suffix).with_context(|| {
                     format!(
                         "Unexpected attestation input {}; expected suffix {suffix}",
                         path.display()
@@ -168,9 +146,7 @@ fn stage_foundry_project(source: &Path, scratch: &Path) -> Result<()> {
         let root = source.join(tree);
         fs::create_dir_all(scratch.join(tree))?;
         for entry in WalkDir::new(&root).min_depth(1) {
-            let entry = entry.map_err(|err| {
-                with_context(format_args!("Could not walk {}", root.display()), err)
-            })?;
+            let entry = entry.with_context(|| format!("Could not walk {}", root.display()))?;
             let destination = scratch.join(entry.path().strip_prefix(source)?);
             if entry.file_type().is_dir() {
                 fs::create_dir(&destination)?;

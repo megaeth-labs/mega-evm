@@ -1,19 +1,12 @@
 //! Checks the artifacts and generated Rust sources when they are shipped together.
 
-use std::{path::Path, process};
+use std::path::Path;
+
+use anyhow::{ensure, Result};
 
 mod artifact_checks;
 
-use artifact_checks::{ensure, Result};
-
-fn main() {
-    if let Err(err) = run() {
-        eprintln!("Error: {err}");
-        process::exit(1);
-    }
-}
-
-fn run() -> Result<()> {
+fn main() -> Result<()> {
     let crate_dir = Path::new(".");
     let artifacts = crate_dir.join("artifacts");
     if artifacts.try_exists()? {
