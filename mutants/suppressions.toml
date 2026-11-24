@@ -29,11 +29,14 @@
 #                         checking the justification still holds.
 #
 # Every entry also carries:
-#   category = "equivalent" | "dead"
+#   category = "equivalent" | "dead" | "non-terminating"
 #     "equivalent" -> reachable code, but the mutation cannot change observable
 #                     behavior on any valid input.
 #     "dead"       -> the mutated code is unreachable (zero call sites / an
 #                     unsatisfiable bound / not reachable from the public API).
+#     "non-terminating" -> a line entry for a timed-out mutant that can never
+#                     finish (a loop it stops advancing): every test that reaches
+#                     it hangs, so no test can record it as caught.
 #   justification  -> the proof; reviewer -> who signed off.
 #
 # Inline `#[mutants::skip]` on a function is also honored natively by
@@ -304,6 +307,16 @@ line = 531
 column = 37
 mutant = "replace < with <= in AdditionalLimit::first_frame_pools"
 justification = "At the only different input the remaining budget equals the cap, so both branches set the same budget."
+reviewer = "RealiCZ"
+
+[[suppress]]
+kind = "line"
+category = "non-terminating"
+file = "crates/mega-evm/src/limit/limit.rs"
+line = 532
+column = 19
+mutant = "replace += with *= in AdditionalLimit::first_frame_pools"
+justification = "The mutant never terminates: `index *= 1` leaves the loop index at zero, so the loop over the counted limits never ends and every non-exempt transaction hangs before its first frame. A test can only record it as a timeout (the gate's re-check alone times out again), never as caught or missed."
 reviewer = "RealiCZ"
 
 [[suppress]]
