@@ -299,7 +299,7 @@ RPC Options:
           Capture JSON-RPC responses to a single file for later offline replay. Requires `--rpc`. If the file already exists, its entries are loaded and merged; missing entries are fetched via the RPC endpoint and persisted on clean exit. Cannot be used with --rpc.replay-file, --rpc.cache-dir, --rpc.clear-cache, --rpc.no-cache-file, or --rpc.cache-max-entries
 
       --rpc.replay-file <REPLAY_FILE>
-          Replay from a previously captured JSON-RPC fixture file (offline). Cannot be used with `--rpc`. Any RPC miss is a hard error; the file is never written. Cannot be used with --rpc.capture-file, --rpc.cache-dir, --rpc.clear-cache, --rpc.no-cache-file, or --rpc.cache-max-entries
+          Replay from a previously captured JSON-RPC fixture file (offline). Cannot be used with `--rpc`. A request missing from the file fails locally without reaching the network. The file is read-only. Cannot be used with --rpc.capture-file, --rpc.cache-dir, --rpc.clear-cache, --rpc.no-cache-file, or --rpc.cache-max-entries
 
       --rpc.cache-max-entries <cache_max_entries>
           Maximum number of items in the in-memory RPC LRU cache (and therefore what gets persisted to the cache file). `0` = effectively unlimited, which caps at 1,048,576 entries so a long-running process cannot grow without bound. The ceiling is not an allocation: memory grows with the entries actually cached, so a high value costs nothing until that many responses arrive. Default is `0`
