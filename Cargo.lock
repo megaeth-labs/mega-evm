@@ -3059,7 +3059,7 @@ dependencies = [
 
 [[package]]
 name = "mega-evm"
-version = "1.7.1"
+version = "1.7.3"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -3093,7 +3093,7 @@ dependencies = [
 
 [[package]]
 name = "mega-evme"
-version = "1.7.1"
+version = "1.7.3"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -3133,7 +3133,7 @@ dependencies = [
 
 [[package]]
 name = "mega-state-test"
-version = "1.7.1"
+version = "1.7.3"
 dependencies = [
  "alloy-eips",
  "alloy-primitives",
@@ -3153,10 +3153,11 @@ dependencies = [
 
 [[package]]
 name = "mega-system-contracts"
-version = "1.7.1"
+version = "1.7.3"
 dependencies = [
  "alloy-primitives",
  "alloy-sol-types",
+ "anyhow",
  "semver 1.0.28",
  "serde",
  "serde_json",
@@ -3164,7 +3165,7 @@ dependencies = [
 
 [[package]]
 name = "mega-t8n"
-version = "1.7.1"
+version = "1.7.3"
 dependencies = [
  "alloy-consensus",
  "alloy-primitives",
@@ -4588,9 +4589,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.42"
+version = "0.23.43"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3c54fcab019b409d04215d3a17cb438fd7fbf192ee61461f20f4fe18704bc138"
+checksum = "0283386ce02abc0151e1761d08802dfe86c173b0b494af5cbc086574e453da06"
 dependencies = [
  "aws-lc-rs",
  "once_cell",
@@ -5041,7 +5042,7 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
 name = "state-test"
-version = "1.7.1"
+version = "1.7.3"
 dependencies = [
  "clap",
  "mega-evm",
@@ -5164,6 +5165,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "system-contract-artifacts"
+version = "1.7.3"
+dependencies = [
+ "alloy-primitives",
+ "anyhow",
+ "semver 1.0.28",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "walkdir",
+]
+
+[[package]]
 name = "tap"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5176,7 +5190,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",

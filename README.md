@@ -15,32 +15,21 @@ A specialized Ethereum Virtual Machine (EVM) implementation tailored for MegaETH
 
 ## Installation
 
-Install the CLI tool from crates.io:
+The Rust build embeds checked-in system-contract bytecode.
+
+From GitHub:
 
 ```bash
-cargo install mega-evme --locked
+cargo install --git https://github.com/megaeth-labs/mega-evm --locked mega-evme
 ```
 
-The `--locked` flag ensures the exact tested dependency versions are used.
-
-Or build from source:
+From a Git checkout:
 
 ```bash
-cargo build --release -p mega-evme
+git clone --recursive https://github.com/megaeth-labs/mega-evm
+cd mega-evm
+cargo install --locked --path bin/mega-evme
 ```
-
-### Prebuilt binary
-
-Every release also attaches a prebuilt `mega-evme` (Linux x86_64, built on `ubuntu-24.04`) and a `SHA256SUMS` file to its [GitHub Release](https://github.com/megaeth-labs/mega-evm/releases).
-Download both, verify the checksum, and make the binary executable:
-
-```bash
-sha256sum --check --ignore-missing SHA256SUMS
-chmod +x mega-evme
-./mega-evme --version
-```
-
-The same binary is published to the MegaETH artifact registry for internal use.
 
 ## Development
 
@@ -62,6 +51,18 @@ git submodule update --init --recursive
 ```bash
 cargo build
 ```
+
+Cargo checks the system-contract artifacts against the checked-in Rust constants in a repository checkout.
+The check is read-only.
+Published crates use the same embedded constants.
+
+### System contracts
+
+Run `mise run system-contracts:attest` with Foundry v1.7.1 and initialized submodules.
+Attestation checks the contract inventory, reproduces the latest deployed bytecode with the pinned Osaka EVM target, and checks the SequencerRegistry storage layout.
+After updating versioned artifacts and their latest aliases, run `mise run system-contracts:generate` to regenerate the Rust constants.
+The required `lint` CI job runs attestation, checks that changing a Solidity version in a temporary copy makes attestation fail, and verifies that the Rust constants match the artifacts.
+Rust tests pin each versioned artifact's code hash and the version selected by each latest alias.
 
 ### Testing
 

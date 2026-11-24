@@ -9,6 +9,8 @@ repository.workspace = true
 description = "MegaETH executable EVM"
 readme = "README.md"
 default-run = "mega-evme"
+# The mainnet replay corpus is larger than crates.io accepts for a crate.
+exclude = ["tests/fixtures/corpus/", "tests/replay_corpus.rs"]
 
 [lints]
 workspace = true

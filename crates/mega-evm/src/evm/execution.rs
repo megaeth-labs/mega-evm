@@ -1151,6 +1151,8 @@ where
                 MegaHaltReason::Base(reason)
             }
         });
+        // The run ends here on the result path; `catch_error` is the other end.
+        evm.ctx().on_tx_end();
         // revm 40 attaches journal logs to Success / Revert / Halt alike. Pre-revm-40, Halt had no
         // logs field, so a failed receipt was structurally empty. Restore that invariant at the
         // single result seam shared by transact, inspect, and system-call entry points. Status,
@@ -1163,7 +1165,28 @@ where
         evm: &mut Self::Evm,
         error: Self::Error,
     ) -> Result<ExecutionResult<Self::HaltReason>, Self::Error> {
-        let result = self.op.catch_error(evm, error)?;
+        // A database error a load stashed in the context is taken only when the result is built,
+        // after post-execution. A run that fails before that, as when post-execution fails first
+        // with an error of its own, ends here with it still stashed, and the next transaction on
+        // this EVM would fail with it. The error this run reports is `error`; neither op-revm nor
+        // revm clears the slot here. Clear it before op-revm's failed-deposit handling, whose own
+        // errors would otherwise return before the clear.
+        *evm.ctx().error() = Ok(());
+        let result = self.op.catch_error(evm, error);
+        if result.is_err() {
+            // op-revm reverts and commits a failed deposit itself, but leaves any other failed
+            // call's journal as it was, including writes made outside its frames (a transaction's
+            // nonce bump and fee) and those of frames that completed before the error. Revert them
+            // here, as revm's mainnet handler does, so no entry point can hand them on: one that
+            // finalizes would report them as the next call's, and the `_one` entry points keep the
+            // journal for the caller's next call. A pre-REX5 keyless deployment's sandbox merge
+            // writes the state map without journal entries and is beyond this revert; only a
+            // finalize drops it.
+            evm.ctx().journal_mut().discard_tx();
+        }
+        // The run ends here on the error path, with a result (a failed deposit) or without one.
+        evm.ctx().on_tx_end();
+        let result = result?;
         // Belt-and-braces: op-revm already reverts the journal to the default checkpoint before
         // building FailedDeposit, so logs are already empty. Clearing is idempotent.
         Ok(strip_logs_if_not_success(result.map_haltreason(MegaHaltReason::Base)))

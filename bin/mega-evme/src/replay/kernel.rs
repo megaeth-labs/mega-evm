@@ -165,9 +165,9 @@ pub(super) struct MinedBlockRun<'a, H, I> {
     /// [`WholeBlock`] only when it committed this many, which a walk over a
     /// prefix of the body never does.
     pub(super) body_len: usize,
-    /// Hashes whose results the driver wants reported. The kernel stops once the
+    /// Body indexes whose results the driver wants reported. The kernel stops once the
     /// last of them has committed.
-    pub(super) targets: &'a HashSet<B256>,
+    pub(super) targets: &'a HashSet<usize>,
 }
 
 /// A failure that stopped the block before any transaction ran.
@@ -255,6 +255,8 @@ pub(super) struct TargetExecution<'a, DB> {
     pub(super) db: &'a DB,
     /// Hash the block body listed this transaction under.
     pub(super) tx_hash: B256,
+    /// Position of the transaction in the block body.
+    pub(super) tx_index: usize,
     /// The transaction that just executed, as the endpoint served it.
     pub(super) tx: &'a Transaction,
     /// How many block hashes this transaction read (the record is cleared before
@@ -283,12 +285,8 @@ pub(super) enum LoopOutcome {
     Aborted {
         /// Why the walk stopped.
         error: ReplayError,
-        /// The transaction whose iteration raised it. This is attribution by
-        /// construction rather than by error introspection: some rejections
-        /// raised *about* a transaction do not embed its hash in the error (the
-        /// block-gas admission check, for one), and an error that does name a
-        /// hash may name a different transaction than the one being walked.
-        tx_hash: B256,
+        /// Body index of the transaction whose iteration raised the error.
+        tx_index: usize,
     },
 }
 
@@ -344,7 +342,7 @@ pub(super) enum FinishOutcome<D> {
         /// Why the block could not be finished.
         error: ReplayError,
         /// Targets that had executed, in commit order.
-        executed: Vec<B256>,
+        executed: Vec<(B256, usize)>,
     },
 }
 
@@ -377,7 +375,7 @@ pub(super) enum TargetHarvest<D> {
         /// Hash of the target left without a receipt.
         tx_hash: B256,
         /// Index of the target in the block body.
-        tx_index: u64,
+        tx_index: usize,
     },
 }
 
@@ -386,7 +384,7 @@ pub(super) struct HarvestedTarget<D> {
     /// Hash of the target.
     pub(super) tx_hash: B256,
     /// Index of the target in the block body.
-    pub(super) tx_index: u64,
+    pub(super) tx_index: usize,
     /// What the execution produced.
     pub(super) exec_result: ExecutionResult<MegaHaltReason>,
     /// Wall-clock time the execution took.
@@ -408,7 +406,7 @@ pub(super) struct HarvestedTarget<D> {
 /// A target that executed, awaiting the receipt harvested by `finish()`.
 struct PendingTarget<D> {
     tx_hash: B256,
-    tx_index: u64,
+    tx_index: usize,
     /// Position of this transaction among the block's committed transactions.
     commit_index: usize,
     exec_result: ExecutionResult<MegaHaltReason>,
@@ -504,12 +502,7 @@ where
     // committed we can stop — later non-targets are not needed for receipts or
     // fixtures, and requiring them would force incomplete offline captures to
     // abort after a successful dump target.
-    let last_target_index = body
-        .iter()
-        .enumerate()
-        .filter(|(_, entry)| targets.contains(&entry.tx_hash()))
-        .map(|(i, _)| i)
-        .max();
+    let last_target_index = targets.iter().copied().max();
     let mut pending: Vec<PendingTarget<K::Draft>> = Vec::new();
     let mut committed = 0usize;
     // The authenticated EIP-2718 encoding of every transaction walked, in body
@@ -521,7 +514,7 @@ where
     // cannot be replayed faithfully. The abort is recorded here, inside the
     // iteration that raised it, so the transaction it is attributed to is the
     // one being walked rather than one recovered from the error afterwards.
-    let mut aborted: Option<(B256, ReplayError)> = None;
+    let mut aborted: Option<(usize, ReplayError)> = None;
     for (tx_index, entry) in body.iter().enumerate() {
         let tx_hash = entry.tx_hash();
         let step: Result<()> = async {
@@ -572,7 +565,7 @@ where
                 .map_err(|message| ReplayError::BlockBodyTransactionFetch { tx_hash, message })?;
             transactions.push(encoded);
 
-            if !targets.contains(&tx_hash) {
+            if !targets.contains(&tx_index) {
                 // Not reported on, so it only has to move the state the way the
                 // chain did: it executes exactly as it was mined.
                 let outcome = block_executor
@@ -608,6 +601,7 @@ where
                 TargetExecution {
                     db: block_executor.evm().db_ref(),
                     tx_hash,
+                    tx_index,
                     tx,
                     accessed_block_hash_count: accessed_block_hashes.len(),
                     result_and_state: &outcome.inner.result_and_state,
@@ -624,7 +618,7 @@ where
 
             pending.push(PendingTarget {
                 tx_hash,
-                tx_index: tx_index as u64,
+                tx_index,
                 commit_index,
                 exec_result,
                 exec_time: start.elapsed(),
@@ -640,7 +634,7 @@ where
         .await;
 
         if let Err(error) = step {
-            aborted = Some((tx_hash, error));
+            aborted = Some((tx_index, error));
             break;
         }
         // Stop once every requested target that can run has committed: trailing
@@ -704,7 +698,7 @@ where
                     target.gas_used,
                     Some(target.tx_hash),
                     Some(identity.hash),
-                    target.tx_index,
+                    target.tx_index as u64,
                     first_log_index,
                 );
                 harvested.push(TargetHarvest::Receipt(Box::new(HarvestedTarget {
@@ -730,12 +724,12 @@ where
         // and every draft is dropped without being published.
         Err(e) => FinishOutcome::Failed {
             error: ReplayError::BlockExecutionError(e),
-            executed: pending.into_iter().map(|target| target.tx_hash).collect(),
+            executed: pending.into_iter().map(|target| (target.tx_hash, target.tx_index)).collect(),
         },
     };
 
     let loop_outcome = match aborted {
-        Some((tx_hash, error)) => LoopOutcome::Aborted { error, tx_hash },
+        Some((tx_index, error)) => LoopOutcome::Aborted { error, tx_index },
         None => LoopOutcome::Completed(CleanRun(())),
     };
 
@@ -860,7 +854,7 @@ mod tests {
             .map(BodyEntry::Listed)
             .collect();
         body.push(target);
-        let targets: HashSet<B256> = HashSet::from([TARGET]);
+        let targets = HashSet::from([body.len() - 1]);
 
         let chain_id = 4326;
         let chain = get_hardfork_config(chain_id);
@@ -948,12 +942,13 @@ mod tests {
         let (block, parent) = target_block(&provider).await;
 
         let listed = run_target(&provider, &block, &parent, BodyEntry::Listed(TARGET)).await;
+        let harvested_index = block.transactions.hashes().position(|hash| hash == TARGET).unwrap();
         match listed.loop_outcome {
             LoopOutcome::Aborted {
                 error: ReplayError::BlockBodyTransactionFetch { .. },
-                tx_hash,
+                tx_index,
             } => {
-                assert_eq!(tx_hash, TARGET, "the abort is the target's own");
+                assert_eq!(tx_index, harvested_index, "the abort is the target's own");
             }
             LoopOutcome::Aborted { error, .. } => panic!("unexpected abort: {error}"),
             LoopOutcome::Completed(_) => panic!("the listed target must be looked up"),

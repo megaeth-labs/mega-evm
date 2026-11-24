@@ -1,7 +1,8 @@
 name: Mutation Testing
 
 # All mutation-testing CI lives here. Three concerns, one file:
-#   * cargo-mutants gate   — generic operators (diff-scoped on PRs, full nightly)
+#   * cargo-mutants gate   — generic operators (diff-scoped on PRs, full nightly
+#                            in four shards)
 #   * spec-gate            — universalmutator + comby custom operators for
 #                            backward-compat spec gates (diff PR + nightly sweep)
 #   * suppression hygiene  — flag suppressions that no longer match a live mutant
@@ -26,20 +27,52 @@ permissions:
 
 jobs:
   # ── cargo-mutants: diff-scoped gate on PRs, full-crate run nightly ──────────
+  # A PR runs one diff-scoped job. The full-crate run (nightly, dispatch) does not
+  # fit in one job, so it runs as four fresh shards (`cargo mutants --shard k/4`:
+  # consecutive slices of the mutant list) and `cargo-mutants-full` scores them
+  # together against the full inventory, so a missing or stopped shard shows as
+  # untested mutants rather than vanishing from the report.
   cargo-mutants:
-    name: cargo-mutants gate
+    name: ${{ matrix.shard == 'diff' && 'cargo-mutants gate' || format('cargo-mutants shard {0}', matrix.shard) }}
     runs-on: ubuntu-24.04
-    # Diff-scoped PR runs finish in minutes; the nightly full-crate run needs
-    # much longer headroom.
+    # Diff-scoped PR runs finish in minutes; a full-crate shard needs much longer
+    # headroom. MUTANTS_BUDGET (below) stops the run itself before this limit, so
+    # a run that cannot finish still scores and uploads its results.
     timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(github.event_name == 'pull_request' && '["diff"]' || '["0/4", "1/4", "2/4", "3/4"]') }}
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
           fetch-depth: 0 # need base history for the diff
 
+      - name: Test the scorer
+        # The PR job scores its own run; the shards' runs are scored, and the
+        # scorer tested, once in cargo-mutants-full.
+        if: github.event_name == 'pull_request'
+        run: python3 scripts/test_mutation_gate.py
+
+      - name: Decide whether the run builds
+        # A PR that changes no mutatable source has nothing to mutate, and the
+        # driver exits before its warm build. The Rust cache is then neither
+        # restored (nothing would use it) nor saved: the save would store a target
+        # with nothing compiled in it, and a later run of this PR that hit that
+        # entry would rebuild every dependency without ever saving a better one.
+        id: scope
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            scripts/mutation_test.sh changed "${{ github.event.pull_request.base.sha }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "mutate=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: ${{ steps.scope.outputs.mutate }}
 
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
@@ -54,28 +87,39 @@ jobs:
           # generated mutants, which would silently shift the gate's baseline.
           tool: cargo-mutants@27.1.0
 
-      - name: Warm build cache
-        # Compile deps + test binaries into ./target so (a) Swatinem/rust-cache
+      - name: Run mutation testing
+        # On a PR: mutate only the changed lines (fast gate). On manual dispatch
+        # there is no PR base, so run the whole crate (sharded) as an on-demand
+        # baseline instead of feeding an empty base into `diff` mode (which would fail).
+        #
+        # The driver first builds the tests into ./target, so (a) Swatinem/rust-cache
         # (bundled in setup-rust-toolchain) caches the compiled dependencies, and
         # (b) cargo-mutants' `copy_target` seeds each scratch build from this warm
         # target — so per-mutant builds skip recompiling dependencies.
-        run: cargo nextest run -p mega-evm --all-features --no-run
-
-      - name: Run mutation testing
-        # On a PR: mutate only the changed lines (fast gate). On manual dispatch
-        # there is no PR base, so run the whole crate as an on-demand baseline
-        # instead of feeding an empty base into `diff` mode (which would fail).
+        env:
+          # setup-rust-toolchain exports CARGO_INCREMENTAL=0. Every mutant rebuilds
+          # mega-evm and all of its test binaries; incremental compilation, for the
+          # warm build and the mutant builds alike, lets each of those rebuilds
+          # reuse what the mutation did not touch.
+          CARGO_INCREMENTAL: "1"
+          # Seconds from the driver's start (300 min). Leaves the job's 330-minute
+          # limit room for setup, the driver's stop grace period, scoring, upload
+          # and the cache save.
+          MUTANTS_BUDGET: "18000"
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             scripts/mutation_test.sh diff "${{ github.event.pull_request.base.sha }}"
           else
-            scripts/mutation_test.sh full
+            scripts/mutation_test.sh full --shard "${{ matrix.shard }}"
           fi
 
       - name: Score and gate
+        # Shards are scored together by cargo-mutants-full.
+        if: github.event_name == 'pull_request'
         run: |
           python3 scripts/mutation_gate.py report \
             --results target/mutants/mutants.out \
+            --status target/mutants/status \
             --suppressions mutants/suppressions.toml \
             --comment mutation-report.md \
             --summary "$GITHUB_STEP_SUMMARY"
@@ -115,13 +159,87 @@ jobs:
             }
 
       - name: Upload mutation artifacts
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutation-results
+          path: |
+            target/mutants/mutants.out
+            target/mutants/status
+            target/mutants.diff
+            mutation-report.md
+          if-no-files-found: ignore
+
+      - name: Upload shard results
+        # The artifact holds this shard's mutants.out/ and status at its root.
+        if: always() && github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutation-results-shard-${{ strategy.job-index }}
+          path: target/mutants
+          if-no-files-found: ignore
+
+  cargo-mutants-full:
+    name: cargo-mutants full run
+    needs: cargo-mutants
+    # Also after a failed or timed-out shard: the report names it, and its
+    # mutants count as untested.
+    if: ${{ !cancelled() && github.event_name != 'pull_request' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test the scorer
+        run: python3 scripts/test_mutation_gate.py
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+
+      - name: Install cargo-mutants
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants@27.1.0
+
+      - name: Download shard results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: mutation-results-shard-*
+          path: shards
+
+      - name: List the full inventory
+        # The mutants the shards' `full` runs test, from the driver itself.
+        run: |
+          scripts/mutation_test.sh list > inventory.txt
+          echo "inventory: $(wc -l < inventory.txt) mutants"
+
+      - name: Merge, score and gate
+        run: |
+          # One directory per shard of the cargo-mutants matrix (by job index), so
+          # that a shard which uploaded nothing is named in the report.
+          shards=(shards/mutation-results-shard-{0..3})
+          python3 scripts/mutation_gate.py merge --inventory inventory.txt \
+            --out target/mutants "${shards[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
+          python3 scripts/mutation_gate.py report \
+            --results target/mutants/mutants.out \
+            --status target/mutants/status \
+            --scope full \
+            --suppressions mutants/suppressions.toml \
+            --comment mutation-report.md \
+            --summary "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload mutation artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: mutation-results
           path: |
             target/mutants/mutants.out
-            target/mutants.diff
+            target/mutants/status
+            target/mutants/unplanned.txt
+            inventory.txt
             mutation-report.md
           if-no-files-found: ignore
 
@@ -164,6 +282,7 @@ jobs:
         run: |
           python3 scripts/mutation_gate.py report \
             --results target/umutate \
+            --title "Spec-gate mutation" \
             --suppressions mutants/suppressions.toml \
             --comment spec-gate-report.md \
             --summary "$GITHUB_STEP_SUMMARY"
@@ -245,11 +364,17 @@ jobs:
             --files "crates/mega-evm/src/${{ matrix.subsystem }}/*" \
             --output "target/umutate/${{ matrix.subsystem }}"
       - name: Score (informational)
+        # --informational exits 0 on survivors, timeouts and an incomplete run.
+        # A scorer error (results or suppressions it cannot read) fails the
+        # step, as it fails the full run, rather than leave an empty summary.
         run: |
           python3 scripts/mutation_gate.py report \
             --results "target/umutate/${{ matrix.subsystem }}" \
+            --scope full \
+            --title "Spec-gate sweep (${{ matrix.subsystem }})" \
+            --informational \
             --suppressions mutants/suppressions.toml \
-            --summary "$GITHUB_STEP_SUMMARY" || true
+            --summary "$GITHUB_STEP_SUMMARY"
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -260,7 +385,8 @@ jobs:
 
   # ── suppression hygiene: gate on relevant PR changes, plus nightly ─────────
   # `changes` scopes the hygiene job to PRs that could orphan a suppression
-  # (suppressions, operators, or src edits); nightly/dispatch always run it.
+  # (suppressions, operators, src edits, or the tools that list and match the
+  # mutants); nightly/dispatch always run it.
   changes:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
@@ -275,6 +401,10 @@ jobs:
               - 'mutants/suppressions.toml'
               - 'mutants/operators/**'
               - 'crates/mega-evm/src/**'
+              - '.cargo/mutants.toml'
+              - 'scripts/mutation_test.sh'
+              - 'scripts/mutation_gate.py'
+              - 'scripts/umutate.py'
 
   orphan-suppressions:
     name: suppression hygiene
@@ -308,15 +438,9 @@ jobs:
           comby -version
       - name: Build the full mutant universe (both engines)
         run: |
-          # --package mega-evm: match the driver's scope (otherwise --list also
-          #   covers the CLI bins in the virtual workspace's default-members, so a
-          #   stale mega-evm suppression could be kept alive by a same-named mutant
-          #   in another crate).
-          # No --exclude-re here, so function-suppressed mutants are included —
-          #   giving the complete universe to validate suppressions against.
-          # --colors never: CI forces CARGO_TERM_COLOR=always, which would otherwise
-          #   embed ANSI codes and break exact suppression matching.
-          cargo mutants --list --package mega-evm --colors never > universe.txt
+          # The driver's mutant set, with --all so that it keeps the mutants of
+          # function-scoped suppressions: the universe to check suppressions against.
+          scripts/mutation_test.sh list --all > universe.txt
           python3 scripts/umutate.py plan --packs spec-gate \
             | grep -oE 'crates/mega-evm/[^:]+:[0-9]+:[0-9]+: spec-gate .*' >> universe.txt
           echo "universe: $(wc -l < universe.txt) mutants"

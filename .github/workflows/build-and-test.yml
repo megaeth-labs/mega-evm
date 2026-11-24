@@ -14,7 +14,7 @@ concurrency:
 jobs:
   lint:
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
         with:
@@ -22,7 +22,21 @@ jobs:
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
       - name: Install Foundry
-        uses: foundry-rs/foundry-toolchain@v1
+        uses: foundry-rs/foundry-toolchain@b00af27efadbc7b4ca8b82abbd903b17cc874d2a # v1
+        with:
+          version: v1.7.1
+      - name: Attest system contract bytecode
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/system-contract-artifacts
+        run: cargo run --locked -p system-contract-artifacts -- attest
+      - name: Attestation negative control
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/system-contract-artifacts
+        run: bash .github/scripts/check_system_contract_attestation.sh
+      - name: Check generated system contract constants
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/system-contract-artifacts
+        run: cargo run --locked -p system-contract-artifacts -- check
       - name: Run cargo-sort
         run: |
           cargo install cargo-sort
@@ -57,8 +71,6 @@ jobs:
           submodules: recursive
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
-      - name: Install Foundry
-        uses: foundry-rs/foundry-toolchain@v1
       - name: Install RISC-V target
         run: rustup target add riscv64imac-unknown-none-elf
       - name: Check for riscv64imac-unknown-none-elf target

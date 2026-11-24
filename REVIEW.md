@@ -45,9 +45,9 @@ This is the single most important correctness concern in mega-evm.
   Follow the existing pattern: `#[cfg(not(feature = "std"))] use alloc as std;`.
 - New workspace dependencies should use `default-features = false` — features are opted-in explicitly.
 - **Release-blocking dependencies.**
-  A crate that gets published must not depend on an unpublished crate.
-  `cargo publish -p <crate> --locked --dry-run` has to resolve at release time.
-  Flag a new dependency that would break the next release's resolution.
+  crates.io publishing is paused while the OP crates are git-pinned (see the root `Cargo.toml`).
+  When it resumes, a crate that gets published must not depend on an unpublished crate, and `cargo publish -p <crate> --locked --dry-run` has to resolve at release time.
+  Until then, flag a new git dependency outside the pinned OP set: each one is another crate that must reach a registry before publishing can resume.
 
 ## Tests
 
@@ -69,7 +69,9 @@ This is the single most important correctness concern in mega-evm.
 - **Storage-layout parity.**
   Where Rust mirrors a Solidity storage layout, add a parity test against that layout.
   A field reordering should fail a test instead of drifting silently into a consensus bug.
-  Generated artifacts need the same treatment: embedded bytecode and slot constants must be cross-checked against the Solidity source at build time (not merely self-hashed), `build.rs` must list the generated sources in `rerun-if-changed`, and a test asserting a constant against itself is tautological.
+  CI must attest the latest system-contract bytecode and the SequencerRegistry storage slots against the Solidity source and verify that the embedded Rust constants match the checked-in artifacts.
+  `build.rs` must track artifact and generated-source changes with `rerun-if-changed`.
+  A test asserting a constant against itself is tautological.
 - **Would this test still pass if the behavior it claims to check regressed?**
   The fixture runners have failed this repeatedly: an exception assertion accepting any `Err`, a setup failure skipping execution, a `zip` letting missing output pass, a duplicate test name silently overwriting, an `unwrap_or(default)` rewriting a contradictory fixture into a valid one, a filename-based skip, an unconditional prune before state-root validation.
   Benchmarks fail it the same way — an unfunded inner call, zero-byte initcode, a discarded inner-call result or an undeployed address means the measured path never runs, and a mock database that cannot fail a lookup cannot test its error path.

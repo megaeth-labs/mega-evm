@@ -70,8 +70,11 @@ The in-memory cache still serves every repeated request within the run.
 With it, the cache file (at the default path, or under `--rpc.cache-dir`) is deleted under the sidecar lock, the run starts from an empty cache, and the cache is persisted on exit.
 An explicit `--rpc.no-cache-file` still wins over both flags and keeps the disk cache off, exactly as in single-transaction mode.
 
-A plain batch replay issues the same RPC calls as single-transaction replay, so an offline envelope captured by single-transaction runs serves a batch run without a cache miss.
-`--verify-receipt` and `--dump-fixture-dir` are the exception: both fetch the receipt of every target in the block, including transactions a single-transaction capture never asked about, so an older envelope will miss them and the run exits `3`.
+A plain batch replay uses the same RPC calls as single-transaction replay, so an envelope captured by single-transaction runs can serve a batch run when it covers every required call.
+`--verify-receipt` and `--dump-fixture-dir` also need receipt responses, and `--block` normally obtains them with one `eth_getBlockReceipts` call per nonempty block.
+If the block receipt request fails, including a missing offline response, or returns `null`, a block with unique hashes falls back to the corresponding `eth_getTransactionReceipt` responses.
+If the block contains repeated hashes, the envelope must contain the block receipt response.
+Missing receipt evidence leaves the affected transactions unverified and the run exits `3`.
 
 ### `--tx-file <PATH>`
 
@@ -79,11 +82,14 @@ Replay every transaction hash listed in `<PATH>`, one per line.
 
 Blank lines and lines whose first non-whitespace character is `#` are ignored.
 A hash listed more than once is replayed once.
+Like the single-transaction command, `--tx-file` follows the inclusion returned by the RPC's by-hash lookup.
 A line that is not a valid 32-byte hex hash aborts the run before any network access, naming the offending line number.
 
 ### `--block <N>`
 
 Replay every transaction of block `N`, given in decimal or `0x`-prefixed hex.
+Each body index gets its own result in block order, even when multiple transactions share the same hash.
+Use `--block` to replay all occurrences, since a by-hash lookup returns a single occurrence.
 
 ### Restrictions
 
@@ -128,10 +134,11 @@ A transaction that could not be executed is reported as an error entry instead:
 ```
 
 `kind` is one of `not_found` (unknown hash), `pending` (mined into no block yet), `rpc` (an RPC call failed), or `execution` (block setup or the block executor rejected the transaction).
+In a whole-block run with repeated hashes, error entries also include `block_number` and `tx_index` so each error identifies its body position.
 Execution outcomes are not errors: a reverted or halted transaction is a normal result line with `success: false`.
 
 A failure while running the block aborts it, because the executor state no longer matches the chain.
-The transaction the failure is about — the hash the endpoint denied, or the one the executor rejected — is reported with that failure's own kind.
+The transaction at the index where the failure occurred is reported with that failure's own kind.
 Every target behind it is reported as `rpc` with a message naming the aborting cause: nothing was established about those transactions, so they went unanswered rather than being unknown.
 Targets that never ran are still emitted in the block's transaction-index order, keeping the whole stream in ascending `(block, tx_index)` order; a hash the endpoint claimed for this block but that the body does not list is reported last within its block, in input order, as `rpc` (an unanswered, divergent view — not a definitive unknown hash).
 Hashes that could not be resolved to a block at all (unknown as `not_found`, pending, or an endpoint failure during resolution) are emitted before every block result, since the run cannot place them in the stream's order.
@@ -209,8 +216,17 @@ Logs are compared explicitly rather than inferred from gas: `LOG` gas depends on
 The logs bloom is not compared as a dimension of its own: it is a function of the logs, an on-chain receipt is only admitted when its bloom is the bloom of its own logs (see below), and the replay's bloom is built from its logs, so equal logs mean equal blooms.
 The fields an RPC receipt adds beside the consensus encoding — `contractAddress`, `effectiveGasPrice`, and the L1 fee fields — are not compared.
 
-The receipt is fetched with the same call the [fixture dump](#self-validating-fixture-dump) uses, so a run with `--rpc.capture-file` records it and a later `--rpc.replay-file` run verifies the same transaction offline.
-An envelope captured without `--verify-receipt` (or by any earlier run that never needed a receipt) holds no receipts, so verifying against it fails the receipt fetch — capture once online with the flag, then re-verify offline as often as you like.
+For `--block`, verification calls `eth_getBlockReceipts` by block number and matches each receipt to its `transactionIndex` in the body.
+For a block with unique hashes, replay falls back to `eth_getTransactionReceipt` for each hash when the block receipt request fails or returns `null`.
+This includes a block receipt response missing from an offline capture.
+A returned list must pass admission and authentication.
+A block with repeated hashes requires `eth_getBlockReceipts`.
+If the call is unavailable, the receipt verdicts are unverified and the run exits `3`.
+Single-transaction and `--tx-file` replays use `eth_getTransactionReceipt` for the occurrence returned by `eth_getTransactionByHash`.
+When that hash occurs multiple times in the block, the returned transaction and receipt must both identify the same body index.
+
+Verification shares these responses with the [fixture dump](#self-validating-fixture-dump).
+Use `--rpc.capture-file` with `--verify-receipt` or a fixture dump to record the responses for later `--rpc.replay-file` runs.
 
 ### Verified, Unverified, and Mismatched
 
@@ -224,8 +240,9 @@ Anything that prevents the comparison from running is an infrastructure failure 
 - The receipt describes a different transaction than the one requested (its `transactionHash` is not the hash the receipt was asked for — an inconsistent endpoint, or a tampered capture): reported as an `rpc` failure, because the verdict would describe the wrong transaction, and two transactions sharing their consensus facts would even yield a spurious match.
 - The target is a pending transaction, which has no receipt yet: rejected up front in single-transaction mode, and reported as a `pending` error entry in batch mode.
 
-Each of those checks answers one receipt's own question, so a receipt rewritten under its own transaction hash and inclusion would pass them all.
-When a batch run has fetched and admitted the receipt of every transaction of a block (a `--block` run asks for all of them), the receipts are therefore also authenticated as a set: their consensus encodings, in body order, must rebuild the receipts root the block's authenticated header commits to.
+A whole-block response must contain exactly one receipt for each body index, and every receipt must pass the admission checks above.
+If any receipt fails admission or the list does not cover the body exactly, the entire list is unverified and the run exits `3`.
+When a batch run admits receipts for every transaction of a block, it authenticates the set by rebuilding the header's receipts root from the consensus encodings in body order.
 That root covers each receipt's cumulative gas but not the `gasUsed` an RPC receipt reports beside it, so each `gasUsed` must also equal the rise in cumulative gas over the receipt before it (over zero for the first).
 A set that fails either check is endpoint data the block does not commit to, so every receipt of that block is reported as unverified (`rpc`, exit `3`) rather than compared, and no verdict rests on it.
 
@@ -469,6 +486,11 @@ On the first run, every JSON-RPC request and response issued while serving the r
 On subsequent runs the existing file is loaded, its entries are merged into the in-memory transport cache, and only missing requests are fetched from the RPC endpoint.
 The updated set of entries is persisted back to the same file on clean exit.
 
+When `--block --verify-receipt` or `--block --dump-fixture-dir` obtains a block receipt list, a fresh capture contains that list as its only receipt response.
+Single-transaction replays with `--verify-receipt` or `--dump-fixture` require per-hash `eth_getTransactionReceipt` responses.
+A `--tx-file` replay uses those responses for `--verify-receipt` and `--dump-fixture-dir`.
+Capture those runs with the receipt-dependent flags you plan to use offline.
+
 The file also embeds an external-environment snapshot — currently the set of `--bucket-capacity` values in effect — so the captured fixture is self-contained.
 If `--bucket-capacity` is not passed on a subsequent run, the previous envelope's values are reused; passing `--bucket-capacity` overrides them (an intentional A→B refresh of an existing capture is accepted at persist when no concurrent writer changed the on-disk snapshot, and a run that reused the previous values yields to a concurrent refresh rather than conflicting with it; only two writers changing the same snapshot differently hard-errors, naming the load-time, caller, and on-disk values — see [state management](../configuration/state-management.md#rpc-cache-and-retry)).
 
@@ -481,8 +503,9 @@ If the write fails, it is reported on stderr like any other failure, next to the
 
 Replay mode. Requires neither `--rpc` nor network access.
 
-The envelope at `<PATH>` is loaded and serves as the only source of JSON-RPC responses.
-Any request that is not present in the fixture aborts the run with a hard error — there is no fall-through to a live RPC endpoint.
+The envelope at `<PATH>` is read-only and serves as the only source of JSON-RPC responses.
+A request missing from the file fails locally without reaching the network.
+For a block with unique hashes, a missing block receipt entry can use the per-hash receipt entries in the same fixture.
 
 Bucket-capacity data is read from the fixture envelope, so `--bucket-capacity` is neither required nor accepted with `--rpc.replay-file`.
 Passing `--bucket-capacity` together with `--rpc.replay-file` is rejected; to regenerate a fixture with new capacities, re-run in capture mode.
@@ -557,9 +580,13 @@ state-test ./fixtures/0xabc123.json
 
 Batch-only.
 Dump a self-validating fixture for every successfully replayed target into `<DIR>/<tx_hash>.json`.
+If a hash occurs more than once in the block, each copy uses `<DIR>/<tx_hash>-<block_number>-<tx_index>.json` and the suite key `replay_<tx_hash>-<block_number>-<tx_index>`.
+Other fixtures use the suite key `replay_<tx_hash>`.
 The fixture content and format match the single-transaction [`--dump-fixture`](#--dump-fixture-file) path (same EEST schema, same sorted `megaEnv`, same self-validation via `state-test`).
 The directory is created if it does not exist.
 Existing files are refused unless `--overwrite` is also set — a refused overwrite is a failed dump for that target, not a skip.
+If a transaction eligible for dumping appears once in each of two blocks, both `--block` runs use the same filename and suite key, so a shared directory causes the second run to refuse the existing file or replace it with `--overwrite`.
+Use a separate output directory per block to keep both fixtures.
 
 Per-target gating mirrors the single-transaction rules, but records a skip instead of failing the run.
 The fixture draft is built against the pre-commit state (same moment as the single-transaction dump) and only written after the block finishes successfully — a commit-time rejection or finish failure never creates or replaces a fixture file.

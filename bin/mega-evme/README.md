@@ -27,33 +27,21 @@ A command-line tool for executing and debugging EVM bytecode, similar to go-ethe
 
 ## Installation
 
-Install from crates.io:
+The Rust build uses checked-in system-contract bytecode.
+
+From GitHub:
 
 ```bash
-cargo install mega-evme --locked
+cargo install --git https://github.com/megaeth-labs/mega-evm --locked mega-evme
 ```
 
-Or build from source:
+From a Git checkout:
 
 ```bash
-cargo build --release -p mega-evme
-# The binary will be at target/release/mega-evme
+git clone --recursive https://github.com/megaeth-labs/mega-evm
+cd mega-evm
+cargo install --locked --path bin/mega-evme
 ```
-
-The `--locked` flag ensures the exact tested dependency versions are used.
-
-### Prebuilt binary
-
-Every release also attaches a prebuilt `mega-evme` (Linux x86_64, built on `ubuntu-24.04`) and a `SHA256SUMS` file to its [GitHub Release](https://github.com/megaeth-labs/mega-evm/releases).
-Download both, verify the checksum, and make the binary executable:
-
-```bash
-sha256sum --check --ignore-missing SHA256SUMS
-chmod +x mega-evme
-./mega-evme --version
-```
-
-The same binary is published to the MegaETH artifact registry for internal use.
 
 ## Commands
 

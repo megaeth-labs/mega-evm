@@ -12,9 +12,10 @@ Target: **`crates/mega-evm`**.
 |------|---------|
 | `.cargo/mutants.toml` | Canonical `cargo-mutants` config (scope, nextest, excludes, timeouts). |
 | `mutants/suppressions.toml` | Reviewed equivalent / dead-code mutants excluded from gating. |
-| `scripts/mutation_test.sh` | Driver: `diff <base>`, `full`, `file <glob>`. |
+| `scripts/mutation_test.sh` | Driver: `diff <base>`, `full`, `file <glob>`; `list` prints the mutant set the runs use. |
 | `scripts/mutation_gate.py` | Scores a run, applies suppressions, gates the PR. |
-| `.github/workflows/mutation.yml` | Diff-scoped PR gate + result comment. |
+| `scripts/test_mutation_gate.py` | Tests for the scorer (`python3 scripts/test_mutation_gate.py`). |
+| `.github/workflows/mutation.yml` | Diff-scoped PR gate + result comment; sharded nightly full run. |
 
 ## Local use
 
@@ -22,11 +23,41 @@ Target: **`crates/mega-evm`**.
 # Mutate only what your branch changed (what CI runs on a PR):
 scripts/mutation_test.sh diff origin/main
 python3 scripts/mutation_gate.py report --results target/mutants/mutants.out \
-        --suppressions mutants/suppressions.toml
+        --status target/mutants/status --suppressions mutants/suppressions.toml
 
 # One subsystem while iterating:
 scripts/mutation_test.sh file 'crates/mega-evm/src/limit/**'
 ```
+
+## Build speed and the time budget
+
+Every mutant rebuilds `mega-evm` and all of its test binaries, so the run's cost is dominated by builds.
+The driver first builds the unmutated tests into `./target`, which `copy_target` copies into each scratch build directory.
+With incremental compilation, each mutant build then reuses everything the mutation did not touch.
+Cargo builds the dev profile incrementally by default, but `actions-rust-lang/setup-rust-toolchain` exports `CARGO_INCREMENTAL=0`, so the workflow sets `CARGO_INCREMENTAL=1` on the mutation step.
+A PR that changes no mutatable source has nothing to mutate, and the driver exits before its warm build.
+The workflow asks the driver first (`scripts/mutation_test.sh changed <base>`) and then neither restores nor saves the Rust cache, so a target with nothing compiled in it is never cached.
+
+`MUTANTS_BUDGET=<seconds>` bounds a run, counted from the driver's start and covering the warm build and cargo-mutants.
+When it runs out, the driver interrupts cargo-mutants, which stops its in-flight mutants and keeps every outcome already recorded, and exits 0 so that what was tested can still be scored and uploaded.
+The driver's last line, also written to `target/mutants/status`, says how far the run got:
+
+```
+MUTANTS-STATUS status=<complete|partial|not-started|baseline-failed|error> expected=<n|unknown> outcomes=<n>
+```
+
+`expected` is the number of mutants cargo-mutants planned (`unknown` if the run stopped before it planned them) and `outcomes` the number that got an outcome.
+`baseline-failed` (the unmutated tree does not build or pass its tests) and `error` (the run itself failed) exit non-zero.
+`mutation_gate.py report --status target/mutants/status` fails the gate unless the status is `complete`, while still reporting what was tested.
+
+The nightly full-crate run does not fit in one job, so CI splits it into four fresh shards (`scripts/mutation_test.sh full --shard k/4`, consecutive slices of the mutant list).
+The `cargo-mutants-full` job lists the full inventory with the driver's own mutant set (`scripts/mutation_test.sh list`), combines the shards with `mutation_gate.py merge`, and scores the result as a full run (`mutation_gate.py report --scope full`, which titles it a full-run score rather than a diff score).
+Each shard's own status is folded into the combined status, and the report names every shard that did not complete and why.
+A shard whose budget ran out makes the combined status `partial` (or `not-started`), one whose baseline failed makes it `baseline-failed`, and one that errored, ended without a status line (cancelled or killed by the job timeout) or uploaded nothing makes it `error`.
+Every shard outcome is kept.
+An outcome for a mutant the inventory does not list, a second outcome for one mutant, or shard plans that do not add up to the inventory mean the shards and the inventory were built from different mutant sets: the combined status is `mismatch`, and `unplanned.txt` lists the outcomes that do not fit.
+Only `complete` passes the gate.
+A cancelled run is not scored.
 
 ## The gate
 
@@ -42,16 +73,18 @@ Two granularities:
 
 - `kind = "function"` — a regex `pattern` matched against the mutant name; excluded before generation.
   For whole equivalent/dead functions.
-- `kind = "line"` — the exact `mutant` text; filtered from results.
+- `kind = "line"` — one mutant, named by its location (`file`, `line`, `column`) and its exact `mutant` text (without the `file:line:col: ` prefix); filtered from results.
   For a single survivor inside an otherwise-tested function.
+  The anchor keeps the entry to the reviewed mutant: the same mutation text elsewhere in the function, such as a newly added `&&`, stays gated.
+  When code above it moves the mutant, the entry stops matching and the mutant is gated again (fail closed); the hygiene job reports the entry as stale, with the location its text moved to, and it is re-anchored once its justification is checked against the new code.
 
 Inline `#[mutants::skip]` on a function is also honored natively by cargo-mutants; prefer `suppressions.toml` when the decision needs a record.
 
 Adding a suppression is a reviewed decision — scrutinize it like disabling a test.
 
-A suppression that stops matching any mutant (its function was renamed/deleted, or its line text changed) silently becomes a permanent blind spot.
-The **Suppression Hygiene** job (the `orphan-suppressions` job in `.github/workflows/mutation.yml`) guards against this: it assembles the full mutant universe from both engines and runs `mutation_gate.py orphans`, failing if any suppression matches nothing.
-It runs on PRs that touch `suppressions.toml` or `src/`, and weekly.
+A suppression that stops matching any mutant (its function was renamed or deleted, its line moved, or its text changed) silently becomes a permanent blind spot, or, for a moved line, gates the reviewed mutant again.
+The **Suppression Hygiene** job (the `orphan-suppressions` job in `.github/workflows/mutation.yml`) guards against this: it assembles the full mutant universe from both engines (`scripts/mutation_test.sh list --all` and `umutate.py plan`) and runs `mutation_gate.py orphans`, failing if any suppression matches nothing.
+It runs on PRs that touch `suppressions.toml`, `src/` or the mutation tooling, and nightly.
 For dead code, prefer deleting it or `#[mutants::skip]` over a permanent `kind = "function"` exclude.
 
 ## Timed-out mutants
@@ -137,5 +170,8 @@ python3 scripts/umutate.py run --packs spec-gate --diff origin/main --output tar
 
 ## Suppressions and CI
 
-Spec-gate equivalents (e.g. a gate guarding a state no test exercises — expect a meaningful rate) go in the **same** `suppressions.toml`, as `kind = "line"` entries matching the mutant text, prefixed with the pack name.
+Spec-gate equivalents (e.g. a gate guarding a state no test exercises — expect a meaningful rate) go in the **same** `suppressions.toml`, as `kind = "line"` entries anchored like any other (spec-gate mutants sit at column 1 of their line), whose text starts with the pack name.
 The PR gate runs diff-scoped (instant on PRs that touch no gate lines); the full crate sweep runs on a nightly schedule (the `spec-gate-sweep` job in `.github/workflows/mutation.yml`).
+Both name themselves in their reports (`mutation_gate.py report --title`), so that neither is read as a cargo-mutants report: the PR gate's is titled `Spec-gate mutation`, and the sweep's `Spec-gate sweep (<subsystem>)`.
+The sweep is informational (`--informational`): its heading gives the number of survivors instead of PASS/FAIL, and survivors do not fail the job.
+A scorer error, such as a `suppressions.toml` entry it cannot apply, does fail it, as it fails the full run.
