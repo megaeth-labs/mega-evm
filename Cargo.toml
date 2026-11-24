@@ -7,6 +7,7 @@ members = [
     "crates/mega-state-test",
     "crates/state-test",
     "crates/system-contracts",
+    "tools/system-contracts",
 ]
 default-members = ["crates/mega-evm", "bin/mega-evme", "bin/mega-t8n"]
 exclude = []
@@ -165,6 +166,7 @@ op-alloy-network = { git = "https://github.com/ethereum-optimism/optimism", rev 
 op-alloy-rpc-types = { git = "https://github.com/ethereum-optimism/optimism", rev = "f67d87cd5c9992b62d215c043917b94e3f019629", default-features = false }
 
 # misc
+anyhow = { version = "1", default-features = false }
 auto_impl = { version = "1.3", default-features = false }
 bitflags = { version = "2.6", default-features = false }
 clap = { version = "4", default-features = false, features = ["derive"] }
