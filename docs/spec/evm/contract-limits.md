@@ -1,6 +1,6 @@
 ---
 description: MegaETH contract size limits — 512 KB max bytecode, 536 KB max initcode, inherited from MiniRex.
-spec: Rex4
+spec: Rex6
 ---
 
 # Contract Limits
@@ -29,6 +29,36 @@ The initcode limit is defined as:
 
 `MAX_INITCODE_SIZE = MAX_CONTRACT_SIZE + ADDITIONAL_INITCODE_SIZE`
 
+### Creation-Opcode Halt Ordering
+
+The rules in this section apply from [MiniRex](../upgrades/minirex.md) onward.
+Under the Equivalence spec a node runs the creation opcodes unchanged, with no prework and no contract-creation storage gas, so canonical ordering applies throughout.
+
+`CREATE2` computes its target address by expanding memory, copying the initcode, and hashing it before the inner opcode body runs, and both `CREATE` and `CREATE2` charge the contract-creation [storage gas](../glossary.md#storage-gas) for the derived address before that body runs.
+Two rejections MUST fire ahead of that prework.
+
+When a `CREATE2`'s initcode length exceeds `MAX_INITCODE_SIZE`, a node MUST halt with `CreateInitCodeSizeLimit` before the memory expansion, the initcode copy, the `keccak256` hash, and the address derivation.
+The check follows canonical operand ordering: the length operand is converted first, then the size check runs, then the offset operand is converted.
+
+This rule is specific to `CREATE2`.
+A `CREATE` derives its address from the creator's nonce without reading the initcode, so it has no such prework to precede: its size check stays inside the opcode body, after the contract-creation storage gas for the derived address is charged.
+An oversized `CREATE` therefore surfaces whichever halt that charge reaches first — a storage-gas out-of-gas, or a fatal external error from the storage-pricing lookup — rather than `CreateInitCodeSizeLimit`, on every spec from MiniRex onward.
+
+Inside a static call frame, any `CREATE` or `CREATE2` MUST halt with the static-call rejection before its operands are read, before the size check runs, before the deployment address is derived, and before the contract-creation storage gas is charged.
+This matches canonical ordering, in which the static-context check precedes every other check.
+
+Where both orderings end in a halt, they change only the halt reason and its timing, not the outcome: every such halt consumes all gas regardless of when it fires, so committed gas and committed state are identical either way.
+The exception is the fatal external error, which abandons the transaction instead of halting the frame: rejecting before the storage-pricing lookup avoids it entirely, so the outcomes there are not equivalent.
+
+MiniRex through Rex5 run the prework first.
+There, an oversized `CREATE2` surfaces whichever halt the prework reaches first — a memory out-of-gas, for instance — rather than the size-limit halt, and a creation opcode in a static frame surfaces a stack underflow, a memory out-of-gas, a storage-gas out-of-gas, or a fatal external error from the storage-pricing lookup instead of the static-call rejection.
+
+### Zero-Length Init Code in CREATE2
+
+When a `CREATE2` opcode is executed with an init-code length of zero, a node MUST short-circuit after validating the salt operand: it MUST use the keccak-256 hash of the empty byte string as the resulting init-code hash, and MUST NOT perform any offset conversion, memory expansion, or hashing of memory.
+Because the init-code length is zero, the init-code offset operand MUST be ignored entirely, even when it is a very large value.
+This ensures that a zero-length `CREATE2` charges no memory-expansion gas (and no associated compute gas) for the unused offset operand and never halts with a spurious out-of-gas error caused by an out-of-range offset whose length is zero.
+
 ## Constants
 
 | Constant                   | Value         | Description                                                         |
@@ -43,7 +73,13 @@ The initcode limit is defined as:
 MegaETH allows substantially larger contracts than standard Ethereum.
 The enlarged limits support deployment patterns that would otherwise exceed Ethereum's contract-size constraints.
 
+## Security Considerations
+
+This page has no security considerations.
+
 ## Spec History
 
 - [MiniRex](../upgrades/minirex.md) introduced the enlarged contract and initcode limits.
-- [Rex](../upgrades/rex.md), [Rex1](../upgrades/rex1.md), [Rex2](../upgrades/rex2.md), and [Rex3](../upgrades/rex3.md) retain the same stable limits.
+- [Rex](../upgrades/rex.md), [Rex1](../upgrades/rex1.md), [Rex2](../upgrades/rex2.md), [Rex3](../upgrades/rex3.md), and [Rex4](../upgrades/rex4.md) retain the same stable limits.
+- [Rex5](../upgrades/rex5.md) short-circuits zero-length `CREATE2` after salt validation, using the empty-init-code hash without observing the init-code offset operand.
+- [Rex6](../upgrades/rex6.md) moved the oversized-`CREATE2` initcode halt and the static-frame rejection ahead of the creation opcode's address-computation prework; MiniRex through Rex5 run the prework first, so those cases surface whichever halt it reaches first instead. The halt reason and its timing change; the outcome changes only where the prework would have raised a fatal external error.

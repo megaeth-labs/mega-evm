@@ -1,0 +1,14 @@
+{
+  "description": "--storage overrides slot 0, SLOAD reads it back as 0x42",
+  "args": [
+    "run",
+    "--storage", "0x0000000000000000000000000000000000000000:0x0=0x42",
+    "0x60005460005260206000f3"
+  ],
+  "expected": {
+    "success": true,
+    "gas_used": 62118,
+    "output": "0x0000000000000000000000000000000000000000000000000000000000000042",
+    "logs_count": 0
+  }
+}

@@ -8,7 +8,6 @@ use alloy_primitives::{address, Bytes, TxKind, U256};
 use mega_evm::{
     test_utils::{BytecodeBuilder, ErrorInjectingDatabase, InjectedDbError, MemoryDatabase},
     EVMError, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
-    MegaTransactionError,
 };
 use revm::{
     bytecode::opcode::CALL,
@@ -28,7 +27,10 @@ fn transact(
     data: Bytes,
     value: U256,
     gas_limit: u64,
-) -> Result<ResultAndState<MegaHaltReason>, EVMError<InjectedDbError, MegaTransactionError>> {
+) -> Result<
+    ResultAndState<MegaHaltReason>,
+    EVMError<InjectedDbError, mega_evm::alloy_op_evm::OpTxError>,
+> {
     let mut context = MegaContext::new(db, spec);
     context.modify_chain(|chain| {
         chain.operator_fee_scalar = Some(U256::from(0));
@@ -43,7 +45,7 @@ fn transact(
         gas_limit,
         ..Default::default()
     };
-    let mut tx = MegaTransaction::new(tx);
+    let mut tx = MegaTransaction(op_revm::OpTransaction::new(tx));
     tx.enveloped_tx = Some(Bytes::new());
     alloy_evm::Evm::transact_raw(&mut evm, tx)
 }
@@ -133,6 +135,47 @@ fn test_call_with_transfer_db_error_on_inspect_account() {
         Err(other) => panic!("expected EVMError::Custom, got: {other:?}"),
         Ok(result) => panic!("expected error, got success: {:?}", result.result),
     }
+}
+
+/// Regression: `inspect_storage` must not query `DB::storage` for accounts created in the
+/// current transaction. Their post-CREATE storage is guaranteed empty (EIP-161 / EIP-6780),
+/// so any DB read returns ZERO at best — and fails outright under stateless replay, where
+/// no witness exists for these slots when CREATE lands on a pre-funded address (its
+/// `Loaded` cache status bypasses revm's `State::storage` short-circuit).
+///
+/// The injected DB is configured to error on every `storage()` read of slot 0 at the
+/// to-be-created address. With the fix, `inspect_storage` short-circuits to ZERO for
+/// newly-created accounts and the error is never triggered, so the CREATE succeeds.
+/// Without the fix, the constructor's SSTORE pre-read would surface `EVMError::Custom`
+/// (mini-rex routes SSTORE through `additional_limit_ext::sstore`, which calls
+/// `inspect_storage` to compute the original/present values before writing).
+#[test]
+fn test_inspect_storage_skips_db_for_newly_created_account() {
+    // Initcode: SSTORE slot 0 = 0x42; STOP. The SSTORE pre-read goes through
+    // `inspect_storage` and is the path the fix targets.
+    let initcode = BytecodeBuilder::default().sstore(U256::ZERO, U256::from(0x42)).stop().build();
+
+    // CALLER's nonce starts at 0, so the top-level CREATE deploys to `CALLER.create(0)`.
+    let created = CALLER.create(0);
+
+    let mut inner_db = MemoryDatabase::default();
+    inner_db.set_account_balance(CALLER, U256::from(100_000_000_000u64));
+    // Pre-fund the future contract address so its DB cache status is `Loaded` rather than
+    // `Vacant` — this is the scenario that exposed the original bug.
+    inner_db.set_account_balance(created, U256::from(1));
+
+    let mut db = ErrorInjectingDatabase::new(inner_db);
+    // The fix means this DB call must never happen. If it does, the test fails.
+    db.fail_on_storage = Some((created, U256::ZERO));
+
+    let result = transact(MegaSpecId::MINI_REX, db, CALLER, None, initcode, U256::ZERO, 10_000_000);
+
+    let res = result.expect("CREATE should not surface a DB error");
+    assert!(
+        res.result.is_success(),
+        "CREATE should succeed without DB::storage being queried, got: {:?}",
+        res.result
+    );
 }
 
 /// When `inspect_account_delegated` fails during STATICCALL (in `wrap_call_with_storage_gas!`),

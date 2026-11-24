@@ -1,0 +1,656 @@
+//! Shared helpers for the integration tests in `tests/*.rs`. Each test file
+//! that wants these helpers declares `mod common;` at its top. cargo treats
+//! `tests/common/` as a directory (not a top-level test binary), so this file
+//! is not picked up as a standalone test target.
+//!
+//! Capture-envelope doctoring lives in [`doctor`]. Other helpers here are the
+//! patterns shared across the provider, state, and replay test binaries.
+
+#![allow(dead_code)] // Each test binary uses a different subset of helpers.
+
+pub(crate) mod doctor;
+pub(crate) mod mock_chain;
+
+use std::{
+    path::{Path, PathBuf},
+    process::{Command, Output},
+    sync::atomic::{AtomicUsize, Ordering},
+};
+
+use clap::Parser;
+use mega_evme::common::RpcArgs;
+use wiremock::{matchers, Mock, MockServer, ResponseTemplate};
+
+/// Resolve a fixture in `tests/fixtures/` by name, extracting it if it is
+/// stored compressed.
+///
+/// A fixture is either the file itself, or a `<name>.tar.xz` holding exactly
+/// that one file. Compression is worth it only where the raw file would bloat a
+/// pull-request diff — git already compresses
+/// blobs, so it buys little on its own, and a compressed blob cannot delta
+/// against its previous revision. A capture is JSON with long runs of repeated
+/// hex, which xz shrinks to about half of what gzip leaves.
+///
+/// To (re)pack a capture, archive the one file and nothing else (macOS `tar`
+/// would otherwise add `._*` metadata members):
+///
+/// ```bash
+/// COPYFILE_DISABLE=1 tar --format ustar -cf - <name> | xz -9e > <name>.tar.xz
+/// ```
+///
+/// The archive is extracted by [`install_archive`], under a directory named by
+/// the keccak-256 of the archive's bytes; see there for why that is safe to
+/// share across runs and concurrent test binaries.
+pub(crate) fn fixture(name: &str) -> PathBuf {
+    let dir = fixtures_dir();
+    let plain = dir.join(name);
+    if plain.is_file() {
+        return plain;
+    }
+
+    let archive = dir.join(format!("{name}.tar.xz"));
+    assert!(
+        archive.is_file(),
+        "no fixture named {name}: neither {} nor {} exists",
+        plain.display(),
+        archive.display(),
+    );
+    let member = plain.file_name().expect("a fixture names a file");
+
+    let extracted = extracted(&archive).join(member);
+    assert!(extracted.is_file(), "{} does not contain {name}", archive.display());
+    extracted
+}
+
+/// Resolve an archive in `tests/fixtures/` holding many fixtures, extracting
+/// all of its members, and return the directory they were extracted into.
+///
+/// `name` names the archive itself (`<dir>/<archive>.tar.xz`). Each member is
+/// then the file of that name in the returned directory. The extraction is the
+/// same as [`fixture`]'s, and so are its guarantees; the directory is returned
+/// only once every member is in place.
+pub(crate) fn fixture_archive(name: &str) -> PathBuf {
+    let archive = fixtures_dir().join(name);
+    assert!(
+        archive.is_file(),
+        "no fixture archive named {name}: {} does not exist",
+        archive.display()
+    );
+    extracted(&archive)
+}
+
+/// The directory `archive` is extracted into, extracting it first unless an
+/// earlier extraction already completed there.
+fn extracted(archive: &Path) -> PathBuf {
+    let destination = extraction_dir(archive);
+    if !destination.join(EXTRACTION_COMPLETE).is_file() {
+        install_archive(archive, &destination);
+    }
+    destination
+}
+
+/// Marker [`install_archive`] writes into an extraction directory once every
+/// member of the archive is in place.
+const EXTRACTION_COMPLETE: &str = ".extraction-complete";
+
+/// Directory an archive is extracted into: under [`extracted_root`], named by
+/// the keccak-256 of the archive's bytes.
+fn extraction_dir(archive: &Path) -> PathBuf {
+    let bytes =
+        std::fs::read(archive).unwrap_or_else(|e| panic!("cannot read {}: {e}", archive.display()));
+    extracted_root().join(format!("{:x}", alloy_primitives::keccak256(&bytes)))
+}
+
+/// Extract every member of `archive` into `destination`, its
+/// [`extraction_dir`], and mark the directory complete.
+///
+/// Naming the directory by the archive's digest means:
+///
+/// - an extraction is reused by every later test binary and every later run for as long as its
+///   archive is unchanged, so the directory does not grow from run to run;
+/// - a changed archive (a recapture, or a branch switch) has a different digest, so an extraction
+///   of an earlier version is never served for it; that earlier extraction stays until `cargo
+///   clean`;
+/// - concurrent extractions — parallel tests, or test binaries running at once — each unpack into a
+///   private scratch directory and rename every file into place, which is atomic, so a reader sees
+///   either no file or a complete one, and two writers write the same bytes. The completion marker
+///   is renamed into place last, so a directory carrying it holds every member.
+///
+/// Extraction shells out to `tar -xJf` rather than linking a decompressor:
+/// every platform that runs these tests has one, and this is the only place
+/// that reads an archive.
+fn install_archive(archive: &Path, destination: &Path) {
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let scratch = extracted_root().join(format!(
+        ".extracting-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&scratch).expect("failed to create the extraction directory");
+    let status = Command::new("tar")
+        .arg("-xJf")
+        .arg(archive)
+        .arg("-C")
+        .arg(&scratch)
+        .status()
+        .expect("failed to run tar");
+    assert!(status.success(), "failed to extract {}", archive.display());
+
+    std::fs::create_dir_all(destination).expect("failed to create the extraction directory");
+    for entry in std::fs::read_dir(&scratch).expect("failed to read the extraction directory") {
+        let unpacked = entry.expect("failed to read an extracted member").path();
+        let member = unpacked.file_name().expect("an extracted member has a name");
+        std::fs::rename(&unpacked, destination.join(member))
+            .expect("failed to move an extracted fixture into place");
+    }
+    let marker = scratch.join(EXTRACTION_COMPLETE);
+    std::fs::write(&marker, b"").expect("failed to write the extraction marker");
+    std::fs::rename(&marker, destination.join(EXTRACTION_COMPLETE))
+        .expect("failed to mark the extraction complete");
+    let _ = std::fs::remove_dir_all(&scratch);
+}
+
+/// Directory the committed fixtures live in.
+pub(crate) fn fixtures_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
+}
+
+/// Directory compressed fixtures are extracted into.
+///
+/// It lives under cargo's per-target scratch directory (`CARGO_TARGET_TMPDIR`),
+/// which persists across test runs and is removed by `cargo clean`. Exposed so a
+/// test that normalizes the paths a run prints can name it.
+pub(crate) fn extracted_root() -> PathBuf {
+    Path::new(env!("CARGO_TARGET_TMPDIR")).join("mega-evme-fixtures")
+}
+
+/// Block of `replay_batch_blocks.cache.json` whose index-13 transaction calls
+/// [`GAS_DIVERGENCE_CALLEE`].
+pub(crate) const GAS_DIVERGENCE_BLOCK: u64 = 22_945_844;
+
+/// Index in [`GAS_DIVERGENCE_BLOCK`] of the transaction that calls
+/// [`GAS_DIVERGENCE_CALLEE`].
+pub(crate) const GAS_DIVERGENCE_TX_INDEX: u64 = 13;
+
+/// A contract only the index-13 transaction of [`GAS_DIVERGENCE_BLOCK`] calls.
+pub(crate) const GAS_DIVERGENCE_CALLEE: &str = "0x681e908b8ab57c49c74d770f369754ccc3e1ae09";
+
+/// Make the index-13 transaction of [`GAS_DIVERGENCE_BLOCK`] burn different gas
+/// than it did on chain, by replacing [`GAS_DIVERGENCE_CALLEE`]'s code at the
+/// parent block with a bare `STOP`.
+///
+/// Every fetched object still authenticates, so the replay executes the block
+/// and only that transaction's gas moves — an execution divergence rather than
+/// an endpoint fault.
+pub(crate) fn diverge_gas(envelope: doctor::DoctoredEnvelope) -> doctor::DoctoredEnvelope {
+    envelope.set_account_code(GAS_DIVERGENCE_CALLEE, GAS_DIVERGENCE_BLOCK - 1, "0x00")
+}
+
+/// Write a `--tx-file` listing `hashes`, one per line, and return its path.
+///
+/// The path is process-unique and derived from `name`, so concurrent test
+/// binaries and tests do not share a list.
+pub(crate) fn tx_file(name: &str, hashes: &[&str]) -> PathBuf {
+    let path = std::env::temp_dir().join(format!("mega_evme_{name}_{}.txt", std::process::id()));
+    let body: String = hashes.iter().map(|hash| format!("{hash}\n")).collect();
+    std::fs::write(&path, body).expect("write tx list");
+    path
+}
+
+/// Whether a value a batch run printed is a block line
+/// (`{"block_number", "block_hash", "block_verification"}`) rather than a
+/// transaction line.
+pub(crate) fn is_block_line(value: &serde_json::Value) -> bool {
+    value.get("block_verification").is_some()
+}
+
+/// Split the values a `--verify-block` run printed into its transaction lines
+/// and its block lines, each in printed order.
+pub(crate) fn split_block_lines(
+    values: Vec<serde_json::Value>,
+) -> (Vec<serde_json::Value>, Vec<serde_json::Value>) {
+    values.into_iter().partition(|value| !is_block_line(value))
+}
+
+/// Split the values a single-block `--verify-block` run printed into its
+/// transaction lines and its one block line, which must come last.
+pub(crate) fn split_one_block(
+    values: Vec<serde_json::Value>,
+) -> (Vec<serde_json::Value>, serde_json::Value) {
+    assert!(values.last().is_some_and(is_block_line), "the block line comes last: {values:?}");
+    let (txs, mut blocks) = split_block_lines(values);
+    assert_eq!(blocks.len(), 1, "exactly one block line per block: {blocks:?}");
+    (txs, blocks.pop().expect("checked above"))
+}
+
+/// The authentic hash of a served block header: the hash its own consensus
+/// fields produce.
+///
+/// The replay authenticates every block it fetches by recomputing this and
+/// comparing it against the `hash` the endpoint reported, so a mock endpoint or
+/// a doctored capture cannot serve an invented block hash any more than it can
+/// serve an invented transaction hash. `header_json` is a served block object
+/// (or a bare header object); its non-header members — `hash`, `transactions`,
+/// `uncles`, `withdrawals`, `size`, `totalDifficulty` — are ignored, which is
+/// exactly what the consensus hash covers.
+///
+/// This is the block-level counterpart of the per-file `tx_identity` helpers:
+/// the identity is computed from the object being served, never asserted beside
+/// it.
+pub(crate) fn block_hash_of(header_json: &serde_json::Value) -> String {
+    let header: alloy_consensus::Header = serde_json::from_value(header_json.clone())
+        .expect("a served block must carry a well-formed consensus header");
+    format!("{:#x}", header.hash_slow())
+}
+
+/// Stamp the authentic hash into a served block's `hash` field.
+///
+/// Chain a block on top of a sealed parent by reading the parent's sealed hash
+/// out of it (`sealed["hash"]`) and passing that as the child's `parentHash`:
+/// the replay checks that linkage too, so a mock's chain has to be built from
+/// the bottom up.
+pub(crate) fn sealed_block(mut header_json: serde_json::Value) -> serde_json::Value {
+    header_json["hash"] = serde_json::Value::String(block_hash_of(&header_json));
+    header_json
+}
+
+/// A mock JSON-RPC server tuned for mega-evme integration tests.
+///
+/// All mounted mocks match `POST` (the JSON-RPC verb) and use priorities so
+/// "fail N times then succeed" sequences compose correctly.
+pub(crate) struct MockRpcServer {
+    server: MockServer,
+}
+
+impl MockRpcServer {
+    /// Start a fresh mock server bound to a random local port.
+    pub(crate) async fn start() -> Self {
+        Self { server: MockServer::start().await }
+    }
+
+    /// HTTP URL the mock is listening on.
+    pub(crate) fn uri(&self) -> String {
+        self.server.uri()
+    }
+
+    /// Mount a mock that responds with `status` for the next `n` POSTs at
+    /// `priority` (lower number = higher priority, checked first).
+    pub(crate) async fn respond_status_n_times(&self, status: u16, n: u64, priority: u8) {
+        Mock::given(matchers::method("POST"))
+            .respond_with(ResponseTemplate::new(status))
+            .up_to_n_times(n)
+            .with_priority(priority)
+            .mount(&self.server)
+            .await;
+    }
+
+    /// Mount an unbounded mock that always responds with `status`.
+    pub(crate) async fn respond_status_always(&self, status: u16) {
+        Mock::given(matchers::method("POST"))
+            .respond_with(ResponseTemplate::new(status))
+            .mount(&self.server)
+            .await;
+    }
+
+    /// Mount an unbounded mock that always returns a successful JSON-RPC
+    /// response with the given hex `result`. Use a higher `priority` number
+    /// (= lower precedence) than companion failure mocks so this serves as
+    /// the fallthrough.
+    pub(crate) async fn respond_jsonrpc_result(&self, hex_result: &str, priority: u8) {
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 0,
+            "result": hex_result,
+        });
+        Mock::given(matchers::method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .with_priority(priority)
+            .mount(&self.server)
+            .await;
+    }
+
+    /// Mount an unbounded mock that always returns a JSON-RPC error body (HTTP
+    /// 200 + `"error": {...}`). Models transient endpoint failures that surface
+    /// through the JSON-RPC envelope rather than an HTTP status, e.g.
+    /// `-32000 rate limit`.
+    pub(crate) async fn respond_jsonrpc_error(&self, code: i32, message: &str, priority: u8) {
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 0,
+            "error": { "code": code, "message": message },
+        });
+        Mock::given(matchers::method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .with_priority(priority)
+            .mount(&self.server)
+            .await;
+    }
+
+    /// Mount an unbounded mock that always returns a successful JSON-RPC body
+    /// with `"result": null` (HTTP 200). Models a transient not-found answer
+    /// (e.g. `eth_getTransactionByHash` for a briefly-invisible transaction)
+    /// that capture must not bake into the fixture.
+    pub(crate) async fn respond_jsonrpc_null_result(&self, priority: u8) {
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 0,
+            "result": null,
+        });
+        Mock::given(matchers::method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .with_priority(priority)
+            .mount(&self.server)
+            .await;
+    }
+
+    /// Mount an unbounded mock that answers every JSON-RPC request for
+    /// `method` with the given hex `result`, regardless of params.
+    pub(crate) async fn respond_method_result(&self, method: &str, hex_result: &str, priority: u8) {
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 0,
+            "result": hex_result,
+        });
+        Mock::given(matchers::method("POST"))
+            .and(matchers::body_partial_json(serde_json::json!({ "method": method })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .with_priority(priority)
+            .mount(&self.server)
+            .await;
+    }
+
+    /// Mount an unbounded mock that answers every JSON-RPC request for `method`
+    /// with the given JSON `result`, regardless of params.
+    ///
+    /// The result is any JSON value, so this serves structured answers (blocks,
+    /// transactions) that [`Self::respond_method_result`]'s hex string cannot.
+    pub(crate) async fn respond_method_json(
+        &self,
+        method: &str,
+        result: serde_json::Value,
+        priority: u8,
+    ) {
+        let body = serde_json::json!({ "jsonrpc": "2.0", "id": 0, "result": result });
+        Mock::given(matchers::method("POST"))
+            .and(matchers::body_partial_json(serde_json::json!({ "method": method })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .with_priority(priority)
+            .mount(&self.server)
+            .await;
+    }
+
+    /// Mount an unbounded mock that answers `method` calls whose params match
+    /// `params` with the given JSON `result`.
+    ///
+    /// Needed where one method is called with different arguments in the same
+    /// run and the answers must differ — `eth_getBlockByNumber` for a block and
+    /// its parent, for instance.
+    pub(crate) async fn respond_method_params_json(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+        result: serde_json::Value,
+        priority: u8,
+    ) {
+        let body = serde_json::json!({ "jsonrpc": "2.0", "id": 0, "result": result });
+        Mock::given(matchers::method("POST"))
+            .and(matchers::body_partial_json(
+                serde_json::json!({ "method": method, "params": params }),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .with_priority(priority)
+            .mount(&self.server)
+            .await;
+    }
+
+    /// Mount a mock that answers the first `n` calls of `method` with matching
+    /// `params` and then stops matching, so a lower-priority mock for the same
+    /// request serves every later call.
+    ///
+    /// Models an endpoint whose answer to one repeated request changes
+    /// mid-run — a reorg landing between two calls, or a load balancer moving
+    /// the run to another backend.
+    pub(crate) async fn respond_method_params_json_n_times(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+        result: serde_json::Value,
+        n: u64,
+        priority: u8,
+    ) {
+        let body = serde_json::json!({ "jsonrpc": "2.0", "id": 0, "result": result });
+        Mock::given(matchers::method("POST"))
+            .and(matchers::body_partial_json(
+                serde_json::json!({ "method": method, "params": params }),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .up_to_n_times(n)
+            .with_priority(priority)
+            .mount(&self.server)
+            .await;
+    }
+
+    /// How many single JSON-RPC requests for `method` the server has received.
+    ///
+    /// Batched requests (a JSON array body) are not counted: every call these
+    /// tests make is a single request.
+    pub(crate) async fn received_method_count(&self, method: &str) -> usize {
+        let requests = self.server.received_requests().await.expect("received_requests");
+        requests
+            .iter()
+            .filter(|request| {
+                serde_json::from_slice::<serde_json::Value>(&request.body)
+                    .ok()
+                    .and_then(|body| {
+                        body.get("method").and_then(serde_json::Value::as_str).map(str::to_string)
+                    })
+                    .as_deref() ==
+                    Some(method)
+            })
+            .count()
+    }
+
+    /// Mount a mock that returns `eth_chainId` with the given chain id.
+    pub(crate) async fn respond_eth_chain_id(&self, chain_id: u64, priority: u8) {
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 0,
+            "result": format!("0x{:x}", chain_id),
+        });
+        Mock::given(matchers::method("POST"))
+            .and(matchers::body_partial_json(serde_json::json!({
+                "method": "eth_chainId"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .with_priority(priority)
+            .mount(&self.server)
+            .await;
+    }
+
+    /// Total number of POSTs the server has received since it started.
+    pub(crate) async fn received_request_count(&self) -> usize {
+        self.server.received_requests().await.expect("received_requests").len()
+    }
+
+    /// Accept every POST and delay the response far beyond any test timeout.
+    ///
+    /// Models a black-hole endpoint that accepts the TCP connection (and the
+    /// HTTP request) but never answers in time — the failure mode that
+    /// `--rpc.request-timeout` is meant to bound. The delay is 5 minutes so a
+    /// client with a 1s timeout fires first while the mock still records the hit.
+    pub(crate) async fn respond_black_hole(&self) {
+        use std::time::Duration;
+
+        Mock::given(matchers::method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(300)))
+            .mount(&self.server)
+            .await;
+    }
+}
+
+/// The `mega-evme` binary under test, ready for arguments.
+pub(crate) fn mega_evme() -> Command {
+    Command::new(env!("CARGO_BIN_EXE_mega-evme"))
+}
+
+/// Outcome of one `mega-evme` invocation.
+pub(crate) struct Run {
+    /// Process exit code, `None` when a signal killed it.
+    pub(crate) code: Option<i32>,
+    /// Everything the run printed on stdout.
+    pub(crate) stdout: String,
+    /// Everything the run printed on stderr.
+    pub(crate) stderr: String,
+}
+
+impl From<Output> for Run {
+    fn from(output: Output) -> Self {
+        Self {
+            code: output.status.code(),
+            stdout: String::from_utf8(output.stdout).expect("stdout is utf-8"),
+            stderr: String::from_utf8(output.stderr).expect("stderr is utf-8"),
+        }
+    }
+}
+
+impl Run {
+    /// The process exit code the run ended with.
+    pub(crate) fn code(&self) -> i32 {
+        self.code.expect("mega-evme was killed by a signal")
+    }
+
+    /// Whether the run exited 0.
+    pub(crate) fn success(&self) -> bool {
+        self.code == Some(0)
+    }
+
+    /// The results printed on stdout, without the structured error object a
+    /// failing `--json` run ends with: one value per NDJSON line of a batch
+    /// run, or the one summary of a single-transaction run.
+    pub(crate) fn results(&self) -> Vec<serde_json::Value> {
+        let mut values = json_values(&self.stdout);
+        if values.last().is_some_and(is_run_error) {
+            values.pop();
+        }
+        values
+    }
+
+    /// The one `--json` summary a single-transaction run printed.
+    pub(crate) fn summary(&self) -> serde_json::Value {
+        let mut results = self.results();
+        assert_eq!(
+            results.len(),
+            1,
+            "expected one summary on stdout:\n{}\nstderr:\n{}",
+            self.stdout,
+            self.stderr,
+        );
+        results.pop().expect("checked above")
+    }
+
+    /// The structured error object a failing `--json` run ends with.
+    pub(crate) fn error_object(&self) -> serde_json::Value {
+        let values = json_values(&self.stdout);
+        let last = values.last().unwrap_or_else(|| {
+            panic!("a failing --json run must not leave stdout empty:\nstderr:\n{}", self.stderr)
+        });
+        assert!(is_run_error(last), "the last stdout value must be the error object, got: {last}");
+        last.clone()
+    }
+
+    /// How many failure reports stderr carries.
+    ///
+    /// Counted by the report prefix: a message may itself span lines (an RPC
+    /// error appends a re-capture hint), and only the report opens one.
+    pub(crate) fn error_lines(&self) -> usize {
+        self.stderr.lines().filter(|line| line.starts_with("error: ")).count()
+    }
+}
+
+/// Replay `tx_hash` online against the endpoint at `uri` in `--json` mode,
+/// without a cache file, retries or backoff, adding `extra` flags.
+pub(crate) fn replay_online(uri: &str, tx_hash: &str, extra: &[&str]) -> Run {
+    mega_evme()
+        .args(["replay", tx_hash, "--rpc", uri])
+        .args(["--rpc.no-cache-file", "--rpc.max-retries", "0", "--rpc.backoff-ms", "1", "--json"])
+        .args(extra)
+        .output()
+        .expect("failed to run mega-evme")
+        .into()
+}
+
+/// Parse every top-level JSON value a run printed on stdout.
+///
+/// Streaming parse, so it covers both the pretty-printed single-transaction
+/// summary and the compact NDJSON of a batch run — in either case followed by
+/// the structured error object a failing `--json` run ends with.
+pub(crate) fn json_values(stdout: &str) -> Vec<serde_json::Value> {
+    serde_json::Deserializer::from_str(stdout)
+        .into_iter::<serde_json::Value>()
+        .collect::<Result<_, _>>()
+        .unwrap_or_else(|e| panic!("stdout is not a JSON stream ({e}):\n{stdout}"))
+}
+
+/// Whether a printed value is the run-level error object of a failing `--json`
+/// run (`{"error":{"code":…,"kind":…,"message":…}}`).
+///
+/// A per-target NDJSON error line carries its transaction hash alongside the
+/// `error` key, so the single-key shape identifies the run-level object.
+pub(crate) fn is_run_error(value: &serde_json::Value) -> bool {
+    value.as_object().is_some_and(|obj| obj.len() == 1 && obj.contains_key("error"))
+}
+
+/// Build [`RpcArgs`] for a test pointed at `url` with the on-disk cache disabled.
+///
+/// Defaults: `--rpc.no-cache-file` (in-memory LRU still applies; no disk persistence),
+/// 1ms backoff, production rate limit. `build_provider` still calls
+/// `eth_chainId`, so the caller must mount a mock for it. Pass `Some(n)` to
+/// override `--rpc.max-retries`; `None` keeps the production default.
+pub(crate) fn test_rpc_args(url: &str, max_retries: Option<u32>) -> RpcArgs {
+    let mut argv: Vec<String> = vec![
+        "mega-evme".into(),
+        "--rpc".into(),
+        url.into(),
+        "--rpc.no-cache-file".into(),
+        "--rpc.backoff-ms".into(),
+        "1".into(),
+        "--rpc.rate-limit".into(),
+        "660".into(),
+    ];
+    if let Some(n) = max_retries {
+        argv.push("--rpc.max-retries".into());
+        argv.push(n.to_string());
+    }
+    RpcArgs::parse_from(argv)
+}
+
+/// Build [`RpcArgs`] for a test that exercises the on-disk cache path.
+///
+/// Sets `--rpc.cache-max-entries 256` and an explicit `--rpc.cache-dir`. The caller
+/// must mount a mock `eth_chainId` response on the server so that
+/// `build_provider`'s `resolve_chain_id` call succeeds — use
+/// [`MockRpcServer::respond_eth_chain_id`] for this.
+pub(crate) fn test_rpc_args_cached(
+    url: &str,
+    cache_dir: &std::path::Path,
+    max_retries: Option<u32>,
+) -> RpcArgs {
+    let mut argv: Vec<String> = vec![
+        "mega-evme".into(),
+        "--rpc".into(),
+        url.into(),
+        "--rpc.cache-max-entries".into(),
+        "256".into(),
+        "--rpc.cache-dir".into(),
+        cache_dir.to_str().expect("cache_dir utf-8").to_string(),
+        "--rpc.backoff-ms".into(),
+        "1".into(),
+        "--rpc.rate-limit".into(),
+        "660".into(),
+    ];
+    if let Some(n) = max_retries {
+        argv.push("--rpc.max-retries".into());
+        argv.push(n.to_string());
+    }
+    RpcArgs::parse_from(argv)
+}

@@ -2,21 +2,27 @@ use core::cmp::min;
 
 use crate::{
     constants::{self},
-    ExternalEnvTypes, HostExt, JournalInspectTr, MegaContext, MegaSpecId,
+    ExternalEnvTypes, HostExt, JournalInspectTr, MegaContext, MegaSpecId, RevertedAccountRead,
 };
 use alloy_evm::Database;
 use alloy_primitives::{keccak256, Bytes, U256};
 use revm::{
+    bytecode::opcode::{
+        self, CALL as OP_CALL, CALLCODE as OP_CALLCODE, DELEGATECALL as OP_DELEGATECALL,
+        STATICCALL as OP_STATICCALL,
+    },
     context::ContextTr,
     handler::instructions::{EthInstructions, InstructionProvider},
     interpreter::{
-        as_usize_or_fail, gas, gas_or_fail,
-        instructions::{self, control, utility::IntoAddress},
+        as_usize_or_fail, gas,
+        instructions::{self, control, gas_table_spec, utility::IntoAddress},
         interpreter::EthInterpreter,
         interpreter_types::{InputsTr, LoopControl, MemoryTr, RuntimeFlag},
-        FrameInput, Instruction, InstructionContext, InstructionResult, InstructionTable,
-        InterpreterAction, InterpreterTypes, SStoreResult, Stack,
+        num_words, CallScheme, FrameInput, GasTable, Instruction, InstructionContext,
+        InstructionExecResult, InstructionResult, InstructionTable, Interpreter, InterpreterAction,
+        InterpreterTypes, SStoreResult, Stack,
     },
+    primitives::KECCAK_EMPTY,
 };
 
 /// `MegaInstructions` is the instruction table for `MegaETH`.
@@ -42,9 +48,9 @@ use revm::{
 /// - Data limit enforcement: Halts when total transaction data exceeds 3.125 MB
 ///
 /// ## SELFDESTRUCT Opcode
-/// - Disabled in Mini-Rex, Rex, and Rex1 specs
-/// - Re-enabled in Rex2 with EIP-6780 semantics
-/// - When disabled, halts with `InvalidFEOpcode` to prevent contract destruction
+/// - Disabled in Mini-Rex, Rex, and Rex1 specs; re-enabled in Rex2 with EIP-6780 semantics
+/// - When disabled, halts the frame and consumes all its remaining gas (`InvalidFEOpcode`, or
+///   `OutOfGas` when the frame cannot pay the opcode's static gas)
 ///
 /// ## SSTORE Opcode
 /// - Compute gas: Standard EIP-2200/EIP-2929 costs
@@ -108,11 +114,17 @@ use revm::{
 ///    opcodes. Wraps `storage_gas_ext` handlers.
 /// 5. **`volatile_data_ext`** — Applies gas detention on volatile data access (block env,
 ///    beneficiary, oracle) and pre-execution disable checks (Rex4+). Wraps `compute_gas_ext` or
-///    `forward_gas_ext` handlers depending on the opcode.
+///    `forward_gas_ext` handlers depending on the opcode. Its opcodes are also the ones excluded
+///    from the interpreter's static-gas pre-charge (see [`gas_table_for_spec`]), so that a frame
+///    holding less gas than the pre-charge still reaches the disable check; that gas is then
+///    charged from inside the layering, at the point revm's own opcode body charges it (see
+///    [`charge_static_gas`]).
 ///
 /// ## Spec Progression and Opcode Overrides
 ///
-/// Each spec builds on the previous one. Only the opcodes that change are listed:
+/// Each behavior-introducing spec builds on the previous one; the alias specs have no table of
+/// their own and select their behavior target's (see [`MegaInstructions::new`]). Only the
+/// opcodes that change are listed:
 ///
 /// - **EQUIVALENCE**: Standard revm mainnet instruction table (no custom wrappers).
 /// - **`MINI_REX`** (base custom table): All 256 opcodes initialized from scratch.
@@ -120,26 +132,45 @@ use revm::{
 ///   - Block env opcodes (TIMESTAMP, NUMBER, etc.): `volatile_data_ext::*`
 ///   - BALANCE, EXTCODESIZE, EXTCODECOPY, EXTCODEHASH: `volatile_data_ext::*`
 ///   - SLOAD: `compute_gas_ext::sload`
-///   - SSTORE: `additional_limit_ext` → `storage_gas_ext` → `compute_gas_ext`
-///   - LOG0–LOG4: `additional_limit_ext` → `storage_gas_ext` → `compute_gas_ext`
-///   - CALL: `forward_gas_ext` → `storage_gas_ext` → `compute_gas_ext`
-///   - CREATE, CREATE2: `forward_gas_ext` → `storage_gas_ext` → `compute_gas_ext`
+///   - SSTORE: `additional_limit_ext` → `storage_gas_ext`
+///   - LOG0–LOG4: `additional_limit_ext` → `storage_gas_ext`
+///   - CALL: `forward_gas_ext` → `storage_gas_ext`
+///   - CREATE, CREATE2: `forward_gas_ext` → `storage_gas_ext`
 ///   - CALLCODE, DELEGATECALL, STATICCALL: `compute_gas_ext::*` (bug: missing `forward_gas_ext`)
 ///   - SELFDESTRUCT: disabled (`control::invalid`)
 /// - **REX / REX1** (extends `MINI_REX)`:
-///   - CALLCODE: `forward_gas_ext` → `storage_gas_ext` → `compute_gas_ext` (bugfix)
-///   - DELEGATECALL: `forward_gas_ext` → `storage_gas_ext` → `compute_gas_ext` (bugfix)
-///   - STATICCALL: `forward_gas_ext` → `storage_gas_ext` → `compute_gas_ext` (bugfix)
+///   - CALLCODE: `forward_gas_ext` → `storage_gas_ext` (bugfix)
+///   - DELEGATECALL: `forward_gas_ext` → `storage_gas_ext` (bugfix)
+///   - STATICCALL: `forward_gas_ext` → `storage_gas_ext` (bugfix)
 /// - **REX2** (extends REX):
 ///   - SELFDESTRUCT: `compute_gas_ext::selfdestruct` (re-enabled with EIP-6780)
 /// - **REX3** (extends REX2):
 ///   - SLOAD: `volatile_data_ext::sload` → `compute_gas_ext::sload` (oracle gas detention)
 /// - **REX4** (extends REX3):
-///   - CALL: `volatile_data_ext` → `forward_gas_ext` → `storage_gas_ext` → `compute_gas_ext`
-///   - STATICCALL: `volatile_data_ext` → `forward_gas_ext` → `storage_gas_ext` → `compute_gas_ext`
-///   - DELEGATECALL: `volatile_data_ext` → `forward_gas_ext` → `storage_gas_ext` →
-///     `compute_gas_ext`
-///   - CALLCODE: `volatile_data_ext` → `forward_gas_ext` → `storage_gas_ext` → `compute_gas_ext`
+///   - CALL: `volatile_data_ext` → `forward_gas_ext` → `storage_gas_ext`
+///   - STATICCALL: `volatile_data_ext` → `forward_gas_ext` → `storage_gas_ext`
+///   - DELEGATECALL: `volatile_data_ext` → `forward_gas_ext` → `storage_gas_ext`
+///   - CALLCODE: `volatile_data_ext` → `forward_gas_ext` → `storage_gas_ext`
+/// - **REX5** (extends REX4):
+///   - SELFDESTRUCT: `volatile_data_ext::selfdestruct_with_beneficiary_guard` →
+///     `storage_gas_ext::selfdestruct` (new-account storage gas, beneficiary-volatile guard
+///     outermost)
+/// - **REX6** (extends REX5): unifies the per-opcode gas-metering order. The table wiring is
+///   unchanged. Storage-affecting handlers (SSTORE, LOG, CALL-family, CREATE/CREATE2) all follow a
+///   canonical order: charge storage gas → run the raw opcode body → record compute gas exactly
+///   once via `record_storage_compute_gas!` after the body completes, excluding the storage gas.
+///   For SSTORE / LOG / CALL-family this is byte-equivalent to the pre-REX6 layering (nothing
+///   between `gas_before` and the storage charge debits EVM gas), so `storage_gas_ext::*` records
+///   compute inline on every spec — no `if REX6` branch is needed. SELFDESTRUCT keeps its
+///   delegation to `compute_gas_ext::selfdestruct`, whose trailing `record_compute_gas_all_dims`
+///   check records the same single compute window while latching the pre-recorded data/KV/state
+///   usage. CREATE2 is the one real behavior change: REX6+ short-circuits to `create_rex6`, which
+///   folds the memory-expansion gas into the single post-body recording instead of recording it as
+///   a separate eager entry as REX5 did.
+///
+/// Note: chains terminating at `storage_gas_ext` (rather than `compute_gas_ext`) reflect the
+/// canonical metering order above — `storage_gas_ext::*` records compute gas internally via
+/// `record_storage_compute_gas!`, so there is no separate `compute_gas_ext` layer below it.
 ///
 /// # Assumptions
 ///
@@ -160,30 +191,79 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> core::fmt::Debug for MegaInstructi
 impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaInstructions<DB, ExtEnvs> {
     /// Create a new `MegaethInstructions` with the given spec id.
     pub fn new(spec: MegaSpecId) -> Self {
+        // MegaETH only ever runs its opcodes under the Ethereum spec its `MegaSpecId` maps to, so
+        // the static gas table is always built from that spec rather than `SpecId::default()`.
+        let eth_spec = spec.into_eth_spec();
+        let gas_table = gas_table_for_spec(spec);
+        // An alias spec is grouped with its `behavior()` target so it executes exactly the
+        // target's table; the grouping must agree with `behavior()`, pinned by
+        // `test_alias_specs_use_their_behavior_targets_table`.
         let instruction_table = match spec {
-            MegaSpecId::EQUIVALENCE => EthInstructions::new_mainnet(),
-            MegaSpecId::MINI_REX => EthInstructions::new(mini_rex::instruction_table::<
-                EthInterpreter,
-                MegaContext<DB, ExtEnvs>,
-            >()),
-            MegaSpecId::REX | MegaSpecId::REX1 => EthInstructions::new(rex::instruction_table::<
-                EthInterpreter,
-                MegaContext<DB, ExtEnvs>,
-            >()),
-            MegaSpecId::REX2 => EthInstructions::new(rex2::instruction_table::<
-                EthInterpreter,
-                MegaContext<DB, ExtEnvs>,
-            >()),
-            MegaSpecId::REX3 => EthInstructions::new(rex3::instruction_table::<
-                EthInterpreter,
-                MegaContext<DB, ExtEnvs>,
-            >()),
-            MegaSpecId::REX4 => EthInstructions::new(rex4::instruction_table::<
-                EthInterpreter,
-                MegaContext<DB, ExtEnvs>,
-            >()),
+            MegaSpecId::EQUIVALENCE | MegaSpecId::MINI_REX_1 => {
+                EthInstructions::new_mainnet_with_spec(eth_spec)
+            }
+            MegaSpecId::MINI_REX | MegaSpecId::MINI_REX_2 => EthInstructions::new(
+                mini_rex::instruction_table::<EthInterpreter, MegaContext<DB, ExtEnvs>>(),
+                gas_table,
+                eth_spec,
+            ),
+            MegaSpecId::REX | MegaSpecId::REX1 => EthInstructions::new(
+                rex::instruction_table::<EthInterpreter, MegaContext<DB, ExtEnvs>>(),
+                gas_table,
+                eth_spec,
+            ),
+            MegaSpecId::REX2 => EthInstructions::new(
+                rex2::instruction_table::<EthInterpreter, MegaContext<DB, ExtEnvs>>(),
+                gas_table,
+                eth_spec,
+            ),
+            MegaSpecId::REX3 => EthInstructions::new(
+                rex3::instruction_table::<EthInterpreter, MegaContext<DB, ExtEnvs>>(),
+                gas_table,
+                eth_spec,
+            ),
+            MegaSpecId::REX4 => EthInstructions::new(
+                rex4::instruction_table::<EthInterpreter, MegaContext<DB, ExtEnvs>>(),
+                gas_table,
+                eth_spec,
+            ),
+            MegaSpecId::REX5 => EthInstructions::new(
+                rex5::instruction_table::<EthInterpreter, MegaContext<DB, ExtEnvs>>(),
+                gas_table,
+                eth_spec,
+            ),
+            MegaSpecId::REX6 => EthInstructions::new(
+                rex6::instruction_table::<EthInterpreter, MegaContext<DB, ExtEnvs>>(),
+                gas_table,
+                eth_spec,
+            ),
         };
         Self { spec, inner: instruction_table }
+    }
+}
+
+/// Returns the static gas table the interpreter pre-charges from for `spec`.
+///
+/// This is revm's table for the spec's Ethereum spec, with the entry of every opcode that `spec`'s
+/// instruction table wraps in a `volatile_data_ext` handler zeroed out — those chains charge their
+/// own static gas so that their `disableVolatileDataAccess` guard is reached even by a frame that
+/// could not afford the pre-charge (see [`charge_static_gas`]). The per-spec zeroing mirrors the
+/// instruction-table layering one module at a time, so a table entry that gains or loses a volatile
+/// wrapper has its gas entry adjusted right beside it.
+fn gas_table_for_spec(spec: MegaSpecId) -> GasTable {
+    let base = gas_table_spec(spec.into_eth_spec());
+    // An alias spec is grouped with its `behavior()` target, mirroring `MegaInstructions::new`;
+    // the grouping is pinned by `test_alias_specs_use_their_behavior_targets_table`.
+    match spec {
+        // Vanilla mainnet table and handlers — no volatile wrappers, nothing to zero.
+        MegaSpecId::EQUIVALENCE | MegaSpecId::MINI_REX_1 => base,
+        MegaSpecId::MINI_REX | MegaSpecId::MINI_REX_2 => mini_rex::gas_table(base),
+        MegaSpecId::REX | MegaSpecId::REX1 => rex::gas_table(base),
+        MegaSpecId::REX2 => rex2::gas_table(base),
+        MegaSpecId::REX3 => rex3::gas_table(base),
+        MegaSpecId::REX4 => rex4::gas_table(base),
+        MegaSpecId::REX5 => rex5::gas_table(base),
+        MegaSpecId::REX6 => rex6::gas_table(base),
     }
 }
 
@@ -196,6 +276,10 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> InstructionProvider
     fn instruction_table(&self) -> &InstructionTable<Self::InterpreterTypes, Self::Context> {
         self.inner.instruction_table()
     }
+
+    fn gas_table(&self) -> &GasTable {
+        self.inner.gas_table()
+    }
 }
 
 mod rex {
@@ -204,9 +288,9 @@ mod rex {
     /// Returns the instruction table for the `REX` and `REX1` specs.
     ///
     /// Changes from Mini-Rex (bugfix — adds missing `forward_gas_ext` wrapping):
-    /// - CALLCODE: `forward_gas_ext` → `storage_gas_ext` → `compute_gas_ext`
-    /// - DELEGATECALL: `forward_gas_ext` → `storage_gas_ext` → `compute_gas_ext`
-    /// - STATICCALL: `forward_gas_ext` → `storage_gas_ext` → `compute_gas_ext`
+    /// - CALLCODE: `forward_gas_ext` → `storage_gas_ext`
+    /// - DELEGATECALL: `forward_gas_ext` → `storage_gas_ext`
+    /// - STATICCALL: `forward_gas_ext` → `storage_gas_ext`
     pub(super) const fn instruction_table<
         WIRE: InterpreterTypes<Stack: StackInspectTr>,
         H: HostExt + ContextTr + JournalInspectTr + ?Sized,
@@ -218,11 +302,19 @@ mod rex {
         let mut table = mini_rex::instruction_table::<WIRE, H>();
 
         // Mini-Rex mistakenly not modifying these three call-like opcodes. They are fixed in Rex
-        table[CALLCODE as usize] = forward_gas_ext::call_code;
-        table[DELEGATECALL as usize] = forward_gas_ext::delegate_call;
-        table[STATICCALL as usize] = forward_gas_ext::static_call;
+        table[CALLCODE as usize] = Instruction::new(forward_gas_ext::call_code);
+        table[DELEGATECALL as usize] = Instruction::new(forward_gas_ext::delegate_call);
+        table[STATICCALL as usize] = Instruction::new(forward_gas_ext::static_call);
 
         table
+    }
+
+    /// Returns the static gas table for the `REX` and `REX1` specs.
+    ///
+    /// The three call-like opcodes rewired above gain a `forward_gas_ext` layer, not a volatile
+    /// guard, so the zeroed set is unchanged from Mini-Rex.
+    pub(super) const fn gas_table(table: GasTable) -> GasTable {
+        mini_rex::gas_table(table)
     }
 }
 
@@ -243,9 +335,17 @@ mod rex2 {
         use revm::bytecode::opcode::*;
         let mut table = rex::instruction_table::<WIRE, H>();
 
-        table[SELFDESTRUCT as usize] = compute_gas_ext::selfdestruct;
+        table[SELFDESTRUCT as usize] = Instruction::new(compute_gas_ext::selfdestruct);
 
         table
+    }
+
+    /// Returns the static gas table for the `REX2` spec.
+    ///
+    /// `SELFDESTRUCT` is re-enabled above without a volatile guard (Rex4 adds one), so the zeroed
+    /// set is unchanged from Rex.
+    pub(super) const fn gas_table(table: GasTable) -> GasTable {
+        rex::gas_table(table)
     }
 }
 
@@ -270,8 +370,18 @@ mod rex3 {
         // Rex3: SLOAD triggers gas detention for oracle contract access.
         // The host's sload() method marks oracle access in the volatile data tracker,
         // then the detain_gas_ext wrapper applies the compute gas limit.
-        table[SLOAD as usize] = volatile_data_ext::sload;
+        table[SLOAD as usize] = Instruction::new(volatile_data_ext::sload);
 
+        table
+    }
+
+    /// Returns the static gas table for the `REX3` spec.
+    ///
+    /// Adds `SLOAD` to the zeroed set: it gains the oracle volatile guard above.
+    pub(super) const fn gas_table(mut table: GasTable) -> GasTable {
+        use revm::bytecode::opcode::*;
+        table = rex2::gas_table(table);
+        table[SLOAD as usize] = 0;
         table
     }
 }
@@ -282,14 +392,10 @@ mod rex4 {
     /// Returns the instruction table for the `REX4` spec.
     ///
     /// Changes from Rex3:
-    /// - CALL: `volatile_data_ext::call` → `forward_gas_ext` → `storage_gas_ext` →
-    ///   `compute_gas_ext`
-    /// - STATICCALL: `volatile_data_ext::static_call` → `forward_gas_ext` → `storage_gas_ext` →
-    ///   `compute_gas_ext`
-    /// - DELEGATECALL: `volatile_data_ext::delegate_call` → `forward_gas_ext` → `storage_gas_ext` →
-    ///   `compute_gas_ext`
-    /// - CALLCODE: `volatile_data_ext::call_code` → `forward_gas_ext` → `storage_gas_ext` →
-    ///   `compute_gas_ext`
+    /// - CALL: `volatile_data_ext::call` → `forward_gas_ext` → `storage_gas_ext`
+    /// - STATICCALL: `volatile_data_ext::static_call` → `forward_gas_ext` → `storage_gas_ext`
+    /// - DELEGATECALL: `volatile_data_ext::delegate_call` → `forward_gas_ext` → `storage_gas_ext`
+    /// - CALLCODE: `volatile_data_ext::call_code` → `forward_gas_ext` → `storage_gas_ext`
     /// - SELFDESTRUCT: `volatile_data_ext::selfdestruct` → `compute_gas_ext::selfdestruct`
     /// - SELFBALANCE: `volatile_data_ext::selfbalance` → `compute_gas_ext::selfbalance`
     ///
@@ -306,50 +412,428 @@ mod rex4 {
         let mut table = rex3::instruction_table::<WIRE, H>();
 
         // Rex4: CALL-like opcodes check for beneficiary volatile access disabled.
-        table[CALL as usize] = volatile_data_ext::call;
-        table[STATICCALL as usize] = volatile_data_ext::static_call;
-        table[DELEGATECALL as usize] = volatile_data_ext::delegate_call;
-        table[CALLCODE as usize] = volatile_data_ext::call_code;
+        table[CALL as usize] = Instruction::new(volatile_data_ext::call);
+        table[STATICCALL as usize] = Instruction::new(volatile_data_ext::static_call);
+        table[DELEGATECALL as usize] = Instruction::new(volatile_data_ext::delegate_call);
+        table[CALLCODE as usize] = Instruction::new(volatile_data_ext::call_code);
 
         // Rex4: SELFDESTRUCT checks for beneficiary volatile access.
-        table[SELFDESTRUCT as usize] = volatile_data_ext::selfdestruct;
+        table[SELFDESTRUCT as usize] = Instruction::new(volatile_data_ext::selfdestruct);
 
         // Rex4: SELFBALANCE checks for beneficiary volatile access (when the executing
         // contract is the beneficiary, SELFBALANCE triggers gas detention).
-        table[SELFBALANCE as usize] = volatile_data_ext::selfbalance;
+        table[SELFBALANCE as usize] = Instruction::new(volatile_data_ext::selfbalance);
 
         table
     }
+
+    /// Returns the static gas table for the `REX4` spec.
+    ///
+    /// Adds the CALL family, `SELFDESTRUCT` and `SELFBALANCE` to the zeroed set: all three gain a
+    /// beneficiary volatile guard above.
+    pub(super) const fn gas_table(mut table: GasTable) -> GasTable {
+        use revm::bytecode::opcode::*;
+        table = rex3::gas_table(table);
+        table[CALL as usize] = 0;
+        table[STATICCALL as usize] = 0;
+        table[DELEGATECALL as usize] = 0;
+        table[CALLCODE as usize] = 0;
+        table[SELFDESTRUCT as usize] = 0;
+        table[SELFBALANCE as usize] = 0;
+        table
+    }
+}
+
+mod rex5 {
+    use super::*;
+
+    /// Returns the instruction table for the `REX5` spec.
+    ///
+    /// Changes from Rex4:
+    /// - SELFDESTRUCT: `volatile_data_ext::selfdestruct_with_beneficiary_guard` →
+    ///   `storage_gas_ext::selfdestruct`. The outer wrapper keeps the beneficiary-volatile guard
+    ///   outermost (matching the SSTORE / LOG layering) and slots the new-account storage-gas
+    ///   charge between the guard and the inner opcode, so disabled-volatile frames short-circuit
+    ///   ahead of any storage-layer side effects (account inspection, dynamic gas charge,
+    ///   `on_selfdestruct_new_account` record).
+    pub(super) const fn instruction_table<
+        WIRE: InterpreterTypes<Stack: StackInspectTr>,
+        H: HostExt + ContextTr + JournalInspectTr + ?Sized,
+    >() -> [Instruction<WIRE, H>; 256]
+    where
+        WIRE::Stack: StackInspectTr,
+    {
+        use revm::bytecode::opcode::*;
+        let mut table = rex4::instruction_table::<WIRE, H>();
+
+        // REX5: SELFDESTRUCT charges storage gas for new beneficiary accounts,
+        // gated behind the beneficiary-volatile guard.
+        table[SELFDESTRUCT as usize] =
+            Instruction::new(volatile_data_ext::selfdestruct_with_beneficiary_guard);
+
+        table
+    }
+
+    /// Returns the static gas table for the `REX5` spec.
+    ///
+    /// `SELFDESTRUCT` swaps one volatile-guarded handler for another, so the zeroed set is
+    /// unchanged from Rex4.
+    pub(super) const fn gas_table(table: GasTable) -> GasTable {
+        rex4::gas_table(table)
+    }
+}
+
+mod rex6 {
+    use super::*;
+
+    /// Returns the instruction table for the `REX6` spec.
+    ///
+    /// Changes from Rex5: the instruction *table* is unchanged (same handler functions as Rex5).
+    /// Every Rex6 behavior difference is expressed as internal `spec.is_enabled(MegaSpecId::REX6)`
+    /// dispatch inside the shared handlers, never as a swapped table entry:
+    /// - the storage-affecting handlers (SSTORE, LOG, CALL-family, CREATE/CREATE2) charge storage
+    ///   gas, run their body, then record compute gas exactly once (via
+    ///   [`record_storage_compute_gas!`]) with the storage gas excluded; SELFDESTRUCT keeps its
+    ///   delegation to `compute_gas_ext::selfdestruct`, whose trailing all-dimension check records
+    ///   the same single compute window while latching the pre-recorded data/KV/state usage;
+    /// - `storage_gas_ext::selfdestruct` additionally records existing-target balance-update
+    ///   accounting, and its outer volatile wrapper
+    ///   (`volatile_data_ext::selfdestruct_with_beneficiary_guard`) additionally guards the
+    ///   executing contract (source) against the beneficiary;
+    /// - the CALL-family volatile wrappers, on the `disableVolatileDataAccess` path, resolve the
+    ///   stack target's one-hop EIP-7702 delegate before the beneficiary comparison.
+    pub(super) const fn instruction_table<
+        WIRE: InterpreterTypes<Stack: StackInspectTr>,
+        H: HostExt + ContextTr + JournalInspectTr + ?Sized,
+    >() -> [Instruction<WIRE, H>; 256]
+    where
+        WIRE::Stack: StackInspectTr,
+    {
+        rex5::instruction_table::<WIRE, H>()
+    }
+
+    /// Returns the static gas table for the `REX6` spec.
+    ///
+    /// The instruction table is unchanged from Rex5, so the zeroed set is too.
+    pub(super) const fn gas_table(table: GasTable) -> GasTable {
+        rex5::gas_table(table)
+    }
+}
+
+/// The static per-opcode gas revm's schedule prices separately from an opcode's dynamic cost.
+///
+/// Every handler below measures its opcode's compute gas as an `interpreter.gas.remaining()` delta
+/// taken inside the handler, and the recorded compute gas must come out as the opcode's full EVM
+/// cost — the quantity `MegaETH`'s compute-gas limit has always been defined over. Which site
+/// debits this table's entry decides how the handler gets there:
+///
+/// - **The interpreter**, from its [`GasTable`] before dispatch, for every opcode whose entry the
+///   spec leaves in place. The debit falls outside the measurement window, so the recording site
+///   adds the entry back into the measured delta.
+/// - **A [`charge_static_gas`] call site**, for the volatile-guarded opcodes whose entry the spec
+///   zeroes. Whether that lands inside or outside the window depends on the position revm's body
+///   charges from, so those sites add the entry back only when they charge it ahead of the window.
+///
+/// This is deliberately revm's unmodified table, not the per-spec one from [`gas_table_for_spec`]:
+/// it is the *schedule*, not the pre-charge configuration, and the guarded opcodes' entries are
+/// exactly what their handlers have to charge.
+///
+/// Every [`MegaSpecId`] maps to the same Ethereum spec, so a single table covers all of them; the
+/// [`tests::test_static_gas_table_is_spec_invariant`] test fails if that stops holding.
+const STATIC_GAS_TABLE: GasTable = gas_table_spec(MegaSpecId::MINI_REX.into_eth_spec());
+
+/// Returns the static gas charged for `opcode` separately from its dynamic cost.
+///
+/// Call sites fold the lookup into a `const` at compile time, so the per-opcode hot path only gains
+/// a constant addition (or, at a [`charge_static_gas`] site, subtraction).
+const fn static_gas(opcode: u8) -> u64 {
+    STATIC_GAS_TABLE[opcode as usize] as u64
+}
+
+/// Halts the interpreter with `$result`, replacing any pending action and leaving the frame's
+/// remaining gas untouched.
+///
+/// This is the abort primitive for `MegaETH`'s resource-limit halts. It deliberately does not use
+/// [`revm::interpreter::Interpreter::halt`], which differs on both counts:
+///
+/// - `halt` spends all remaining gas when `$result` is `OutOfGas`. A TX-level limit exceed halts
+///   with exactly that result and `MegaETH` refunds the frame's remaining gas to the sender
+///   (`AdditionalLimit::rescue_gas`, and the detained-gas refund) from the gas recorded in the halt
+///   action — spending it would burn gas the user never got to use.
+/// - `halt` rejects setting an action while one is already pending. A limit abort taken right after
+///   a CALL/CREATE body published its child `NewFrame` must *replace* that action: the halt wins
+///   and the child never runs. The pending action is therefore taken and dropped first.
+///
+/// The enclosing handler must still return `Err($result)` afterwards: the interpreter loop only
+/// stops when a step reports an error, and it does not consult the action.
+macro_rules! set_halt_action {
+    ($interpreter:expr, $result:expr) => {{
+        if $interpreter.bytecode.action().is_some() {
+            // Drop the pending child `NewFrame` (or return) action — the halt supersedes it.
+            let _ = $interpreter.take_next_action();
+        }
+        let gas = $interpreter.gas;
+        $interpreter.bytecode.set_action(InterpreterAction::new_halt($result, gas));
+    }};
 }
 
 /// Macro to record compute gas and check if the limit has been exceeded. If the limit is exceeded,
 /// the interpreter halts and returns.
 macro_rules! compute_gas {
-    ($interpreter:expr, $additional_limit:expr, $gas_used:expr $(,$ret:expr)?) => {
+    // Variant for helpers that report failure as `None` rather than `Err`.
+    ($interpreter:expr, $additional_limit:expr, $gas_used:expr, $ret:expr) => {
         if !$additional_limit.record_compute_gas($gas_used) {
-            $interpreter.halt($additional_limit.exceeding_instruction_result());
-            return $($ret)?;
+            set_halt_action!($interpreter, $additional_limit.exceeding_instruction_result());
+            return $ret;
         }
     };
+    // Variant for instruction handlers returning `InstructionExecResult`.
+    ($interpreter:expr, $additional_limit:expr, $gas_used:expr) => {
+        if !$additional_limit.record_compute_gas($gas_used) {
+            let result = $additional_limit.exceeding_instruction_result();
+            set_halt_action!($interpreter, result);
+            return Err(result);
+        }
+    };
+}
+
+/// Converts a `U256` operand to `usize`, halting with `InvalidOperandOOG` and returning `$ret` from
+/// the enclosing function when it does not fit.
+///
+/// Mirrors the limb check of `revm::interpreter::as_usize_or_fail!`, which cannot be used here
+/// because it returns `Err(..)` and these helpers return an `Option`.
+macro_rules! as_usize_or_fail_ret {
+    ($interpreter:expr, $v:expr, $ret:expr) => {
+        match $v.as_limbs() {
+            x => {
+                if (x[0] > usize::MAX as u64) | (x[1] != 0) | (x[2] != 0) | (x[3] != 0) {
+                    $interpreter.halt(InstructionResult::InvalidOperandOOG);
+                    return $ret;
+                }
+                x[0] as usize
+            }
+        }
+    };
+}
+
+/// Expands memory and charges the expansion gas, halting and returning `$ret` from the enclosing
+/// function on failure.
+///
+/// Wraps `Interpreter::resize_memory`, which reports failure as `Err(InstructionResult)` rather
+/// than halting the interpreter itself.
+macro_rules! resize_memory_ret {
+    ($context:expr, $offset:expr, $len:expr, $ret:expr) => {
+        if let Err(result) =
+            $context.interpreter.resize_memory($context.host.gas_params(), $offset, $len)
+        {
+            $context.interpreter.halt(result);
+            return $ret;
+        }
+    };
+}
+
+/// Charges a gas cost that may have overflowed, halting with `OutOfGas` on the `None` arm.
+///
+/// Replaces `revm::interpreter::gas_or_fail!`, which was removed when instructions started
+/// returning `InstructionExecResult`.
+macro_rules! gas_or_fail {
+    ($interpreter:expr, $gas:expr) => {
+        match $gas {
+            Some(gas_used) => gas!($interpreter, gas_used),
+            None => return Err(InstructionResult::OutOfGas),
+        }
+    };
+}
+
+/// Charges `$opcode`'s [`STATIC_GAS_TABLE`] entry, returning `Err(OutOfGas)` from the enclosing
+/// handler when the frame cannot afford it.
+///
+/// `Interpreter::step` normally debits an opcode's static gas from its [`GasTable`] *before*
+/// dispatching to the handler, and reports out-of-gas without ever entering it. That pre-check is
+/// incompatible with a guard that must reject its opcode with a revert and full gas: a frame
+/// holding less than the static gas would be halted out of gas before the guard could run. Every
+/// spec's gas table therefore zeroes the entries of its volatile-guarded opcodes (see
+/// [`gas_table_for_spec`]), which makes the dispatch unconditional, and the handler charges the
+/// entry itself.
+///
+/// Where it charges it is not free choice. `MegaETH`'s consensus schedule is the one revm charged
+/// before the static gas table existed, which is to say from *inside* each opcode's body. The two
+/// call-site groups below reproduce that position per opcode; each states the body order it is
+/// mirroring.
+///
+/// The `const` item folds the table lookup away at compile time, leaving a constant subtraction on
+/// the hot path.
+macro_rules! charge_static_gas {
+    ($context:expr, $opcode:ident) => {{
+        const STATIC_GAS: u64 = static_gas(opcode::$opcode);
+        gas!($context.interpreter, STATIC_GAS);
+    }};
 }
 
 /// Macro to run the inner instruction and abort if the instruction result is an error.
 macro_rules! run_inner_instruction_or_abort {
     ($inner_fn:path, $context:expr) => {
+        run_inner_instruction_or_abort!($inner_fn, $context, _unused_inner_outcome)
+    };
+    ($inner_fn:path, $context:expr, $out:ident) => {
         let ctx = InstructionContext::<'_, H, WIRE> {
             interpreter: &mut *$context.interpreter,
             host: &mut *$context.host,
         };
-        $inner_fn(ctx);
-        if $context
-            .interpreter
-            .bytecode
-            .instruction_result()
-            .is_some_and(|result| result.is_error())
-        {
-            return;
-        }
+        // Halting results abort the wrapper immediately. Non-halting terminations (STOP, RETURN,
+        // SELFDESTRUCT, SUSPEND) are carried in `inner_outcome` so the wrapper's post-instruction
+        // accounting still runs, and must be returned as the wrapper's own result — returning
+        // `Ok(())` after the inner instruction set an action would let the interpreter loop keep
+        // stepping.
+        #[allow(unused_variables)]
+        let $out: InstructionExecResult = match $inner_fn(ctx) {
+            Ok(()) => Ok(()),
+            Err(result) if result.is_halt() => return Err(result),
+            Err(result) => Err(result),
+        };
     };
+    // Same as above, but a halting result runs `$on_halt` — with the result bound to `$halt` —
+    // before the early return skips the wrapper's tail. Callers use it to restore what the halting
+    // body would have done on the deployed schedule, and which results they restore for is theirs
+    // to decide.
+    ($inner_fn:path, $context:expr, $out:ident, on_halt: |$halt:ident| $on_halt:expr) => {
+        let ctx = InstructionContext::<'_, H, WIRE> {
+            interpreter: &mut *$context.interpreter,
+            host: &mut *$context.host,
+        };
+        #[allow(unused_variables)]
+        let $out: InstructionExecResult = match $inner_fn(ctx) {
+            Ok(()) => Ok(()),
+            Err(result) if result.is_halt() => {
+                {
+                    let $halt = result;
+                    $on_halt;
+                }
+                return Err(result);
+            }
+            Err(result) => Err(result),
+        };
+    };
+}
+
+/// Records an opcode's compute gas in a single measurement window and enforces the compute-gas
+/// limit. The REX6 storage-affecting handlers invoke it directly with the storage gas they
+/// charged; plain opcodes use the leaner inline recording in
+/// `compute_gas_ext::wrap_op_compute_gas`, which implements the same forwarded-gas exclusion
+/// without the REX6 abort-path handling (unreachable from those wrappers).
+///
+/// `$gas_before` MUST be the interpreter gas remaining captured at the very top of the handler,
+/// before any storage-gas charge or wrapper-side EVM-gas work (e.g. CREATE2 memory expansion), so
+/// the single measurement window covers all of the opcode's compute work. `$opcode` is the wrapped
+/// opcode, whose [`STATIC_GAS_TABLE`] entry the interpreter charged before the handler was entered
+/// and which therefore falls outside that window. The recorded amount is
+/// `(static_gas + $gas_before − gas_after) − $storage_charged − forwarded_child_gas`: the storage
+/// gas charged inside the window is subtracted back out, and gas forwarded to a child frame is
+/// excluded (the child records its own compute gas). The forwarded-gas exclusion is spec-aware —
+/// REX5+ excludes the revm-side `CALL_STIPEND`, pre-REX5 does not — so the result is identical to
+/// the pre-existing inline recording on every spec.
+///
+/// Because nothing consumes EVM gas before the storage charge for the non-CREATE2 opcodes, the REX6
+/// storage handlers record the same compute gas, at the same point, as the pre-REX6 layering;
+/// CREATE2 differs only by folding its memory-expansion gas into this single window instead of
+/// recording it separately.
+///
+/// On exceeding the compute-gas limit, halts the interpreter and returns from the enclosing
+/// instruction handler. The early return mirrors [`compute_gas!`] so a trailing statement after
+/// this macro (e.g. the pre-REX5 `resize_gas` late-record in `storage_gas_ext::create`) is only
+/// reached on the non-halt path; without the return, a halt here would let a later `compute_gas!`
+/// add gas to the tracker after the OOG was already set.
+macro_rules! record_storage_compute_gas {
+    ($context:expr, $gas_before:expr, $storage_charged:expr, $opcode:expr) => {{
+        let gas_after = $context.interpreter.gas.remaining();
+        let mut gas_used = (const { static_gas($opcode) } + $gas_before.saturating_sub(gas_after))
+            .saturating_sub($storage_charged);
+        // Exclude gas forwarded to a child frame. REX5+ excludes the revm-side `CALL_STIPEND`
+        // (added by value-transferring CALL/CALLCODE without deducting from the parent) so the
+        // parent's compute gas is not under-counted; pre-REX5 subtracts the full child gas limit
+        // for replay parity. `forwarded_child_gas` records that deducted amount so the abort path
+        // below can return it to the parent.
+        let mut forwarded_child_gas: u64 = 0;
+        match $context.interpreter.bytecode.action() {
+            Some(InterpreterAction::NewFrame(FrameInput::Call(call_inputs))) => {
+                let stipend_from_revm = if $context.host.spec_id().is_enabled(MegaSpecId::REX5) &&
+                    matches!(call_inputs.scheme, CallScheme::Call | CallScheme::CallCode) &&
+                    call_inputs.transfers_value()
+                {
+                    gas::CALL_STIPEND
+                } else {
+                    0
+                };
+                let parent_contributed = call_inputs.gas_limit.saturating_sub(stipend_from_revm);
+                forwarded_child_gas = parent_contributed;
+                gas_used = gas_used.saturating_sub(parent_contributed);
+            }
+            Some(InterpreterAction::NewFrame(FrameInput::Create(create_inputs))) => {
+                forwarded_child_gas = create_inputs.gas_limit();
+                gas_used = gas_used.saturating_sub(create_inputs.gas_limit());
+            }
+            _ => {}
+        }
+        // On a compute-limit halt the pending child `NewFrame` is discarded (the child never runs),
+        // but revm already deducted the forwarded gas and the outer `forward_gas_ext` erase is
+        // skipped on this abort path. REX6+: return that gas to the parent before halting.
+        let is_rex6 = $context.host.spec_id().is_enabled(MegaSpecId::REX6);
+        let exceeding_result = {
+            let mut additional_limit = $context.host.additional_limit().borrow_mut();
+            if additional_limit.record_compute_gas(gas_used) {
+                None
+            } else {
+                Some(additional_limit.exceeding_instruction_result())
+            }
+        };
+        if let Some(result) = exceeding_result {
+            if is_rex6 {
+                $context.interpreter.gas.erase_cost(forwarded_child_gas);
+            }
+            // The halt action is set even though `Err` is returned: a pending child `NewFrame` is
+            // already set here and must be replaced (the child never runs), and the interpreter's
+            // own fallback halt would spend all the remaining gas that the erase above just
+            // returned. Setting it after `erase_cost` is what captures the returned gas in the
+            // action.
+            set_halt_action!($context.interpreter, result);
+            return Err(result);
+        }
+    }};
+}
+
+/// Runs revm's CALL-family opcode body inside a CALL target-resolution scope.
+///
+/// Every `MegaETH` handler for `CALL` / `CALLCODE` / `DELEGATECALL` / `STATICCALL` reaches revm's
+/// body through this function instead of calling [`instructions::contract::call`] directly, on
+/// every spec and at every wrapper layer. The scope is what lets
+/// [`Host::load_account_info_skip_cold_load`] tell the CALL's raw stack operand (marks beneficiary
+/// access on every spec) from its EIP-7702 delegate hop (marks only from `REX6`) — two loads that
+/// are otherwise identical at the host boundary. Routing every handler through one function is what
+/// makes the bracket impossible to forget when a table entry or wrapper layer is added.
+///
+/// The scope is closed on both exit paths, so a halting CALL cannot leak it into the next opcode's
+/// loads. The inner instruction is invoked directly rather than through
+/// [`run_inner_instruction_or_abort`], which returns early on a halt.
+///
+/// `EQUIVALENCE` is the one spec whose table keeps revm's unwrapped CALL handlers, so its delegate
+/// hop still marks. That is unobservable: pre-`MINI_REX` there is no detention (`AdditionalLimit`
+/// and the `apply_compute_gas_limit!` wrappers are `MINI_REX`+), the reported volatile-access info
+/// is `MINI_REX`-gated in `execution_result`, and `get_block_env_accesses` masks the beneficiary
+/// bit out.
+#[inline]
+fn call_resolving_target<const KIND: u8, WIRE: InterpreterTypes, H: HostExt + ?Sized>(
+    context: InstructionContext<'_, H, WIRE>,
+) -> InstructionExecResult {
+    context.host.begin_call_target_resolution();
+    let inner_outcome = {
+        let ctx = InstructionContext::<'_, H, WIRE> {
+            interpreter: &mut *context.interpreter,
+            host: &mut *context.host,
+        };
+        instructions::contract::call::<KIND, _, _>(ctx)
+    };
+    context.host.end_call_target_resolution();
+    inner_outcome
 }
 
 mod mini_rex {
@@ -362,10 +846,10 @@ mod mini_rex {
     /// - Most opcodes: `compute_gas_ext::*` (compute gas tracking only)
     /// - Block env opcodes: `volatile_data_ext::*` (gas detention)
     /// - BALANCE, EXTCODESIZE, EXTCODECOPY, EXTCODEHASH: `volatile_data_ext::*` (conditional)
-    /// - SSTORE: `additional_limit_ext` → `storage_gas_ext` → `compute_gas_ext`
-    /// - LOG0–LOG4: `additional_limit_ext` → `storage_gas_ext` → `compute_gas_ext`
-    /// - CALL: `forward_gas_ext` → `storage_gas_ext` → `compute_gas_ext`
-    /// - CREATE, CREATE2: `forward_gas_ext` → `storage_gas_ext` → `compute_gas_ext`
+    /// - SSTORE: `additional_limit_ext` → `storage_gas_ext`
+    /// - LOG0–LOG4: `additional_limit_ext` → `storage_gas_ext`
+    /// - CALL: `forward_gas_ext` → `storage_gas_ext`
+    /// - CREATE, CREATE2: `forward_gas_ext` → `storage_gas_ext`
     /// - CALLCODE, DELEGATECALL, STATICCALL: `compute_gas_ext::*` (bug: missing `forward_gas_ext`)
     /// - SELFDESTRUCT: disabled (`control::invalid`)
     pub(super) const fn instruction_table<
@@ -373,169 +857,205 @@ mod mini_rex {
         H: HostExt + ContextTr + JournalInspectTr + ?Sized,
     >() -> [Instruction<WIRE, H>; 256] {
         use revm::bytecode::opcode::*;
-        let mut table = [control::unknown as Instruction<WIRE, H>; 256];
+        let mut table = [Instruction::new(control::unknown); 256];
 
-        table[STOP as usize] = compute_gas_ext::stop;
-        table[ADD as usize] = compute_gas_ext::add;
-        table[MUL as usize] = compute_gas_ext::mul;
-        table[SUB as usize] = compute_gas_ext::sub;
-        table[DIV as usize] = compute_gas_ext::div;
-        table[SDIV as usize] = compute_gas_ext::sdiv;
-        table[MOD as usize] = compute_gas_ext::rem;
-        table[SMOD as usize] = compute_gas_ext::smod;
-        table[ADDMOD as usize] = compute_gas_ext::addmod;
-        table[MULMOD as usize] = compute_gas_ext::mulmod;
-        table[EXP as usize] = compute_gas_ext::exp;
-        table[SIGNEXTEND as usize] = compute_gas_ext::signextend;
+        table[STOP as usize] = Instruction::new(compute_gas_ext::stop);
+        table[ADD as usize] = Instruction::new(compute_gas_ext::add);
+        table[MUL as usize] = Instruction::new(compute_gas_ext::mul);
+        table[SUB as usize] = Instruction::new(compute_gas_ext::sub);
+        table[DIV as usize] = Instruction::new(compute_gas_ext::div);
+        table[SDIV as usize] = Instruction::new(compute_gas_ext::sdiv);
+        table[MOD as usize] = Instruction::new(compute_gas_ext::rem);
+        table[SMOD as usize] = Instruction::new(compute_gas_ext::smod);
+        table[ADDMOD as usize] = Instruction::new(compute_gas_ext::addmod);
+        table[MULMOD as usize] = Instruction::new(compute_gas_ext::mulmod);
+        table[EXP as usize] = Instruction::new(compute_gas_ext::exp);
+        table[SIGNEXTEND as usize] = Instruction::new(compute_gas_ext::signextend);
 
-        table[LT as usize] = compute_gas_ext::lt;
-        table[GT as usize] = compute_gas_ext::gt;
-        table[SLT as usize] = compute_gas_ext::slt;
-        table[SGT as usize] = compute_gas_ext::sgt;
-        table[EQ as usize] = compute_gas_ext::eq;
-        table[ISZERO as usize] = compute_gas_ext::iszero;
-        table[AND as usize] = compute_gas_ext::bitand;
-        table[OR as usize] = compute_gas_ext::bitor;
-        table[XOR as usize] = compute_gas_ext::bitxor;
-        table[NOT as usize] = compute_gas_ext::not;
-        table[BYTE as usize] = compute_gas_ext::byte;
-        table[SHL as usize] = compute_gas_ext::shl;
-        table[SHR as usize] = compute_gas_ext::shr;
-        table[SAR as usize] = compute_gas_ext::sar;
-        table[CLZ as usize] = compute_gas_ext::clz;
+        table[LT as usize] = Instruction::new(compute_gas_ext::lt);
+        table[GT as usize] = Instruction::new(compute_gas_ext::gt);
+        table[SLT as usize] = Instruction::new(compute_gas_ext::slt);
+        table[SGT as usize] = Instruction::new(compute_gas_ext::sgt);
+        table[EQ as usize] = Instruction::new(compute_gas_ext::eq);
+        table[ISZERO as usize] = Instruction::new(compute_gas_ext::iszero);
+        table[AND as usize] = Instruction::new(compute_gas_ext::bitand);
+        table[OR as usize] = Instruction::new(compute_gas_ext::bitor);
+        table[XOR as usize] = Instruction::new(compute_gas_ext::bitxor);
+        table[NOT as usize] = Instruction::new(compute_gas_ext::not);
+        table[BYTE as usize] = Instruction::new(compute_gas_ext::byte);
+        table[SHL as usize] = Instruction::new(compute_gas_ext::shl);
+        table[SHR as usize] = Instruction::new(compute_gas_ext::shr);
+        table[SAR as usize] = Instruction::new(compute_gas_ext::sar);
+        table[CLZ as usize] = Instruction::new(compute_gas_ext::clz);
 
-        table[KECCAK256 as usize] = compute_gas_ext::keccak256;
+        table[KECCAK256 as usize] = Instruction::new(compute_gas_ext::keccak256);
 
-        table[ADDRESS as usize] = compute_gas_ext::address;
-        table[BALANCE as usize] = volatile_data_ext::balance;
-        table[ORIGIN as usize] = compute_gas_ext::origin;
-        table[CALLER as usize] = compute_gas_ext::caller;
-        table[CALLVALUE as usize] = compute_gas_ext::callvalue;
-        table[CALLDATALOAD as usize] = compute_gas_ext::calldataload;
-        table[CALLDATASIZE as usize] = compute_gas_ext::calldatasize;
-        table[CALLDATACOPY as usize] = compute_gas_ext::calldatacopy;
-        table[CODESIZE as usize] = compute_gas_ext::codesize;
-        table[CODECOPY as usize] = compute_gas_ext::codecopy;
+        table[ADDRESS as usize] = Instruction::new(compute_gas_ext::address);
+        table[BALANCE as usize] = Instruction::new(volatile_data_ext::balance);
+        table[ORIGIN as usize] = Instruction::new(compute_gas_ext::origin);
+        table[CALLER as usize] = Instruction::new(compute_gas_ext::caller);
+        table[CALLVALUE as usize] = Instruction::new(compute_gas_ext::callvalue);
+        table[CALLDATALOAD as usize] = Instruction::new(compute_gas_ext::calldataload);
+        table[CALLDATASIZE as usize] = Instruction::new(compute_gas_ext::calldatasize);
+        table[CALLDATACOPY as usize] = Instruction::new(compute_gas_ext::calldatacopy);
+        table[CODESIZE as usize] = Instruction::new(compute_gas_ext::codesize);
+        table[CODECOPY as usize] = Instruction::new(compute_gas_ext::codecopy);
 
-        table[GASPRICE as usize] = compute_gas_ext::gasprice;
-        table[EXTCODESIZE as usize] = volatile_data_ext::extcodesize;
-        table[EXTCODECOPY as usize] = volatile_data_ext::extcodecopy;
-        table[EXTCODEHASH as usize] = volatile_data_ext::extcodehash;
-        table[RETURNDATASIZE as usize] = compute_gas_ext::returndatasize;
-        table[RETURNDATACOPY as usize] = compute_gas_ext::returndatacopy;
-        table[BLOCKHASH as usize] = volatile_data_ext::blockhash;
-        table[COINBASE as usize] = volatile_data_ext::coinbase;
-        table[TIMESTAMP as usize] = volatile_data_ext::timestamp;
-        table[NUMBER as usize] = volatile_data_ext::block_number;
-        table[DIFFICULTY as usize] = volatile_data_ext::difficulty;
-        table[GASLIMIT as usize] = volatile_data_ext::gas_limit_opcode;
-        table[CHAINID as usize] = compute_gas_ext::chainid;
-        table[SELFBALANCE as usize] = compute_gas_ext::selfbalance;
-        table[BASEFEE as usize] = volatile_data_ext::basefee;
-        table[BLOBBASEFEE as usize] = volatile_data_ext::blobbasefee;
-        table[BLOBHASH as usize] = volatile_data_ext::blobhash;
+        table[GASPRICE as usize] = Instruction::new(compute_gas_ext::gasprice);
+        table[EXTCODESIZE as usize] = Instruction::new(volatile_data_ext::extcodesize);
+        table[EXTCODECOPY as usize] = Instruction::new(volatile_data_ext::extcodecopy);
+        table[EXTCODEHASH as usize] = Instruction::new(volatile_data_ext::extcodehash);
+        table[RETURNDATASIZE as usize] = Instruction::new(compute_gas_ext::returndatasize);
+        table[RETURNDATACOPY as usize] = Instruction::new(compute_gas_ext::returndatacopy);
+        table[BLOCKHASH as usize] = Instruction::new(volatile_data_ext::blockhash);
+        table[COINBASE as usize] = Instruction::new(volatile_data_ext::coinbase);
+        table[TIMESTAMP as usize] = Instruction::new(volatile_data_ext::timestamp);
+        table[NUMBER as usize] = Instruction::new(volatile_data_ext::block_number);
+        table[DIFFICULTY as usize] = Instruction::new(volatile_data_ext::difficulty);
+        table[GASLIMIT as usize] = Instruction::new(volatile_data_ext::gas_limit_opcode);
+        table[CHAINID as usize] = Instruction::new(compute_gas_ext::chainid);
+        table[SELFBALANCE as usize] = Instruction::new(compute_gas_ext::selfbalance);
+        table[BASEFEE as usize] = Instruction::new(volatile_data_ext::basefee);
+        table[BLOBBASEFEE as usize] = Instruction::new(volatile_data_ext::blobbasefee);
+        table[BLOBHASH as usize] = Instruction::new(volatile_data_ext::blobhash);
 
-        table[POP as usize] = compute_gas_ext::pop;
-        table[MLOAD as usize] = compute_gas_ext::mload;
-        table[MSTORE as usize] = compute_gas_ext::mstore;
-        table[MSTORE8 as usize] = compute_gas_ext::mstore8;
-        table[SLOAD as usize] = compute_gas_ext::sload;
-        table[SSTORE as usize] = additional_limit_ext::sstore;
-        table[JUMP as usize] = compute_gas_ext::jump;
-        table[JUMPI as usize] = compute_gas_ext::jumpi;
-        table[PC as usize] = compute_gas_ext::pc;
-        table[MSIZE as usize] = compute_gas_ext::msize;
-        table[GAS as usize] = compute_gas_ext::gas;
-        table[JUMPDEST as usize] = compute_gas_ext::jumpdest;
-        table[TLOAD as usize] = compute_gas_ext::tload;
-        table[TSTORE as usize] = compute_gas_ext::tstore;
-        table[MCOPY as usize] = compute_gas_ext::mcopy;
+        table[POP as usize] = Instruction::new(compute_gas_ext::pop);
+        table[MLOAD as usize] = Instruction::new(compute_gas_ext::mload);
+        table[MSTORE as usize] = Instruction::new(compute_gas_ext::mstore);
+        table[MSTORE8 as usize] = Instruction::new(compute_gas_ext::mstore8);
+        table[SLOAD as usize] = Instruction::new(compute_gas_ext::sload);
+        table[SSTORE as usize] = Instruction::new(additional_limit_ext::sstore);
+        table[JUMP as usize] = Instruction::new(compute_gas_ext::jump);
+        table[JUMPI as usize] = Instruction::new(compute_gas_ext::jumpi);
+        table[PC as usize] = Instruction::new(compute_gas_ext::pc);
+        table[MSIZE as usize] = Instruction::new(compute_gas_ext::msize);
+        table[GAS as usize] = Instruction::new(compute_gas_ext::gas);
+        table[JUMPDEST as usize] = Instruction::new(compute_gas_ext::jumpdest);
+        table[TLOAD as usize] = Instruction::new(compute_gas_ext::tload);
+        table[TSTORE as usize] = Instruction::new(compute_gas_ext::tstore);
+        table[MCOPY as usize] = Instruction::new(compute_gas_ext::mcopy);
 
-        table[PUSH0 as usize] = compute_gas_ext::push0;
-        table[PUSH1 as usize] = compute_gas_ext::push1;
-        table[PUSH2 as usize] = compute_gas_ext::push2;
-        table[PUSH3 as usize] = compute_gas_ext::push3;
-        table[PUSH4 as usize] = compute_gas_ext::push4;
-        table[PUSH5 as usize] = compute_gas_ext::push5;
-        table[PUSH6 as usize] = compute_gas_ext::push6;
-        table[PUSH7 as usize] = compute_gas_ext::push7;
-        table[PUSH8 as usize] = compute_gas_ext::push8;
-        table[PUSH9 as usize] = compute_gas_ext::push9;
-        table[PUSH10 as usize] = compute_gas_ext::push10;
-        table[PUSH11 as usize] = compute_gas_ext::push11;
-        table[PUSH12 as usize] = compute_gas_ext::push12;
-        table[PUSH13 as usize] = compute_gas_ext::push13;
-        table[PUSH14 as usize] = compute_gas_ext::push14;
-        table[PUSH15 as usize] = compute_gas_ext::push15;
-        table[PUSH16 as usize] = compute_gas_ext::push16;
-        table[PUSH17 as usize] = compute_gas_ext::push17;
-        table[PUSH18 as usize] = compute_gas_ext::push18;
-        table[PUSH19 as usize] = compute_gas_ext::push19;
-        table[PUSH20 as usize] = compute_gas_ext::push20;
-        table[PUSH21 as usize] = compute_gas_ext::push21;
-        table[PUSH22 as usize] = compute_gas_ext::push22;
-        table[PUSH23 as usize] = compute_gas_ext::push23;
-        table[PUSH24 as usize] = compute_gas_ext::push24;
-        table[PUSH25 as usize] = compute_gas_ext::push25;
-        table[PUSH26 as usize] = compute_gas_ext::push26;
-        table[PUSH27 as usize] = compute_gas_ext::push27;
-        table[PUSH28 as usize] = compute_gas_ext::push28;
-        table[PUSH29 as usize] = compute_gas_ext::push29;
-        table[PUSH30 as usize] = compute_gas_ext::push30;
-        table[PUSH31 as usize] = compute_gas_ext::push31;
-        table[PUSH32 as usize] = compute_gas_ext::push32;
+        table[PUSH0 as usize] = Instruction::new(compute_gas_ext::push0);
+        table[PUSH1 as usize] = Instruction::new(compute_gas_ext::push1);
+        table[PUSH2 as usize] = Instruction::new(compute_gas_ext::push2);
+        table[PUSH3 as usize] = Instruction::new(compute_gas_ext::push3);
+        table[PUSH4 as usize] = Instruction::new(compute_gas_ext::push4);
+        table[PUSH5 as usize] = Instruction::new(compute_gas_ext::push5);
+        table[PUSH6 as usize] = Instruction::new(compute_gas_ext::push6);
+        table[PUSH7 as usize] = Instruction::new(compute_gas_ext::push7);
+        table[PUSH8 as usize] = Instruction::new(compute_gas_ext::push8);
+        table[PUSH9 as usize] = Instruction::new(compute_gas_ext::push9);
+        table[PUSH10 as usize] = Instruction::new(compute_gas_ext::push10);
+        table[PUSH11 as usize] = Instruction::new(compute_gas_ext::push11);
+        table[PUSH12 as usize] = Instruction::new(compute_gas_ext::push12);
+        table[PUSH13 as usize] = Instruction::new(compute_gas_ext::push13);
+        table[PUSH14 as usize] = Instruction::new(compute_gas_ext::push14);
+        table[PUSH15 as usize] = Instruction::new(compute_gas_ext::push15);
+        table[PUSH16 as usize] = Instruction::new(compute_gas_ext::push16);
+        table[PUSH17 as usize] = Instruction::new(compute_gas_ext::push17);
+        table[PUSH18 as usize] = Instruction::new(compute_gas_ext::push18);
+        table[PUSH19 as usize] = Instruction::new(compute_gas_ext::push19);
+        table[PUSH20 as usize] = Instruction::new(compute_gas_ext::push20);
+        table[PUSH21 as usize] = Instruction::new(compute_gas_ext::push21);
+        table[PUSH22 as usize] = Instruction::new(compute_gas_ext::push22);
+        table[PUSH23 as usize] = Instruction::new(compute_gas_ext::push23);
+        table[PUSH24 as usize] = Instruction::new(compute_gas_ext::push24);
+        table[PUSH25 as usize] = Instruction::new(compute_gas_ext::push25);
+        table[PUSH26 as usize] = Instruction::new(compute_gas_ext::push26);
+        table[PUSH27 as usize] = Instruction::new(compute_gas_ext::push27);
+        table[PUSH28 as usize] = Instruction::new(compute_gas_ext::push28);
+        table[PUSH29 as usize] = Instruction::new(compute_gas_ext::push29);
+        table[PUSH30 as usize] = Instruction::new(compute_gas_ext::push30);
+        table[PUSH31 as usize] = Instruction::new(compute_gas_ext::push31);
+        table[PUSH32 as usize] = Instruction::new(compute_gas_ext::push32);
 
-        table[DUP1 as usize] = compute_gas_ext::dup1;
-        table[DUP2 as usize] = compute_gas_ext::dup2;
-        table[DUP3 as usize] = compute_gas_ext::dup3;
-        table[DUP4 as usize] = compute_gas_ext::dup4;
-        table[DUP5 as usize] = compute_gas_ext::dup5;
-        table[DUP6 as usize] = compute_gas_ext::dup6;
-        table[DUP7 as usize] = compute_gas_ext::dup7;
-        table[DUP8 as usize] = compute_gas_ext::dup8;
-        table[DUP9 as usize] = compute_gas_ext::dup9;
-        table[DUP10 as usize] = compute_gas_ext::dup10;
-        table[DUP11 as usize] = compute_gas_ext::dup11;
-        table[DUP12 as usize] = compute_gas_ext::dup12;
-        table[DUP13 as usize] = compute_gas_ext::dup13;
-        table[DUP14 as usize] = compute_gas_ext::dup14;
-        table[DUP15 as usize] = compute_gas_ext::dup15;
-        table[DUP16 as usize] = compute_gas_ext::dup16;
+        table[DUP1 as usize] = Instruction::new(compute_gas_ext::dup1);
+        table[DUP2 as usize] = Instruction::new(compute_gas_ext::dup2);
+        table[DUP3 as usize] = Instruction::new(compute_gas_ext::dup3);
+        table[DUP4 as usize] = Instruction::new(compute_gas_ext::dup4);
+        table[DUP5 as usize] = Instruction::new(compute_gas_ext::dup5);
+        table[DUP6 as usize] = Instruction::new(compute_gas_ext::dup6);
+        table[DUP7 as usize] = Instruction::new(compute_gas_ext::dup7);
+        table[DUP8 as usize] = Instruction::new(compute_gas_ext::dup8);
+        table[DUP9 as usize] = Instruction::new(compute_gas_ext::dup9);
+        table[DUP10 as usize] = Instruction::new(compute_gas_ext::dup10);
+        table[DUP11 as usize] = Instruction::new(compute_gas_ext::dup11);
+        table[DUP12 as usize] = Instruction::new(compute_gas_ext::dup12);
+        table[DUP13 as usize] = Instruction::new(compute_gas_ext::dup13);
+        table[DUP14 as usize] = Instruction::new(compute_gas_ext::dup14);
+        table[DUP15 as usize] = Instruction::new(compute_gas_ext::dup15);
+        table[DUP16 as usize] = Instruction::new(compute_gas_ext::dup16);
 
-        table[SWAP1 as usize] = compute_gas_ext::swap1;
-        table[SWAP2 as usize] = compute_gas_ext::swap2;
-        table[SWAP3 as usize] = compute_gas_ext::swap3;
-        table[SWAP4 as usize] = compute_gas_ext::swap4;
-        table[SWAP5 as usize] = compute_gas_ext::swap5;
-        table[SWAP6 as usize] = compute_gas_ext::swap6;
-        table[SWAP7 as usize] = compute_gas_ext::swap7;
-        table[SWAP8 as usize] = compute_gas_ext::swap8;
-        table[SWAP9 as usize] = compute_gas_ext::swap9;
-        table[SWAP10 as usize] = compute_gas_ext::swap10;
-        table[SWAP11 as usize] = compute_gas_ext::swap11;
-        table[SWAP12 as usize] = compute_gas_ext::swap12;
-        table[SWAP13 as usize] = compute_gas_ext::swap13;
-        table[SWAP14 as usize] = compute_gas_ext::swap14;
-        table[SWAP15 as usize] = compute_gas_ext::swap15;
-        table[SWAP16 as usize] = compute_gas_ext::swap16;
+        table[SWAP1 as usize] = Instruction::new(compute_gas_ext::swap1);
+        table[SWAP2 as usize] = Instruction::new(compute_gas_ext::swap2);
+        table[SWAP3 as usize] = Instruction::new(compute_gas_ext::swap3);
+        table[SWAP4 as usize] = Instruction::new(compute_gas_ext::swap4);
+        table[SWAP5 as usize] = Instruction::new(compute_gas_ext::swap5);
+        table[SWAP6 as usize] = Instruction::new(compute_gas_ext::swap6);
+        table[SWAP7 as usize] = Instruction::new(compute_gas_ext::swap7);
+        table[SWAP8 as usize] = Instruction::new(compute_gas_ext::swap8);
+        table[SWAP9 as usize] = Instruction::new(compute_gas_ext::swap9);
+        table[SWAP10 as usize] = Instruction::new(compute_gas_ext::swap10);
+        table[SWAP11 as usize] = Instruction::new(compute_gas_ext::swap11);
+        table[SWAP12 as usize] = Instruction::new(compute_gas_ext::swap12);
+        table[SWAP13 as usize] = Instruction::new(compute_gas_ext::swap13);
+        table[SWAP14 as usize] = Instruction::new(compute_gas_ext::swap14);
+        table[SWAP15 as usize] = Instruction::new(compute_gas_ext::swap15);
+        table[SWAP16 as usize] = Instruction::new(compute_gas_ext::swap16);
 
-        table[LOG0 as usize] = additional_limit_ext::log::<0, _, _>;
-        table[LOG1 as usize] = additional_limit_ext::log::<1, _, _>;
-        table[LOG2 as usize] = additional_limit_ext::log::<2, _, _>;
-        table[LOG3 as usize] = additional_limit_ext::log::<3, _, _>;
-        table[LOG4 as usize] = additional_limit_ext::log::<4, _, _>;
+        table[LOG0 as usize] = Instruction::new(additional_limit_ext::log::<0, _, _>);
+        table[LOG1 as usize] = Instruction::new(additional_limit_ext::log::<1, _, _>);
+        table[LOG2 as usize] = Instruction::new(additional_limit_ext::log::<2, _, _>);
+        table[LOG3 as usize] = Instruction::new(additional_limit_ext::log::<3, _, _>);
+        table[LOG4 as usize] = Instruction::new(additional_limit_ext::log::<4, _, _>);
 
-        table[CREATE as usize] = forward_gas_ext::create;
-        table[CREATE2 as usize] = forward_gas_ext::create2;
-        table[CALL as usize] = forward_gas_ext::call;
-        table[CALLCODE as usize] = compute_gas_ext::call_code;
-        table[DELEGATECALL as usize] = compute_gas_ext::delegate_call;
-        table[STATICCALL as usize] = compute_gas_ext::static_call;
+        table[CREATE as usize] = Instruction::new(forward_gas_ext::create);
+        table[CREATE2 as usize] = Instruction::new(forward_gas_ext::create2);
+        table[CALL as usize] = Instruction::new(forward_gas_ext::call);
+        table[CALLCODE as usize] = Instruction::new(compute_gas_ext::call_code);
+        table[DELEGATECALL as usize] = Instruction::new(compute_gas_ext::delegate_call);
+        table[STATICCALL as usize] = Instruction::new(compute_gas_ext::static_call);
 
-        table[INVALID as usize] = compute_gas_ext::invalid;
-        table[RETURN as usize] = compute_gas_ext::ret;
-        table[REVERT as usize] = compute_gas_ext::revert;
-        table[SELFDESTRUCT as usize] = control::invalid;
+        table[INVALID as usize] = Instruction::new(compute_gas_ext::invalid);
+        table[RETURN as usize] = Instruction::new(compute_gas_ext::ret);
+        table[REVERT as usize] = Instruction::new(compute_gas_ext::revert);
+        table[SELFDESTRUCT as usize] = Instruction::new(control::invalid);
+
+        table
+    }
+
+    /// Returns the static gas table for the `MINI_REX` spec.
+    ///
+    /// Zeroes the entry of every opcode this spec's instruction table wraps in a
+    /// `volatile_data_ext` handler — the block-environment reads plus the beneficiary-conditional
+    /// account-touching opcodes. See [`super::volatile_data_ext::charge_static_gas`] for why those
+    /// entries have to move out of the interpreter's pre-charge and into the handler.
+    ///
+    /// Opcodes this table dispatches to `control::invalid` (disabled) or `control::unknown` (never
+    /// wired) keep their entries even though no handler consumes them. The pre-charge cannot change
+    /// what such a frame pays — the handler takes the whole budget either way — only which halt it
+    /// reports, and revm treats that as an implementation detail: its own table prices `CLZ`,
+    /// `SLOTNUM` and the `DUPN` family at every fork, including the forks whose handlers reject
+    /// them outright.
+    pub(super) const fn gas_table(mut table: GasTable) -> GasTable {
+        use revm::bytecode::opcode::*;
+
+        // Unconditionally volatile: `wrap_op_detain_gas_unconditional!`.
+        table[BLOCKHASH as usize] = 0;
+        table[COINBASE as usize] = 0;
+        table[TIMESTAMP as usize] = 0;
+        table[NUMBER as usize] = 0;
+        table[DIFFICULTY as usize] = 0;
+        table[GASLIMIT as usize] = 0;
+        table[BASEFEE as usize] = 0;
+        table[BLOBBASEFEE as usize] = 0;
+        table[BLOBHASH as usize] = 0;
+
+        // Beneficiary-conditional: `wrap_op_detain_gas_conditional!`.
+        table[BALANCE as usize] = 0;
+        table[EXTCODESIZE as usize] = 0;
+        table[EXTCODECOPY as usize] = 0;
+        table[EXTCODEHASH as usize] = 0;
 
         table
     }
@@ -580,12 +1100,12 @@ pub mod forward_gas_ext {
                 H: HostExt + ContextTr + JournalInspectTr + ?Sized,
             >(
                 context: InstructionContext<'_, H, WIRE>,
-            ) {
+            ) -> InstructionExecResult {
                 // Determine if there's a value transfer (only applies to CALL opcode).
                 let has_transfer = $has_transfer_logic(&context);
 
                 // Call the wrapped opcode handler.
-                run_inner_instruction_or_abort!($wrapped_fn, context);
+                run_inner_instruction_or_abort!($wrapped_fn, context, inner_outcome);
 
                 // Cap the forwarded gas to the child call/create to the 98/100 of the remaining
                 // gas.
@@ -633,7 +1153,7 @@ pub mod forward_gas_ext {
                         // stipend, so the logic is simpler.
 
                         // We recover the forwarded gas from the parent call.
-                        let child_gas = create_inputs.gas_limit as u128;
+                        let child_gas = create_inputs.gas_limit() as u128;
                         let forwarded_gas = child_gas; // No stipend for CREATE
 
                         // Recover the remaining gas in the parent call before forwarding to the
@@ -652,10 +1172,11 @@ pub mod forward_gas_ext {
                         context.interpreter.gas.erase_cost(gas_to_return as u64);
 
                         // Set the child create gas limit to the capped value.
-                        create_inputs.gas_limit = capped_forwarded_gas as u64;
+                        create_inputs.set_gas_limit(capped_forwarded_gas as u64);
                     }
                     _ => {}
                 }
+                inner_outcome
             }
         };
     }
@@ -717,6 +1238,29 @@ opcode and revert immediately if the access would be volatile.
 This ensures that disabled volatile accesses do not pollute the tracker's `volatile_data_accessed`
 bitmap or lower the `compute_gas_limit`.
 
+The check runs before *anything* is charged for the opcode, including its static gas: every spec's
+static gas table zeroes the entries of the opcodes handled here, and the entry is charged via
+[`charge_static_gas`] only after the check has declined to fire.
+That is what lets the rejection be a revert that keeps the frame's whole remaining gas even when
+that gas would not have covered the opcode's static cost.
+
+# Where the Static Gas Lands Once the Guard Declines
+
+`MegaETH`'s gas schedule is the one revm charged from inside each opcode's body, before a static gas
+table existed, so each guarded opcode's charge has to go back to that body position rather than to
+whichever wrapper is convenient. It splits the guarded set in two:
+
+- The block-environment reads and `SELFBALANCE` — bodies that open with their gas charge — are
+  charged here, at the top of the handler, before the inner instruction runs.
+- The account-reading opcodes (`BALANCE`, `EXTCODESIZE`, `EXTCODECOPY`, `EXTCODEHASH`, `SLOAD`,
+  `SELFDESTRUCT`) — bodies that pop their operands and read the host *first* — are charged by the
+  `compute_gas_ext` `@self_charged` handlers, after the inner instruction. A frame too poor to pay
+  therefore still consumes its operands and performs the host read, so it halts on whatever the body
+  raised first and its volatile-access mark stands, instead of being pre-empted out of gas.
+- The CALL family is the exception: its body derives the child frame's gas limit from what is left
+  after the charge, so the charge cannot move behind the body without changing what the child is
+  forwarded. See [`wrap_call_volatile_check`].
+
 # Two Categories of Opcodes
 
 ## Block Environment Opcodes (Always Volatile)
@@ -760,33 +1304,323 @@ pub mod volatile_data_ext {
         };
     }
 
+    /// Recreates, for a frame that cannot afford the static-gas charge this wrapper takes ahead of
+    /// revm's body, what the pre-revm-40 schedule did before it charged the opcode anything.
+    ///
+    /// The deployed implementation charged the CALL family's static gas from inside revm's body,
+    /// after the target was loaded, so a frame that could not afford it had already run three
+    /// sites this frame now skips. In the order the opcode reached them:
+    ///
+    /// 1. The storage-gas wrapper's inspection of the account it meters, which runs ahead of revm's
+    ///    body and is therefore unconditional. `select_addr` must be the same selector that wrapper
+    ///    uses, and the `REX5` split below the same one: `CALLCODE` meters against the current
+    ///    frame from `REX5`, which is why its stack operand legitimately stays unmaterialized
+    ///    there.
+    /// 2. From `REX6`, the stack operand's own journal entry, materialized by the raw-operand
+    ///    delegate resolution in [`Host::load_account_info_skip_cold_load`]. The resolution
+    ///    inspects the operand alone — it reads the delegate's address off the operand's code and
+    ///    never inspects the delegate. revm's own load then brought the delegate in as a fresh
+    ///    entry, which a frame revert leaves priced exactly like an absent one, so the delegate is
+    ///    not touched here.
+    /// 3. The beneficiary-access mark the host set as revm's body loaded the target — see
+    ///    [`mark_call_target_beneficiary`].
+    ///
+    /// Sites 2 and 3 sit inside revm's load, which the deployed schedule reached only if the frame
+    /// got through everything ahead of it: the storage-gas wrapper's new-account charge, the
+    /// body's static-call check on a value transfer, and its two memory expansions. Each is
+    /// replayed here against the gas the frame holds, and a frame that would have stopped on any
+    /// of them gets neither — recreating either for a frame that never reached the load diverges
+    /// just as much, in the other direction.
+    ///
+    /// Journal entries are recreated cold, which is the state the frame's out-of-gas revert left
+    /// them in. `MegaETH` prices a resident-but-cold entry as a cold access even for an address the
+    /// pre-warmed sets cover, so whether they exist decides what every later access to the address
+    /// costs in the transaction. The mark is not journaled and survives the halt, capping the rest
+    /// of the transaction once the caller's tail applies it.
+    ///
+    /// `HAS_VALUE_OPERAND` is `true` for the two opcodes carrying a `value` operand (`CALL` and
+    /// `CALLCODE`), whose memory operands sit one stack position deeper. `IS_CALL` is `true` for
+    /// `CALL`, the only one of the family revm rejects in a static frame when it carries value.
+    fn recreate_unreached_call_load<
+        const HAS_VALUE_OPERAND: bool,
+        const IS_CALL: bool,
+        WIRE: InterpreterTypes<Stack: StackInspectTr>,
+        H: HostExt + ContextTr + JournalInspectTr + ?Sized,
+    >(
+        context: &mut InstructionContext<'_, H, WIRE>,
+        select_addr: fn(MegaSpecId, Address, Address) -> Address,
+    ) -> InstructionExecResult {
+        // A stack too short to hold the target is a stack underflow raised before the storage-gas
+        // wrapper inspected anything.
+        let Some(to) = context.interpreter.stack.inspect::<1>() else { return Ok(()) };
+        let to = to.into_address();
+        let spec = context.interpreter.runtime_flag.spec_id();
+        let mega_spec = context.host.spec_id();
+        let current_address = context.interpreter.input.target_address();
+        let storage_address = select_addr(mega_spec, current_address, to);
+        let storage_is_empty = if mega_spec.is_enabled(MegaSpecId::REX5) {
+            context
+                .host
+                .inspect_account(storage_address, false)
+                .map(|a| a.state_clear_aware_is_empty(spec))
+        } else {
+            context
+                .host
+                .inspect_account_delegated(mega_spec, storage_address)
+                .map(|a| a.state_clear_aware_is_empty(spec))
+        };
+        let Ok(storage_is_empty) = storage_is_empty else {
+            return Err(InstructionResult::FatalExternalError);
+        };
+
+        // Everything below replays what stood between the storage-gas wrapper's inspection and
+        // revm's load. A failed `record_regular_cost` debits nothing, so the frame still holds
+        // exactly what the deployed schedule had at this point, and its memory is untouched.
+        let has_transfer = if HAS_VALUE_OPERAND {
+            let Some(value) = context.interpreter.stack.inspect::<2>() else { return Ok(()) };
+            !value.is_zero()
+        } else {
+            false
+        };
+        let mut budget = context.interpreter.gas.remaining();
+        if storage_is_empty && has_transfer {
+            // The storage-gas wrapper's new-account charge, taken the way that wrapper takes it.
+            // Draining the frame's storage stipend here is what the deployed schedule did on this
+            // path too, and the frame is about to halt, so nothing observes the drained allowance.
+            let Some(new_account_storage_gas) =
+                context.host.new_account_storage_gas(storage_address)
+            else {
+                return Err(InstructionResult::FatalExternalError);
+            };
+            let drained = context
+                .host
+                .additional_limit()
+                .borrow_mut()
+                .try_consume_storage_stipend(new_account_storage_gas);
+            let Some(left) = budget.checked_sub(new_account_storage_gas - drained) else {
+                return Ok(());
+            };
+            budget = left;
+        }
+        if !deployed_body_reaches_load::<HAS_VALUE_OPERAND, IS_CALL, _, _>(
+            context,
+            has_transfer,
+            budget,
+        ) {
+            return Ok(());
+        }
+        recreate_reached_load(context.host, to, storage_address)
+    }
+
+    /// Whether revm's CALL-family body, entered with `budget` gas, got through the steps it takes
+    /// ahead of its load on the deployed schedule: the rejection of a valued `CALL` from a static
+    /// frame, and its two memory expansions. Must be asked before the body runs, which pops the
+    /// memory operands; a stack too short to hold them is a stack underflow raised before the load.
+    pub(super) fn deployed_body_reaches_load<
+        const HAS_VALUE_OPERAND: bool,
+        const IS_CALL: bool,
+        WIRE: InterpreterTypes<Stack: StackInspectTr>,
+        H: HostExt + ?Sized,
+    >(
+        context: &InstructionContext<'_, H, WIRE>,
+        has_transfer: bool,
+        budget: u64,
+    ) -> bool {
+        if IS_CALL && has_transfer && context.interpreter.runtime_flag.is_static() {
+            return false;
+        }
+        let Some(ranges) = call_memory_ranges::<HAS_VALUE_OPERAND, _, _>(context) else {
+            return false;
+        };
+        call_memory_expansions_affordable(
+            context,
+            *context.interpreter.gas.memory(),
+            budget,
+            ranges,
+        )
+    }
+
+    /// Recreates what the deployed host did as revm's CALL-family body loaded its target, for a
+    /// frame that halted before revm 40's body got there although the deployed schedule did: from
+    /// `REX6` the stack operand's cold journal entry, when the storage-gas wrapper did not already
+    /// inspect it; then the body's own read of the operand and, through an EIP-7702 designation,
+    /// of its delegate; and the beneficiary-access mark (see [`mark_call_target_beneficiary`]).
+    pub(super) fn recreate_reached_load<H: HostExt + JournalInspectTr + ?Sized>(
+        host: &mut H,
+        to: Address,
+        storage_address: Address,
+    ) -> InstructionExecResult {
+        if host.spec_id().is_enabled(MegaSpecId::REX6) && storage_address != to {
+            // The operand alone, code hydrated, exactly as the delegate resolution inspects it —
+            // not `inspect_account_delegated`, which would also materialize the delegate cold.
+            if host.inspect_account(to, true).is_err() {
+                return Err(InstructionResult::FatalExternalError);
+            }
+        }
+        // The body then read the operand and its delegate through the journal. An entry an
+        // earlier inspection left resident is unaffected; an absent one — the operand of a
+        // `REX5` CALLCODE, or any delegate from `REX5` — is loaded as that read loaded it.
+        if !host.recreate_reverted_account_read(to, RevertedAccountRead::AccountCodeAndDelegate) {
+            return Err(InstructionResult::FatalExternalError);
+        }
+        mark_call_target_beneficiary(host, to);
+        Ok(())
+    }
+
+    /// Marks beneficiary access for a CALL-family target the way the deployed host did as revm's
+    /// body loaded it: the raw stack operand when it is the block beneficiary, and from `REX6` the
+    /// operand's one-hop EIP-7702 delegate when that is.
+    ///
+    /// revm 40 charges the static gas and the value-transfer cost ahead of that load, so a frame
+    /// that halts on either never reaches the host's marking; the halting exits call this in its
+    /// place, only where the deployed schedule would have reached the load. The mark is idempotent,
+    /// so calling it after a halt that did follow the load changes nothing.
+    ///
+    /// The delegate is resolved the way the deployed host resolved it — best-effort, which inspects
+    /// the operand (as that host did) and falls back to the raw operand on a database error.
+    pub(super) fn mark_call_target_beneficiary<H: HostExt + ?Sized>(host: &mut H, to: Address) {
+        let beneficiary = host.beneficiary_address();
+        let mut marks = to == beneficiary;
+        if host.spec_id().is_enabled(MegaSpecId::REX6) {
+            marks |= host.best_effort_resolve_eip7702_delegate_address(to) == beneficiary;
+        }
+        if marks {
+            host.volatile_data_tracker().borrow_mut().mark_beneficiary_balance_accessed();
+        }
+    }
+
+    /// The `(offset, len)` operand pairs of a CALL-family opcode's input and output memory ranges,
+    /// in the order revm's body expands them.
+    pub(super) type CallMemoryRanges = [U256; 4];
+
+    /// Reads a CALL-family opcode's memory-range operands off the stack.
+    ///
+    /// Must be called before revm's body runs, which pops them. `None` means the stack is too short
+    /// to hold them, which the body raises as a stack underflow ahead of its load.
+    ///
+    /// `HAS_VALUE_OPERAND` is `true` for the two opcodes carrying a `value` operand (`CALL` and
+    /// `CALLCODE`), whose memory operands sit one stack position deeper.
+    pub(super) fn call_memory_ranges<
+        const HAS_VALUE_OPERAND: bool,
+        WIRE: InterpreterTypes<Stack: StackInspectTr>,
+        H: HostExt + ?Sized,
+    >(
+        context: &InstructionContext<'_, H, WIRE>,
+    ) -> Option<CallMemoryRanges> {
+        let stack = &context.interpreter.stack;
+        let operands = if HAS_VALUE_OPERAND {
+            [stack.inspect::<3>(), stack.inspect::<4>(), stack.inspect::<5>(), stack.inspect::<6>()]
+        } else {
+            [stack.inspect::<2>(), stack.inspect::<3>(), stack.inspect::<4>(), stack.inspect::<5>()]
+        };
+        let [Some(in_offset), Some(in_len), Some(out_offset), Some(out_len)] = operands else {
+            return None;
+        };
+        Some([in_offset, in_len, out_offset, out_len])
+    }
+
+    /// Reports whether `budget` gas covers the two memory expansions revm's CALL-family body
+    /// performs before it loads the target, for a frame whose memory accounting stands at
+    /// `memory_gas`.
+    ///
+    /// Answers the question without charging anything, because both callers ask it about a budget
+    /// the frame no longer has: one is about to return out of gas without having debited the
+    /// static charge, the other has already had it debited by a body that then halted.
+    ///
+    /// Mirrors revm's `resize_memory`: a zero length neither reads its offset nor touches memory,
+    /// an operand revm's `as_usize_or_fail!` would reject makes the body halt ahead of its load
+    /// (so it counts as unaffordable), and the two expansions together cost exactly what reaching
+    /// their high-water mark costs, because memory gas is cumulative and priced off the size alone.
+    pub(super) fn call_memory_expansions_affordable<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
+        context: &InstructionContext<'_, H, WIRE>,
+        memory_gas: gas::MemoryGas,
+        budget: u64,
+        ranges: CallMemoryRanges,
+    ) -> bool {
+        let [in_offset, in_len, out_offset, out_len] = ranges;
+        let (Some(in_words), Some(out_words)) =
+            (memory_range_words(in_offset, in_len), memory_range_words(out_offset, out_len))
+        else {
+            return false;
+        };
+        let words = in_words.max(out_words);
+        if words <= memory_gas.words_num {
+            return true;
+        }
+        context.host.gas_params().memory_cost(words).saturating_sub(memory_gas.expansion_cost) <=
+            budget
+    }
+
+    /// The memory size, in words, one `(offset, len)` operand pair requires. `None` for an operand
+    /// revm's `as_usize_or_fail!` would have rejected.
+    fn memory_range_words(offset: U256, len: U256) -> Option<usize> {
+        let len = operand_as_usize(len)?;
+        if len == 0 {
+            return Some(0);
+        }
+        let offset = operand_as_usize(offset)?;
+        Some(num_words(offset.saturating_add(len)))
+    }
+
+    /// Converts a memory operand to `usize`, reporting `None` for a value revm's
+    /// `as_usize_or_fail!` would have rejected.
+    fn operand_as_usize(value: U256) -> Option<usize> {
+        let [low, high @ ..] = *value.as_limbs();
+        if high != [0; 3] {
+            return None;
+        }
+        usize::try_from(low).ok()
+    }
+
+    /// Rejects the guarded opcode with the `disableVolatileDataAccess` revert data and returns from
+    /// the enclosing handler, leaving the frame's gas exactly as it was before the opcode.
+    ///
+    /// Every guard using this macro rejects its opcode *before* the opcode executes, so the opcode
+    /// must cost the frame nothing: the gas snapshot taken into the revert action is what the
+    /// parent frame gets back. Nothing has been debited at this point — the guarded opcodes are
+    /// excluded from the interpreter's static-gas pre-charge and are charged by
+    /// [`charge_static_gas`] only once the guard has declined to fire — so the snapshot is taken
+    /// as-is. Debiting and refunding around the guard instead would be observably wrong for a
+    /// frame holding less gas than the pre-charge: it would never reach the guard at all.
+    macro_rules! revert_volatile_access_disabled {
+        ($context:expr, $opcode:ident, $access_type:expr) => {{
+            $context.interpreter.bytecode.set_action(InterpreterAction::new_return(
+                InstructionResult::Revert,
+                volatile_data_access_disabled_revert_data($access_type),
+                $context.interpreter.gas,
+            ));
+            return Err(InstructionResult::Revert);
+        }};
+    }
+
     /// Macro to create opcode handlers for **unconditionally volatile** opcodes.
     ///
     /// These opcodes (TIMESTAMP, NUMBER, etc.) always access volatile data.
     /// The handler:
     /// 1. Checks if volatile data access is disabled (Rex4+) — if so, reverts immediately
     ///    **before** executing the opcode, avoiding any side effects on the tracker.
-    /// 2. Executes the original instruction.
-    /// 3. Applies the compute gas limit via `apply_compute_gas_limit!`.
+    /// 2. Charges the opcode's static gas, which this spec's gas table left to the handler. These
+    ///    opcodes are the ones whose revm body opens with its gas charge — `gas!(BASE)` /
+    ///    `gas!(BLOCKHASH)` / `gas!(VERYLOW)` ahead of the operand pop and the host read — so
+    ///    charging here, before the inner handler, is that same position.
+    /// 3. Executes the original instruction.
+    /// 4. Applies the compute gas limit via `apply_compute_gas_limit!`.
     macro_rules! wrap_op_detain_gas_unconditional {
-    ($fn_name:ident, $opcode_name:expr, $original_fn:path, $access_type:expr) => {
-        #[doc = concat!("`", $opcode_name, "` opcode with compute gas limit enforcement on volatile data access.")]
+    ($fn_name:ident, $opcode:ident, $original_fn:path, $access_type:expr) => {
+        #[doc = concat!("`", stringify!($opcode), "` opcode with compute gas limit enforcement on volatile data access.")]
         #[inline]
         pub fn $fn_name<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
             context: InstructionContext<'_, H, WIRE>,
-        ) {
+        ) -> InstructionExecResult {
             // Rex4+: revert before executing if volatile data access is disabled.
             if context.host.volatile_access_disabled() {
-                context.interpreter.bytecode.set_action(InterpreterAction::new_return(
-                    InstructionResult::Revert,
-                    volatile_data_access_disabled_revert_data($access_type),
-                    context.interpreter.gas,
-                ));
-                return;
+                revert_volatile_access_disabled!(context, $opcode, $access_type);
             }
+            charge_static_gas!(context, $opcode);
 
-            run_inner_instruction_or_abort!($original_fn, context);
+            run_inner_instruction_or_abort!($original_fn, context, inner_outcome);
             apply_compute_gas_limit!(context);
+            inner_outcome
         }
     };
     }
@@ -801,16 +1635,21 @@ pub mod volatile_data_ext {
     ///    **before** executing the opcode.
     /// 3. Otherwise executes the instruction normally and applies gas detention if volatile data
     ///    was accessed.
+    ///
+    /// The opcode's static gas is *not* charged here. Every opcode in this family charges it from
+    /// inside its revm body, after the operand pop and after the host load that marks beneficiary
+    /// access — so the handlers this delegates to are the `_self_charged` variants, which charge it
+    /// at that point instead.
     macro_rules! wrap_op_detain_gas_conditional {
-    ($fn_name:ident, $opcode_name:expr, $original_fn:path) => {
-        #[doc = concat!("`", $opcode_name, "` opcode with compute gas limit enforcement on volatile data access.")]
+    ($fn_name:ident, $opcode:ident, $original_fn:path) => {
+        #[doc = concat!("`", stringify!($opcode), "` opcode with compute gas limit enforcement on volatile data access.")]
         #[inline]
         pub fn $fn_name<
             WIRE: InterpreterTypes<Stack: StackInspectTr>,
-            H: HostExt + ?Sized,
+            H: HostExt + ContextTr + JournalInspectTr + ?Sized,
         >(
             context: InstructionContext<'_, H, WIRE>,
-        ) {
+        ) -> InstructionExecResult {
             // Peek the target address from the stack to check if it's the beneficiary.
             // Rex4+: If targeting the beneficiary while volatile access is disabled, revert
             // before executing the opcode to avoid polluting the tracker.
@@ -818,19 +1657,64 @@ pub mod volatile_data_ext {
                 let target: Address = addr_word.into_address();
                 let beneficiary = context.host.beneficiary_address();
                 if target == beneficiary && context.host.volatile_access_disabled() {
-                    context.interpreter.bytecode.set_action(InterpreterAction::new_return(
-                        InstructionResult::Revert,
-                        volatile_data_access_disabled_revert_data(
-                            VolatileDataAccessType::Beneficiary,
-                        ),
-                        context.interpreter.gas,
-                    ));
-                    return;
+                    revert_volatile_access_disabled!(
+                        context,
+                        $opcode,
+                        VolatileDataAccessType::Beneficiary
+                    );
                 }
             }
 
-            run_inner_instruction_or_abort!($original_fn, context);
+            // The deployed schedule read the target right after the pop and charged for it
+            // afterwards; revm 40 can halt ahead of that read on two paths, and on both the
+            // wrapper recreates what the read left behind. Captured before the body pops it.
+            //
+            // - `EXTCODECOPY` validates its operands, charges the copy cost and expands memory
+            //   before its load, so a halt on any of those steps left the target's journal entry
+            //   and, for the beneficiary, the access mark behind on the deployed schedule.
+            // - Every member declines a cold read the frame cannot afford and halts out of gas,
+            //   where the deployed read loaded the account first and ran out of gas on the charge.
+            //   The host marks the beneficiary before it declines, so only the read is missing.
+            //   A halt out of gas after the read has left the account resident already, so
+            //   recreating the read there changes nothing.
+            let target: Option<Address> =
+                context.interpreter.stack.inspect::<0>().map(|w| w.into_address());
+
+            run_inner_instruction_or_abort!(
+                $original_fn,
+                context,
+                inner_outcome,
+                on_halt: |halt| {
+                    // A stack underflow is raised by the pop itself, ahead of the deployed load.
+                    // The wrapper still aborts here without applying the cap, as the deployed one
+                    // did, so the mark caps the transaction only once a later tail applies it. A
+                    // database error on the recreated read keeps this halt's own result.
+                    let read_reached = if opcode::$opcode == opcode::EXTCODECOPY {
+                        halt != InstructionResult::StackUnderflow
+                    } else {
+                        halt == InstructionResult::OutOfGas
+                    };
+                    if let Some(target) = target.filter(|_| read_reached) {
+                        let read = if opcode::$opcode == opcode::BALANCE {
+                            RevertedAccountRead::Account
+                        } else {
+                            RevertedAccountRead::AccountAndCode
+                        };
+                        let _ = context.host.recreate_reverted_account_read(target, read);
+                        if opcode::$opcode == opcode::EXTCODECOPY &&
+                            target == context.host.beneficiary_address()
+                        {
+                            context
+                                .host
+                                .volatile_data_tracker()
+                                .borrow_mut()
+                                .mark_beneficiary_balance_accessed();
+                        }
+                    }
+                }
+            );
             apply_compute_gas_limit!(context);
+            inner_outcome
         }
     };
     }
@@ -838,65 +1722,129 @@ pub mod volatile_data_ext {
     // Unconditional volatile opcodes — always access volatile data, no stack inspection needed.
     wrap_op_detain_gas_unconditional!(
         timestamp,
-        "TIMESTAMP",
+        TIMESTAMP,
         compute_gas_ext::timestamp,
         VolatileDataAccessType::Timestamp
     );
     wrap_op_detain_gas_unconditional!(
         block_number,
-        "NUMBER",
+        NUMBER,
         compute_gas_ext::number,
         VolatileDataAccessType::BlockNumber
     );
     wrap_op_detain_gas_unconditional!(
         difficulty,
-        "DIFFICULTY",
+        DIFFICULTY,
         compute_gas_ext::difficulty,
         VolatileDataAccessType::Difficulty
     );
     wrap_op_detain_gas_unconditional!(
         gas_limit_opcode,
-        "GASLIMIT",
+        GASLIMIT,
         compute_gas_ext::gaslimit,
         VolatileDataAccessType::GasLimit
     );
     wrap_op_detain_gas_unconditional!(
         basefee,
-        "BASEFEE",
+        BASEFEE,
         compute_gas_ext::basefee,
         VolatileDataAccessType::BaseFee
     );
     wrap_op_detain_gas_unconditional!(
         coinbase,
-        "COINBASE",
+        COINBASE,
         compute_gas_ext::coinbase,
         VolatileDataAccessType::Coinbase
     );
     wrap_op_detain_gas_unconditional!(
         blockhash,
-        "BLOCKHASH",
+        BLOCKHASH,
         compute_gas_ext::blockhash,
         VolatileDataAccessType::BlockHash
     );
     wrap_op_detain_gas_unconditional!(
         blobbasefee,
-        "BLOBBASEFEE",
+        BLOBBASEFEE,
         compute_gas_ext::blobbasefee,
         VolatileDataAccessType::BlobBaseFee
     );
     wrap_op_detain_gas_unconditional!(
         blobhash,
-        "BLOBHASH",
+        BLOBHASH,
         compute_gas_ext::blobhash,
         VolatileDataAccessType::BlobHash
     );
 
     // Conditional volatile opcodes — volatile only when targeting the block beneficiary.
-    wrap_op_detain_gas_conditional!(balance, "BALANCE", compute_gas_ext::balance);
-    wrap_op_detain_gas_conditional!(extcodesize, "EXTCODESIZE", compute_gas_ext::extcodesize);
-    wrap_op_detain_gas_conditional!(extcodecopy, "EXTCODECOPY", compute_gas_ext::extcodecopy);
-    wrap_op_detain_gas_conditional!(extcodehash, "EXTCODEHASH", compute_gas_ext::extcodehash);
-    wrap_op_detain_gas_conditional!(selfdestruct, "SELFDESTRUCT", compute_gas_ext::selfdestruct);
+    wrap_op_detain_gas_conditional!(balance, BALANCE, compute_gas_ext::balance);
+    wrap_op_detain_gas_conditional!(extcodesize, EXTCODESIZE, compute_gas_ext::extcodesize);
+    wrap_op_detain_gas_conditional!(extcodecopy, EXTCODECOPY, compute_gas_ext::extcodecopy);
+    wrap_op_detain_gas_conditional!(extcodehash, EXTCODEHASH, compute_gas_ext::extcodehash);
+    wrap_op_detain_gas_conditional!(
+        selfdestruct,
+        SELFDESTRUCT,
+        compute_gas_ext::selfdestruct_self_charged
+    );
+
+    /// REX5+ SELFDESTRUCT outer wrapper: beneficiary volatile-access guard ahead of the
+    /// `storage_gas_ext::selfdestruct` layer (which under REX6 also records the existing-target
+    /// balance-update accounting), then the compute-gas-limit application.
+    ///
+    /// This is the conditional-volatile shape of [`wrap_op_detain_gas_conditional`] (it cannot be
+    /// macro-generated because of the extra REX6 source check below): when volatile access is
+    /// disabled and the stack target is the beneficiary, revert before any storage-layer side
+    /// effect. REX6 additionally guards the executing contract (the *source*, whose balance is read
+    /// and zeroed): REX5 inspected only the stack target, so when the source itself was the
+    /// beneficiary its state was still observed without `disableVolatileDataAccess` rejecting.
+    /// The source check is REX6-gated, leaving REX5 byte-for-byte frozen. When volatile access is
+    /// *enabled*, the beneficiary is already balance-marked before its own code runs (it is reached
+    /// as the tx recipient or a CALL target, both of which mark it), so detention engages without a
+    /// SELFDESTRUCT-specific hook.
+    #[inline]
+    pub fn selfdestruct_with_beneficiary_guard<
+        WIRE: InterpreterTypes<Stack: StackInspectTr>,
+        H: HostExt + ContextTr + JournalInspectTr + ?Sized,
+    >(
+        context: InstructionContext<'_, H, WIRE>,
+    ) -> InstructionExecResult {
+        if context.host.volatile_access_disabled() {
+            let beneficiary = context.host.beneficiary_address();
+            // Confirm the SELFDESTRUCT has a target operand first: a stack-underflow SELFDESTRUCT
+            // must keep revm's `StackUnderflow` halt and not be pre-empted by a beneficiary revert.
+            // The guards apply only once the opcode actually acts on a target.
+            if let Some(addr_word) = context.interpreter.stack.inspect::<0>() {
+                let target: Address = addr_word.into_address();
+                // REX6: the executing contract (source) reading and zeroing its own balance is
+                // itself a beneficiary observation. Frozen off pre-REX6, where only the stack
+                // target below was guarded.
+                if context.host.spec_id().is_enabled(MegaSpecId::REX6) &&
+                    context.interpreter.input.target_address() == beneficiary
+                {
+                    revert_volatile_access_disabled!(
+                        context,
+                        SELFDESTRUCT,
+                        VolatileDataAccessType::Beneficiary
+                    );
+                }
+                // All specs: the stack target (the value-transfer destination).
+                if target == beneficiary {
+                    revert_volatile_access_disabled!(
+                        context,
+                        SELFDESTRUCT,
+                        VolatileDataAccessType::Beneficiary
+                    );
+                }
+            }
+        }
+
+        run_inner_instruction_or_abort!(
+            super::storage_gas_ext::selfdestruct,
+            context,
+            inner_outcome
+        );
+        apply_compute_gas_limit!(context);
+        inner_outcome
+    }
 
     /// `SELFBALANCE` opcode with compute gas limit enforcement on volatile data access.
     ///
@@ -904,23 +1852,29 @@ pub mod volatile_data_ext {
     /// Unlike the other beneficiary-conditional opcodes (BALANCE, EXTCODESIZE, etc.),
     /// the target comes from `interpreter.input.target_address()` (the executing contract),
     /// not from a stack operand, so `wrap_op_detain_gas_conditional` cannot be reused.
+    ///
+    /// It also charges its static gas here rather than from inside the compute-gas window, for the
+    /// same reason as the block-environment reads: revm's body opens with `gas!(LOW)` and only then
+    /// reads the balance, so this is that position. The `check!(ISTANBUL)` the body runs first
+    /// never fires — every `MegaSpecId` maps to a post-Istanbul Ethereum spec.
     #[inline]
     pub fn selfbalance<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
         context: InstructionContext<'_, H, WIRE>,
-    ) {
+    ) -> InstructionExecResult {
         let target = context.interpreter.input.target_address();
         let beneficiary = context.host.beneficiary_address();
         if target == beneficiary && context.host.volatile_access_disabled() {
-            context.interpreter.bytecode.set_action(InterpreterAction::new_return(
-                InstructionResult::Revert,
-                volatile_data_access_disabled_revert_data(VolatileDataAccessType::Beneficiary),
-                context.interpreter.gas,
-            ));
-            return;
+            revert_volatile_access_disabled!(
+                context,
+                SELFBALANCE,
+                VolatileDataAccessType::Beneficiary
+            );
         }
+        charge_static_gas!(context, SELFBALANCE);
 
-        run_inner_instruction_or_abort!(compute_gas_ext::selfbalance, context);
+        run_inner_instruction_or_abort!(compute_gas_ext::selfbalance, context, inner_outcome);
         apply_compute_gas_limit!(context);
+        inner_outcome
     }
 
     /// `SLOAD` opcode with compute gas limit enforcement on volatile data access.
@@ -931,63 +1885,134 @@ pub mod volatile_data_ext {
     ///
     /// The handler checks if the SLOAD targets the oracle contract and volatile access is
     /// disabled — if so, reverts before executing the instruction.
+    ///
+    /// The static gas is charged by [`compute_gas_ext::sload_self_charged`], after the host read —
+    /// revm's body loads the slot first and prices it afterwards, and it is that load which marks
+    /// oracle access.
     #[inline]
     pub fn sload<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
         context: InstructionContext<'_, H, WIRE>,
-    ) {
+    ) -> InstructionExecResult {
         // Rex4+: If SLOAD targets the oracle contract and volatile access is disabled,
         // revert before executing to avoid polluting the tracker.
         let target = context.interpreter.input.target_address();
         if target == ORACLE_CONTRACT_ADDRESS && context.host.volatile_access_disabled() {
-            context.interpreter.bytecode.set_action(InterpreterAction::new_return(
-                InstructionResult::Revert,
-                volatile_data_access_disabled_revert_data(VolatileDataAccessType::Oracle),
-                context.interpreter.gas,
-            ));
-            return;
+            revert_volatile_access_disabled!(context, SLOAD, VolatileDataAccessType::Oracle);
         }
 
-        run_inner_instruction_or_abort!(compute_gas_ext::sload, context);
+        run_inner_instruction_or_abort!(
+            compute_gas_ext::sload_self_charged,
+            context,
+            inner_outcome
+        );
         apply_compute_gas_limit!(context);
+        inner_outcome
     }
 
     /// Macro to create opcode handlers for **conditionally volatile CALL-like** opcodes.
     ///
     /// These opcodes (CALL, STATICCALL, DELEGATECALL, CALLCODE) are volatile only when
     /// targeting the block beneficiary address.
-    /// The handler:
-    /// 1. Peeks the target address from the stack (position 1) without consuming it.
-    /// 2. If the target is the beneficiary and volatile access is disabled, reverts immediately
-    ///    **before** executing the opcode to avoid polluting the tracker via
-    ///    `load_account_delegated`.
-    /// 3. Otherwise delegates to the existing `forward_gas_ext` handler.
+    ///
+    /// When volatile access is disabled, the handler peeks the stack target (position 1) and
+    /// reverts **before** executing the opcode if the target is the beneficiary — avoiding tracker
+    /// pollution by the opcode's own account loads. Under REX6 it compares the target's one-hop
+    /// EIP-7702 delegate so a call to a delegator pointing at the beneficiary is also caught; that
+    /// resolution (a DB read) is gated behind the disabled check so it stays off the enabled
+    /// path, where the raw call proceeds and the host marks the delegate as it is loaded
+    /// (see [`call_resolving_target`]). `<=` REX5 compares the raw stack operand (frozen).
+    /// Otherwise it delegates to the existing `forward_gas_ext` handler.
+    ///
+    /// # Where the static gas is charged
+    ///
+    /// This family is the one that cannot put its static gas back where revm's body charges it.
+    /// The body charges it as part of the call cost, after the target load — but it then derives
+    /// the child's gas limit from what the frame has left, and `forward_gas_ext` re-derives its
+    /// 98/100 cap from the same quantity. A charge taken after the body would therefore hand the
+    /// child ~98 gas more than the schedule allows. Charging it before the body keeps every
+    /// forwarded amount identical, because the same total is deducted before either split is
+    /// computed; only the order of the deductions within the body differs, which is unobservable
+    /// for a frame that can afford them.
+    ///
+    /// A frame that *cannot* afford the charge is the case where that order shows: the body never
+    /// runs, so it never loads the target, where the deployed implementation, which loaded before
+    /// charging, did. The out-of-gas exit therefore recreates what that load left behind whenever
+    /// the deployed body would have reached it (see [`recreate_unreached_call_load`]). The
+    /// detention cap below is applied on every path out of this handler, including the
+    /// out-of-gas one, so an access marked there, or by an already-returned inner frame, is
+    /// propagated into the transaction's compute budget.
     macro_rules! wrap_call_volatile_check {
-    ($fn_name:ident, $opcode_name:expr, $inner_fn:path) => {
-        #[doc = concat!("`", $opcode_name, "` opcode with volatile data access disabled check for beneficiary.")]
+    ($fn_name:ident, $opcode:ident, $inner_fn:path, $select_addr:path) => {
+        #[doc = concat!("`", stringify!($opcode), "` opcode with volatile data access disabled check for beneficiary.")]
         #[inline]
         pub fn $fn_name<
             WIRE: InterpreterTypes<Stack: StackInspectTr>,
             H: HostExt + ContextTr + JournalInspectTr + ?Sized,
         >(
             context: InstructionContext<'_, H, WIRE>,
-        ) {
-            // Peek the target address from the stack (position 1 for CALL-like opcodes:
-            // stack layout is [gas_limit, to, ...]).
-            // Rex4+: If targeting the beneficiary while volatile access is disabled, revert
-            // before executing the opcode to avoid polluting the tracker.
-            if let Some(addr_word) = context.interpreter.stack.inspect::<1>() {
-                let target: Address = addr_word.into_address();
-                let beneficiary = context.host.beneficiary_address();
-                if target == beneficiary && context.host.volatile_access_disabled() {
-                    context.interpreter.bytecode.set_action(InterpreterAction::new_return(
-                        InstructionResult::Revert,
-                        volatile_data_access_disabled_revert_data(
-                            VolatileDataAccessType::Beneficiary,
-                        ),
-                        context.interpreter.gas,
-                    ));
-                    return;
+        ) -> InstructionExecResult {
+            let inner_outcome: InstructionExecResult;
+            // Rex4+: If targeting the beneficiary while volatile access is disabled, revert before
+            // executing the opcode to avoid polluting the tracker. Only this disabled path can
+            // revert and only it needs the EIP-7702 delegate resolved, so the resolve (a DB read)
+            // is gated behind the disabled check to keep it off the common (enabled) hot path —
+            // enabled-access detention is marked by the host as the CALL loads the resolved
+            // delegate.
+            if context.host.volatile_access_disabled() {
+                // Peek the target address from the stack (position 1 for CALL-like opcodes:
+                // stack layout is [gas_limit, to, ...]).
+                if let Some(addr_word) = context.interpreter.stack.inspect::<1>() {
+                    let target: Address = addr_word.into_address();
+                    let beneficiary = context.host.beneficiary_address();
+                    let spec = context.host.spec_id();
+                    // The raw target already being the beneficiary observes beneficiary state
+                    // regardless of where it itself delegates, so check it first — `||` short-circuits
+                    // so no EIP-7702 delegate is resolved (and no DB read happens) in that case.
+                    // REX6 otherwise resolves the delegate one hop so a CALL to a delegator `A` whose
+                    // code points at `B == beneficiary` is also caught; <= REX5 compares the raw
+                    // operand (frozen). The resolve is best-effort: a DB error (e.g. the delegate's
+                    // code failing to load) falls back to the raw target WITHOUT stashing a
+                    // `ctx.error`, so a malformed CALL that underflows before it ever runs the target
+                    // keeps its `StackUnderflow` rather than surfacing a spurious DB error from this
+                    // precheck. The opcode's real execution path reads the account again and owns
+                    // surfacing any genuine failure.
+                    if target == beneficiary ||
+                        (spec.is_enabled(MegaSpecId::REX6) &&
+                            context.host.best_effort_resolve_eip7702_delegate_address(target) ==
+                                beneficiary)
+                    {
+                        revert_volatile_access_disabled!(
+                            context,
+                            $opcode,
+                            VolatileDataAccessType::Beneficiary
+                        );
+                    }
                 }
+            }
+            // Charged here rather than after the body — see the macro's doc comment. The charge
+            // does not return early: the detention tail below has to run on this path too.
+            const STATIC_GAS: u64 = static_gas(opcode::$opcode);
+            if !context.interpreter.gas.record_regular_cost(STATIC_GAS) {
+                // The charge is where revm 40 put it, but it is not where this family's consensus
+                // schedule takes it: the deployed implementation charged from inside revm's body,
+                // after the target was loaded, so a frame that cannot afford the charge had
+                // already materialized journal entries and marked beneficiary access. Recreate
+                // them here, ahead of the tail that applies the detention cap.
+                const HAS_VALUE_OPERAND: bool =
+                    opcode::$opcode == opcode::CALL || opcode::$opcode == opcode::CALLCODE;
+                const IS_CALL: bool = opcode::$opcode == opcode::CALL;
+                {
+                    let mut ctx = InstructionContext::<'_, H, WIRE> {
+                        interpreter: &mut *context.interpreter,
+                        host: &mut *context.host,
+                    };
+                    recreate_unreached_call_load::<HAS_VALUE_OPERAND, IS_CALL, _, _>(
+                        &mut ctx,
+                        $select_addr,
+                    )?;
+                }
+                apply_compute_gas_limit!(context);
+                return Err(InstructionResult::OutOfGas);
             }
 
             // Delegate to the existing forward_gas_ext handler via reborrow so that
@@ -997,25 +2022,51 @@ pub mod volatile_data_ext {
                     interpreter: &mut *context.interpreter,
                     host: &mut *context.host,
                 };
-                $inner_fn(ctx);
+                // The inner handler already recorded its outcome in the interpreter action; the
+                // detention below must run regardless, so the result is carried to the tail.
+                inner_outcome = $inner_fn(ctx);
             }
 
             // Propagate the detained compute gas limit if the CALL triggered beneficiary
-            // access (via `host.load_account_delegated()` inside the CALL handler).
+            // access (marked by the host as the CALL's target account was loaded).
             // `apply_compute_gas_limit!` only touches the tracker and `AdditionalLimit`,
             // not interpreter state, so it is safe in any interpreter state (including
             // `NewFrame` after a successful CALL).
             apply_compute_gas_limit!(context);
+            inner_outcome
         }
     };
     }
 
     // Conditionally volatile CALL-like opcodes — volatile only when targeting the block
     // beneficiary. These wrap forward_gas_ext handlers with a pre-execution beneficiary check.
-    wrap_call_volatile_check!(call, "CALL", forward_gas_ext::call);
-    wrap_call_volatile_check!(static_call, "STATICCALL", forward_gas_ext::static_call);
-    wrap_call_volatile_check!(delegate_call, "DELEGATECALL", forward_gas_ext::delegate_call);
-    wrap_call_volatile_check!(call_code, "CALLCODE", forward_gas_ext::call_code);
+    // The trailing selector must stay the one `storage_gas_ext`'s wrapper meters this opcode
+    // against: it is what `recreate_unreached_call_load` reproduces when the frame cannot
+    // afford the static charge above.
+    wrap_call_volatile_check!(
+        call,
+        CALL,
+        forward_gas_ext::call,
+        storage_gas_ext::storage_addr_from_to
+    );
+    wrap_call_volatile_check!(
+        static_call,
+        STATICCALL,
+        forward_gas_ext::static_call,
+        storage_gas_ext::storage_addr_from_to
+    );
+    wrap_call_volatile_check!(
+        delegate_call,
+        DELEGATECALL,
+        forward_gas_ext::delegate_call,
+        storage_gas_ext::storage_addr_from_to
+    );
+    wrap_call_volatile_check!(
+        call_code,
+        CALLCODE,
+        forward_gas_ext::call_code,
+        storage_gas_ext::storage_addr_for_callcode
+    );
 }
 
 /// Extends opcodes with additional limit (kv update limit, data limit, etc.) enforcement.
@@ -1045,27 +2096,24 @@ pub mod additional_limit_ext {
         H: HostExt + ContextTr + JournalInspectTr + ?Sized,
     >(
         context: InstructionContext<'_, H, WIRE>,
-    ) {
+    ) -> InstructionExecResult {
         // Load storage slot values before executing the instruction
         let target_address = context.interpreter.input.target_address();
         let Some(index) = context.interpreter.stack.inspect::<0>() else {
-            context.interpreter.halt(InstructionResult::StackUnderflow);
-            return;
+            return Err(InstructionResult::StackUnderflow);
         };
         let mega_spec = context.host.spec_id();
         let Ok(slot) = context.host.inspect_storage(mega_spec, target_address, index) else {
-            context.interpreter.halt(InstructionResult::FatalExternalError);
-            return;
+            return Err(InstructionResult::FatalExternalError);
         };
         let (original_value, present_value) = (slot.original_value(), slot.present_value());
         let Some(new_value) = context.interpreter.stack.inspect::<1>() else {
-            context.interpreter.halt(InstructionResult::StackUnderflow);
-            return;
+            return Err(InstructionResult::StackUnderflow);
         };
         let loaded_data = SStoreResult { original_value, present_value, new_value };
 
         // Execute the original SSTORE instruction
-        run_inner_instruction_or_abort!(storage_gas_ext::sstore, context);
+        run_inner_instruction_or_abort!(storage_gas_ext::sstore, context, inner_outcome);
 
         // KV update bomb and data bomb (only when first writing non-zero value to originally zero
         // slot): check if the number of key-value updates or the total data size will exceed the
@@ -1073,8 +2121,11 @@ pub mod additional_limit_ext {
         let additional_limit = context.host.additional_limit();
         let mut additional_limit = additional_limit.borrow_mut();
         if !additional_limit.on_sstore(target_address, index, &loaded_data) {
-            context.interpreter.halt(additional_limit.exceeding_instruction_result());
+            let result = additional_limit.exceeding_instruction_result();
+            set_halt_action!(context.interpreter, result);
+            return Err(result);
         }
+        inner_outcome
     }
 
     /// `LOG` opcode implementation with data size limit enforcement.
@@ -1092,38 +2143,79 @@ pub mod additional_limit_ext {
         H: HostExt + ContextTr + JournalInspectTr + ?Sized,
     >(
         context: InstructionContext<'_, H, WIRE>,
-    ) {
+    ) -> InstructionExecResult {
         // Get the log data length before executing the instruction
         let Some(len) = context.interpreter.stack.inspect::<1>() else {
-            context.interpreter.halt(InstructionResult::StackUnderflow);
-            return;
+            return Err(InstructionResult::StackUnderflow);
         };
         let len = as_usize_or_fail!(context.interpreter, len);
 
         // Execute the original LOG instruction
-        run_inner_instruction_or_abort!(storage_gas_ext::log::<N, WIRE, H>, context);
+        run_inner_instruction_or_abort!(storage_gas_ext::log::<N, WIRE, H>, context, inner_outcome);
 
         // Record the size of the log topics and data. If the total data size exceeds the limit, we
         // halt.
         let additional_limit = context.host.additional_limit();
         let mut additional_limit = additional_limit.borrow_mut();
         if !additional_limit.on_log(N as u64, len as u64) {
-            context.interpreter.halt(additional_limit.exceeding_instruction_result());
+            let result = additional_limit.exceeding_instruction_result();
+            set_halt_action!(context.interpreter, result);
+            return Err(result);
         }
+        inner_outcome
     }
 }
 
 /// Extends opcodes with storage gas cost on top of `compute_gas_ext`.
 pub mod storage_gas_ext {
     use super::*;
+    use alloy_primitives::Address;
+
+    /// Address-selector for opcodes where the storage account is the stack `to` address (e.g.
+    /// CALL).
+    pub(super) fn storage_addr_from_to(
+        _mega_spec: MegaSpecId,
+        _current: Address,
+        to: Address,
+    ) -> Address {
+        to
+    }
+
+    /// Selects the create opcode that `IS_CREATE2` stands for.
+    ///
+    /// The `CREATE`/`CREATE2` handlers are one function generic over `IS_CREATE2`, so the opcode
+    /// cannot be spelled as a literal macro argument the way the other wrappers do it.
+    pub(super) const fn create_opcode(is_create2: bool) -> u8 {
+        if is_create2 {
+            opcode::CREATE2
+        } else {
+            opcode::CREATE
+        }
+    }
+
+    /// Address-selector for CALLCODE: Rex5+ uses the current frame's address because CALLCODE
+    /// executes borrowed code in the caller's own storage context; pre-Rex5 preserves the frozen
+    /// behavior of metering against the code-source (stack `to`).
+    pub(super) fn storage_addr_for_callcode(
+        mega_spec: MegaSpecId,
+        current: Address,
+        to: Address,
+    ) -> Address {
+        if mega_spec.is_enabled(MegaSpecId::REX5) {
+            current
+        } else {
+            to
+        }
+    }
 
     /// Macro to charge storage gas for new account creation before calling the wrapped instruction.
     ///
     /// This macro generates a wrapper function that:
     /// 1. Inspects the target address (stack position 1) and value (stack position 2)
-    /// 2. Checks if the target account is empty and value transfer is non-zero
-    /// 3. Charges storage gas for new account creation if applicable
-    /// 4. Calls the wrapped instruction implementation
+    /// 2. Resolves the storage account address via `$select_addr`
+    /// 3. Checks if the storage account is empty and value transfer is non-zero
+    /// 4. Charges storage gas for new account creation if applicable
+    /// 5. Calls the wrapped instruction implementation
     ///
     /// # Call Opcode Behavior
     ///
@@ -1134,62 +2226,345 @@ pub mod storage_gas_ext {
     ///
     /// # Parameters
     /// - `$fn_name`: Name of the generated function
-    /// - `$opcode_name`: String name of the opcode (for documentation)
-    /// - `$wrapped_fn`: Path to the wrapped instruction implementation
+    /// - `$opcode`: The wrapped opcode, used for documentation and for the static-gas add-back
+    /// - `$raw_fn`: Path to the raw inner opcode implementation (no compute-gas wrapper)
+    /// - `$has_transfer_logic`: `true` if the opcode can transfer value (inspects stack position 2)
+    /// - `$select_addr` (optional): Path to a `fn(MegaSpecId, current: Address, to: Address) ->
+    ///   Address` function that returns the address to check for emptiness and charge
+    ///   `new_account_storage_gas` against. `current` is the current frame's address; `to` is the
+    ///   stack position-1 address. Defaults to [`storage_addr_from_to`].
+    ///
+    /// # Metering order
+    ///
+    /// Runs `$raw_fn` directly and records compute gas exactly once after the body completes via
+    /// [`record_storage_compute_gas!`], excluding the storage gas charged above. Nothing consumes
+    /// EVM gas between the `gas_before` capture and the storage-gas charge (only stack inspects,
+    /// host account reads, and additional-limit operations), so this single-window form records
+    /// the same compute gas as the pre-REX6 "wrap the inner with `compute_gas_ext`" layering on
+    /// every spec — the recorded amount is `body_gas` either way.
     macro_rules! wrap_call_with_storage_gas {
-        ($fn_name:ident, $opcode_name:expr, $wrapped_fn:path, $has_transfer_logic:expr) => {
-            #[doc = concat!("`", $opcode_name, "` opcode implementation modified from `revm` with compute gas tracking and dynamically-scaled storage gas costs.")]
+        ($fn_name:ident, $opcode:ident, $raw_fn:path, $has_transfer_logic:expr) => {
+            wrap_call_with_storage_gas!(
+                $fn_name,
+                $opcode,
+                $raw_fn,
+                $has_transfer_logic,
+                storage_addr_from_to
+            );
+        };
+        ($fn_name:ident, $opcode:ident, $raw_fn:path, $has_transfer_logic:expr, $select_addr:path) => {
+            #[doc = concat!("`", stringify!($opcode), "` opcode implementation modified from `revm` with compute gas tracking and dynamically-scaled storage gas costs.")]
             pub fn $fn_name<
                 WIRE: InterpreterTypes<Stack: StackInspectTr>,
                 H: HostExt + ContextTr + JournalInspectTr + ?Sized,
             >(
                 context: InstructionContext<'_, H, WIRE>,
-            ) {
+            ) -> InstructionExecResult {
+                // Captured at the very top so the single compute window covers all of the
+                // opcode's compute work.
+                let gas_before = context.interpreter.gas.remaining();
                 let spec = context.interpreter.runtime_flag.spec_id();
                 let Some(to) = context.interpreter.stack.inspect::<1>() else {
-                    context.interpreter.halt(InstructionResult::StackUnderflow);
-                    return;
+                    return Err(InstructionResult::StackUnderflow);
                 };
                 let to = to.into_address();
                 let mega_spec = context.host.spec_id();
-                let Ok(to_account) = context.host.inspect_account_delegated(mega_spec, to) else {
-                    context.interpreter.halt(InstructionResult::FatalExternalError);
-                    return;
+                let current_address = context.interpreter.input.target_address();
+                let storage_address = $select_addr(mega_spec, current_address, to);
+                let Ok(storage_account) = (if mega_spec.is_enabled(MegaSpecId::REX5) {
+                    context.host.inspect_account(storage_address, false)
+                } else {
+                    context.host.inspect_account_delegated(mega_spec, storage_address)
+                }) else {
+                    return Err(InstructionResult::FatalExternalError);
                 };
-                let is_empty = to_account.state_clear_aware_is_empty(spec);
+                let is_empty = storage_account.state_clear_aware_is_empty(spec);
                 let has_transfer = if $has_transfer_logic {
-                    let Some(value) =context.interpreter.stack.inspect::<2>() else {
-                        context.interpreter.halt(InstructionResult::StackUnderflow);
-                        return;
+                    let Some(value) = context.interpreter.stack.inspect::<2>() else {
+                        return Err(InstructionResult::StackUnderflow);
                     };
                     !value.is_zero()
                 } else {
                     false
                 };
-                // Charge additional storage gas cost for creating a new account
-                if is_empty && has_transfer {
-                    let Some(new_account_storage_gas) = context.host.new_account_storage_gas(to) else {
-                        context.interpreter.halt(InstructionResult::FatalExternalError);
-                        return;
+                // Charge additional storage gas cost for creating a new account.
+                // REX5 drains the storage stipend allowance first; pre-REX5 returns 0.
+                // `storage_charged` is the EVM gas actually debited for storage gas, so the REX6
+                // single compute recording below can exclude it from the measured window.
+                let storage_charged = if is_empty && has_transfer {
+                    let Some(new_account_storage_gas) =
+                        context.host.new_account_storage_gas(storage_address)
+                    else {
+                        return Err(InstructionResult::FatalExternalError);
                     };
-                    gas!(context.interpreter, new_account_storage_gas);
-                }
+                    let drained = context
+                        .host
+                        .additional_limit()
+                        .borrow_mut()
+                        .try_consume_storage_stipend(new_account_storage_gas);
+                    let charged = new_account_storage_gas - drained;
+                    if !context.interpreter.gas.record_regular_cost(charged) {
+                        // The deployed schedule took this charge with the opcode's static gas
+                        // still in the frame — revm 40 debits it first, through this family's
+                        // wrapper or the interpreter's pre-charge — so a frame short of the charge
+                        // by less than that static gas paid it there and went on towards its load.
+                        // A failed charge debits nothing, so the frame's gas is as it was.
+                        const IS_CALL: bool = opcode::$opcode == opcode::CALL;
+                        let budget = context
+                            .interpreter
+                            .gas
+                            .remaining()
+                            .saturating_add(static_gas(opcode::$opcode))
+                            .checked_sub(charged);
+                        if budget.is_some_and(|budget| {
+                            volatile_data_ext::deployed_body_reaches_load::<
+                                $has_transfer_logic,
+                                IS_CALL,
+                                _,
+                                _,
+                            >(&context, has_transfer, budget)
+                        }) {
+                            volatile_data_ext::recreate_reached_load(
+                                context.host,
+                                to,
+                                storage_address,
+                            )?;
+                        }
+                        return Err(InstructionResult::OutOfGas);
+                    }
+                    charged
+                } else {
+                    0
+                };
 
-                // Call the original instruction
-                run_inner_instruction_or_abort!($wrapped_fn, context);
+                // revm 40 takes two charges ahead of its load that the deployed schedule took after
+                // it — the opcode's static gas, debited before this handler was entered, and the
+                // body's value-transfer cost — so a frame that halts on either never reaches the
+                // load. That is where the deployed host marked beneficiary access and, from REX6,
+                // gave the raw operand a journal entry of its own. Deciding whether that schedule
+                // would have reached the load needs the memory ranges revm's body expands on the
+                // way there, and the body pops them, so they are read here.
+                let memory_ranges =
+                    volatile_data_ext::call_memory_ranges::<$has_transfer_logic, _, _>(&context);
+                let memory_gas_before = *context.interpreter.gas.memory();
+
+                // Run the raw opcode and record compute gas once after the body completes
+                // (canonical metering order). Byte-equivalent to the pre-REX6 layering on every
+                // spec because nothing between the `gas_before` capture and the storage charge
+                // above consumes EVM gas.
+                run_inner_instruction_or_abort!(
+                    $raw_fn,
+                    context,
+                    inner_outcome,
+                    on_halt: |halt| {
+                        let reached_load = match halt {
+                            // The body cleared its memory expansions and halted on a gas charge.
+                            // Every one of those the deployed schedule took after the load, and a
+                            // body that did reach it has already marked and materialized, which
+                            // repeating leaves as it is.
+                            InstructionResult::OutOfGas => true,
+                            // The body halted on a memory expansion, which the deployed schedule
+                            // ran with the static charge still in the frame. That charge was
+                            // debited before this handler was entered, by this family's wrapper
+                            // or by the interpreter's pre-charge, and nothing between it and
+                            // `gas_before` consumes EVM gas besides the storage charge above, so
+                            // this recovers the budget the deployed schedule had.
+                            InstructionResult::MemoryOOG => memory_ranges.is_some_and(|ranges| {
+                                volatile_data_ext::call_memory_expansions_affordable(
+                                    &context,
+                                    memory_gas_before,
+                                    gas_before
+                                        .saturating_sub(storage_charged)
+                                        .saturating_add(static_gas(opcode::$opcode)),
+                                    ranges,
+                                )
+                            }),
+                            // Everything else the body can raise before its load — a stack
+                            // underflow, an oversized memory operand, a value transfer inside
+                            // a static call — stopped the deployed schedule in the same place.
+                            _ => false,
+                        };
+                        if reached_load {
+                            volatile_data_ext::recreate_reached_load(
+                                context.host,
+                                to,
+                                storage_address,
+                            )?;
+                        }
+                    }
+                );
+                record_storage_compute_gas!(
+                    context,
+                    gas_before,
+                    storage_charged,
+                    opcode::$opcode
+                );
+                inner_outcome
             }
         };
     }
 
-    wrap_call_with_storage_gas!(call, "CALL", compute_gas_ext::call, true);
-    wrap_call_with_storage_gas!(call_code, "CALLCODE", compute_gas_ext::call_code, true);
+    wrap_call_with_storage_gas!(call, CALL, call_resolving_target::<OP_CALL, _, _>, true);
     wrap_call_with_storage_gas!(
         delegate_call,
-        "DELEGATECALL",
-        compute_gas_ext::delegate_call,
+        DELEGATECALL,
+        call_resolving_target::<OP_DELEGATECALL, _, _>,
         false
     );
-    wrap_call_with_storage_gas!(static_call, "STATICCALL", compute_gas_ext::static_call, false);
+    wrap_call_with_storage_gas!(
+        static_call,
+        STATICCALL,
+        call_resolving_target::<OP_STATICCALL, _, _>,
+        false
+    );
+    wrap_call_with_storage_gas!(
+        call_code,
+        CALLCODE,
+        call_resolving_target::<OP_CALLCODE, _, _>,
+        true,
+        storage_addr_for_callcode
+    );
+
+    /// Inspects the creator account and computes the address a `CREATE`/`CREATE2` would deploy to.
+    ///
+    /// Shared by the pre-REX6 [`create`] and the REX6 [`create_rex6`] handlers so the address
+    /// computation lives in one place. For CREATE2 this expands memory to hash the initcode, which
+    /// debits EVM gas:
+    ///
+    /// - When `record_resize_eagerly` is `true` (pre-REX6 with REX5 enabled), the memory-expansion
+    ///   gas is recorded into the compute-gas tracker immediately — the same position and timing as
+    ///   the original inline code — and the returned `resize_gas` is `0`.
+    /// - When `record_resize_eagerly` is `false`, the gas is left unrecorded and returned, so the
+    ///   caller decides when to record it: the pre-REX5 late-record path, or the REX6 single-window
+    ///   folding in [`record_storage_compute_gas!`].
+    ///
+    /// Returns `None` if a precondition failed (stack underflow, oversized operand, a REX6
+    /// oversized-initcode halt, memory OOG, external DB error, or an eager compute-gas-limit
+    /// exceed) and the interpreter was halted.
+    fn compute_created_address<
+        WIRE: InterpreterTypes<Stack: StackInspectTr>,
+        const IS_CREATE2: bool,
+        H: HostExt + ContextTr + JournalInspectTr + ?Sized,
+    >(
+        context: &mut InstructionContext<'_, H, WIRE>,
+        spec: MegaSpecId,
+        record_resize_eagerly: bool,
+    ) -> Option<(Address, u64)> {
+        // The current execution contract (the caller). Load it without marking it warm (it is
+        // already warm since the current frame began). REX5+ uses non-delegating inspection to get
+        // the authority's own state.
+        let creator_address = context.interpreter.input.target_address();
+        let Ok(creator) = (if spec.is_enabled(MegaSpecId::REX5) {
+            context.host.inspect_account(creator_address, false)
+        } else {
+            context.host.inspect_account_delegated(spec, creator_address)
+        }) else {
+            context.interpreter.halt(InstructionResult::FatalExternalError);
+            return None;
+        };
+
+        let mut resize_gas: u64 = 0;
+        let is_rex5_enabled = spec.is_enabled(MegaSpecId::REX5);
+        let created_address = if IS_CREATE2 {
+            let Some(initcode_offset) = context.interpreter.stack.inspect::<1>() else {
+                context.interpreter.halt(InstructionResult::StackUnderflow);
+                return None;
+            };
+            let Some(initcode_len) = context.interpreter.stack.inspect::<2>() else {
+                context.interpreter.halt(InstructionResult::StackUnderflow);
+                return None;
+            };
+            // REX5+: validate the salt operand before running `resize_memory!` and the copy /
+            // keccak block, so a missing salt halts with `StackUnderflow` without
+            // performing the expensive memory work. Pre-REX5 keeps the original "resize
+            // first, salt last" order.
+            let rex5_salt = if is_rex5_enabled {
+                let Some(salt) = context.interpreter.stack.inspect::<3>() else {
+                    context.interpreter.halt(InstructionResult::StackUnderflow);
+                    return None;
+                };
+                Some(salt)
+            } else {
+                None
+            };
+
+            // REX5+: when `initcode_len == 0`, mirror canonical revm CREATE2 — ignore the offset
+            // entirely (no conversion, no memory expansion, no slice, no keccak) and use
+            // `KECCAK_EMPTY`. Pre-REX5 keeps the "observe offset, resize, slice, hash" sequence.
+            let initcode_hash = if is_rex5_enabled && initcode_len.is_zero() {
+                KECCAK_EMPTY
+            } else {
+                // Convert `initcode_len` before `initcode_offset` (matching canonical revm's
+                // `create`, which pops/converts `len` first): both operands halt with the same
+                // `InstructionResult::InvalidOperandOOG` reason when they don't fit in a
+                // `usize` (see `as_usize_or_fail_ret!`'s default reason), so this reordering
+                // does not change pre-REX6 behavior — but it matters for the REX6 size check
+                // below, which must run before `initcode_offset` is ever touched so that an
+                // oversized `initcode_len` halts with `CreateInitCodeSizeLimit` even when
+                // `initcode_offset` does not fit in a `usize` either.
+                let initcode_len = as_usize_or_fail_ret!(context.interpreter, initcode_len, None);
+
+                // REX6: EIP-3860 initcode-size halt, matching revm's canonical
+                // ordering intent (`revm::interpreter::instructions::contract::create`) — halt
+                // BEFORE `initcode_offset` conversion, `resize_memory!`/copy/keccak256/address-
+                // derivation, not after. Pre-REX6 performs that prework before the halt
+                // eventually fires inside the inner opcode call below; that ordering is
+                // non-consensus under REX6 when the halt fires before the inner opcode
+                // completes (committed gas/state is identical either way —
+                // `record_resize_eagerly=false` means the resize gas is not yet recorded at
+                // this point, so skipping it here charges nothing that a later, slower path
+                // would have charged — only the halt timing / node CPU differ), but changing
+                // pre-REX6 timing would perturb sealed-spec replay, so this is gated to REX6
+                // only. A REX6 static frame never reaches this check: [`create_rex6`] rejects
+                // static frames before entering this helper.
+                if spec.is_enabled(MegaSpecId::REX6) &&
+                    initcode_len > context.host.max_initcode_size()
+                {
+                    context.interpreter.halt(InstructionResult::CreateInitCodeSizeLimit);
+                    return None;
+                }
+
+                let initcode_offset =
+                    as_usize_or_fail_ret!(context.interpreter, initcode_offset, None);
+
+                // Expand memory before slicing so the read can never go out of bounds. The inner
+                // CREATE2 also calls `resize_memory!`, which is a no-op once memory already fits.
+                let gas_before_resize = context.interpreter.gas.remaining();
+                resize_memory_ret!(context, initcode_offset, initcode_len, None);
+                resize_gas = gas_before_resize.saturating_sub(context.interpreter.gas.remaining());
+
+                // Eager recording (pre-REX6 / REX5): record the expansion gas immediately to align
+                // its timing with revm's EVM-gas debit, then zero `resize_gas` so the caller's
+                // late-record path does not double-count.
+                if record_resize_eagerly && resize_gas > 0 {
+                    let mut additional_limit = context.host.additional_limit().borrow_mut();
+                    compute_gas!(context.interpreter, additional_limit, resize_gas, None);
+                    resize_gas = 0;
+                }
+
+                let code = Bytes::copy_from_slice(
+                    context.interpreter.memory.slice_len(initcode_offset, initcode_len).as_ref(),
+                );
+                keccak256(&code)
+            };
+
+            let salt = if let Some(s) = rex5_salt {
+                s
+            } else {
+                let Some(salt) = context.interpreter.stack.inspect::<3>() else {
+                    context.interpreter.halt(InstructionResult::StackUnderflow);
+                    return None;
+                };
+                salt
+            };
+
+            creator_address.create2(salt.to_be_bytes(), initcode_hash)
+        } else {
+            creator_address.create(creator.info.nonce)
+        };
+
+        Some((created_address, resize_gas))
+    }
 
     /// `CREATE`/`CREATE2` opcode implementation modified from `revm` with compute gas tracking and
     /// dynamically-scaled storage gas costs.
@@ -1201,52 +2576,40 @@ pub mod storage_gas_ext {
     ///
     /// # Assumptions
     ///
-    /// This alternative implementation of `CREATE`/`CREATE2` is only used when the `MINI_REX` spec
-    /// is enabled, so we can safely assume that all features before and including `MINI_REX`
-    /// are enabled.
+    /// This is the entry point for `CREATE`/`CREATE2` from `MINI_REX` onward. REX6+ short-
+    /// circuits to [`create_rex6`] at the top; the body below is the pre-REX6 path, which can
+    /// assume all features up to and including `MINI_REX` are enabled.
     pub fn create<
         WIRE: InterpreterTypes<Stack: StackInspectTr>,
         const IS_CREATE2: bool,
         H: HostExt + ContextTr + JournalInspectTr + ?Sized,
     >(
-        context: InstructionContext<'_, H, WIRE>,
-    ) {
+        mut context: InstructionContext<'_, H, WIRE>,
+    ) -> InstructionExecResult {
         let spec = context.host.spec_id();
 
-        // The current execution contract (the caller)
-        let creator_address = context.interpreter.input.target_address();
-        // Load the creator account without marking it warm (it is already warm since the creator
-        // must have been warmed when the current frame begins).
-        let Ok(creator) = context.host.inspect_account_delegated(spec, creator_address) else {
-            context.interpreter.halt(InstructionResult::FatalExternalError);
-            return;
-        };
+        // REX6+: canonical metering order — fold the CREATE2 memory-expansion gas into a single
+        // compute-gas recording taken after the body completes (see `create_rex6`), instead of
+        // the pre-REX6 split `resize_gas` recording handled below.
+        if spec.is_enabled(MegaSpecId::REX6) {
+            return create_rex6::<WIRE, IS_CREATE2, H>(context);
+        }
 
-        // Calculate the created address
-        let created_address = if IS_CREATE2 {
-            let Some(initcode_offset) = context.interpreter.stack.inspect::<1>() else {
-                context.interpreter.halt(InstructionResult::StackUnderflow);
-                return;
-            };
-            let Some(initcode_len) = context.interpreter.stack.inspect::<2>() else {
-                context.interpreter.halt(InstructionResult::StackUnderflow);
-                return;
-            };
-            let initcode_offset = as_usize_or_fail!(context.interpreter, initcode_offset);
-            let initcode_len = as_usize_or_fail!(context.interpreter, initcode_len);
-            let code = Bytes::copy_from_slice(
-                context.interpreter.memory.slice_len(initcode_offset, initcode_len).as_ref(),
-            );
-            let initcode_hash = keccak256(&code);
-
-            let Some(salt) = context.interpreter.stack.inspect::<3>() else {
-                context.interpreter.halt(InstructionResult::StackUnderflow);
-                return;
-            };
-
-            creator_address.create2(salt.to_be_bytes(), initcode_hash)
-        } else {
-            creator_address.create(creator.info.nonce)
+        // Inspect the creator and compute the created address. REX5+ records the CREATE2
+        // memory-expansion gas eagerly inside the helper (the same position and timing as the
+        // original inline code); pre-REX5 leaves it in `resize_gas` for the late-record path below.
+        let Some((created_address, resize_gas)) = compute_created_address::<WIRE, IS_CREATE2, H>(
+            &mut context,
+            spec,
+            spec.is_enabled(MegaSpecId::REX5),
+        ) else {
+            // `compute_created_address` halted the interpreter; surface the recorded result so
+            // the interpreter loop stops instead of stepping past the halt.
+            return Err(context
+                .interpreter
+                .bytecode
+                .instruction_result()
+                .unwrap_or(InstructionResult::FatalExternalError));
         };
 
         // Charge storage gas cost for creating a new contract
@@ -1258,17 +2621,138 @@ pub mod storage_gas_ext {
             context.host.new_account_storage_gas(created_address)
         };
         let Some(create_contract_storage_gas) = create_contract_storage_gas else {
-            context.interpreter.halt(InstructionResult::FatalExternalError);
-            return;
+            return Err(InstructionResult::FatalExternalError);
         };
-        gas!(context.interpreter, create_contract_storage_gas);
+        // REX5 drains the storage stipend allowance first; pre-REX5 returns 0.
+        let drained = context
+            .host
+            .additional_limit()
+            .borrow_mut()
+            .try_consume_storage_stipend(create_contract_storage_gas);
+        gas!(context.interpreter, create_contract_storage_gas - drained);
 
-        // Call the original create instruction
-        if IS_CREATE2 {
-            run_inner_instruction_or_abort!(compute_gas_ext::create2, context);
-        } else {
-            run_inner_instruction_or_abort!(compute_gas_ext::create, context);
+        // Capture, run raw, record — `gas_before` here is captured after the storage debit and
+        // after `compute_created_address`'s eager `resize_gas` record (REX5+), so the recorded
+        // amount equals the inner opcode's body gas. Byte-equivalent to the old per-`IS_CREATE2`
+        // dispatch through `compute_gas_ext::{create, create2}`, which captured at the same
+        // point.
+        let gas_before = context.interpreter.gas.remaining();
+        run_inner_instruction_or_abort!(
+            instructions::contract::create::<IS_CREATE2, _, _>,
+            context,
+            inner_outcome
+        );
+        record_storage_compute_gas!(context, gas_before, 0, create_opcode(IS_CREATE2));
+
+        // Pre-REX5 late-record path for the CREATE2 initcode memory-expansion gas.
+        // Preserved verbatim for replay parity: pre-REX5 keeps the original "skip on inner
+        // error" semantics where storage-gas OOG and inner-CREATE2 failure both skip this
+        // recording. REX5+ already recorded `resize_gas` above (and zeroed it), so this
+        // branch is a no-op under REX5.
+        if resize_gas > 0 {
+            let mut additional_limit = context.host.additional_limit().borrow_mut();
+            compute_gas!(context.interpreter, additional_limit, resize_gas);
         }
+        inner_outcome
+    }
+
+    /// `CREATE`/`CREATE2` under the REX6+ canonical metering order.
+    ///
+    /// Records the opcode's compute gas exactly once, after the inner opcode completes, via
+    /// [`record_storage_compute_gas!`]. This folds the CREATE2 memory-expansion (`resize_memory!`)
+    /// gas into the single compute window instead of the pre-REX6 split recording (REX5 recorded it
+    /// eagerly before the storage charge; pre-REX5 recorded it after the inner op). The storage gas
+    /// charged for contract creation is excluded from the recorded compute gas.
+    ///
+    /// On the straight-line success path the total compute gas equals the pre-REX6 amount. The two
+    /// differ only when a compute-limit or storage-gas-OOG halt occurs between the memory expansion
+    /// and inner-op completion: REX6 records compute gas only once the body has fully executed, so
+    /// a partial memory expansion that never reaches the inner opcode is not recorded against
+    /// the compute-gas limit (its EVM gas is still debited).
+    ///
+    /// REX6 implies REX5 (and REX), so the REX5 operand validation and the contract-creation
+    /// storage-gas path are taken unconditionally here.
+    fn create_rex6<
+        WIRE: InterpreterTypes<Stack: StackInspectTr>,
+        const IS_CREATE2: bool,
+        H: HostExt + ContextTr + JournalInspectTr + ?Sized,
+    >(
+        mut context: InstructionContext<'_, H, WIRE>,
+    ) -> InstructionExecResult {
+        // Canonical revm's `create` runs `require_non_staticcall!` before any operand read,
+        // memory work, address derivation, or storage-gas charge, so a static-frame
+        // `CREATE`/`CREATE2` halts here first. This unifies the halt reasons the prework below
+        // would otherwise produce in a static frame — stack underflow from operand inspection,
+        // memory OOG from an unaffordable resize, storage-gas OOG from the creation charge, or
+        // a fatal external error from the storage-pricing lookup — into the canonical
+        // `StateChangeDuringStaticCall`. No spec gate: [`create`] dispatches here exactly when
+        // REX6 is enabled. Pre-REX6 keeps the prework-first order (changing sealed-spec halt
+        // reasons would perturb replay). Every reachable path is an all-gas-consuming halt, so
+        // committed gas and state are identical either way.
+        if context.interpreter.runtime_flag.is_static() {
+            return Err(InstructionResult::StateChangeDuringStaticCall);
+        }
+
+        // Captured before any gas movement so the single compute window covers the wrapper-side
+        // CREATE2 memory expansion as well as the inner opcode.
+        let gas_before = context.interpreter.gas.remaining();
+        let spec = context.host.spec_id();
+
+        // Inspect the creator and compute the created address. `record_resize_eagerly = false`:
+        // the CREATE2 memory-expansion gas is left unrecorded so it folds into the single compute
+        // window closed by `record_storage_compute_gas!` below.
+        let Some((created_address, _resize_gas)) =
+            compute_created_address::<WIRE, IS_CREATE2, H>(&mut context, spec, false)
+        else {
+            return Err(context
+                .interpreter
+                .bytecode
+                .instruction_result()
+                .unwrap_or(InstructionResult::FatalExternalError));
+        };
+
+        // Charge storage gas cost for creating a new contract. REX6 implies REX, so the
+        // contract-creation cost path applies. `storage_charged` is excluded from the compute
+        // recording below.
+        let Some(create_contract_storage_gas) =
+            context.host.create_contract_storage_gas(created_address)
+        else {
+            return Err(InstructionResult::FatalExternalError);
+        };
+        // REX6 implies REX5: drain the storage stipend allowance first.
+        let drained = context
+            .host
+            .additional_limit()
+            .borrow_mut()
+            .try_consume_storage_stipend(create_contract_storage_gas);
+        let storage_charged = create_contract_storage_gas - drained;
+        gas!(context.interpreter, storage_charged);
+
+        // Run the raw inner create opcode (no `compute_gas_ext` wrapper — REX6 records compute gas
+        // once below).
+        let inner_outcome = if IS_CREATE2 {
+            run_inner_instruction_or_abort!(
+                instructions::contract::create::<true, _, _>,
+                context,
+                outcome
+            );
+            outcome
+        } else {
+            run_inner_instruction_or_abort!(
+                instructions::contract::create::<false, _, _>,
+                context,
+                outcome
+            );
+            outcome
+        };
+
+        record_storage_compute_gas!(
+            context,
+            gas_before,
+            storage_charged,
+            create_opcode(IS_CREATE2)
+        );
+        inner_outcome
     }
 
     /// `LOG` opcode implementation modified from `revm` with compute gas tracking, increased
@@ -1289,42 +2773,44 @@ pub mod storage_gas_ext {
         H: HostExt + ?Sized,
     >(
         context: InstructionContext<'_, H, WIRE>,
-    ) {
+    ) -> InstructionExecResult {
+        // Captured at the very top so the single compute window covers the inner opcode.
+        let gas_before = context.interpreter.gas.remaining();
         let Some(len) = context.interpreter.stack.inspect::<1>() else {
-            context.interpreter.halt(InstructionResult::StackUnderflow);
-            return;
+            return Err(InstructionResult::StackUnderflow);
         };
         let len = as_usize_or_fail!(context.interpreter, len);
 
         // Charge storage gas cost for log topics and data before instruction execution.
+        // REX5 drains the allowance on the `Some(amount)` arm; the `None` (overflow) arm
+        // is passed through unchanged to preserve the OOG halt.
         let log_storage_cost = {
             let topic_cost = constants::mini_rex::LOG_TOPIC_STORAGE_GAS.checked_mul(N as u64);
             let data_cost = constants::mini_rex::LOG_DATA_STORAGE_GAS.checked_mul(len as u64);
             topic_cost.and_then(|topic| data_cost.and_then(|cost| cost.checked_add(topic)))
         };
+        let log_storage_cost = log_storage_cost.map(|amount| {
+            let drained =
+                context.host.additional_limit().borrow_mut().try_consume_storage_stipend(amount);
+            amount - drained
+        });
         gas_or_fail!(context.interpreter, log_storage_cost);
+        // `gas_or_fail!` halts and returns on the `None` (overflow) arm, so reaching here means the
+        // cost was `Some`; this is the storage gas actually charged, excluded from the compute
+        // recording below. Assert the invariant with `expect` rather than `unwrap_or(0)`: a silent
+        // `0` here would make `record_storage_compute_gas!` over-count compute gas by the full LOG
+        // storage cost.
+        let storage_charged =
+            log_storage_cost.expect("gas_or_fail! above halts and returns on None");
 
-        // Execute the original LOG instruction.
-        match N {
-            0 => {
-                run_inner_instruction_or_abort!(compute_gas_ext::log0, context);
-            }
-            1 => {
-                run_inner_instruction_or_abort!(compute_gas_ext::log1, context);
-            }
-            2 => {
-                run_inner_instruction_or_abort!(compute_gas_ext::log2, context);
-            }
-            3 => {
-                run_inner_instruction_or_abort!(compute_gas_ext::log3, context);
-            }
-            4 => {
-                run_inner_instruction_or_abort!(compute_gas_ext::log4, context);
-            }
-            _ => {
-                context.interpreter.halt(InstructionResult::InvalidFEOpcode);
-            }
-        }
+        // Run the raw opcode and record compute gas once after the body completes (canonical
+        // metering order). Byte-equivalent to the pre-REX6 per-`N` `compute_gas_ext::logK`
+        // dispatch on every spec because nothing between `gas_before` and the `gas_or_fail!` above
+        // consumes EVM gas. The wrapper is only ever instantiated for `N` in `0..=4`, so the
+        // generic `instructions::host::log::<N, _>` covers every valid call site.
+        run_inner_instruction_or_abort!(instructions::host::log::<N, _>, context, inner_outcome);
+        record_storage_compute_gas!(context, gas_before, storage_charged, opcode::LOG0 + N as u8);
+        inner_outcome
     }
 
     /// `SSTORE` opcode implementation modified from `revm` with compute gas tracking and
@@ -1347,39 +2833,157 @@ pub mod storage_gas_ext {
         H: HostExt + ContextTr + JournalInspectTr + ?Sized,
     >(
         context: InstructionContext<'_, H, WIRE>,
-    ) {
+    ) -> InstructionExecResult {
+        // Captured at the very top so the single compute window covers the inner opcode.
+        let gas_before = context.interpreter.gas.remaining();
         // The address to the underlying execution contract state
         let target_address = context.interpreter.input.target_address();
         // The storage slot to write
         let Some(index) = context.interpreter.stack.inspect::<0>() else {
-            context.interpreter.halt(InstructionResult::StackUnderflow);
-            return;
+            return Err(InstructionResult::StackUnderflow);
         };
         // The storage slot values
         let mega_spec = context.host.spec_id();
         let Ok(slot) = context.host.inspect_storage(mega_spec, target_address, index) else {
-            context.interpreter.halt(InstructionResult::FatalExternalError);
-            return;
+            return Err(InstructionResult::FatalExternalError);
         };
         let (original_value, present_value) = (slot.original_value(), slot.present_value());
         let Some(new_value) = context.interpreter.stack.inspect::<1>() else {
-            context.interpreter.halt(InstructionResult::StackUnderflow);
-            return;
+            return Err(InstructionResult::StackUnderflow);
         };
 
-        // Charge storage gas cost before the instruction is executed
-        if original_value.is_zero() && present_value.is_zero() && !new_value.is_zero() {
-            let Some(sstore_set_storage_gas) =
-                context.host.sstore_set_storage_gas(target_address, index)
-            else {
-                context.interpreter.halt(InstructionResult::FatalExternalError);
-                return;
+        // Charge storage gas cost before the instruction is executed.
+        // REX5 drains the storage stipend allowance first; pre-REX5 returns 0.
+        // `storage_charged` is the EVM gas actually debited for storage gas, excluded from the
+        // single compute recording below.
+        let storage_charged =
+            if original_value.is_zero() && present_value.is_zero() && !new_value.is_zero() {
+                let Some(sstore_set_storage_gas) =
+                    context.host.sstore_set_storage_gas(target_address, index)
+                else {
+                    return Err(InstructionResult::FatalExternalError);
+                };
+                let drained = context
+                    .host
+                    .additional_limit()
+                    .borrow_mut()
+                    .try_consume_storage_stipend(sstore_set_storage_gas);
+                let charged = sstore_set_storage_gas - drained;
+                gas!(context.interpreter, charged);
+                charged
+            } else {
+                0
             };
-            gas!(context.interpreter, sstore_set_storage_gas);
+
+        // Run the raw opcode and record compute gas once after the body completes (canonical
+        // metering order). Byte-equivalent to the pre-REX6 `compute_gas_ext::sstore` layering on
+        // every spec because nothing between `gas_before` and the storage charge above consumes
+        // EVM gas.
+        run_inner_instruction_or_abort!(instructions::host::sstore, context, inner_outcome);
+        record_storage_compute_gas!(context, gas_before, storage_charged, opcode::SSTORE);
+        inner_outcome
+    }
+
+    /// `SELFDESTRUCT` opcode implementation with storage gas metering for
+    /// new beneficiary account creation (REX5+).
+    ///
+    /// When SELFDESTRUCT sends remaining balance to an empty beneficiary, charges:
+    /// - Storage gas for new account creation (dynamic bucket-based cost)
+    /// - Data size (+40 for account info write)
+    /// - KV update (+1)
+    /// - State growth (+1)
+    ///
+    /// This wrapper sits between `volatile_data_ext` and `compute_gas_ext` in the
+    /// REX5 SELFDESTRUCT dispatch chain
+    /// (`volatile_data_ext::selfdestruct_with_beneficiary_guard` → `storage_gas_ext::selfdestruct`
+    /// → `compute_gas_ext::selfdestruct_self_charged`), matching the layering used by SSTORE
+    /// and LOG. The beneficiary-volatile guard runs in the outer
+    /// `volatile_data_ext::selfdestruct_with_beneficiary_guard` ahead of any side effects below.
+    ///
+    /// REX6 additionally records the `DataSize` +40 / KV +1 of a balance credit to an existing
+    /// *distinct* beneficiary — the account-info write the frame-init / `target_updated` path never
+    /// sees — via the REX6-gated arm below; pre-REX6 records nothing for an existing target. The
+    /// rest of the body, and all ≤REX5 behavior, is unchanged.
+    pub fn selfdestruct<
+        WIRE: InterpreterTypes<Stack: StackInspectTr>,
+        H: HostExt + ContextTr + JournalInspectTr + ?Sized,
+    >(
+        context: InstructionContext<'_, H, WIRE>,
+    ) -> InstructionExecResult {
+        // Inside a static frame, revm's inner SELFDESTRUCT halts on the
+        // static-context check without changing state. Skip the mega host work below
+        // (two account inspections, SALT account-creation pricing, the storage-gas
+        // stipend draw and tracker write) — the frame reverts and discards all of it
+        // anyway — and let the inner instruction produce the identical halt. This is
+        // behavior-neutral: the static halt is exceptional, so the frame's gas and
+        // tracked usage are the same whether or not the host work ran first. The table
+        // installs this wrapper only for REX5+, so pre-REX5 specs never reach here.
+        if context.interpreter.runtime_flag.is_static() {
+            run_inner_instruction_or_abort!(
+                compute_gas_ext::selfdestruct_self_charged,
+                context,
+                inner_outcome
+            );
+            // Defensive: unreachable in practice — a static SELFDESTRUCT always halts
+            // inside the inner instruction, so the macro returns early above.
+            return inner_outcome;
         }
 
-        // Execute the original SSTORE instruction
-        run_inner_instruction_or_abort!(compute_gas_ext::sstore, context);
+        let eth_spec = context.interpreter.runtime_flag.spec_id();
+
+        // Peek beneficiary address from stack (SELFDESTRUCT uses stack position 0)
+        let Some(target) = context.interpreter.stack.inspect::<0>() else {
+            return Err(InstructionResult::StackUnderflow);
+        };
+        let target = target.into_address();
+
+        // Use non-delegating inspection (REX5+)
+        let Ok(target_account) = context.host.inspect_account(target, false) else {
+            return Err(InstructionResult::FatalExternalError);
+        };
+        let is_empty = target_account.state_clear_aware_is_empty(eth_spec);
+
+        // Check if caller has balance (value will be transferred to beneficiary)
+        let caller = context.interpreter.input.target_address();
+        let Ok(caller_account) = context.host.inspect_account(caller, false) else {
+            return Err(InstructionResult::FatalExternalError);
+        };
+        let has_value = !caller_account.info.balance.is_zero();
+
+        if is_empty && has_value {
+            // Charge storage gas for creating a new account.
+            // REX5 drains the storage stipend allowance first; pre-REX5 returns 0.
+            let Some(cost) = context.host.new_account_storage_gas(target) else {
+                return Err(InstructionResult::FatalExternalError);
+            };
+            let drained =
+                context.host.additional_limit().borrow_mut().try_consume_storage_stipend(cost);
+            gas!(context.interpreter, cost - drained);
+
+            // Record resource usage for new beneficiary account
+            context.host.additional_limit().borrow_mut().on_selfdestruct_new_account();
+        } else if context.host.spec_id().is_enabled(MegaSpecId::REX6) &&
+            has_value &&
+            caller != target
+        {
+            // REX6: a balance credit to an existing *distinct* beneficiary performs an account-info
+            // write the frame-init / `target_updated` path never sees — record DataSize +40 / KV +1
+            // (no `StateGrowth`, the account already exists; no storage gas, the bucket is paid).
+            // SELFDESTRUCT to self (`caller == target`) is an EIP-6780 balance no-op on a
+            // non-same-tx-created account (and a burn-to-self on a same-tx-created one) — neither
+            // is a distinct-target credit, so record nothing. Pre-REX6 records nothing
+            // for any existing target.
+            context.host.additional_limit().borrow_mut().on_selfdestruct_existing_account();
+        }
+
+        // Delegate to compute_gas_ext::selfdestruct_self_charged (the volatile-disabled guard
+        // ran in the outer `volatile_data_ext::selfdestruct_with_beneficiary_guard` wrapper).
+        run_inner_instruction_or_abort!(
+            compute_gas_ext::selfdestruct_self_charged,
+            context,
+            inner_outcome
+        );
+        inner_outcome
     }
 }
 
@@ -1388,196 +2992,367 @@ pub mod compute_gas_ext {
     use super::*;
 
     /// Macro to wrap the original instruction implementation with compute gas tracking.
+    ///
+    /// `$opcode` names the wrapped opcode; its [`STATIC_GAS_TABLE`] entry is added back into the
+    /// measured window because the interpreter charged that portion before entering the handler.
+    ///
+    /// Three variants:
+    /// - default: "simple" opcodes that can never spawn a child frame. The compute gas used is
+    ///   simply `static_gas + (gas_before - gas_after)`. These opcodes never set an
+    ///   `InterpreterAction::NewFrame`, so the child-gas-subtraction match (below) would always
+    ///   fall through to `_` — it is omitted entirely to keep the per-opcode hot path lean.
+    /// - `@frame`: the call/create family (`CALL`/`CALLCODE`/`DELEGATECALL`/`STATICCALL`/
+    ///   `CREATE`/`CREATE2`), the only opcodes that set `NewFrame`. These must subtract the gas
+    ///   forwarded to the child frame so the parent's compute gas is not over-counted.
+    /// - `@self_charged`: the account-reading opcodes whose spec zeroes their static gas entry, so
+    ///   that their volatile guard is reached even by a frame too poor to pay it. Nobody has
+    ///   charged the entry when the handler is entered; it is charged here, right after the inner
+    ///   instruction, which is where revm's own body charges it (operands popped and the host read
+    ///   — the read that marks volatile access — already done). The charge therefore lands *inside*
+    ///   the measurement window and must not be added back on top of it.
     macro_rules! wrap_op_compute_gas {
-        ($fn_name:ident, $opcode_name:expr, $original_fn:path) => {
-            #[doc = concat!("`", $opcode_name, "` opcode with compute gas tracking.")]
+        ($fn_name:ident, $opcode:ident, $original_fn:path) => {
+            #[doc = concat!("`", stringify!($opcode), "` opcode with compute gas tracking.")]
             #[inline]
             pub fn $fn_name<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
                 context: InstructionContext<'_, H, WIRE>,
-            ) {
+            ) -> InstructionExecResult {
+                // Captured before the inner opcode runs. Plain opcodes charge no storage gas, so
+                // the measurement window starting here plus the opcode's pre-charged static gas
+                // covers exactly the opcode's compute work.
                 let gas_before = context.interpreter.gas.remaining();
 
                 // Call the original instruction
-                run_inner_instruction_or_abort!($original_fn, context);
+                run_inner_instruction_or_abort!($original_fn, context, inner_outcome);
 
-                let mut gas_used = gas_before.saturating_sub(context.interpreter.gas.remaining());
-                // Some of the gas may be forwarded to the child call. We need to substract them.
+                let gas_used = const { static_gas(opcode::$opcode) } +
+                    gas_before.saturating_sub(context.interpreter.gas.remaining());
+                let mut additional_limit = context.host.additional_limit().borrow_mut();
+                compute_gas!(context.interpreter, additional_limit, gas_used);
+                inner_outcome
+            }
+        };
+        (@self_charged $fn_name:ident, $opcode:ident, $original_fn:path) => {
+            #[doc = concat!("`", stringify!($opcode), "` opcode with compute gas tracking, charging its own static gas.")]
+            #[inline]
+            pub fn $fn_name<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
+                context: InstructionContext<'_, H, WIRE>,
+            ) -> InstructionExecResult {
+                let gas_before = context.interpreter.gas.remaining();
+
+                // Call the original instruction
+                run_inner_instruction_or_abort!($original_fn, context, inner_outcome);
+
+                // revm charges this opcode's static gas from here — after the operand pop, after
+                // the host read. A frame that cannot afford it has already had its stack popped and
+                // its account read, so it halts on whatever the body raised first (stack underflow,
+                // an unrepresentable operand, a database failure) and its volatile-access mark
+                // stands, instead of being pre-empted by an out-of-gas halt before the body ran.
+                charge_static_gas!(context, $opcode);
+
+                // No static-gas add-back: unlike the pre-charged wrappers above, the charge is
+                // inside this window.
+                let gas_used = gas_before.saturating_sub(context.interpreter.gas.remaining());
+                let mut additional_limit = context.host.additional_limit().borrow_mut();
+                compute_gas!(context.interpreter, additional_limit, gas_used);
+                inner_outcome
+            }
+        };
+        (@frame $fn_name:ident, $opcode:ident, $original_fn:path) => {
+            #[doc = concat!("`", stringify!($opcode), "` opcode with compute gas tracking.")]
+            #[inline]
+            pub fn $fn_name<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
+                context: InstructionContext<'_, H, WIRE>,
+            ) -> InstructionExecResult {
+                let gas_before = context.interpreter.gas.remaining();
+
+                // Call the original instruction
+                run_inner_instruction_or_abort!($original_fn, context, inner_outcome);
+
+                let mut gas_used = const { static_gas(opcode::$opcode) } +
+                    gas_before.saturating_sub(context.interpreter.gas.remaining());
+                // Subtract the gas forwarded to the child. REX5 excludes the revm-side
+                // `CALL_STIPEND` (added by value-transferring CALL/CALLCODE without
+                // deducting from the parent) so parent compute-gas is not under-counted.
+                // Pre-REX5 keeps the legacy raw-`gas_limit` subtraction for replay parity.
                 match context.interpreter.bytecode.action() {
                     Some(InterpreterAction::NewFrame(FrameInput::Call(call_inputs))) => {
-                        gas_used = gas_used.saturating_sub(call_inputs.gas_limit);
+                        let stipend_from_revm = if context
+                            .host
+                            .spec_id()
+                            .is_enabled(MegaSpecId::REX5) &&
+                            matches!(call_inputs.scheme, CallScheme::Call | CallScheme::CallCode) &&
+                            call_inputs.transfers_value()
+                        {
+                            gas::CALL_STIPEND
+                        } else {
+                            0
+                        };
+                        let parent_contributed =
+                            call_inputs.gas_limit.saturating_sub(stipend_from_revm);
+                        gas_used = gas_used.saturating_sub(parent_contributed);
                     }
                     Some(InterpreterAction::NewFrame(FrameInput::Create(create_inputs))) => {
-                        gas_used = gas_used.saturating_sub(create_inputs.gas_limit);
+                        gas_used = gas_used.saturating_sub(create_inputs.gas_limit());
                     }
                     _ => {}
                 }
                 let mut additional_limit = context.host.additional_limit().borrow_mut();
                 compute_gas!(context.interpreter, additional_limit, gas_used);
+                inner_outcome
             }
         };
     }
 
-    wrap_op_compute_gas!(stop, "STOP", instructions::control::stop);
-    wrap_op_compute_gas!(add, "ADD", instructions::arithmetic::add);
-    wrap_op_compute_gas!(mul, "MUL", instructions::arithmetic::mul);
-    wrap_op_compute_gas!(sub, "SUB", instructions::arithmetic::sub);
-    wrap_op_compute_gas!(div, "DIV", instructions::arithmetic::div);
-    wrap_op_compute_gas!(sdiv, "SDIV", instructions::arithmetic::sdiv);
-    wrap_op_compute_gas!(rem, "MOD", instructions::arithmetic::rem);
-    wrap_op_compute_gas!(smod, "SMOD", instructions::arithmetic::smod);
-    wrap_op_compute_gas!(addmod, "ADDMOD", instructions::arithmetic::addmod);
-    wrap_op_compute_gas!(mulmod, "MULMOD", instructions::arithmetic::mulmod);
-    wrap_op_compute_gas!(exp, "EXP", instructions::arithmetic::exp);
-    wrap_op_compute_gas!(signextend, "SIGNEXTEND", instructions::arithmetic::signextend);
+    wrap_op_compute_gas!(stop, STOP, instructions::control::stop);
+    wrap_op_compute_gas!(add, ADD, instructions::arithmetic::add);
+    wrap_op_compute_gas!(mul, MUL, instructions::arithmetic::mul);
+    wrap_op_compute_gas!(sub, SUB, instructions::arithmetic::sub);
+    wrap_op_compute_gas!(div, DIV, instructions::arithmetic::div);
+    wrap_op_compute_gas!(sdiv, SDIV, instructions::arithmetic::sdiv);
+    wrap_op_compute_gas!(rem, MOD, instructions::arithmetic::rem);
+    wrap_op_compute_gas!(smod, SMOD, instructions::arithmetic::smod);
+    wrap_op_compute_gas!(addmod, ADDMOD, instructions::arithmetic::addmod);
+    wrap_op_compute_gas!(mulmod, MULMOD, instructions::arithmetic::mulmod);
+    wrap_op_compute_gas!(exp, EXP, instructions::arithmetic::exp);
+    wrap_op_compute_gas!(signextend, SIGNEXTEND, instructions::arithmetic::signextend);
 
-    wrap_op_compute_gas!(lt, "LT", instructions::bitwise::lt);
-    wrap_op_compute_gas!(gt, "GT", instructions::bitwise::gt);
-    wrap_op_compute_gas!(slt, "SLT", instructions::bitwise::slt);
-    wrap_op_compute_gas!(sgt, "SGT", instructions::bitwise::sgt);
-    wrap_op_compute_gas!(eq, "EQ", instructions::bitwise::eq);
-    wrap_op_compute_gas!(iszero, "ISZERO", instructions::bitwise::iszero);
-    wrap_op_compute_gas!(bitand, "AND", instructions::bitwise::bitand);
-    wrap_op_compute_gas!(bitor, "OR", instructions::bitwise::bitor);
-    wrap_op_compute_gas!(bitxor, "XOR", instructions::bitwise::bitxor);
-    wrap_op_compute_gas!(not, "NOT", instructions::bitwise::not);
-    wrap_op_compute_gas!(byte, "BYTE", instructions::bitwise::byte);
-    wrap_op_compute_gas!(shl, "SHL", instructions::bitwise::shl);
-    wrap_op_compute_gas!(shr, "SHR", instructions::bitwise::shr);
-    wrap_op_compute_gas!(sar, "SAR", instructions::bitwise::sar);
-    wrap_op_compute_gas!(clz, "CLZ", instructions::bitwise::clz);
+    wrap_op_compute_gas!(lt, LT, instructions::bitwise::lt);
+    wrap_op_compute_gas!(gt, GT, instructions::bitwise::gt);
+    wrap_op_compute_gas!(slt, SLT, instructions::bitwise::slt);
+    wrap_op_compute_gas!(sgt, SGT, instructions::bitwise::sgt);
+    wrap_op_compute_gas!(eq, EQ, instructions::bitwise::eq);
+    wrap_op_compute_gas!(iszero, ISZERO, instructions::bitwise::iszero);
+    wrap_op_compute_gas!(bitand, AND, instructions::bitwise::bitand);
+    wrap_op_compute_gas!(bitor, OR, instructions::bitwise::bitor);
+    wrap_op_compute_gas!(bitxor, XOR, instructions::bitwise::bitxor);
+    wrap_op_compute_gas!(not, NOT, instructions::bitwise::not);
+    wrap_op_compute_gas!(byte, BYTE, instructions::bitwise::byte);
+    wrap_op_compute_gas!(shl, SHL, instructions::bitwise::shl);
+    wrap_op_compute_gas!(shr, SHR, instructions::bitwise::shr);
+    wrap_op_compute_gas!(sar, SAR, instructions::bitwise::sar);
+    wrap_op_compute_gas!(clz, CLZ, instructions::bitwise::clz);
 
-    wrap_op_compute_gas!(keccak256, "KECCAK256", instructions::system::keccak256);
+    wrap_op_compute_gas!(keccak256, KECCAK256, instructions::system::keccak256);
 
-    wrap_op_compute_gas!(address, "ADDRESS", instructions::system::address);
-    wrap_op_compute_gas!(balance, "BALANCE", instructions::host::balance);
-    wrap_op_compute_gas!(origin, "ORIGIN", instructions::tx_info::origin);
-    wrap_op_compute_gas!(caller, "CALLER", instructions::system::caller);
-    wrap_op_compute_gas!(callvalue, "CALLVALUE", instructions::system::callvalue);
-    wrap_op_compute_gas!(calldataload, "CALLDATALOAD", instructions::system::calldataload);
-    wrap_op_compute_gas!(calldatasize, "CALLDATASIZE", instructions::system::calldatasize);
-    wrap_op_compute_gas!(calldatacopy, "CALLDATACOPY", instructions::system::calldatacopy);
-    wrap_op_compute_gas!(codesize, "CODESIZE", instructions::system::codesize);
-    wrap_op_compute_gas!(codecopy, "CODECOPY", instructions::system::codecopy);
+    wrap_op_compute_gas!(address, ADDRESS, instructions::system::address);
+    wrap_op_compute_gas!(@self_charged balance, BALANCE, instructions::host::balance);
+    wrap_op_compute_gas!(origin, ORIGIN, instructions::tx_info::origin);
+    wrap_op_compute_gas!(caller, CALLER, instructions::system::caller);
+    wrap_op_compute_gas!(callvalue, CALLVALUE, instructions::system::callvalue);
+    wrap_op_compute_gas!(calldataload, CALLDATALOAD, instructions::system::calldataload);
+    wrap_op_compute_gas!(calldatasize, CALLDATASIZE, instructions::system::calldatasize);
+    wrap_op_compute_gas!(calldatacopy, CALLDATACOPY, instructions::system::calldatacopy);
+    wrap_op_compute_gas!(codesize, CODESIZE, instructions::system::codesize);
+    wrap_op_compute_gas!(codecopy, CODECOPY, instructions::system::codecopy);
 
-    wrap_op_compute_gas!(gasprice, "GASPRICE", instructions::tx_info::gasprice);
-    wrap_op_compute_gas!(extcodesize, "EXTCODESIZE", instructions::host::extcodesize);
-    wrap_op_compute_gas!(extcodecopy, "EXTCODECOPY", instructions::host::extcodecopy);
-    wrap_op_compute_gas!(returndatasize, "RETURNDATASIZE", instructions::system::returndatasize);
-    wrap_op_compute_gas!(returndatacopy, "RETURNDATACOPY", instructions::system::returndatacopy);
-    wrap_op_compute_gas!(extcodehash, "EXTCODEHASH", instructions::host::extcodehash);
-    wrap_op_compute_gas!(blockhash, "BLOCKHASH", instructions::host::blockhash);
-    wrap_op_compute_gas!(coinbase, "COINBASE", instructions::block_info::coinbase);
-    wrap_op_compute_gas!(timestamp, "TIMESTAMP", instructions::block_info::timestamp);
-    wrap_op_compute_gas!(number, "NUMBER", instructions::block_info::block_number);
-    wrap_op_compute_gas!(difficulty, "DIFFICULTY", instructions::block_info::difficulty);
-    wrap_op_compute_gas!(gaslimit, "GASLIMIT", instructions::block_info::gaslimit);
-    wrap_op_compute_gas!(chainid, "CHAINID", instructions::block_info::chainid);
-    wrap_op_compute_gas!(selfbalance, "SELFBALANCE", instructions::host::selfbalance);
-    wrap_op_compute_gas!(basefee, "BASEFEE", instructions::block_info::basefee);
-    wrap_op_compute_gas!(blobhash, "BLOBHASH", instructions::tx_info::blob_hash);
-    wrap_op_compute_gas!(blobbasefee, "BLOBBASEFEE", instructions::block_info::blob_basefee);
+    wrap_op_compute_gas!(gasprice, GASPRICE, instructions::tx_info::gasprice);
+    wrap_op_compute_gas!(@self_charged extcodesize, EXTCODESIZE, instructions::host::extcodesize);
+    wrap_op_compute_gas!(@self_charged extcodecopy, EXTCODECOPY, instructions::host::extcodecopy);
+    wrap_op_compute_gas!(returndatasize, RETURNDATASIZE, instructions::system::returndatasize);
+    wrap_op_compute_gas!(returndatacopy, RETURNDATACOPY, instructions::system::returndatacopy);
+    wrap_op_compute_gas!(@self_charged extcodehash, EXTCODEHASH, instructions::host::extcodehash);
+    wrap_op_compute_gas!(blockhash, BLOCKHASH, instructions::host::blockhash);
+    wrap_op_compute_gas!(coinbase, COINBASE, instructions::block_info::coinbase);
+    wrap_op_compute_gas!(timestamp, TIMESTAMP, instructions::block_info::timestamp);
+    wrap_op_compute_gas!(number, NUMBER, instructions::block_info::block_number);
+    wrap_op_compute_gas!(difficulty, DIFFICULTY, instructions::block_info::difficulty);
+    wrap_op_compute_gas!(gaslimit, GASLIMIT, instructions::block_info::gaslimit);
+    wrap_op_compute_gas!(chainid, CHAINID, instructions::block_info::chainid);
+    wrap_op_compute_gas!(selfbalance, SELFBALANCE, instructions::host::selfbalance);
+    wrap_op_compute_gas!(basefee, BASEFEE, instructions::block_info::basefee);
+    wrap_op_compute_gas!(blobhash, BLOBHASH, instructions::tx_info::blob_hash);
+    wrap_op_compute_gas!(blobbasefee, BLOBBASEFEE, instructions::block_info::blob_basefee);
 
-    wrap_op_compute_gas!(pop, "POP", instructions::stack::pop);
-    wrap_op_compute_gas!(mload, "MLOAD", instructions::memory::mload);
-    wrap_op_compute_gas!(mstore, "MSTORE", instructions::memory::mstore);
-    wrap_op_compute_gas!(mstore8, "MSTORE8", instructions::memory::mstore8);
-    wrap_op_compute_gas!(sload, "SLOAD", instructions::host::sload);
-    wrap_op_compute_gas!(sstore, "SSTORE", instructions::host::sstore);
-    wrap_op_compute_gas!(jump, "JUMP", instructions::control::jump);
-    wrap_op_compute_gas!(jumpi, "JUMPI", instructions::control::jumpi);
-    wrap_op_compute_gas!(pc, "PC", instructions::control::pc);
-    wrap_op_compute_gas!(msize, "MSIZE", instructions::memory::msize);
-    wrap_op_compute_gas!(gas, "GAS", instructions::system::gas);
-    wrap_op_compute_gas!(jumpdest, "JUMPDEST", instructions::control::jumpdest);
-    wrap_op_compute_gas!(tload, "TLOAD", instructions::host::tload);
-    wrap_op_compute_gas!(tstore, "TSTORE", instructions::host::tstore);
-    wrap_op_compute_gas!(mcopy, "MCOPY", instructions::memory::mcopy);
+    wrap_op_compute_gas!(pop, POP, instructions::stack::pop);
+    wrap_op_compute_gas!(mload, MLOAD, instructions::memory::mload);
+    wrap_op_compute_gas!(mstore, MSTORE, instructions::memory::mstore);
+    wrap_op_compute_gas!(mstore8, MSTORE8, instructions::memory::mstore8);
+    wrap_op_compute_gas!(sload, SLOAD, instructions::host::sload);
+    wrap_op_compute_gas!(@self_charged sload_self_charged, SLOAD, instructions::host::sload);
+    wrap_op_compute_gas!(jump, JUMP, instructions::control::jump);
+    wrap_op_compute_gas!(jumpi, JUMPI, instructions::control::jumpi);
+    wrap_op_compute_gas!(pc, PC, instructions::control::pc);
+    wrap_op_compute_gas!(msize, MSIZE, instructions::memory::msize);
+    wrap_op_compute_gas!(gas, GAS, instructions::system::gas);
+    wrap_op_compute_gas!(jumpdest, JUMPDEST, instructions::control::jumpdest);
+    wrap_op_compute_gas!(tload, TLOAD, instructions::host::tload);
+    wrap_op_compute_gas!(tstore, TSTORE, instructions::host::tstore);
+    wrap_op_compute_gas!(mcopy, MCOPY, instructions::memory::mcopy);
 
-    wrap_op_compute_gas!(push0, "PUSH0", instructions::stack::push0);
-    wrap_op_compute_gas!(push1, "PUSH1", instructions::stack::push::<1, _, _>);
-    wrap_op_compute_gas!(push2, "PUSH2", instructions::stack::push::<2, _, _>);
-    wrap_op_compute_gas!(push3, "PUSH3", instructions::stack::push::<3, _, _>);
-    wrap_op_compute_gas!(push4, "PUSH4", instructions::stack::push::<4, _, _>);
-    wrap_op_compute_gas!(push5, "PUSH5", instructions::stack::push::<5, _, _>);
-    wrap_op_compute_gas!(push6, "PUSH6", instructions::stack::push::<6, _, _>);
-    wrap_op_compute_gas!(push7, "PUSH7", instructions::stack::push::<7, _, _>);
-    wrap_op_compute_gas!(push8, "PUSH8", instructions::stack::push::<8, _, _>);
-    wrap_op_compute_gas!(push9, "PUSH9", instructions::stack::push::<9, _, _>);
-    wrap_op_compute_gas!(push10, "PUSH10", instructions::stack::push::<10, _, _>);
-    wrap_op_compute_gas!(push11, "PUSH11", instructions::stack::push::<11, _, _>);
-    wrap_op_compute_gas!(push12, "PUSH12", instructions::stack::push::<12, _, _>);
-    wrap_op_compute_gas!(push13, "PUSH13", instructions::stack::push::<13, _, _>);
-    wrap_op_compute_gas!(push14, "PUSH14", instructions::stack::push::<14, _, _>);
-    wrap_op_compute_gas!(push15, "PUSH15", instructions::stack::push::<15, _, _>);
-    wrap_op_compute_gas!(push16, "PUSH16", instructions::stack::push::<16, _, _>);
-    wrap_op_compute_gas!(push17, "PUSH17", instructions::stack::push::<17, _, _>);
-    wrap_op_compute_gas!(push18, "PUSH18", instructions::stack::push::<18, _, _>);
-    wrap_op_compute_gas!(push19, "PUSH19", instructions::stack::push::<19, _, _>);
-    wrap_op_compute_gas!(push20, "PUSH20", instructions::stack::push::<20, _, _>);
-    wrap_op_compute_gas!(push21, "PUSH21", instructions::stack::push::<21, _, _>);
-    wrap_op_compute_gas!(push22, "PUSH22", instructions::stack::push::<22, _, _>);
-    wrap_op_compute_gas!(push23, "PUSH23", instructions::stack::push::<23, _, _>);
-    wrap_op_compute_gas!(push24, "PUSH24", instructions::stack::push::<24, _, _>);
-    wrap_op_compute_gas!(push25, "PUSH25", instructions::stack::push::<25, _, _>);
-    wrap_op_compute_gas!(push26, "PUSH26", instructions::stack::push::<26, _, _>);
-    wrap_op_compute_gas!(push27, "PUSH27", instructions::stack::push::<27, _, _>);
-    wrap_op_compute_gas!(push28, "PUSH28", instructions::stack::push::<28, _, _>);
-    wrap_op_compute_gas!(push29, "PUSH29", instructions::stack::push::<29, _, _>);
-    wrap_op_compute_gas!(push30, "PUSH30", instructions::stack::push::<30, _, _>);
-    wrap_op_compute_gas!(push31, "PUSH31", instructions::stack::push::<31, _, _>);
-    wrap_op_compute_gas!(push32, "PUSH32", instructions::stack::push::<32, _, _>);
+    wrap_op_compute_gas!(push0, PUSH0, instructions::stack::push0);
+    wrap_op_compute_gas!(push1, PUSH1, instructions::stack::push::<1, _, _>);
+    wrap_op_compute_gas!(push2, PUSH2, instructions::stack::push::<2, _, _>);
+    wrap_op_compute_gas!(push3, PUSH3, instructions::stack::push::<3, _, _>);
+    wrap_op_compute_gas!(push4, PUSH4, instructions::stack::push::<4, _, _>);
+    wrap_op_compute_gas!(push5, PUSH5, instructions::stack::push::<5, _, _>);
+    wrap_op_compute_gas!(push6, PUSH6, instructions::stack::push::<6, _, _>);
+    wrap_op_compute_gas!(push7, PUSH7, instructions::stack::push::<7, _, _>);
+    wrap_op_compute_gas!(push8, PUSH8, instructions::stack::push::<8, _, _>);
+    wrap_op_compute_gas!(push9, PUSH9, instructions::stack::push::<9, _, _>);
+    wrap_op_compute_gas!(push10, PUSH10, instructions::stack::push::<10, _, _>);
+    wrap_op_compute_gas!(push11, PUSH11, instructions::stack::push::<11, _, _>);
+    wrap_op_compute_gas!(push12, PUSH12, instructions::stack::push::<12, _, _>);
+    wrap_op_compute_gas!(push13, PUSH13, instructions::stack::push::<13, _, _>);
+    wrap_op_compute_gas!(push14, PUSH14, instructions::stack::push::<14, _, _>);
+    wrap_op_compute_gas!(push15, PUSH15, instructions::stack::push::<15, _, _>);
+    wrap_op_compute_gas!(push16, PUSH16, instructions::stack::push::<16, _, _>);
+    wrap_op_compute_gas!(push17, PUSH17, instructions::stack::push::<17, _, _>);
+    wrap_op_compute_gas!(push18, PUSH18, instructions::stack::push::<18, _, _>);
+    wrap_op_compute_gas!(push19, PUSH19, instructions::stack::push::<19, _, _>);
+    wrap_op_compute_gas!(push20, PUSH20, instructions::stack::push::<20, _, _>);
+    wrap_op_compute_gas!(push21, PUSH21, instructions::stack::push::<21, _, _>);
+    wrap_op_compute_gas!(push22, PUSH22, instructions::stack::push::<22, _, _>);
+    wrap_op_compute_gas!(push23, PUSH23, instructions::stack::push::<23, _, _>);
+    wrap_op_compute_gas!(push24, PUSH24, instructions::stack::push::<24, _, _>);
+    wrap_op_compute_gas!(push25, PUSH25, instructions::stack::push::<25, _, _>);
+    wrap_op_compute_gas!(push26, PUSH26, instructions::stack::push::<26, _, _>);
+    wrap_op_compute_gas!(push27, PUSH27, instructions::stack::push::<27, _, _>);
+    wrap_op_compute_gas!(push28, PUSH28, instructions::stack::push::<28, _, _>);
+    wrap_op_compute_gas!(push29, PUSH29, instructions::stack::push::<29, _, _>);
+    wrap_op_compute_gas!(push30, PUSH30, instructions::stack::push::<30, _, _>);
+    wrap_op_compute_gas!(push31, PUSH31, instructions::stack::push::<31, _, _>);
+    wrap_op_compute_gas!(push32, PUSH32, instructions::stack::push::<32, _, _>);
 
-    wrap_op_compute_gas!(dup1, "DUP1", instructions::stack::dup::<1, _, _>);
-    wrap_op_compute_gas!(dup2, "DUP2", instructions::stack::dup::<2, _, _>);
-    wrap_op_compute_gas!(dup3, "DUP3", instructions::stack::dup::<3, _, _>);
-    wrap_op_compute_gas!(dup4, "DUP4", instructions::stack::dup::<4, _, _>);
-    wrap_op_compute_gas!(dup5, "DUP5", instructions::stack::dup::<5, _, _>);
-    wrap_op_compute_gas!(dup6, "DUP6", instructions::stack::dup::<6, _, _>);
-    wrap_op_compute_gas!(dup7, "DUP7", instructions::stack::dup::<7, _, _>);
-    wrap_op_compute_gas!(dup8, "DUP8", instructions::stack::dup::<8, _, _>);
-    wrap_op_compute_gas!(dup9, "DUP9", instructions::stack::dup::<9, _, _>);
-    wrap_op_compute_gas!(dup10, "DUP10", instructions::stack::dup::<10, _, _>);
-    wrap_op_compute_gas!(dup11, "DUP11", instructions::stack::dup::<11, _, _>);
-    wrap_op_compute_gas!(dup12, "DUP12", instructions::stack::dup::<12, _, _>);
-    wrap_op_compute_gas!(dup13, "DUP13", instructions::stack::dup::<13, _, _>);
-    wrap_op_compute_gas!(dup14, "DUP14", instructions::stack::dup::<14, _, _>);
-    wrap_op_compute_gas!(dup15, "DUP15", instructions::stack::dup::<15, _, _>);
-    wrap_op_compute_gas!(dup16, "DUP16", instructions::stack::dup::<16, _, _>);
+    wrap_op_compute_gas!(dup1, DUP1, instructions::stack::dup::<1, _, _>);
+    wrap_op_compute_gas!(dup2, DUP2, instructions::stack::dup::<2, _, _>);
+    wrap_op_compute_gas!(dup3, DUP3, instructions::stack::dup::<3, _, _>);
+    wrap_op_compute_gas!(dup4, DUP4, instructions::stack::dup::<4, _, _>);
+    wrap_op_compute_gas!(dup5, DUP5, instructions::stack::dup::<5, _, _>);
+    wrap_op_compute_gas!(dup6, DUP6, instructions::stack::dup::<6, _, _>);
+    wrap_op_compute_gas!(dup7, DUP7, instructions::stack::dup::<7, _, _>);
+    wrap_op_compute_gas!(dup8, DUP8, instructions::stack::dup::<8, _, _>);
+    wrap_op_compute_gas!(dup9, DUP9, instructions::stack::dup::<9, _, _>);
+    wrap_op_compute_gas!(dup10, DUP10, instructions::stack::dup::<10, _, _>);
+    wrap_op_compute_gas!(dup11, DUP11, instructions::stack::dup::<11, _, _>);
+    wrap_op_compute_gas!(dup12, DUP12, instructions::stack::dup::<12, _, _>);
+    wrap_op_compute_gas!(dup13, DUP13, instructions::stack::dup::<13, _, _>);
+    wrap_op_compute_gas!(dup14, DUP14, instructions::stack::dup::<14, _, _>);
+    wrap_op_compute_gas!(dup15, DUP15, instructions::stack::dup::<15, _, _>);
+    wrap_op_compute_gas!(dup16, DUP16, instructions::stack::dup::<16, _, _>);
 
-    wrap_op_compute_gas!(swap1, "SWAP1", instructions::stack::swap::<1, _, _>);
-    wrap_op_compute_gas!(swap2, "SWAP2", instructions::stack::swap::<2, _, _>);
-    wrap_op_compute_gas!(swap3, "SWAP3", instructions::stack::swap::<3, _, _>);
-    wrap_op_compute_gas!(swap4, "SWAP4", instructions::stack::swap::<4, _, _>);
-    wrap_op_compute_gas!(swap5, "SWAP5", instructions::stack::swap::<5, _, _>);
-    wrap_op_compute_gas!(swap6, "SWAP6", instructions::stack::swap::<6, _, _>);
-    wrap_op_compute_gas!(swap7, "SWAP7", instructions::stack::swap::<7, _, _>);
-    wrap_op_compute_gas!(swap8, "SWAP8", instructions::stack::swap::<8, _, _>);
-    wrap_op_compute_gas!(swap9, "SWAP9", instructions::stack::swap::<9, _, _>);
-    wrap_op_compute_gas!(swap10, "SWAP10", instructions::stack::swap::<10, _, _>);
-    wrap_op_compute_gas!(swap11, "SWAP11", instructions::stack::swap::<11, _, _>);
-    wrap_op_compute_gas!(swap12, "SWAP12", instructions::stack::swap::<12, _, _>);
-    wrap_op_compute_gas!(swap13, "SWAP13", instructions::stack::swap::<13, _, _>);
-    wrap_op_compute_gas!(swap14, "SWAP14", instructions::stack::swap::<14, _, _>);
-    wrap_op_compute_gas!(swap15, "SWAP15", instructions::stack::swap::<15, _, _>);
-    wrap_op_compute_gas!(swap16, "SWAP16", instructions::stack::swap::<16, _, _>);
+    wrap_op_compute_gas!(swap1, SWAP1, instructions::stack::swap::<1, _, _>);
+    wrap_op_compute_gas!(swap2, SWAP2, instructions::stack::swap::<2, _, _>);
+    wrap_op_compute_gas!(swap3, SWAP3, instructions::stack::swap::<3, _, _>);
+    wrap_op_compute_gas!(swap4, SWAP4, instructions::stack::swap::<4, _, _>);
+    wrap_op_compute_gas!(swap5, SWAP5, instructions::stack::swap::<5, _, _>);
+    wrap_op_compute_gas!(swap6, SWAP6, instructions::stack::swap::<6, _, _>);
+    wrap_op_compute_gas!(swap7, SWAP7, instructions::stack::swap::<7, _, _>);
+    wrap_op_compute_gas!(swap8, SWAP8, instructions::stack::swap::<8, _, _>);
+    wrap_op_compute_gas!(swap9, SWAP9, instructions::stack::swap::<9, _, _>);
+    wrap_op_compute_gas!(swap10, SWAP10, instructions::stack::swap::<10, _, _>);
+    wrap_op_compute_gas!(swap11, SWAP11, instructions::stack::swap::<11, _, _>);
+    wrap_op_compute_gas!(swap12, SWAP12, instructions::stack::swap::<12, _, _>);
+    wrap_op_compute_gas!(swap13, SWAP13, instructions::stack::swap::<13, _, _>);
+    wrap_op_compute_gas!(swap14, SWAP14, instructions::stack::swap::<14, _, _>);
+    wrap_op_compute_gas!(swap15, SWAP15, instructions::stack::swap::<15, _, _>);
+    wrap_op_compute_gas!(swap16, SWAP16, instructions::stack::swap::<16, _, _>);
 
-    wrap_op_compute_gas!(log0, "LOG0", instructions::host::log::<0, _>);
-    wrap_op_compute_gas!(log1, "LOG1", instructions::host::log::<1, _>);
-    wrap_op_compute_gas!(log2, "LOG2", instructions::host::log::<2, _>);
-    wrap_op_compute_gas!(log3, "LOG3", instructions::host::log::<3, _>);
-    wrap_op_compute_gas!(log4, "LOG4", instructions::host::log::<4, _>);
+    wrap_op_compute_gas!(@frame call_code, CALLCODE, call_resolving_target::<OP_CALLCODE, _, _>);
+    wrap_op_compute_gas!(ret, RETURN, instructions::control::ret);
+    wrap_op_compute_gas!(@frame delegate_call, DELEGATECALL, call_resolving_target::<OP_DELEGATECALL, _, _>);
+    wrap_op_compute_gas!(@frame static_call, STATICCALL, call_resolving_target::<OP_STATICCALL, _, _>);
 
-    wrap_op_compute_gas!(create, "CREATE", instructions::contract::create::<_, false, _>);
-    wrap_op_compute_gas!(call, "CALL", instructions::contract::call);
-    wrap_op_compute_gas!(call_code, "CALLCODE", instructions::contract::call_code);
-    wrap_op_compute_gas!(ret, "RETURN", instructions::control::ret);
-    wrap_op_compute_gas!(delegate_call, "DELEGATECALL", instructions::contract::delegate_call);
-    wrap_op_compute_gas!(create2, "CREATE2", instructions::contract::create::<_, true, _>);
-    wrap_op_compute_gas!(static_call, "STATICCALL", instructions::contract::static_call);
+    wrap_op_compute_gas!(revert, REVERT, instructions::control::revert);
+    wrap_op_compute_gas!(invalid, INVALID, instructions::control::invalid);
 
-    wrap_op_compute_gas!(revert, "REVERT", instructions::control::revert);
-    wrap_op_compute_gas!(invalid, "INVALID", instructions::control::invalid);
-    wrap_op_compute_gas!(selfdestruct, "SELFDESTRUCT", instructions::host::selfdestruct);
+    /// `SELFDESTRUCT` opcode with compute gas tracking, for the specs whose static gas entry the
+    /// interpreter still pre-charges (`REX2`, `REX3` — the two that re-enabled the opcode before it
+    /// gained a volatile guard).
+    pub fn selfdestruct<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
+        context: InstructionContext<'_, H, WIRE>,
+    ) -> InstructionExecResult {
+        selfdestruct_impl::<false, WIRE, H>(context)
+    }
+
+    /// `SELFDESTRUCT` opcode with compute gas tracking, charging its own static gas.
+    ///
+    /// `REX4+` zeroes the opcode's static gas entry so its beneficiary guard is reached even by a
+    /// frame that cannot afford the 5,000 gas; this variant charges that entry where revm's body
+    /// does, after the static-context check, the target pop and the `host.selfdestruct` call that
+    /// marks beneficiary access.
+    pub fn selfdestruct_self_charged<WIRE: InterpreterTypes, H: HostExt + ?Sized>(
+        context: InstructionContext<'_, H, WIRE>,
+    ) -> InstructionExecResult {
+        selfdestruct_impl::<true, WIRE, H>(context)
+    }
+
+    /// Halts a `SELFDESTRUCT` that cannot afford its charge with the frame's remaining gas set to
+    /// `remaining`, the amount the deployed implementation left.
+    ///
+    /// The deployed implementation charged the opcode's whole cost in one step and, when that
+    /// charge failed, halted with the frame's gas as it stood before the opcode; revm 40 charges in
+    /// steps and zeroes a frame that halts out of gas. The halted frame's remaining gas is
+    /// observable: a frame-local limit exceed turns the halt into a revert that hands it back to
+    /// the caller, and a transaction-level one refunds it to the sender. The halt action set here
+    /// is kept by the interpreter loop, which zeroes the gas only when no action is set.
+    pub(super) fn halt_out_of_gas_with_remaining<WIRE: InterpreterTypes>(
+        interpreter: &mut Interpreter<WIRE>,
+        remaining: u64,
+    ) {
+        let current = interpreter.gas.remaining();
+        interpreter.gas.erase_cost(remaining.saturating_sub(current));
+        set_halt_action!(interpreter, InstructionResult::OutOfGas);
+    }
+
+    /// Shared body of the two `SELFDESTRUCT` compute-gas wrappers.
+    ///
+    /// `SELF_CHARGES_STATIC_GAS` says who owes the opcode's static gas: when set, this handler
+    /// charges it inside the measurement window and does not add it back; when clear, the
+    /// interpreter pre-charged it outside the window and it is added back, exactly as in
+    /// [`wrap_op_compute_gas`].
+    ///
+    /// Unlike the default wrapper, the trailing check fans out across all four limit
+    /// dimensions (`record_compute_gas_all_dims`): the REX5 storage wrapper records
+    /// beneficiary data/KV/state usage *before* the inner instruction runs, without
+    /// latching, and those dimensions must latch (and halt) here — only once the inner
+    /// instruction has succeeded. Latching at the recording site instead would stick
+    /// even when the inner instruction subsequently fails and the frame's discardable
+    /// usage is rolled back.
+    #[inline]
+    fn selfdestruct_impl<
+        const SELF_CHARGES_STATIC_GAS: bool,
+        WIRE: InterpreterTypes,
+        H: HostExt + ?Sized,
+    >(
+        context: InstructionContext<'_, H, WIRE>,
+    ) -> InstructionExecResult {
+        let gas_before = context.interpreter.gas.remaining();
+        let pre_charged =
+            if SELF_CHARGES_STATIC_GAS { 0 } else { const { static_gas(opcode::SELFDESTRUCT) } };
+
+        // Call the original instruction
+        run_inner_instruction_or_abort!(
+            instructions::host::selfdestruct,
+            context,
+            inner_outcome,
+            on_halt: |halt| {
+                if halt == InstructionResult::OutOfGas {
+                    halt_out_of_gas_with_remaining(context.interpreter, gas_before + pre_charged);
+                }
+            }
+        );
+
+        if SELF_CHARGES_STATIC_GAS &&
+            !context
+                .interpreter
+                .gas
+                .record_regular_cost(const { static_gas(opcode::SELFDESTRUCT) })
+        {
+            halt_out_of_gas_with_remaining(context.interpreter, gas_before);
+            return Err(InstructionResult::OutOfGas);
+        }
+        let gas_used = pre_charged + gas_before.saturating_sub(context.interpreter.gas.remaining());
+        let mut additional_limit = context.host.additional_limit().borrow_mut();
+        if !additional_limit.record_compute_gas_all_dims(gas_used) {
+            // A successful inner SELFDESTRUCT has already set its return action, which the halt
+            // replaces; the `Err` is what stops the interpreter loop.
+            let result = additional_limit.exceeding_instruction_result();
+            set_halt_action!(context.interpreter, result);
+            return Err(result);
+        }
+        inner_outcome
+    }
 }
 
 /// Trait to inspect the stack elements.
@@ -1595,5 +3370,193 @@ impl StackInspectTr for Stack {
         let index = self.len() - 1 - N;
         // SAFETY: the index must be within the bounds of the stack
         Some(unsafe { *self.data().get_unchecked(index) })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{test_utils::MemoryDatabase, EmptyExternalEnv};
+
+    /// [`STATIC_GAS_TABLE`] is a single table shared by every handler, so the static gas it adds
+    /// back is only correct as long as every spec's instruction table was built from the same
+    /// Ethereum spec. A future spec that maps to a different one must give its handlers their own
+    /// table instead of silently metering against this one.
+    #[test]
+    fn test_static_gas_table_is_spec_invariant() {
+        for spec in MegaSpecId::ALL.iter().copied() {
+            assert_eq!(
+                gas_table_spec(spec.into_eth_spec()),
+                STATIC_GAS_TABLE,
+                "{spec} builds its instruction table from a different static gas table",
+            );
+        }
+    }
+
+    /// Pins the table entries the measurement windows depend on.
+    ///
+    /// The entry is the portion the interpreter charges before the handler runs, which for the
+    /// account-touching opcodes is the *warm* access cost only — the cold surcharge and every other
+    /// dynamic component are charged inside the body and therefore already land inside the window.
+    /// An entry that silently became the opcode's full cost would make the handlers double-count.
+    #[test]
+    fn test_static_gas_matches_known_opcode_costs() {
+        // Fully static opcodes: the whole cost is pre-charged and none of it lands in the window.
+        assert_eq!(static_gas(opcode::STOP), 0);
+        assert_eq!(static_gas(opcode::ADD), 3);
+        assert_eq!(static_gas(opcode::PUSH1), 3);
+        assert_eq!(static_gas(opcode::JUMPDEST), 1);
+        // Warm access cost only (EIP-2929); the cold surcharge is charged in the body.
+        assert_eq!(static_gas(opcode::SLOAD), gas::WARM_STORAGE_READ_COST);
+        assert_eq!(static_gas(opcode::BALANCE), gas::WARM_STORAGE_READ_COST);
+        assert_eq!(static_gas(opcode::CALL), gas::WARM_STORAGE_READ_COST);
+        assert_eq!(static_gas(opcode::STATICCALL), gas::WARM_STORAGE_READ_COST);
+        // Base LOG cost; the per-topic and per-byte costs are charged in the body.
+        assert_eq!(static_gas(opcode::LOG0), gas::LOG);
+        assert_eq!(static_gas(opcode::LOG4), gas::LOG);
+        assert_eq!(static_gas(opcode::SELFDESTRUCT), 5_000);
+        // Charged entirely inside the body.
+        assert_eq!(static_gas(opcode::SSTORE), 0);
+        assert_eq!(static_gas(opcode::CREATE), 0);
+        assert_eq!(static_gas(opcode::CREATE2), 0);
+    }
+
+    /// The opcodes `spec`'s instruction table wraps in a `volatile_data_ext` handler, and whose
+    /// static gas [`gas_table_for_spec`] therefore has to leave to the handler.
+    ///
+    /// Maintained by hand against the table wiring above, so that the pin below fails when a
+    /// volatile wrapper is added to (or removed from) a table without its gas entry following.
+    fn volatile_guarded_opcodes(spec: MegaSpecId) -> Vec<u8> {
+        use opcode::*;
+        if !spec.is_enabled(MegaSpecId::MINI_REX) {
+            return Vec::new();
+        }
+        let mut opcodes = vec![
+            // `wrap_op_detain_gas_unconditional!`
+            BLOCKHASH,
+            COINBASE,
+            TIMESTAMP,
+            NUMBER,
+            DIFFICULTY,
+            GASLIMIT,
+            BASEFEE,
+            BLOBBASEFEE,
+            BLOBHASH,
+            // `wrap_op_detain_gas_conditional!`
+            BALANCE,
+            EXTCODESIZE,
+            EXTCODECOPY,
+            EXTCODEHASH,
+        ];
+        if spec.is_enabled(MegaSpecId::REX3) {
+            // `volatile_data_ext::sload`
+            opcodes.push(SLOAD);
+        }
+        if spec.is_enabled(MegaSpecId::REX4) {
+            // `wrap_call_volatile_check!`
+            opcodes.extend([CALL, CALLCODE, DELEGATECALL, STATICCALL]);
+            // `volatile_data_ext::selfdestruct` (REX5+: `selfdestruct_with_beneficiary_guard`)
+            opcodes.push(SELFDESTRUCT);
+            // `volatile_data_ext::selfbalance`
+            opcodes.push(SELFBALANCE);
+        }
+        opcodes.sort_unstable();
+        opcodes
+    }
+
+    /// A volatile-guarded opcode must have a zero static gas entry, and every other opcode must
+    /// keep revm's.
+    ///
+    /// The two halves of the mechanism are wired in different places — the guard charges its
+    /// opcode's static gas in `volatile_data_ext`, the table stops pre-charging it in
+    /// [`gas_table_for_spec`] — so a mismatch is silent but consensus-visible: an opcode zeroed
+    /// without a guard to charge it becomes free, and a guard whose entry was left in place charges
+    /// its opcode twice.
+    ///
+    /// The disabled and never-wired opcodes are deliberately not in the zeroed set. Their entries
+    /// are charged by a frame the handler was going to strip of its whole budget anyway, so the
+    /// pre-charge moves no gas — it only decides which halt an underfunded frame reports, and that
+    /// is not a surface this table is used to pin.
+    #[test]
+    fn test_only_volatile_guarded_opcodes_have_zero_static_gas() {
+        for spec in MegaSpecId::ALL.iter().copied() {
+            let vanilla = gas_table_spec(spec.into_eth_spec());
+            let table = gas_table_for_spec(spec);
+            let expected = volatile_guarded_opcodes(spec);
+
+            let zeroed: Vec<u8> = (0..=u8::MAX)
+                .filter(|&op| table[op as usize] == 0 && vanilla[op as usize] != 0)
+                .collect();
+            assert_eq!(
+                zeroed, expected,
+                "{spec}: the opcodes whose static gas is left to the handler must be exactly the \
+                 volatile-guarded ones",
+            );
+
+            for op in 0..=u8::MAX {
+                if !expected.contains(&op) {
+                    assert_eq!(
+                        table[op as usize], vanilla[op as usize],
+                        "{spec}: opcode {op:#04x} is not volatile-guarded, so its static gas must \
+                         stay exactly revm's",
+                    );
+                }
+            }
+        }
+    }
+
+    /// [`create_opcode`] feeds the static-gas lookup for the `IS_CREATE2`-generic create handlers.
+    #[test]
+    fn test_create_opcode_selects_by_const_generic() {
+        assert_eq!(storage_gas_ext::create_opcode(false), opcode::CREATE);
+        assert_eq!(storage_gas_ext::create_opcode(true), opcode::CREATE2);
+    }
+
+    /// Pins `Debug` for `MegaInstructions` so a `fmt` body that returns `Ok(Default)`
+    /// (empty formatter write) fails.
+    #[test]
+    fn test_mega_instructions_debug_fmt_is_non_empty() {
+        let instructions =
+            MegaInstructions::<MemoryDatabase, EmptyExternalEnv>::new(MegaSpecId::REX5);
+        let rendered = format!("{instructions:?}");
+        assert!(!rendered.is_empty(), "Debug output must write at least one byte",);
+        assert!(
+            rendered.contains("MegaethInstructions") || rendered.contains("REX5"),
+            "Debug output must identify the type or the configured spec; got {rendered}",
+        );
+    }
+
+    /// Every alias spec must select exactly its `behavior()` target's instruction
+    /// table and static gas table — the matches in `MegaInstructions::new` and
+    /// `gas_table_for_spec` each state the alias→target mapping again, and this test is
+    /// the reconciliation between them. Both instruction tables come from the same
+    /// monomorphization, so identical arms produce identical fn pointers. revm wraps each
+    /// entry in an opaque `Instruction` whose pointer is only observable through its `Debug`
+    /// rendering, so that rendering is what gets compared.
+    #[test]
+    fn test_alias_specs_use_their_behavior_targets_table() {
+        for spec in MegaSpecId::ALL {
+            if !spec.is_alias() {
+                continue;
+            }
+            let alias = MegaInstructions::<MemoryDatabase, EmptyExternalEnv>::new(*spec);
+            let target = MegaInstructions::<MemoryDatabase, EmptyExternalEnv>::new(spec.behavior());
+            let (alias_table, target_table) =
+                (alias.instruction_table(), target.instruction_table());
+            for opcode in 0..=0xff_usize {
+                assert_eq!(
+                    format!("{:?}", alias_table[opcode]),
+                    format!("{:?}", target_table[opcode]),
+                    "{spec:?} table diverges from its behavior target {:?} at opcode {opcode:#04x}",
+                    spec.behavior(),
+                );
+            }
+            assert_eq!(
+                alias.gas_table(),
+                target.gas_table(),
+                "{spec:?} static gas table diverges from its behavior target {:?}",
+                spec.behavior(),
+            );
+        }
     }
 }

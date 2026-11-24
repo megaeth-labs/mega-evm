@@ -69,3 +69,8 @@ pub type BlockExecutor<C, E, R> = MegaBlockExecutor<C, E, R>;
 /// Alias for [`MegaBlockExecutorFactory`]
 pub type BlockExecutorFactory<ChainSpec, EvmF, ReceiptBuilder> =
     MegaBlockExecutorFactory<ChainSpec, EvmF, ReceiptBuilder>;
+
+/// Runs the README's code blocks as doctests, so the Quick Start stays compiled and correct.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+pub struct ReadmeDoctests;

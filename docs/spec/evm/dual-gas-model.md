@@ -1,6 +1,6 @@
 ---
 description: MegaETH dual gas model specification — compute gas, storage gas, SALT bucket multiplier, and per-operation storage gas schedule.
-spec: Rex4
+spec: Rex6
 ---
 
 # Dual Gas Model
@@ -33,14 +33,71 @@ total_gas_used = compute_gas_used + storage_gas_used
 ```
 
 Both compute gas and storage gas MUST be deducted from the transaction's `gas_limit` budget.
-If the combined total exceeds `gas_limit`, the transaction MUST halt with `OutOfGas`.
-The `gas_used` field in the transaction receipt MUST reflect the combined total.
+When that budget is exhausted, the transaction MUST halt with `OutOfGas`; the halt is decided by the EVM gas meter's budget, not by summing the two counters.
+
+Total gas is the sum of the two metered dimensions.
+It is not the receipt, and a node MUST NOT derive the receipt by summing the two counters.
+
+#### Gas Charged to the Transaction
+
+The two counters are metering state.
+The gas charged to a transaction is the EVM gas meter's own accounting, maintained alongside them.
+
+A node MUST charge the transaction from the gas meter, and MUST NOT compute the charge from the two counters.
+No equation relates them: the counters can total more than the transaction is charged, or less, and both happen in ordinary transactions.
+
+They total **less** than the charge when the transaction pays for gas neither counter records:
+
+- Gas an operation consumed before halting partway through, which is deliberately never recorded as compute gas (see [Single-Record Rule](compute-gas.md#single-record-rule)).
+- The difference between the gas limit a caller forwards into a failing precompile and the compute gas recorded for it, which is capped at the remaining compute budget (see [Precompiles](compute-gas.md#precompiles)).
+
+Gas forwarded to a child frame that a compute-gas exceed discarded, and the envelope a transaction has left when the [KeylessDeploy](compute-gas.md#keyless-deploy-exceed) dispatch overhead crosses the transaction-level compute limit, are both returned rather than spent, so neither contributes to this gap (see [Exceed Behavior](compute-gas.md#exceed-behavior)).
+
+They total **more** than the charge when compute gas records gas the transaction never paid.
+This happens on every value-transferring `CALL` or `CALLCODE`: the inherited EVM hands the callee `CALL_STIPEND` without deducting it from the caller, and the parent's compute gas records it regardless, so the counters run `CALL_STIPEND` ahead of the charge for each such call (see [Forwarded Gas Exclusion](compute-gas.md#forwarded-gas-exclusion)).
+
+#### Receipt Gas
+
+The `gas_used` field in the transaction receipt MUST be the gas charged to the transaction, less any standard EVM gas refund settled at the end of the transaction, and then raised to the [calldata floor cost](#calldata-floor-cost) if that floor is higher.
+
+Refunds and the calldata floor apply to the charge, not to either counter: a node MUST NOT subtract a refund from tracked compute gas, and MUST NOT raise it to a floor.
 
 ### Compute Gas
 
 [Compute gas](../glossary.md#compute-gas) is based on standard EVM gas semantics inherited from Optimism Isthmus / Ethereum Prague.
 Unless explicitly overridden elsewhere in this specification, each opcode MUST use the same compute gas cost as in the inherited EVM semantics.
 The dual gas model itself does not redefine opcode compute gas costs; it adds the storage gas dimension on top of them.
+
+How much of an operation's inherited EVM gas a node records as compute gas — the measurement window, its exclusions, and the recording sites — is specified in [Compute Gas Accounting](compute-gas.md).
+
+### Gas Metering Order
+
+Each opcode consumes [compute gas](../glossary.md#compute-gas) and may additionally charge [storage gas](../glossary.md#storage-gas).
+Because the compute gas a transaction has consumed is itself a metered resource bounded by the [compute gas limit](resource-limits.md), the order in which an opcode charges storage gas relative to recording compute gas is consensus-visible: it determines, when an opcode halts partway through, how much compute gas has been recorded and which limit is reached first.
+
+A node MUST meter every storage-affecting opcode — `SSTORE`, `LOG0` through `LOG4`, `CALL`, `CALLCODE`, `DELEGATECALL`, `STATICCALL`, `CREATE`, `CREATE2`, and `SELFDESTRUCT` — in the following fixed order:
+
+1. Validate the operands the storage-gas charge itself reads.
+   A validation failure (for example, stack underflow) MUST halt before any gas is charged or recorded.
+   Operands the charge does not read are validated by the opcode body in step 3: `LOG1` through `LOG4` read only the data length here, so a short stack missing their topic operands reaches step 2 first.
+2. Charge the opcode's storage gas against the transaction's gas budget.
+   If the budget is insufficient, the node MUST halt with `OutOfGas` before executing the opcode body.
+3. Execute the opcode body, including every standard EVM dynamic cost such as memory expansion, account access, and child-frame gas forwarding.
+   `CREATE2` is the exception to the order of steps 2 and 3: its target address is derived from the initcode, so the memory expansion and hash that derive it necessarily precede the charge for that address, and an insufficient budget surfaces after the expansion has already been paid for.
+4. Record the opcode's compute gas as a single amount, measured over a window spanning steps 2 and 3 — or over the equivalent window that opens after step 2 with `storage_gas_charged` treated as zero (see [Storage Gas Exclusion](compute-gas.md#storage-gas-exclusion)).
+   The recorded amount and its exclusions are defined in [Compute Gas Accounting](compute-gas.md#measurement-window).
+   The node MUST then enforce the compute gas limit, halting if it is exceeded.
+5. Surface the opcode's other resource-limit dimensions (data size, key-value updates, state growth).
+   This step fixes when an exceed on those dimensions is acted on, not when their usage is recorded.
+   An opcode MAY record such usage earlier — before its body runs — provided the resulting exceed is not acted on until this step, so that a body that fails still discards the usage it would have added.
+
+`SELFDESTRUCT` is the exception to the split between steps 4 and 5.
+It records its beneficiary's data-size, key-value-update, and state-growth usage before its body runs, so it MUST evaluate all four dimensions together once the body completes, rather than deciding compute gas first.
+When more than one dimension is over its limit on that opcode, the reported dimension follows the fixed priority specified in [Multidimensional Resource Limits](resource-limits.md#runtime-transaction-level-limits).
+`SELFDESTRUCT` can record all three non-compute dimensions for a newly materialized beneficiary, so that order decides the reported dimension in both directions — data size or key-value updates outrank compute gas, while compute gas outranks state growth.
+
+A node MUST record an opcode's compute gas in exactly one step, after the opcode body has fully executed — with no `CREATE2` exception.
+The no-record rule when the body does not run to completion is specified in [Single-Record Rule](compute-gas.md#single-record-rule).
 
 ### Storage Gas
 
@@ -64,6 +121,12 @@ A node MUST charge storage gas according to the following schedule:
 Contract creation MUST charge only `CONTRACT_CREATION_STORAGE_GAS_BASE × (multiplier − 1)`.
 The account creation storage gas (`ACCOUNT_CREATION_STORAGE_GAS_BASE`) MUST NOT be charged on top of the contract creation cost.
 
+#### Top-Level Contract Creation Address
+
+For a top-level contract-creation transaction, the contract-creation storage gas and its [SALT bucket](../glossary.md#salt-bucket) multiplier MUST be computed from the address that the transaction will actually create.
+A node MUST derive that address from the sender account's current state nonce — the same nonce used to create the contract — and MUST NOT derive it from the transaction's nonce field.
+These two values differ when prior in-block activity or EIP-7702 authorizations have advanced the sender account's nonce ahead of the value carried in the transaction's nonce field.
+
 #### Calldata Floor Cost
 
 Per [EIP-7623](https://eips.ethereum.org/EIPS/eip-7623), after execution completes, if the total gas consumed is less than the calldata floor cost, the transaction MUST be charged the floor cost instead.
@@ -85,12 +148,11 @@ The [data size](resource-accounting.md) tracked for LOG operations within a reve
 
 The 10× storage gas on LOG opcodes causes a simple `LOG1` to cost 4,500 gas (750 compute + 3,750 storage), exceeding the EVM's `CALL_STIPEND` of 2,300.
 
-An additional **[storage gas stipend](../glossary.md#storage-gas-stipend)** of 23,000 gas is granted for internal (`depth > 0`) value-transferring `CALL` and `CALLCODE` opcodes.
+A **[storage gas stipend](../glossary.md#storage-gas-stipend)** allowance of 23,000 gas is reserved for internal (`depth > 0`) value-transferring `CALL` and `CALLCODE` opcodes.
 `DELEGATECALL`, `STATICCALL`, top-level transaction calls, and [system contract](../system-contracts/overview.md) interceptions MUST NOT receive the stipend.
-The callee's total gas becomes: `forwarded_gas + CALL_STIPEND (2,300) + STORAGE_CALL_STIPEND (23,000)`.
-The callee's [compute gas](../glossary.md#compute-gas) limit MUST remain at the original level (`forwarded_gas + CALL_STIPEND`), so the extra gas can only be consumed by storage gas operations.
-On return, unused storage gas stipend MUST be burned — it MUST NOT be returned to the caller, regardless of whether the callee succeeded or reverted.
-See [Rex4 Network Upgrade](../upgrades/rex4.md) for details.
+The allowance MUST NOT inflate the callee's gas limit: the callee runs with the standard `forwarded_gas + CALL_STIPEND (2,300)`, and the stipend is a separate per-frame budget drawn only at the storage-gas surcharge sites MegaETH adds on top of standard EVM opcode costs (LOG topic/data, new-account materialization, first-time-write SSTORE, contract-creation storage, SELFDESTRUCT beneficiary creation).
+Because the allowance never enters the callee's gas limit, it MUST NOT be spendable on compute (standard EVM opcode) gas, and any undrawn portion is neither returned to the caller nor rescued for the sender on early termination.
+See the [gas forwarding](gas-forwarding.md) page for the full mechanism.
 
 ### Dynamic SALT Multiplier
 
@@ -109,6 +171,10 @@ The following rules MUST apply:
 - When `multiplier = 1` (bucket at minimum size): storage gas for the operation MUST be zero, since `base × (1 − 1) = 0`.
 - When `multiplier > 1`: storage gas MUST scale linearly as `base × (multiplier − 1)`.
 - The multiplier MUST be determined from the SALT bucket state of the **parent block**, not the current transaction's intermediate state.
+
+A [system-originated transaction](../system-contracts/system-tx.md#system-originated-transaction-metering-exemption) MUST be charged dynamic storage gas as if every target bucket were at minimum capacity (`multiplier = 1`), regardless of the bucket's actual capacity.
+Under the `base × (multiplier − 1)` formula this makes the dynamic storage gas zero, so a protocol-mandated storage write costs only its standard EVM gas and cannot run out of gas as SALT buckets grow.
+User transactions are unaffected and continue to pay capacity-scaled storage gas.
 
 #### Bucket ID Calculation
 
@@ -185,24 +251,25 @@ A transaction with `gas_limit < 60,000 + calldata_gas` MUST be rejected as inval
 
 ## Constants
 
-| Constant                                            | Value      | Description                                                 |
-| --------------------------------------------------- | ---------- | ----------------------------------------------------------- |
-| `INTRINSIC_COMPUTE_GAS`                             | 21,000     | Standard EVM intrinsic gas for all transactions             |
-| `INTRINSIC_STORAGE_GAS`                             | 39,000     | Storage gas intrinsic for all transactions                  |
-| `SSTORE_STORAGE_GAS_BASE`                           | 20,000     | Base storage gas for SSTORE (0 → non-0)                     |
-| `ACCOUNT_CREATION_STORAGE_GAS_BASE`                 | 25,000     | Base storage gas for account creation                       |
-| `CONTRACT_CREATION_STORAGE_GAS_BASE`                | 32,000     | Base storage gas for contract creation                      |
-| `CODE_DEPOSIT_STORAGE_GAS`                          | 10,000     | Storage gas per byte of deployed bytecode                   |
-| `LOG_TOPIC_STORAGE_GAS`                             | 3,750      | Storage gas per LOG topic                                   |
-| `LOG_DATA_STORAGE_GAS`                              | 80         | Storage gas per byte of LOG data                            |
-| `CALLDATA_ZERO_STORAGE_GAS`                         | 40         | Storage gas per zero byte of calldata                       |
-| `CALLDATA_NONZERO_STORAGE_GAS`                      | 160        | Storage gas per non-zero byte of calldata                   |
-| `CALLDATA_FLOOR_ZERO_STORAGE_GAS`                   | 100        | Storage gas floor per zero byte of calldata                 |
-| `CALLDATA_FLOOR_NONZERO_STORAGE_GAS`                | 400        | Storage gas floor per non-zero byte of calldata             |
-| `STORAGE_GAS_MULTIPLIER`                            | 10         | Ratio of calldata/LOG storage gas to standard EVM costs     |
-| [`MIN_BUCKET_SIZE`](../glossary.md#min_bucket_size) | 256        | Smallest [SALT bucket](../glossary.md#salt-bucket) capacity |
-| `NUM_META_BUCKETS`                                  | 65,536     | Number of SALT buckets reserved for metadata                |
-| `NUM_KV_BUCKETS`                                    | 16,711,680 | Number of SALT buckets available for key-value state        |
+| Constant                                            | Value      | Description                                                   |
+| --------------------------------------------------- | ---------- | ------------------------------------------------------------- |
+| `INTRINSIC_COMPUTE_GAS`                             | 21,000     | Standard EVM intrinsic gas for all transactions               |
+| `CALL_STIPEND`                                      | 2,300      | Standard EVM value-transfer call stipend, inherited unchanged |
+| `INTRINSIC_STORAGE_GAS`                             | 39,000     | Storage gas intrinsic for all transactions                    |
+| `SSTORE_STORAGE_GAS_BASE`                           | 20,000     | Base storage gas for SSTORE (0 → non-0)                       |
+| `ACCOUNT_CREATION_STORAGE_GAS_BASE`                 | 25,000     | Base storage gas for account creation                         |
+| `CONTRACT_CREATION_STORAGE_GAS_BASE`                | 32,000     | Base storage gas for contract creation                        |
+| `CODE_DEPOSIT_STORAGE_GAS`                          | 10,000     | Storage gas per byte of deployed bytecode                     |
+| `LOG_TOPIC_STORAGE_GAS`                             | 3,750      | Storage gas per LOG topic                                     |
+| `LOG_DATA_STORAGE_GAS`                              | 80         | Storage gas per byte of LOG data                              |
+| `CALLDATA_ZERO_STORAGE_GAS`                         | 40         | Storage gas per zero byte of calldata                         |
+| `CALLDATA_NONZERO_STORAGE_GAS`                      | 160        | Storage gas per non-zero byte of calldata                     |
+| `CALLDATA_FLOOR_ZERO_STORAGE_GAS`                   | 100        | Storage gas floor per zero byte of calldata                   |
+| `CALLDATA_FLOOR_NONZERO_STORAGE_GAS`                | 400        | Storage gas floor per non-zero byte of calldata               |
+| `STORAGE_GAS_MULTIPLIER`                            | 10         | Ratio of calldata/LOG storage gas to standard EVM costs       |
+| [`MIN_BUCKET_SIZE`](../glossary.md#min_bucket_size) | 256        | Smallest [SALT bucket](../glossary.md#salt-bucket) capacity   |
+| `NUM_META_BUCKETS`                                  | 65,536     | Number of SALT buckets reserved for metadata                  |
+| `NUM_KV_BUCKETS`                                    | 16,711,680 | Number of SALT buckets available for key-value state          |
 
 ## Rationale
 
@@ -222,6 +289,13 @@ The `STORAGE_GAS_MULTIPLIER` of 10 was chosen to reflect the long-term storage a
 Every transaction imposes a baseline storage cost on nodes regardless of its execution: the transaction itself must be stored, the receipt must be persisted, and account state (nonce, balance) must be updated.
 The 39,000 flat intrinsic storage gas covers this per-transaction overhead.
 
+## Security Considerations
+
+**If storage gas is omitted or undercharged**, MegaETH's 0.001 gwei base fee makes every SSTORE, contract deployment, and LOG call negligible in cost.
+A single transaction could write thousands of storage slots or emit megabytes of log data for nearly zero fee — the exact attack the dual gas model exists to prevent.
+
+**If the `STORAGE_CALL_STIPEND` allowance is allowed to enter the callee's gas limit or be returned to the caller**, system-granted gas leaks to the caller, who can redirect it to non-storage operations — defeating the allowance's purpose of covering only MegaETH's storage-gas surcharges.
+
 ## Spec History
 
 For the historical evolution of storage gas formulas and constants across specs:
@@ -229,3 +303,5 @@ For the historical evolution of storage gas formulas and constants across specs:
 - [MiniRex](../upgrades/minirex.md) — original `base × multiplier` formula with 2,000,000 base cost
 - [Rex](../upgrades/rex.md) — revised to `base × (multiplier − 1)` with current base costs, added transaction intrinsic storage gas
 - [Rex4](../upgrades/rex4.md) — storage gas stipend for value transfers
+- [Rex5](../upgrades/rex5.md) — reworked the storage gas stipend into a separated-allowance model, derived the top-level contract-creation storage-gas address from the sender's current state nonce, and made contract-creation code-deposit compute gas atomic with the deployment commit
+- [Rex6](../upgrades/rex6.md) — unified per-opcode gas metering order (compute gas recorded once, after the opcode body, with no `CREATE2` exception); system-originated transactions charge dynamic storage gas at minimum bucket capacity; forwarded gas and the KeylessDeploy envelope are returned on a compute-gas exceed rather than spent

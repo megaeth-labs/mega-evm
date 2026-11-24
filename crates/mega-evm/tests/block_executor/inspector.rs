@@ -178,14 +178,14 @@ impl<CTX: ContextTr, INTR: InterpreterTypes> Inspector<CTX, INTR> for SkipNested
             // Return early for nested calls - this triggers the bug scenario where
             // inspector skips `frame_init` but `frame_return_result` is still called
             self.calls_intercepted.set(self.calls_intercepted.get() + 1);
-            Some(CallOutcome {
-                result: InterpreterResult {
+            Some(CallOutcome::new(
+                InterpreterResult {
                     result: InstructionResult::Stop,
                     output: Bytes::new(),
                     gas: Gas::new(inputs.gas_limit),
                 },
-                memory_offset: 0..0,
-            })
+                0..0,
+            ))
         } else {
             None
         }
@@ -331,7 +331,7 @@ impl<CTX: ContextTr, INTR: InterpreterTypes> Inspector<CTX, INTR> for SkipCreate
             result: InterpreterResult {
                 result: InstructionResult::Stop,
                 output: Bytes::new(),
-                gas: Gas::new(inputs.gas_limit),
+                gas: Gas::new(inputs.gas_limit()),
             },
             address: None,
         })

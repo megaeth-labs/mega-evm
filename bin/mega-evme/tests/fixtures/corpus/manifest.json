@@ -1,0 +1,534 @@
+{
+  "chain_id": 4326,
+  "salt": "default-minimum",
+  "archive": "corpus.tar.xz",
+  "sha256": "9b4b50a2fa7f6e2c2267579dd4bf177952220666415ef3b45b0b72eb4dc808dc",
+  "blocks": [
+    {
+      "number": 853802,
+      "hash": "0x3cb371ca86fec370f2184916d9dd4a05970e17905bc3a7d051898a0a2fe5ac2f",
+      "spec": "MiniRex",
+      "tx_count": 2,
+      "member": "853802.cache.json",
+      "sha256": "94991f1e33da7ae8e96541071c29d35e1d9351f4eff6d4619884f7e788cf6602",
+      "note": "earliest block in the corpus; a failed EIP-1559 transaction burning 980M gas"
+    },
+    {
+      "number": 1708174,
+      "hash": "0x3b4be7f397108d2230c8cf7349217db456213f3c77b821bbaac852dc7c5617cd",
+      "spec": "MiniRex",
+      "tx_count": 2,
+      "member": "1708174.cache.json",
+      "sha256": "43192003679eb0978db6924b587bf008e66c85dd4398869b1683416529614c06",
+      "note": "failed deposit CREATE, whose receipt still reports the contractAddress it targeted"
+    },
+    {
+      "number": 2045117,
+      "hash": "0x79bcb010c2081bcc2eda1a6bab4c000ff6d8389812dcbb31e97ae3c1fd60f46d",
+      "spec": "MiniRex",
+      "tx_count": 2,
+      "member": "2045117.cache.json",
+      "sha256": "21062c353538b1d2ad3fcdfb7f9f540a92598474c4d6f9773b47eaa7e8f86cd6",
+      "note": "EIP-7702 transaction under MiniRex"
+    },
+    {
+      "number": 2052680,
+      "hash": "0xf87252bff694d792bc67ae7d941614617c5b7bbd124c41414092c0b96f2c99e9",
+      "spec": "MiniRex1",
+      "tx_count": 8,
+      "member": "2052680.cache.json",
+      "sha256": "ac4938ea4f9afc116f1926aecbeeeaa40496fbda5b229019af804626df003a1c",
+      "note": "MiniRex1 alias rung, executing Equivalence behavior"
+    },
+    {
+      "number": 2053779,
+      "hash": "0x51b1f50710c0e94342aa3c0ff672d5f4cb3b4a1aa2246e666145541c90c00734",
+      "spec": "MiniRex2",
+      "tx_count": 2,
+      "member": "2053779.cache.json",
+      "sha256": "31a0bff98563cb073ae8fa7c8843b094d1e7467b5edf456e4a787b58d861addd",
+      "note": "MiniRex2 alias rung, executing MiniRex behavior"
+    },
+    {
+      "number": 3224158,
+      "hash": "0x1adca0bcef3a06756304e6b43642c37ef693a34b10e4c9f6513497a741fdaa76",
+      "spec": "Rex",
+      "tx_count": 22,
+      "member": "3224158.cache.json",
+      "sha256": "c7b797406f3c5e1c0ee375694772460cf5a21fefd4e2f8717bceddeabad5a66e"
+    },
+    {
+      "number": 3451849,
+      "hash": "0x6da3fe19e89817ff5280478947c63d1b846eb38431d2e08e6ebcc8c59429594f",
+      "spec": "Rex",
+      "tx_count": 22,
+      "member": "3451849.cache.json",
+      "sha256": "a580ecf1430e30c9a111ce8341431ed0ee7f0b4f5d33a43aea29dc8cfff58f29",
+      "note": "failed CREATE that burns 67M gas"
+    },
+    {
+      "number": 6780842,
+      "hash": "0xa4b73d0c8a273a8ae088ee44b4e8c2b1f803762649d3f5b986f1f6ea37799a9e",
+      "spec": "Rex1",
+      "tx_count": 21153,
+      "member": "6780842.cache.json",
+      "sha256": "29bf4c2c5d4c36a579f595a8adf0d6c2d5fb42cd6548a4d5daa9540e5341ac8e",
+      "note": "most transactions in the corpus (21,153, using 2.06B gas) and the only type-1 (EIP-2930) transaction"
+    },
+    {
+      "number": 7057359,
+      "hash": "0xa06a037f8575ea54c744ea411e9e135a9400d6efbbb90d1abdcc4a68f0ddb21b",
+      "spec": "Rex1",
+      "tx_count": 36,
+      "member": "7057359.cache.json",
+      "sha256": "0e8f6d22aa1b0376e4d31a9cc135e3d29566a0f60fcf891eac9f2c37d2e1d87a"
+    },
+    {
+      "number": 7193432,
+      "hash": "0xffdd7bc8ce5e3d6e07788b19a850c1060511ed12e422f0e18aacfb85c7a47c4e",
+      "spec": "Rex1",
+      "tx_count": 27,
+      "member": "7193432.cache.json",
+      "sha256": "ad18ecc8f1c6db2789b4d8a7cac413604e76c9019937ab41c0f98d030b2dff6c"
+    },
+    {
+      "number": 7448989,
+      "hash": "0x9ea4deaa6e0503972890af25135fa5f9348b229b3e0427a642a0a11a119d301e",
+      "spec": "Rex2",
+      "tx_count": 25,
+      "member": "7448989.cache.json",
+      "sha256": "9f31dcf6ea8708739a9e5533a6c3da05dd4142c14f6dd82d76fde48fe2d7270e",
+      "note": "Rex2 activation block"
+    },
+    {
+      "number": 7487457,
+      "hash": "0x318177f902ba8c9b554d3f7a639a76ce4c3152f9dac1a107353808eb2313c47e",
+      "spec": "Rex2",
+      "tx_count": 27,
+      "member": "7487457.cache.json",
+      "sha256": "654bec9e765096bce15f198902d5178b56638c14d706be165cec915deb1c3048"
+    },
+    {
+      "number": 7921084,
+      "hash": "0x3b6d08a7619c49864e952765f5601b9647cd55080390a9b588b9d536f699f199",
+      "spec": "Rex2",
+      "tx_count": 25,
+      "member": "7921084.cache.json",
+      "sha256": "9044e11d7a812e3afcb5bca86ac003a0afb2c2072db0f9a574448eefcb76f1a5",
+      "note": "184 successful internal contract creations, the most in the corpus"
+    },
+    {
+      "number": 7942160,
+      "hash": "0xe8584ad412fae71c26f776b70739faa4e7dc8d451e2a9c0ad4ed44d89a7e4bde",
+      "spec": "Rex2",
+      "tx_count": 25,
+      "member": "7942160.cache.json",
+      "sha256": "e2a7a07477b2fd64f19e10a847c6a6436ade932fccc9e5bf5736a72df582c43f"
+    },
+    {
+      "number": 8013460,
+      "hash": "0x588123464bf94845183870349e3b71b683e036bcea1319717332839fb3beec82",
+      "spec": "Rex2",
+      "tx_count": 25,
+      "member": "8013460.cache.json",
+      "sha256": "2692fb51f9fc6a3b899eebb593bb7710548f28230c235572d1805862c7c6acef"
+    },
+    {
+      "number": 8046913,
+      "hash": "0x4172abe09fe6b8af1f1f8a8b0aca8883206672d12881a30cae48df9209599408",
+      "spec": "Rex2",
+      "tx_count": 26,
+      "member": "8046913.cache.json",
+      "sha256": "21963ffc8ea91f1875c2b159230cb3b0f22b09f3f6b84ad25e3529eb6d745c09"
+    },
+    {
+      "number": 8064067,
+      "hash": "0x7b5833e73147deab9690395cecacc78cff06c5a0cc40a5687c4cee602c7ec554",
+      "spec": "Rex2",
+      "tx_count": 24,
+      "member": "8064067.cache.json",
+      "sha256": "61e3c07a80326d9e14b7fb00ccd61914c50f394187181d8cf92aeb70a03ae64f"
+    },
+    {
+      "number": 8587332,
+      "hash": "0x74d65e95d7c9b1da7c0e7ad4cc70a3cc5ed1abba97838783e94bbb19dbc7b573",
+      "spec": "Rex2",
+      "tx_count": 27,
+      "member": "8587332.cache.json",
+      "sha256": "0834a7abf50b57a19aff2cc2d774d813d20d7692bb33dc8db4dc88499d137c56"
+    },
+    {
+      "number": 8652636,
+      "hash": "0x2000ec1c3cf167b866cfef1c3978dbdddfe9009a0571bcfcba98ea86f94f33d1",
+      "spec": "Rex2",
+      "tx_count": 49,
+      "member": "8652636.cache.json",
+      "sha256": "2cfc84f0f44b4bb8e2e5d6fd43764b589d51e91984458761ec5ae5e698cb7e93",
+      "note": "the only successful top-level CREATE in the corpus"
+    },
+    {
+      "number": 8715810,
+      "hash": "0x8a0c7e5af610296769fe9a071bda19b8ec1e54ed890775e1c79147e2a1f481b4",
+      "spec": "Rex2",
+      "tx_count": 48,
+      "member": "8715810.cache.json",
+      "sha256": "49f8852625a9229dd378f36ae46d1686c8a2ef974c7e448a021e769d5d76e475"
+    },
+    {
+      "number": 10108963,
+      "hash": "0x9e21bb092456c3bd20c9cc788b0e0412d5480cf0d04eb7a5a254284385817fce",
+      "spec": "Rex3",
+      "tx_count": 48,
+      "member": "10108963.cache.json",
+      "sha256": "9304875012527ad219327c4b0660aa9cfe9913e92f3939f1c305c525a2237251",
+      "note": "failed user deposit under Rex3"
+    },
+    {
+      "number": 12747297,
+      "hash": "0x9aa7579ec7a161ba36cbd9a0b8364a9c423d32ccd95072bf26b9a15aaf7200ca",
+      "spec": "Rex3",
+      "tx_count": 28,
+      "member": "12747297.cache.json",
+      "sha256": "cf37446c9df9e0256779cd7e0f1974141afe2c8a2ce45a79498101f7d192d043",
+      "note": "successful internal CREATE and CREATE2 under Rex3"
+    },
+    {
+      "number": 12956090,
+      "hash": "0x21c5d162de0e4deba3b2741036f6649ce84e1242bf9f8a86bd66d6ae6ebd5eaf",
+      "spec": "Rex3",
+      "tx_count": 28,
+      "member": "12956090.cache.json",
+      "sha256": "861614ec42e619781474c177a18a6188c2dc86e1029f1a7667aa257ad08d6a0e"
+    },
+    {
+      "number": 14104013,
+      "hash": "0x4f700ab073cabf96dad67c130fa24b1f820ae38b9fe5a920edd179e1f7157ce1",
+      "spec": "Rex4",
+      "tx_count": 28,
+      "member": "14104013.cache.json",
+      "sha256": "2c988fb9b49bacf678b4e799d50563aeee6186edb0803045826e1aee7eed302d"
+    },
+    {
+      "number": 14924732,
+      "hash": "0xa3e83b0de9e2a0dfe4d69fd2786fe019e6c72be0456cc260bbb0331b1ad28201",
+      "spec": "Rex4",
+      "tx_count": 31,
+      "member": "14924732.cache.json",
+      "sha256": "896478cfa8b77b45006077a193a4403846f287cfa710dee0d3db0099fe50fe6d"
+    },
+    {
+      "number": 15052089,
+      "hash": "0x9c9246753a6e6541b6902ccbb91ce5e5fe709896156dc5c646e1f8f7fe575d0f",
+      "spec": "Rex4",
+      "tx_count": 30,
+      "member": "15052089.cache.json",
+      "sha256": "96a7d55e33c15ac71998d7264f1b08bb795b1ea8959eec08f21dafa66ebada23"
+    },
+    {
+      "number": 15197778,
+      "hash": "0xdde8e89e4486cdff0dccda73ed469b468150a0288a927fee9d43e0ac25f09a22",
+      "spec": "Rex4",
+      "tx_count": 35,
+      "member": "15197778.cache.json",
+      "sha256": "675c227d24e45f00ec2c0124fd75d33f4900d159e6bc76980fd7035907a09f9f",
+      "note": "largest transaction in the corpus (3.29B gas)"
+    },
+    {
+      "number": 15212274,
+      "hash": "0xc4f698612b00fac6000a3735dabee0c7ad3ec17fb2d246e774dac2de4c323494",
+      "spec": "Rex4",
+      "tx_count": 28,
+      "member": "15212274.cache.json",
+      "sha256": "4f4795eba4d12da53c5436edef76b43d851f0b2f158638cf6055eeaa0a9c0ba1"
+    },
+    {
+      "number": 15365484,
+      "hash": "0x4055d24e31181116eddd944cdaba24cbd6a9fdc0e57d291cb745bef874dbd7fa",
+      "spec": "Rex4",
+      "tx_count": 38,
+      "member": "15365484.cache.json",
+      "sha256": "bce190ea41ac492d63de1a59f90dcad62d42622c07944ee96190bd992ba8146e"
+    },
+    {
+      "number": 15890682,
+      "hash": "0x29036afd8147bfc7ad546791d179d9360eb150c2044b66a38058c09740fcc62c",
+      "spec": "Rex4",
+      "tx_count": 29,
+      "member": "15890682.cache.json",
+      "sha256": "2e581a83d62d5555f9fb7213882b16d68ae8bcbd7b581d1746b5d653395f693c"
+    },
+    {
+      "number": 16095618,
+      "hash": "0x7d8644fa513c53a47d550c7789f443d83f1c0dc8c6cb160ecc15a1c546255047",
+      "spec": "Rex4",
+      "tx_count": 28,
+      "member": "16095618.cache.json",
+      "sha256": "64186a8c3c89ae4e3f577a4c5382a8853a5dba3ea7a5bd4c3c4f47a18dbb7539"
+    },
+    {
+      "number": 16511216,
+      "hash": "0x9d7858fd033b3648da7db555eefbce4fe03574d2e9905ee6222b19867df5b539",
+      "spec": "Rex4",
+      "tx_count": 42,
+      "member": "16511216.cache.json",
+      "sha256": "e9760cf021c5455f2f671970b8dfc71ba8ce5e8a14c7665a262c57876767389b"
+    },
+    {
+      "number": 16543519,
+      "hash": "0xbe8caa1d9740366ad950810d5f8f12042756c610f8f273523c511c787f51a2ce",
+      "spec": "Rex4",
+      "tx_count": 31,
+      "member": "16543519.cache.json",
+      "sha256": "9c37e17549742d07da19dcf2ab24d41c86ba26bde9fd1b6612bae1842d77024f"
+    },
+    {
+      "number": 17352967,
+      "hash": "0x6f075322f2dacee2dc3e674aae7267aa122aa01a82471126332838aa1eec6065",
+      "spec": "Rex4",
+      "tx_count": 28,
+      "member": "17352967.cache.json",
+      "sha256": "509d1b5157f55b01c446301f7e2a125ca4026729374741610bd977a48a1ddaa9"
+    },
+    {
+      "number": 17822091,
+      "hash": "0x347689511ab2bd092f04e0d42ffb800268b85efc9f0a332097bd835a71df2ab8",
+      "spec": "Rex4",
+      "tx_count": 38,
+      "member": "17822091.cache.json",
+      "sha256": "8c94240245a9e3e0ae24e131ca4cadb7bc7a80c596299133b607d245b045455d"
+    },
+    {
+      "number": 17834989,
+      "hash": "0xcb5b5b86dc4d894a8db2a8c5be6041f3673fbb16c75d54a1916dfec86f9f4c4c",
+      "spec": "Rex5",
+      "tx_count": 34,
+      "member": "17834989.cache.json",
+      "sha256": "d65b3552a127c49505238152f33f82a70e0edaa3341738ef4ec1b1fc8db6cde4",
+      "note": "Rex5 activation block"
+    },
+    {
+      "number": 18138664,
+      "hash": "0x9c6dba5a19683f36920a13c43af0868878a81726c1490773bf63235329015815",
+      "spec": "Rex5",
+      "tx_count": 33,
+      "member": "18138664.cache.json",
+      "sha256": "8898e78c15a69e1f3be7c56d6d6c730bdcb5ed12c18e161ce56a46a963199ea1"
+    },
+    {
+      "number": 18402396,
+      "hash": "0xa6ceae52dd7773b6e4f6c5655eeb0ea194f97ff41925927c2086e10fb83a10f8",
+      "spec": "Rex5",
+      "tx_count": 34,
+      "member": "18402396.cache.json",
+      "sha256": "d2ffb59742a7f19aa15b2348ef5a9c218b9cc85c966635c43911a485e6d2f734"
+    },
+    {
+      "number": 18751390,
+      "hash": "0x67b9ef1795a72ceef5ca199144575490982f554e08e7032b4c63b5b269adc5d6",
+      "spec": "Rex5",
+      "tx_count": 34,
+      "member": "18751390.cache.json",
+      "sha256": "7a5cd3cd5e3b72753c448049648d601a3dfa68f673f3af7543c0b71d9e29b944",
+      "note": "the only successful internal contract creations under Rex5 (CREATE2)"
+    },
+    {
+      "number": 18843279,
+      "hash": "0x0f0fb297c9659727f784b1f45dba1fe0d599ec8b4e7437c39b685a6c127dabf0",
+      "spec": "Rex5",
+      "tx_count": 32,
+      "member": "18843279.cache.json",
+      "sha256": "423ee8293df2fc614687bce8461b5ce264bcdfdf6d3364ebb81c79664947e225"
+    },
+    {
+      "number": 18922221,
+      "hash": "0xddc2ba02086d32056505ca1284ec32d2629cf01721169bcf9c46fcaa1cd7d7cd",
+      "spec": "Rex5",
+      "tx_count": 137,
+      "member": "18922221.cache.json",
+      "sha256": "d91fe7433751b1a7f8dbb45e456464911930340c7ee91c7ddd165c04ded0cccc"
+    },
+    {
+      "number": 19004244,
+      "hash": "0xd34da24fdc8036204de3bf6684767a23a72c8dcb4f0ce6c63ab738a172f6c291",
+      "spec": "Rex5",
+      "tx_count": 28,
+      "member": "19004244.cache.json",
+      "sha256": "9ed3051bf3da2d50db1132d1b778b41621455218782f34dd4042c6982896f4c7"
+    },
+    {
+      "number": 19010529,
+      "hash": "0xf40f3b995109844a062eb69aa6f91e6d11e6bcc44aa531d3d4672166de7b16d5",
+      "spec": "Rex5",
+      "tx_count": 29,
+      "member": "19010529.cache.json",
+      "sha256": "4f1e65f656f12e0bc0a1318c54136070e2f098bcf8b3467d4d99b56fc3acfca0"
+    },
+    {
+      "number": 20513790,
+      "hash": "0xb4b6ad0655399a14d47a2ff26660a3792748f0d65a175a8940fa338210798129",
+      "spec": "Rex5",
+      "tx_count": 29,
+      "member": "20513790.cache.json",
+      "sha256": "ca64ea6d5ac5bace6ddd744932714466b76f765bcb1294f7c3a79ab2cc3a1199"
+    },
+    {
+      "number": 21945032,
+      "hash": "0x20b7f1565db045a38937edf946d7145717d66dc00f43cca88f697ddd537bd348",
+      "spec": "Rex5",
+      "tx_count": 31,
+      "member": "21945032.cache.json",
+      "sha256": "f291abb4188e73ed1fb3e5ba1d4561e35a57bcb5488c35d01c20ba433f7b8947"
+    },
+    {
+      "number": 22016777,
+      "hash": "0x7423505d551a44ecdc128e1a1e0db64938d858daba93740a1332910f4a6cc2a0",
+      "spec": "Rex5",
+      "tx_count": 27,
+      "member": "22016777.cache.json",
+      "sha256": "33a958fd97b15df055eba763ac5f50a1de1b59413152225ca5ec8f724b5c7a10",
+      "note": "successful user deposit beside the L1 attributes deposit, under Rex5"
+    },
+    {
+      "number": 22018358,
+      "hash": "0x88a4fd35c09950bb0af97f3f43c0ff882e5389bb0e28ad4cc64ba0d62e69e4db",
+      "spec": "Rex5",
+      "tx_count": 35,
+      "member": "22018358.cache.json",
+      "sha256": "54e015a3e236ba28fbf4ec32a03a9cad56ca25fa9fde74c57c17baebd0275d7b",
+      "note": "failed CREATE under Rex5"
+    },
+    {
+      "number": 22815990,
+      "hash": "0x7252b43ec0b0e398a22bc03ac4934fa79d8f3e3d13509856fc92068b1c34089a",
+      "spec": "Rex5",
+      "tx_count": 53,
+      "member": "22815990.cache.json",
+      "sha256": "7f4b5f7081d7a18b62476efbfabbab22b7632444444572f9c1ccc15e5ea44178"
+    },
+    {
+      "number": 23000533,
+      "hash": "0xe3104bd7962c6668548157188cf814f4563a5b44188f9ea4e1c77b2746ca37a5",
+      "spec": "Rex5",
+      "tx_count": 26,
+      "member": "23000533.cache.json",
+      "sha256": "891b0b5cd5247d68261d50ba7770f69c48b2bd848b44390d9c16ce50be68e0f4"
+    },
+    {
+      "number": 23001113,
+      "hash": "0x5ba6babeffba7f9dd918ca527f75f7caa57b6619fd711c5d86fb1de72639d334",
+      "spec": "Rex5",
+      "tx_count": 25,
+      "member": "23001113.cache.json",
+      "sha256": "b0ed01ae11e27609edb45400feca293197a1dab4892c5fda628d392056178a6d"
+    },
+    {
+      "number": 24829789,
+      "hash": "0x9dfbc5514180137eef514447b3a511d13858efe3c8516bef657abf90d1881582",
+      "spec": "Rex6",
+      "tx_count": 25,
+      "member": "24829789.cache.json",
+      "sha256": "0b3d12c5f96eeaf6f1a46b0a683decd51d80c2f22d50ba3cff29a293c2d5163f",
+      "note": "Rex6 activation block"
+    },
+    {
+      "number": 24985394,
+      "hash": "0xa95599a1c85bd91d5a62dbbf0dbf3d91ece2d5fd2deb5f5678332b1027e00403",
+      "spec": "Rex6",
+      "tx_count": 24,
+      "member": "24985394.cache.json",
+      "sha256": "37a51022d4289dd19e42c1be9528f3dcebbd159958595e7800f721a47c9c2af1"
+    },
+    {
+      "number": 25086401,
+      "hash": "0x71671137e5908df92ac5f4a4dbd2b31fad5ccbdf8e5bc961fe39e4b2701f227c",
+      "spec": "Rex6",
+      "tx_count": 25,
+      "member": "25086401.cache.json",
+      "sha256": "e5b8ccf9c30c13c33d396ec92ac88ac6f00d46c7934278d926d40cce2cc3065d"
+    },
+    {
+      "number": 26682905,
+      "hash": "0x49ececf5b02943964afe894892a119cba377641383efafbbc765e58d5d15c072",
+      "spec": "Rex6",
+      "tx_count": 26,
+      "member": "26682905.cache.json",
+      "sha256": "350b1a94398c10ec419aed80f4853726d64a24e8a959f3d32b14fea29346320b"
+    },
+    {
+      "number": 27167408,
+      "hash": "0xee91b40f4bdbc9bf8278ba402a004fcddd580a01cecbb254173ad6cff60f912a",
+      "spec": "Rex6",
+      "tx_count": 24,
+      "member": "27167408.cache.json",
+      "sha256": "4c2e9db6881cc8ec688d0e857ac1891c6e64e7215e4901460a4da219060dbf29"
+    },
+    {
+      "number": 27670576,
+      "hash": "0xf96cd0b4d326faefe3074f186f1e568b92b5ebe5d8642fd79280afd401f5c786",
+      "spec": "Rex6",
+      "tx_count": 23,
+      "member": "27670576.cache.json",
+      "sha256": "14ac44ba2dffc017746502108cb6fd352cfaf7c796dfa925d19e71f9ef472c3a",
+      "note": "failed EIP-7702 transaction under Rex6"
+    },
+    {
+      "number": 27985540,
+      "hash": "0x70e0107f13e540222c9482a6b5ad06c0e4147f421eceb0488015905c21d5b890",
+      "spec": "Rex6",
+      "tx_count": 36,
+      "member": "27985540.cache.json",
+      "sha256": "debb846ac4f345d15760a8558cb390b3482fcb2a347f339c558ce29d5dea04c4",
+      "note": "EIP-7702 transaction carrying three authorizations"
+    },
+    {
+      "number": 28102900,
+      "hash": "0x08878e1dfb1edba997dd17f02f2d6497ea984b739b1de9b6c520aaf9c0fd6967",
+      "spec": "Rex6",
+      "tx_count": 29,
+      "member": "28102900.cache.json",
+      "sha256": "a51604a954913f20317cfa7da2d573591d87b73e1a701a54faceec14c86f8638"
+    },
+    {
+      "number": 28107033,
+      "hash": "0xabe5285e0cfaae50fca917efe666cf2a64f8b34fa13a7d3c79e3217fa6a72e88",
+      "spec": "Rex6",
+      "tx_count": 24,
+      "member": "28107033.cache.json",
+      "sha256": "9e77f08138fe9b20c6250183914d1d20074e16defd993beea01617daa3e58867",
+      "note": "failed user deposit under Rex6"
+    },
+    {
+      "number": 28329186,
+      "hash": "0xadeffd5eff6a0b9af7f6bf049bf79029b4bed0fa89372b99559d22a96c9313f8",
+      "spec": "Rex6",
+      "tx_count": 25,
+      "member": "28329186.cache.json",
+      "sha256": "2275aded6489cc5782b7652967dfb4b0ad2c3ae43b2fa602521b8e4f5fe6ffba"
+    },
+    {
+      "number": 28399774,
+      "hash": "0xeb99ed2ce8b233eaef88f5de7fa71d841e4b15ce58b496849567016ad1138649",
+      "spec": "Rex6",
+      "tx_count": 23,
+      "member": "28399774.cache.json",
+      "sha256": "cc61eded5740995d3ee3097f3fa1b0bb508a11115e81ad14604c5ef8a257b51f"
+    },
+    {
+      "number": 29100622,
+      "hash": "0xa3f9366661bb2306008f00cc83a12f0dcac9a64a6f71cea5871e018e566b6e37",
+      "spec": "Rex6",
+      "tx_count": 24,
+      "member": "29100622.cache.json",
+      "sha256": "ba413361712c1af6f592f11f644e6d02210d480b0822aa28ba6ada563d29a753"
+    },
+    {
+      "number": 29604510,
+      "hash": "0xbf41b9f22b2708fc04336d893463297b52a8d145d7d81638043ed11d03d13bd5",
+      "spec": "Rex6",
+      "tx_count": 23,
+      "member": "29604510.cache.json",
+      "sha256": "08067d0db8d4465cbd3bc251ae9e2208b8a6ef2b66432947c746abb29e653286",
+      "note": "latest block in the corpus"
+    }
+  ]
+}

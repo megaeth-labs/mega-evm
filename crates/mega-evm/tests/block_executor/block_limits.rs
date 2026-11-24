@@ -12,8 +12,8 @@ use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
 use alloy_primitives::{address, Bytes, Signature, TxKind, B256, U256};
 use mega_evm::{
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutor, MegaEvmFactory, MegaHardforkConfig,
-    MegaSpecId, MegaTxEnvelope, TestExternalEnvs,
+    BlockLimits, EnrichedMegaTx, MegaBlockExecutionCtx, MegaBlockExecutor, MegaEvmFactory,
+    MegaHardforkConfig, MegaSpecId, MegaTransactionExt, MegaTxEnvelope, TestExternalEnvs,
 };
 use revm::{
     bytecode::opcode::{ADD, DUP1, LOG0, PUSH0, SLOAD, SSTORE},
@@ -41,6 +41,22 @@ fn create_transaction(
     let signed = Signed::new_unchecked(tx_legacy, Signature::test_signature(), Default::default());
     let tx = MegaTxEnvelope::Legacy(signed);
     alloy_consensus::transaction::Recovered::new_unchecked(tx, CALLER)
+}
+
+/// Like [`create_transaction`], but returns the bare envelope so callers can build a
+/// `Recovered<&MegaTxEnvelope>` (needed for `EnrichedMegaTx<T>: Copy`, which requires `T: Copy`).
+fn create_envelope(nonce: u64, gas_limit: u64) -> MegaTxEnvelope {
+    let tx_legacy = TxLegacy {
+        chain_id: Some(8453), // Base mainnet
+        nonce,
+        gas_price: 1_000_000,
+        gas_limit,
+        to: TxKind::Call(CONTRACT),
+        value: U256::ZERO,
+        input: Bytes::new(),
+    };
+    let signed = Signed::new_unchecked(tx_legacy, Signature::test_signature(), Default::default());
+    MegaTxEnvelope::Legacy(signed)
 }
 
 /// Creates a contract that generates a log with specified data size.
@@ -160,13 +176,19 @@ fn test_block_custom_data_limit() {
     let tx1 = create_transaction(0, 1_000_000);
     let result1 = executor.execute_transaction(&tx1);
     assert!(result1.is_ok(), "First transaction should succeed");
-    assert!(result1.unwrap() < tx1.gas_limit(), "Gas used should be less than gas limit");
+    assert!(
+        result1.unwrap().tx_gas_used() < tx1.gas_limit(),
+        "Gas used should be less than gas limit"
+    );
 
     // Execute second transaction (should succeed, causing block to exceed limit)
     let tx2 = create_transaction(1, 1_000_000);
     let result2 = executor.execute_transaction(&tx2);
     assert!(result2.is_ok(), "Second transaction should succeed (last tx can exceed limit)");
-    assert!(result2.unwrap() < tx2.gas_limit(), "Gas used should be less than gas limit");
+    assert!(
+        result2.unwrap().tx_gas_used() < tx2.gas_limit(),
+        "Gas used should be less than gas limit"
+    );
 
     // Execute third transaction (should fail due to block data limit already exceeded)
     let tx3 = create_transaction(2, 1_000_000);
@@ -178,6 +200,137 @@ fn test_block_custom_data_limit() {
         "Error should mention TransactionDataLimit, got: {}",
         err_msg
     );
+}
+
+/// `MegaBlockExecutor::run_transaction` resolves `tx_size`/`da_size` through `MegaTransactionExt`,
+/// so an `EnrichedMegaTx` feeds its cached values into the pre-execution limit check instead of a
+/// fresh recompute (see the method's "Correctness" doc section). Its `debug_assert` cross-checks
+/// the resolved values against a fresh recompute, so a caller bug — here a deliberately understated
+/// stored `da_size` — is caught immediately in debug/test builds instead of silently letting a
+/// transaction bypass a limit it should have been rejected by.
+///
+/// A freshly recomputed DA size for any legacy tx is always >= 100 bytes (the `op_alloy_flz`
+/// minimum-size floor), so a `tx_da_size_limit` of 80 rejects a bare `Recovered<&MegaTxEnvelope>`
+/// (which uses the recomputing default). An `EnrichedMegaTx` carrying a deliberately understated
+/// stored `da_size` of 50 would pass that same limit using the cached value, but the `debug_assert`
+/// trips on the mismatch first.
+///
+/// `#[cfg(debug_assertions)]`: this test exercises the `debug_assert` itself, which is compiled
+/// out in release builds — under `cargo test --release` the same call would not panic and would
+/// instead silently succeed using the understated cached value. That is the documented,
+/// deliberate trade-off on `run_transaction` (see its "Correctness" doc section): the cache
+/// contract is enforced in debug/test builds only, at zero cost in release.
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "does not match a fresh recompute")]
+fn test_run_transaction_rejects_understated_cached_da_size() {
+    let mut db = MemoryDatabase::default();
+    db.set_account_balance(CALLER, U256::from(1_000_000_000_000_000u64));
+
+    let mut state = State::builder().with_database(&mut db).build();
+    let external_envs = TestExternalEnvs::<Infallible>::new();
+    let evm_factory = MegaEvmFactory::new().with_external_env_factory(external_envs);
+
+    let mut cfg_env = revm::context::CfgEnv::default();
+    cfg_env.spec = MegaSpecId::MINI_REX;
+    let block_env = BlockEnv {
+        number: U256::from(1000),
+        timestamp: U256::from(1_800_000_000),
+        gas_limit: 30_000_000,
+        ..Default::default()
+    };
+    let evm_env = EvmEnv::new(cfg_env, block_env);
+    let evm = evm_factory.create_evm(&mut state, evm_env);
+
+    const TX_DA_SIZE_LIMIT: u64 = 80;
+    const STORED_DA_SIZE: u64 = 50;
+
+    let block_ctx = MegaBlockExecutionCtx::new(
+        B256::ZERO,
+        None,
+        Bytes::new(),
+        BlockLimits::no_limits().with_tx_da_size_limit(TX_DA_SIZE_LIMIT),
+    );
+
+    use alloy_hardforks::ForkCondition;
+    use mega_evm::MegaHardfork;
+    let chain_spec =
+        MegaHardforkConfig::default().with(MegaHardfork::MiniRex, ForkCondition::Timestamp(0));
+    let receipt_builder = OpAlloyReceiptBuilder::default();
+    let mut executor = MegaBlockExecutor::new(evm, block_ctx, chain_spec, receipt_builder);
+
+    let envelope = create_envelope(0, 100_000);
+    let real_da_size = MegaTransactionExt::estimated_da_size(&envelope);
+    assert!(
+        real_da_size > TX_DA_SIZE_LIMIT,
+        "test setup requires the freshly recomputed da_size ({real_da_size}) to exceed the limit"
+    );
+    const { assert!(STORED_DA_SIZE < TX_DA_SIZE_LIMIT, "stored da_size must pass the limit") };
+
+    let recovered = alloy_consensus::transaction::Recovered::new_unchecked(&envelope, CALLER);
+
+    // A bare (non-enriched) transaction uses the recomputing default and is rejected.
+    let plain_result = executor.run_transaction(&recovered);
+    assert!(
+        plain_result.is_err(),
+        "bare transaction should be rejected: real da_size exceeds the limit"
+    );
+
+    // An `EnrichedMegaTx` with an understated stored `da_size` would pass the limit using the
+    // cached value, but `run_transaction`'s debug_assert catches the mismatch and panics instead
+    // of silently letting it through. `tx_size` is stored accurately here so the assert trips on
+    // `da_size` alone.
+    let real_tx_size = MegaTransactionExt::tx_size(&envelope);
+    let enriched =
+        EnrichedMegaTx::new(recovered, envelope.trie_hash(), STORED_DA_SIZE, real_tx_size);
+    let _ = executor.run_transaction(enriched);
+}
+
+/// `MegaBlockExecutor::execute_mega_transaction` (the alias for
+/// [`MegaBlockExecutor::run_transaction`]) must succeed and produce an outcome carrying the cached
+/// fields when they accurately reflect the wrapped transaction — the intended, common-case usage,
+/// as opposed to the deliberately mismatched cache exercised above.
+#[test]
+fn test_execute_mega_transaction_succeeds_with_accurate_cache() {
+    let mut db = MemoryDatabase::default();
+    db.set_account_balance(CALLER, U256::from(1_000_000_000_000_000u64));
+
+    let mut state = State::builder().with_database(&mut db).build();
+    let external_envs = TestExternalEnvs::<Infallible>::new();
+    let evm_factory = MegaEvmFactory::new().with_external_env_factory(external_envs);
+
+    let mut cfg_env = revm::context::CfgEnv::default();
+    cfg_env.spec = MegaSpecId::MINI_REX;
+    let block_env = BlockEnv {
+        number: U256::from(1000),
+        timestamp: U256::from(1_800_000_000),
+        gas_limit: 30_000_000,
+        ..Default::default()
+    };
+    let evm_env = EvmEnv::new(cfg_env, block_env);
+    let evm = evm_factory.create_evm(&mut state, evm_env);
+
+    let block_ctx =
+        MegaBlockExecutionCtx::new(B256::ZERO, None, Bytes::new(), BlockLimits::no_limits());
+
+    use alloy_hardforks::ForkCondition;
+    use mega_evm::MegaHardfork;
+    let chain_spec =
+        MegaHardforkConfig::default().with(MegaHardfork::MiniRex, ForkCondition::Timestamp(0));
+    let receipt_builder = OpAlloyReceiptBuilder::default();
+    let mut executor = MegaBlockExecutor::new(evm, block_ctx, chain_spec, receipt_builder);
+
+    let envelope = create_envelope(0, 1_000_000);
+    let expected_da_size = MegaTransactionExt::estimated_da_size(&envelope);
+    let expected_tx_size = MegaTransactionExt::tx_size(&envelope);
+    let recovered = alloy_consensus::transaction::Recovered::new_unchecked(&envelope, CALLER);
+    let enriched = EnrichedMegaTx::new_slow(recovered);
+
+    let outcome = executor
+        .execute_mega_transaction(enriched)
+        .expect("accurate cached values must satisfy the debug_assert and succeed normally");
+    assert_eq!(outcome.da_size, expected_da_size, "outcome da_size must match the accurate cache");
+    assert_eq!(outcome.tx_size, expected_tx_size, "outcome tx_size must match the accurate cache");
 }
 
 #[test]
@@ -296,7 +449,10 @@ fn test_block_multiple_transactions_within_limits() {
         let tx = create_transaction(nonce, 1_000_000);
         let result = executor.execute_transaction(&tx);
         assert!(result.is_ok(), "Transaction {} should succeed", nonce);
-        assert!(result.unwrap() < tx.gas_limit(), "Gas used should be less than gas limit");
+        assert!(
+            result.unwrap().tx_gas_used() < tx.gas_limit(),
+            "Gas used should be less than gas limit"
+        );
     }
 
     // Finish the block and get receipts
@@ -432,7 +588,10 @@ fn test_block_kv_limit_exceeded_mid_block() {
     let tx1 = create_transaction(0, 10_000_000);
     let result1 = executor.execute_transaction(&tx1);
     assert!(result1.is_ok(), "First transaction should succeed (last tx can exceed limit)");
-    assert!(result1.unwrap() < tx1.gas_limit(), "Gas used should be less than gas limit");
+    assert!(
+        result1.unwrap().tx_gas_used() < tx1.gas_limit(),
+        "Gas used should be less than gas limit"
+    );
 
     // Execute second transaction (should fail due to KV limit already exceeded)
     let tx2 = create_transaction(1, 10_000_000);
@@ -1009,4 +1168,239 @@ fn test_block_tx_size_limit_with_varying_sizes() {
 
     let (_, receipts) = block_result.unwrap();
     assert_eq!(receipts.receipts.len(), 3, "Should have 3 receipts (4th tx failed)");
+}
+
+/// Block gas limit that admits exactly two of the transactions produced by
+/// [`RACE_TX_GAS_LIMIT`]: each uses about `30_000` gas, so after two commits the block sits at
+/// about `60_000` and a third transaction is rejected by `60_000 + 100_000 > 150_000`.
+const RACE_BLOCK_GAS_LIMIT: u64 = 150_000;
+
+/// Gas limit declared by each transaction in the commit-time race tests.
+const RACE_TX_GAS_LIMIT: u64 = 100_000;
+
+/// Builds the database used by the commit-time race tests: a contract that emits a small log,
+/// and three funded senders so three independent transactions can be executed before any commits.
+fn create_race_database() -> MemoryDatabase {
+    let mut db = MemoryDatabase::default();
+    db.set_account_code(CONTRACT, create_log_generating_contract(100));
+    db.set_account_balance(CALLER, U256::from(1_000_000_000_000_000u64));
+    db.set_account_balance(CALLER2, U256::from(1_000_000_000_000_000u64));
+    db.set_account_balance(CALLER3, U256::from(1_000_000_000_000_000u64));
+    db
+}
+
+/// Builds the block execution context and hardfork config used by the commit-time race tests.
+fn create_race_block_ctx() -> (MegaBlockExecutionCtx, MegaHardforkConfig) {
+    use alloy_hardforks::ForkCondition;
+    use mega_evm::MegaHardfork;
+
+    let block_ctx = MegaBlockExecutionCtx::new(
+        B256::ZERO,
+        None,
+        Bytes::new(),
+        BlockLimits::no_limits().with_block_gas_limit(RACE_BLOCK_GAS_LIMIT),
+    );
+    let chain_spec =
+        MegaHardforkConfig::default().with(MegaHardfork::MiniRex, ForkCondition::Timestamp(0));
+    (block_ctx, chain_spec)
+}
+
+/// Builds the EVM environment used by the commit-time race tests.
+fn create_race_evm_env() -> EvmEnv<MegaSpecId> {
+    let mut cfg_env = revm::context::CfgEnv::default();
+    cfg_env.spec = MegaSpecId::MINI_REX;
+    let block_env = BlockEnv {
+        number: U256::from(1000),
+        timestamp: U256::from(1_800_000_000),
+        gas_limit: RACE_BLOCK_GAS_LIMIT,
+        ..Default::default()
+    };
+    EvmEnv::new(cfg_env, block_env)
+}
+
+/// Tests the fallible commit path of the split execute/commit API: a transaction admitted at
+/// execution time but no longer admissible once the block filled up is rejected with an error,
+/// never a panic, and nothing about it is committed.
+///
+/// This is the API an embedder driving parallel execution uses:
+/// 1. TX 1/2/3: `execute_transaction_without_commit()` → all pass (nothing committed yet)
+/// 2. TX 2, TX 3: `commit_tx_result()` → succeed, filling the block
+/// 3. TX 1: `commit_tx_result()` → returns `Err`; no receipt, no latched error, block still valid
+#[test]
+fn test_commit_tx_result_rejects_tx_that_no_longer_fits() {
+    let mut db = create_race_database();
+    let mut state = State::builder().with_database(&mut db).build();
+    let external_envs = TestExternalEnvs::<Infallible>::new();
+    let evm_factory = MegaEvmFactory::new().with_external_env_factory(external_envs);
+    let evm = evm_factory.create_evm(&mut state, create_race_evm_env());
+    let (block_ctx, chain_spec) = create_race_block_ctx();
+    let receipt_builder = OpAlloyReceiptBuilder::default();
+    let mut executor = MegaBlockExecutor::new(evm, block_ctx, chain_spec, receipt_builder);
+
+    let tx1 = create_transaction_with_caller(CALLER, 0, RACE_TX_GAS_LIMIT);
+    let tx2 = create_transaction_with_caller(CALLER2, 0, RACE_TX_GAS_LIMIT);
+    let tx3 = create_transaction_with_caller(CALLER3, 0, RACE_TX_GAS_LIMIT);
+
+    // Execute all three before committing any: this is the window the commit-time re-check exists
+    // for.
+    let result1 = executor.execute_transaction_without_commit(&tx1).expect("execute tx1");
+    let result2 = executor.execute_transaction_without_commit(&tx2).expect("execute tx2");
+    let result3 = executor.execute_transaction_without_commit(&tx3).expect("execute tx3");
+
+    // Commit out of order, filling the block.
+    assert!(executor.commit_tx_result(result2).is_ok(), "commit_tx_result(tx2) should succeed");
+    assert!(executor.commit_tx_result(result3).is_ok(), "commit_tx_result(tx3) should succeed");
+
+    // tx1 was admitted when the block was empty, but no longer fits.
+    let commit1 = executor.commit_tx_result(result1);
+    assert!(commit1.is_err(), "commit_tx_result(tx1) should fail - block at capacity");
+    let err_msg = format!("{:?}", commit1.unwrap_err());
+    assert!(
+        err_msg.contains("TransactionGasLimitMoreThanAvailableBlockGas"),
+        "Error should mention TransactionGasLimitMoreThanAvailableBlockGas, got: {}",
+        err_msg
+    );
+
+    // The rejection is reported to the caller, not latched: the block is still valid without tx1.
+    assert!(
+        executor.pending_commit_error().is_none(),
+        "The fallible commit path must not latch the error"
+    );
+    assert_eq!(executor.receipts().len(), 2, "Rejected tx must not produce a receipt");
+
+    let (_, block_result) = executor.finish().expect("Block should finish successfully");
+    assert_eq!(block_result.receipts.len(), 2, "Should have 2 receipts (tx1 was rejected)");
+}
+
+/// Tests the infallible trait commit path: `BlockExecutor::commit_transaction` cannot return an
+/// error, so a transaction that no longer fits is not committed, the failure is latched, and
+/// `finish` fails the block with it. It must never panic.
+#[test]
+fn test_commit_transaction_latches_rejection_and_fails_block() {
+    let mut db = create_race_database();
+    let mut state = State::builder().with_database(&mut db).build();
+    let external_envs = TestExternalEnvs::<Infallible>::new();
+    let evm_factory = MegaEvmFactory::new().with_external_env_factory(external_envs);
+    let evm = evm_factory.create_evm(&mut state, create_race_evm_env());
+    let (block_ctx, chain_spec) = create_race_block_ctx();
+    let receipt_builder = OpAlloyReceiptBuilder::default();
+    let mut executor = MegaBlockExecutor::new(evm, block_ctx, chain_spec, receipt_builder);
+
+    let tx1 = create_transaction_with_caller(CALLER, 0, RACE_TX_GAS_LIMIT);
+    let tx2 = create_transaction_with_caller(CALLER2, 0, RACE_TX_GAS_LIMIT);
+    let tx3 = create_transaction_with_caller(CALLER3, 0, RACE_TX_GAS_LIMIT);
+
+    let result1 = executor.execute_transaction_without_commit(&tx1).expect("execute tx1");
+    let result2 = executor.execute_transaction_without_commit(&tx2).expect("execute tx2");
+    let result3 = executor.execute_transaction_without_commit(&tx3).expect("execute tx3");
+
+    assert!(
+        executor.commit_transaction(result2).tx_gas_used() > 0,
+        "commit_transaction(tx2) should report the gas it committed"
+    );
+    assert!(
+        executor.commit_transaction(result3).tx_gas_used() > 0,
+        "commit_transaction(tx3) should report the gas it committed"
+    );
+
+    // Must not panic: this is a legitimate race, not a broken invariant.
+    let gas_output = executor.commit_transaction(result1);
+    assert_eq!(
+        gas_output.tx_gas_used(),
+        0,
+        "A rejected transaction contributes no gas to the block"
+    );
+    assert_eq!(executor.receipts().len(), 2, "Rejected tx must not produce a receipt");
+
+    let latched = format!("{:?}", executor.pending_commit_error().expect("rejection is latched"));
+    assert!(
+        latched.contains("TransactionGasLimitMoreThanAvailableBlockGas"),
+        "Latched error should mention TransactionGasLimitMoreThanAvailableBlockGas, got: {}",
+        latched
+    );
+
+    // The rejection could not be reported at commit time, so the block fails instead.
+    let block_result = executor.finish();
+    assert!(block_result.is_err(), "finish() should fail the block with the latched rejection");
+    let err_msg = format!("{:?}", block_result.unwrap_err());
+    assert!(
+        err_msg.contains("TransactionGasLimitMoreThanAvailableBlockGas"),
+        "finish() error should be the latched rejection, got: {}",
+        err_msg
+    );
+}
+
+/// Tests that taking the latched rejection lets the block finish: the rejected transaction was
+/// never committed, so the block is valid without it once the caller has acknowledged the error.
+#[test]
+fn test_take_pending_commit_error_lets_block_finish() {
+    let mut db = create_race_database();
+    let mut state = State::builder().with_database(&mut db).build();
+    let external_envs = TestExternalEnvs::<Infallible>::new();
+    let evm_factory = MegaEvmFactory::new().with_external_env_factory(external_envs);
+    let evm = evm_factory.create_evm(&mut state, create_race_evm_env());
+    let (block_ctx, chain_spec) = create_race_block_ctx();
+    let receipt_builder = OpAlloyReceiptBuilder::default();
+    let mut executor = MegaBlockExecutor::new(evm, block_ctx, chain_spec, receipt_builder);
+
+    let tx1 = create_transaction_with_caller(CALLER, 0, RACE_TX_GAS_LIMIT);
+    let tx2 = create_transaction_with_caller(CALLER2, 0, RACE_TX_GAS_LIMIT);
+    let tx3 = create_transaction_with_caller(CALLER3, 0, RACE_TX_GAS_LIMIT);
+
+    let result1 = executor.execute_transaction_without_commit(&tx1).expect("execute tx1");
+    let result2 = executor.execute_transaction_without_commit(&tx2).expect("execute tx2");
+    let result3 = executor.execute_transaction_without_commit(&tx3).expect("execute tx3");
+
+    executor.commit_transaction(result2);
+    executor.commit_transaction(result3);
+    executor.commit_transaction(result1);
+
+    let taken = executor.take_pending_commit_error().expect("rejection is latched");
+    assert!(
+        format!("{:?}", taken).contains("TransactionGasLimitMoreThanAvailableBlockGas"),
+        "Taken error should be the commit-time rejection"
+    );
+    assert!(executor.pending_commit_error().is_none(), "Taking the error should clear it");
+
+    let (_, block_result) = executor.finish().expect("Block should finish once acknowledged");
+    assert_eq!(block_result.receipts.len(), 2, "Should have 2 receipts (tx1 was rejected)");
+}
+
+/// Tests that the atomic trait path never latches: `execute_transaction` executes and commits
+/// without releasing the executor in between, so a transaction that does not fit is rejected by
+/// the admission check up front and the commit-time re-check has nothing left to catch.
+#[test]
+fn test_execute_transaction_rejects_up_front_without_latching() {
+    let mut db = create_race_database();
+    let mut state = State::builder().with_database(&mut db).build();
+    let external_envs = TestExternalEnvs::<Infallible>::new();
+    let evm_factory = MegaEvmFactory::new().with_external_env_factory(external_envs);
+    let evm = evm_factory.create_evm(&mut state, create_race_evm_env());
+    let (block_ctx, chain_spec) = create_race_block_ctx();
+    let receipt_builder = OpAlloyReceiptBuilder::default();
+    let mut executor = MegaBlockExecutor::new(evm, block_ctx, chain_spec, receipt_builder);
+
+    let tx1 = create_transaction_with_caller(CALLER, 0, RACE_TX_GAS_LIMIT);
+    let tx2 = create_transaction_with_caller(CALLER2, 0, RACE_TX_GAS_LIMIT);
+    let tx3 = create_transaction_with_caller(CALLER3, 0, RACE_TX_GAS_LIMIT);
+
+    assert!(executor.execute_transaction(&tx1).is_ok(), "First transaction should be admitted");
+    assert!(executor.execute_transaction(&tx2).is_ok(), "Second transaction should be admitted");
+
+    let result3 = executor.execute_transaction(&tx3);
+    assert!(result3.is_err(), "Third transaction should be rejected - block at capacity");
+    let err_msg = format!("{:?}", result3.unwrap_err());
+    assert!(
+        err_msg.contains("TransactionGasLimitMoreThanAvailableBlockGas"),
+        "Error should mention TransactionGasLimitMoreThanAvailableBlockGas, got: {}",
+        err_msg
+    );
+
+    // The rejection happened before execution, so there is nothing to latch and the block stands.
+    assert!(
+        executor.pending_commit_error().is_none(),
+        "An up-front rejection must not latch a commit error"
+    );
+    let (_, block_result) = executor.finish().expect("Block should finish successfully");
+    assert_eq!(block_result.receipts.len(), 2, "Should have 2 receipts (tx3 was rejected)");
 }

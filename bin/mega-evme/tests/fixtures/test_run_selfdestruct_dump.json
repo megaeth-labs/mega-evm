@@ -1,0 +1,41 @@
+{
+  "description": "--json --dump reports an account destroyed in the same transaction by the selfdestructed marker, not as a live account still carrying its code and storage",
+  "args": [
+    "run",
+    "0x766d3660075733ff005b604260015500600052600e6012f3600052601760096000f060006000600060006000855af15060006000600160006000855af1505000",
+    "--create",
+    "true",
+    "--spec",
+    "Rex6",
+    "--gas",
+    "30000000",
+    "--sender.balance",
+    "10ether",
+    "--dump"
+  ],
+  "expected": {
+    "success": true,
+    "gas_used": 303514,
+    "contract_address": "0x5fbdb2315678afecb367f032d93f642f64180aa3",
+    "logs_count": 0,
+    "state": {
+      "0x5fbdb2315678afecb367f032d93f642f64180aa3": {
+        "balance": "0x0",
+        "nonce": "0x2",
+        "code": "0x",
+        "codeHash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "storage": {}
+      },
+      "0xa16e02e87b7454126e5e10d957a927a7f5b5d2be": {
+        "selfdestructed": true
+      },
+      "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266": {
+        "balance": "0x8ac7230489e80000",
+        "nonce": "0x1",
+        "code": "0x",
+        "codeHash": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+        "storage": {}
+      }
+    }
+  }
+}

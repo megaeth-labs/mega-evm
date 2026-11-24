@@ -12,9 +12,10 @@ use std::convert::Infallible;
 
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
+    alloy_op_evm::OpTxError,
     test_utils::{BytecodeBuilder, MemoryDatabase},
     EvmTxRuntimeLimits, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
-    MegaTransactionError,
+    MegaTransactionNew as _,
 };
 use revm::{
     bytecode::opcode::*,
@@ -43,7 +44,7 @@ fn transact(
     db: &mut MemoryDatabase,
     state_growth_limit: u64,
     tx: TxEnv,
-) -> Result<(ResultAndState<MegaHaltReason>, u64), EVMError<Infallible, MegaTransactionError>> {
+) -> Result<(ResultAndState<MegaHaltReason>, u64), EVMError<Infallible, OpTxError>> {
     let mut context = MegaContext::new(db, spec).with_tx_runtime_limits(
         EvmTxRuntimeLimits::no_limits().with_tx_state_growth_limit(state_growth_limit),
     );

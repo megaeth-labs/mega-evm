@@ -1,0 +1,32 @@
+{
+  "description": "Smoke test: offline replay from committed fixture-file envelope (MegaETH deposit tx)",
+  "args": [
+    "replay",
+    "0xf0ac58ac093e718e12fb9d00bb79c28c335343f79d8cb4ab804a5e1b6c5c4adf",
+    "--rpc.replay-file",
+    "{fixtures}/replay_offline_smoke.cache.json"
+  ],
+  "expected": {
+    "success": true,
+    "gas_used": 109332,
+    "logs_count": 0,
+    "receipt": {
+      "type": "0x7e",
+      "status": "0x1",
+      "cumulativeGasUsed": "0x1ab14",
+      "logs": [],
+      "depositNonce": "0xfaa6f6",
+      "depositReceiptVersion": "0x1",
+      "logsBloom": "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "transactionHash": "0xf0ac58ac093e718e12fb9d00bb79c28c335343f79d8cb4ab804a5e1b6c5c4adf",
+      "transactionIndex": "0x0",
+      "blockHash": "0x96f5cff1b76c8bf415d4d0e5b4a91c92210d2c4c4faa1fed5167bb8cc32f2efc",
+      "blockNumber": "0xfaa6f7",
+      "gasUsed": "0x1ab14",
+      "effectiveGasPrice": "0x0",
+      "from": "0xdeaddeaddeaddeaddeaddeaddeaddeaddead0001",
+      "to": "0x4200000000000000000000000000000000000015",
+      "contractAddress": null
+    }
+  }
+}

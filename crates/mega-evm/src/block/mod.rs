@@ -15,6 +15,25 @@
 //! 4. **[`BlockLimiter`]**: Stateful tracker that enforces limits and accumulates resource usage
 //! 5. **[`MegaBlockExecutionCtx`]**: Context for block execution including parent hash and limits
 //!
+//! # Pre-Block State Changes and Witness Recording
+//!
+//! [`MegaBlockExecutor::pre_execution_changes`] collects `Option<EvmState>` outcomes from each
+//! pre-block helper, and [`MegaBlockExecutor::commit_system_call_outcomes`] walks them calling
+//! `db.commit(state)` for every entry.
+//!
+//! The state hook that feeds the stateless witness generator is installed on the revm `State`
+//! database itself (`State::set_state_hook`) and fires from inside `DatabaseCommit::commit`, so
+//! the commit is what records the outcome — there is no separate pre-commit notification for the
+//! executor to make, and nothing may reach the state without going through `commit`. The hook
+//! receives only the state diff, so the `source` label on each
+//! [`crate::MegaSystemCallOutcome`] no longer reaches it; it is retained for in-crate use, such
+//! as attributing an outcome while debugging.
+//!
+//! The recorded set is still whatever the helper returns, so the helper-side contract is
+//! unchanged: helpers must return all accounts and slots they touched — including pure reads on
+//! idempotent no-change paths — or a stateless client cannot verify the block against its
+//! pre-state.
+//!
 //! # Resource Limit Enforcement
 //!
 //! `MegaETH` implements a comprehensive resource limiting system to prevent `DoS` attacks and
@@ -81,6 +100,7 @@
 //! - Support for parallel execution through access tracking
 //! - Optimized gas calculations for modified opcodes
 
+mod chain;
 mod eips;
 mod executor;
 mod factory;
@@ -89,6 +109,7 @@ mod helpers;
 mod limit;
 mod result;
 
+pub use chain::*;
 pub use executor::*;
 pub use factory::*;
 pub use hardfork::*;

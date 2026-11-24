@@ -1,203 +1,44 @@
 ---
 name: bump-version-release
-description: Bumps the workspace version in Cargo.toml and Cargo.lock, creates a version bump PR, waits for CI, and creates a GitHub release with auto-generated notes. Use when releasing a new version, bumping version, creating a release, tagging a release, or running a release workflow.
+description: Start a mega-evm release. The bump, tag and GitHub Release are made by the shared release workflows; this skill only dispatches them and explains the steps. Use when releasing a new version, bumping version, creating a release, or tagging a release.
 user-invocable: true
 ---
 
 # Bump Version & Release
 
-Bump the project version and create a GitHub release: $ARGUMENTS
-
-## Overview
-
-This skill handles the full release workflow:
-
-1. Check if a version bump is already pending/merged on main
-2. Bump the workspace version in Cargo.toml and Cargo.lock
-3. Create a PR for the version bump
-4. Wait for CI to pass
-5. User merges the PR
-6. Create a git tag and push it
-7. Verify the tag on remote matches expectations
-8. Create a GitHub release with auto-generated notes
-
-## Step 0: Detect existing version bump progress
-
-Before starting a new version bump, check if one is already in progress.
-Run these checks in order and take the first matching action.
-
-### 0a. Fetch latest remote state
-
-```bash
-git fetch origin main
-```
-
-### 0b. Check if we're on a version bump branch
-
-Check the current branch name:
-
-```bash
-git branch --show-current
-```
-
-If the current branch matches a version bump pattern (e.g., `*/chore/bump-v*`), extract the version from the branch name.
-Then check whether a PR already exists for this branch:
-
-```bash
-gh pr list --head "$(git branch --show-current)" --state all --json number,state,url,title
-```
-
-- If **an open PR exists**: inform the user, then **skip to Step 3** (wait for CI / merge).
-- If **a merged PR exists**: extract the version and **skip to Step 5** (tag & release).
-- If **no PR exists but the branch has commits ahead of main**: **skip to Step 2e** (push and create PR).
-- If **no PR exists and no commits ahead**: the branch is empty — continue to Step 1 to determine the version, then proceed to Step 2b (skip branch creation since we're already on it).
-
-### 0c. Check for open version bump PRs on any branch
-
-```bash
-gh pr list --search "bump version in:title" --state open --json number,title,url,headRefName
-```
-
-If an open version bump PR exists:
-
-- Inform the user about the existing PR (show title and URL).
-- Ask the user whether to continue with that PR or start a new one.
-- If continuing: check out that branch and **skip to Step 3**.
-
-### 0d. Check if main already has a version bump as the latest commit
-
-```bash
-git log origin/main -1 --oneline
-```
-
-If the latest commit message on `main` matches a version bump pattern (e.g., starts with `chore: bump version`), extract the version from that commit and **skip to Step 5**.
-
-### 0e. No existing progress found
-
-Proceed to Step 1.
-
-## Step 1: Determine version bump type
-
-Ask the user which version component to bump:
-
-- **Patch** (e.g., 1.4.0 → 1.4.1) — bug fixes, minor changes
-- **Minor** (e.g., 1.4.1 → 1.5.0) — new features, backward-compatible
-- **Major** (e.g., 1.4.1 → 2.0.0) — breaking changes
-
-Read the current version from `Cargo.toml` (`workspace.package.version`) and compute the new version.
-
-## Step 2: Create version bump PR
-
-### 2a. Create a branch
-
-```bash
-git checkout origin/main -b {username}/chore/bump-v{new_version}
-```
-
-Use `git config user.name` to determine the username (lowercase first name).
-
-### 2b. Update Cargo.toml
-
-Edit the `version` field under `[workspace.package]` in the root `Cargo.toml`.
-Only change the version line — do not modify anything else.
-
-### 2c. Update Cargo.lock
-
-Run `cargo check` to regenerate `Cargo.lock` with the new version.
-
-### 2d. Commit changes
-
-Stage only `Cargo.toml` and `Cargo.lock`:
-
-```bash
-git add Cargo.toml Cargo.lock
-git commit -m "chore: bump version to {new_version}"
-```
-
-Do NOT include any AI attribution in the commit message.
-
-### 2e. Push and create PR
-
-```bash
-git push -u origin {branch-name}
-gh pr create --base main --title "chore: bump version to {new_version}" --body "$(cat <<'EOF'
-## Summary
-- Bump workspace version from {old_version} to {new_version}
-EOF
-)"
-```
-
-## Step 3: Wait for CI
-
-Use `gh pr checks` with `--watch` to monitor CI status:
-
-```bash
-gh pr checks --watch --fail-fast
-```
-
-If CI fails:
-
-1. Inspect the failure with `gh pr checks`
-2. Attempt to fix the issue
-3. Commit the fix and push
-4. Re-check CI
-
-## Step 4: Ask user to merge
-
-Tell the user the PR is ready and ask them to merge it on GitHub.
-Provide the PR URL.
-Wait for the user to confirm the merge before proceeding.
-
-After merge confirmation, update local main:
-
-```bash
-git fetch origin main
-```
-
-## Step 5: Check if tag exists
-
-Determine the version from the merge commit on main (or from the version computed in Step 1).
-
-```bash
-git tag -l "v{version}"
-```
-
-If the tag already exists, **skip to Step 7** (verify it still).
-
-## Step 6: Create and push tag
-
-Create a lightweight tag on the merge commit:
-
-```bash
-git tag "v{version}" origin/main
-git push origin "v{version}"
-```
-
-## Step 7: Verify tag on remote
-
-After pushing the tag (or if the tag already existed), verify it points to the expected commit on remote:
-
-```bash
-git ls-remote origin "refs/tags/v{version}"
-```
-
-Compare the commit SHA from the tag with the expected merge commit on `origin/main`:
-
-```bash
-git rev-parse origin/main
-```
-
-If the SHAs do not match, warn the user and stop — do not proceed with the release.
-If they match, continue.
-
-## Step 8: Create GitHub release
-
-Use `gh release create` with auto-generated release notes:
-
-```bash
-gh release create "v{version}" --generate-notes --title "v{version}"
-```
-
-This uses GitHub's Release Notes API to automatically generate notes from merged PRs since the last release.
-
-Print the release URL when done.
+Releases are made by the org release pipeline (megaeth-labs/.github).
+Three decisions are yours: merging the candidate PR, which cuts the release branch; merging a settle PR when one opens; and approving the pending `release` deployment, which tags and publishes.
+Candidate and settle PRs need one each of the `spec:`, `comp:` and `api:` labels.
+
+1. **Candidate** — `gh workflow run release-candidate.yml --ref main -f version=X.Y.Z`.
+   This opens a `chore/release-candidate-X.Y.Z` PR that bumps `Cargo.toml` (workspace version, the three path dependencies, `Cargo.lock`) and drafts the `CHANGELOG.md` entry.
+   Merging it pushes to `main`, the route decides `cut`, and `release-vX.Y.Z` is created from the merge commit.
+   Fixes for the release go to the release branch by PR, and every such fix must also land on `main` (cherry-pick it in a separate PR): the next candidate is cut from `main`, so a fix that exists only on the release branch is lost in the next release.
+2. **Settle** — after the candidate lands, check the settle run.
+   If it opens or refreshes `chore/release-settle-vX.Y.Z`, review and merge that PR.
+   It writes the generated release notes under the candidate's undated `## vX.Y.Z` heading and refuses to settle anything that is not the branch tip.
+   If the branch is clean at the candidate merge, there is no settle PR.
+   Then publish with `gh workflow run release-settle.yml --ref main -f version=X.Y.Z`; that dispatch also resumes a partial publication.
+   A blank version only refreshes every eligible release branch.
+   The workflow's only input is `version`; the commit, release branch and version file are computed by the route and the action, so pass no `commit`.
+3. **Publish**, on either path — `mega-evme` is built and its version checked first.
+   Then approve the pending `release` deployment: it creates the annotated tag `vX.Y.Z` and publishes the GitHub Release with `mega-evme-x86_64-unknown-linux-gnu` and `SHA256SUMS` attached.
+   If the build fails, publish does not run and no tag is created.
+   The dispatch or the merge is not the approval.
+4. **Targets** — automatic on the published Release: `on-release.yml` uploads `mega-evme` to the MegaETH artifact registry, in the `release` environment.
+   The registry job builds its own `mega-evme` from the tag, independently of the Release download.
+   The GitHub Release is written by the release app; the registry upload credential, `GCP_AUTH_KEY`, lives in the `release` environment, whose deployment policy admits `main`, `release-v*` branches and `v*` tags.
+   crates.io publishing is paused while the OP crates are git-pinned (see the root `Cargo.toml`), so no crates are published.
+   Rehearse `on-release.yml` first on an existing tag, dispatching on that tag's ref: `gh workflow run on-release.yml --ref vX.Y.Z -f dry_run=true`.
+   The tag being released is always the run's own ref; there is no separate tag input.
+5. **Recover** a partial publication:
+   - Tag present but no published Release: if the tag is on the settle PR merge, rerun the original push-triggered settle run; if it is on the candidate merge, redispatch settle with the same version on `main`.
+   - A rerun rebuilds `mega-evme` before publish resumes.
+   - A finished Release cannot be backfilled.
+   - Only the registry failed: after fixing the cause, `gh workflow run on-release.yml --ref vX.Y.Z -f dry_run=false`.
+   - A broken target workflow in the tagged tree needs a new release.
+6. **Hotfix** — `gh workflow run release-candidate.yml --ref main -f version=X.Y.Z -f base_commit=vA.B.C`, where `vA.B.C` is the release line to fix and the new version is above the newest tag.
+   Then follow the same steps on that release branch.
+   The fix must also land on `main`.
+
+Do not create tags or Releases by hand; the tag ruleset rejects it.

@@ -1,6 +1,6 @@
 ---
 description: MegaAccessControl system contract — proactive volatile data access restriction for call subtrees.
-spec: Rex4
+spec: Rex6
 ---
 
 # MegaAccessControl
@@ -27,18 +27,18 @@ The MegaAccessControl system contract MUST exist at `MEGA_ACCESS_CONTROL_ADDRESS
 The contract takes no constructor arguments.
 A node MUST deploy the bytecode version corresponding to the active spec.
 
-Source: [`MegaAccessControl.sol`](https://github.com/megaeth-labs/mega-evm/blob/main/crates/system-contracts/contracts/MegaAccessControl.sol)
-
 #### Version 1.0.0
 
 Since: [Rex4](../upgrades/rex4.md)
 
 Code hash: `0x96d0f3ba6b474e9684a97e4388ec8dbb7929818b51e6b4f19f885ccbdf642f9b`
 
-Deployed bytecode:
+Deployed bytecode: `0x60806040526004361061003e...` (full bytecode: [`MegaAccessControl-1.0.0.json`](https://github.com/megaeth-labs/mega-evm/blob/main/crates/system-contracts/artifacts/MegaAccessControl-1.0.0.json), `deployedBytecode` field).
 
-```
-0x60806040526004361061003e575f3560e01c8063143d63fd1461007057806315f952801461008657806354fd4d50146100af578063c62e8daf14610070575b6040517f1894f07600000000000000000000000000000000000000000000000000000000815260040160405180910390fd5b34801561007b575f5ffd5b5061008461003e565b005b348015610091575f5ffd5b5061009a6100fa565b60405190151581526020015b60405180910390f35b3480156100ba575f5ffd5b50604080518082018252600581527f312e302e30000000000000000000000000000000000000000000000000000000602082015290516100a6919061012d565b5f6040517f1894f07600000000000000000000000000000000000000000000000000000000815260040160405180910390fd5b602081525f82518060208401528060208501604085015e5f6040828501015260407fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe0601f8301168401019150509291505056fea164736f6c634300081e000a
+To verify the code hash, from the repository root:
+
+```bash
+cast keccak $(jq -r .deployedBytecode crates/system-contracts/artifacts/MegaAccessControl-1.0.0.json)
 ```
 
 ### Interface
@@ -81,6 +81,12 @@ They fall through to the on-chain bytecode, which reverts with `NotIntercepted()
 
 Unknown selectors MUST NOT be intercepted and MUST fall through to the on-chain bytecode.
 
+### Execution-Local Policy State
+
+The restriction controlled by `disableVolatileDataAccess` and `enableVolatileDataAccess` MUST be treated as execution-local policy state rather than persistent chain state.
+Successful interception of those selectors MUST update that execution-local policy state identically for `CALL` and `STATICCALL`.
+Those updates MUST NOT write account storage, emit logs, or transfer value.
+
 ### Value Transfer Policy
 
 All intercepted functions MUST reject calls with non-zero value transfer.
@@ -89,14 +95,39 @@ If the call carries a non-zero transferred value, the node MUST revert with `Non
 ### `disableVolatileDataAccess`
 
 When intercepted, the node MUST disable volatile data access for the caller's [call frame](../glossary.md#call-frame) and all descendant call frames.
+The rule above MUST apply identically when the selector is reached through `CALL` or `STATICCALL`.
 
 While disabled, any volatile data access — block environment reads, beneficiary-targeted account access (including `SELFDESTRUCT` to the beneficiary), and [oracle](oracle.md) storage reads — MUST revert immediately with `VolatileDataAccessDisabled(VolatileDataAccessType accessType)`.
 
+Beneficiary-targeted account access covers two further cases beyond a direct operand match:
+
+- a `SELFDESTRUCT` executed by a contract whose own address is the block beneficiary — the operation reads and zeroes the executing contract's balance, so it observes beneficiary state regardless of its stack target;
+- a `CALL`, `CALLCODE`, `DELEGATECALL`, or `STATICCALL` whose target's [EIP-7702](https://eips.ethereum.org/EIPS/eip-7702) delegation designation resolves (one hop) to the beneficiary.
+
 Blocked volatile access MUST NOT update volatile-access tracking and MUST NOT tighten [gas detention](../evm/gas-detention.md).
+
+The blocked opcode never executes, so it MUST NOT consume any gas — neither its static cost nor any dynamic cost.
+The gas the reverting frame returns to its caller MUST equal the gas it held when the blocked opcode was reached.
+
+This holds regardless of how much gas the frame holds.
+A frame whose remaining gas is below the blocked opcode's static cost MUST still revert with `VolatileDataAccessDisabled` and keep that gas; it MUST NOT be halted out of gas.
+A blocked opcode is never charged, so its static cost is not a precondition for reaching it.
+
+For opcodes that are unconditionally volatile — block-environment reads such as `TIMESTAMP`, `NUMBER`, `COINBASE`, `DIFFICULTY` / `PREVRANDAO`, `GASLIMIT`, `BASEFEE`, `BLOBBASEFEE`, `BLOCKHASH`, and `BLOBHASH` — the disabled-state revert is synthesized before operand validation.
+A malformed invocation of an operand-taking unconditionally volatile opcode (`BLOCKHASH`, `BLOBHASH`) with an insufficient stack therefore reverts with `VolatileDataAccessDisabled` instead of halting with the canonical stack-underflow error; this is intended MegaETH semantics.
+Conditionally volatile opcodes — `BALANCE`, `EXTCODESIZE`, `EXTCODECOPY`, `EXTCODEHASH`, the CALL family, and `SELFDESTRUCT`, which are volatile only when their operand resolves to the beneficiary — inspect their operands first and keep the canonical stack-underflow halt when the stack is malformed.
+The source-side `SELFDESTRUCT` guard follows the same rule: it applies only once the target operand exists, so a stack-underflow `SELFDESTRUCT` keeps its canonical stack-underflow halt.
+
+#### Oracle `sendHint` Forwarding
+
+A `sendHint` call (see [`Oracle`](oracle.md#hint-forwarding)) MUST NOT forward its payload to the off-chain oracle backend when the calling frame's volatile data access is disabled.
+Unlike the reverting accesses above, a disabled `sendHint` call MUST NOT revert: the node MUST skip forwarding and let the call fall through to the on-chain Oracle bytecode, without charging the call against the transaction's data-size resource lane — the same admission-failure shape as a zero-gas-limit or selector-mismatch call (a decode failure differs: it is still charged).
+The hint is an off-chain side-channel, not consensus state, so silently dropping it — rather than reverting the caller's on-chain control flow — is the correct failure mode.
 
 ### `enableVolatileDataAccess`
 
 When intercepted, the node MUST re-enable volatile data access for the caller's call frame and descendant call frames if and only if the restriction was set at the caller's depth or was not active.
+The rule above MUST apply identically when the selector is reached through `CALL` or `STATICCALL`.
 
 If the restriction was set by an ancestor call frame (a parent at a shallower depth), the node MUST revert with `DisabledByParent()`.
 
@@ -131,6 +162,13 @@ Allowing untrusted child code to re-enable access would defeat the purpose.
 The calling contract disables access precisely because it does not trust inner calls to behave correctly with volatile data.
 The parent-override rule preserves the caller's intent.
 
+**Why allow `disableVolatileDataAccess()` and `enableVolatileDataAccess()` under `STATICCALL`?**
+These functions change execution-local policy state only.
+Allowing the same interception semantics under `STATICCALL` lets read-only frames defend themselves against descendant volatile accesses and restore their own policy when the disable was set at the same depth.
+Treating these selectors as forbidden mutable side effects under `STATICCALL` would make that defense unavailable to `view` entrypoints.
+
 ## Spec History
 
 - [Rex4](../upgrades/rex4.md) introduced the MegaAccessControl system contract.
+- [Rex6](../upgrades/rex6.md) extended the disabled-state beneficiary guard to a `SELFDESTRUCT` whose executing contract is the beneficiary and to CALL-family targets whose EIP-7702 delegate resolves to the beneficiary, and stopped forwarding `sendHint` while volatile data access is disabled.
+  Through Rex5, only the `SELFDESTRUCT` stack target and the raw CALL-family target operand are compared to the beneficiary, and `sendHint` forwarding does not consult the disabled state at all.

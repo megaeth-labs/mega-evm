@@ -117,7 +117,7 @@ The 98/100 rule reduces this to approximately 10 gas.
 
 #### New behavior
 
-- `SELFDESTRUCT` halts execution with `InvalidFEOpcode`.
+- `SELFDESTRUCT` halts execution and consumes the frame's entire remaining gas.
 - Contracts relying on self-destruct patterns must migrate to alternatives.
 
 ### Contract Size Limits
@@ -157,21 +157,21 @@ The 98/100 rule reduces this to approximately 10 gas.
 
 ## Developer Impact
 
-**Storage gas is a new cost dimension you must account for.**
+**Storage gas is a new cost dimension that implementations must account for.**
 Total gas cost = compute gas + storage gas.
-Local gas estimation tools may be inaccurate due to dynamic [SALT](../glossary.md#salt)-based [multipliers](../glossary.md#multiplier) — use MegaETH's native gas estimation APIs.
+Local gas estimation tools may be inaccurate due to dynamic [SALT](../glossary.md#salt)-based [multipliers](../glossary.md#multiplier) — MegaETH's native gas estimation APIs should be used instead.
 
-**Your transactions must respect three independent limits** (compute gas, data size, KV updates).
+**Transactions must respect three independent limits** (compute gas, data size, KV updates).
 Exceeding any one of them halts execution with remaining gas refunded.
 
 **Accessing volatile data triggers compute gas detention.**
-If your contract reads block environment fields, the beneficiary's account, or oracle storage, remaining compute gas is capped.
+Contracts that read block environment fields, the beneficiary's account, or oracle storage will have their remaining compute gas capped.
 Front-load volatile reads and minimize computation after access.
 
 **Subcalls receive at most 98/100 of remaining gas.**
 Contracts depending on precise 63/64 gas forwarding behavior may need adjustment.
 
-**SELFDESTRUCT is disabled** — contracts using it will halt with `InvalidFEOpcode`.
+**SELFDESTRUCT is disabled** — contracts using it will halt and forfeit all remaining gas.
 
 **Contracts can now be up to 512 KB**, enabling significantly larger deployments.
 

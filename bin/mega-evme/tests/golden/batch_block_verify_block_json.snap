@@ -1,0 +1,15 @@
+# mega-evme replay equivalence baseline
+# case:    batch_block_verify_block_json
+# capture: replay_batch_blocks.cache.json
+# argv:    replay --rpc.replay-file <CAPTURE> --block 22945844 --verify-receipt --verify-block --json
+
+== exit code ==
+0
+
+== stdout (digest) ==
+bytes: 113636
+lines: 24
+keccak256: 0x5baa66099c823fab34a2a1d754f681b5173687eb34b98f7c9014c9b76bba1ccf
+
+== stderr ==
+(empty)

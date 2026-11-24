@@ -8,6 +8,7 @@
 - [run](commands/run.md)
 - [tx](commands/tx.md)
 - [replay](commands/replay.md)
+- [cache](commands/cache.md)
 
 ## Configuration
 

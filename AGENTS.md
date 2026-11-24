@@ -14,7 +14,7 @@ cargo build
 cargo build --release -p mega-evme       # CLI tool
 
 # Test
-cargo test                                # all tests
+cargo test --workspace                    # all tests
 cargo test -p mega-evm                    # core crate only
 cargo test -p mega-evm -- test_name       # single test
 
@@ -28,42 +28,52 @@ cargo clippy --workspace --lib --examples --tests --benches --all-features --loc
 cargo sort --check --workspace --grouped --order package,workspace,lints,profile,bin,benches,dependencies,dev-dependencies,features
 
 # Benchmarks
-cargo bench -p mega-evm --bench transact
+cargo bench -p mega-evm --bench transact                                  # wall-clock + HTML report
+cargo codspeed build -p mega-evm --bench <target> && cargo codspeed run   # instruction counts (Linux only)
 
 # no_std check (run against riscv target)
 cargo check -p mega-evm --target riscv64imac-unknown-none-elf --no-default-features
 
-# System contracts (requires Foundry)
-cd crates/system-contracts && forge build
+# System contracts
+mise run system-contracts:attest          # attest Solidity bytecode (requires Foundry)
+mise run system-contracts:generate        # regenerate Rust constants from checked-in artifacts
+(cd crates/system-contracts && forge test) # run Solidity tests (requires Foundry)
 ```
 
-Git submodules are required — clone with `--recursive` or run `git submodule update --init --recursive`.
+Initialize git submodules for the Foundry commands with `git submodule update --init --recursive`, or clone with `--recursive`.
 
 ## Workspace Structure
 
-| Crate                   | Path                      | Purpose                                                      |
-| ----------------------- | ------------------------- | ------------------------------------------------------------ |
-| `mega-evm`              | `crates/mega-evm`         | Core EVM implementation                                      |
-| `mega-system-contracts` | `crates/system-contracts` | Solidity system contracts with Rust bindings (Foundry-based) |
-| `state-test`            | `crates/state-test`       | Ethereum state test runner                                   |
-| `mega-evme`             | `bin/mega-evme`           | CLI tool for EVM execution (`run`, `tx`, `replay`)           |
+| Crate                       | Path                      | Purpose                                                                                     |
+| --------------------------- | ------------------------- | ------------------------------------------------------------------------------------------- |
+| `mega-evm`                  | `crates/mega-evm`         | Core EVM implementation                                                                     |
+| `mega-system-contracts`     | `crates/system-contracts` | Versioned system-contract bytecode and Rust ABI bindings                                    |
+| `system-contract-artifacts` | `tools/system-contracts`  | Attests Solidity deployments and regenerates the checked-in Rust bytecode constants         |
+| `mega-state-test`           | `crates/mega-state-test`  | State-test fixtures + runner library (EEST-compatible, published; imported as `state_test`) |
+| `state-test`                | `crates/state-test`       | Thin CLI front-end over `mega-state-test` (not published)                                   |
+| `mega-evme`                 | `bin/mega-evme`           | CLI tool for EVM execution (`run`, `tx`, `replay`, `cache`)                                 |
+| `mega-t8n`                  | `bin/mega-t8n`            | Standalone state transition (t8n) tool                                                      |
 
 ## Architecture
 
 ### Spec System (`MegaSpecId`)
 
-Progression: `EQUIVALENCE` → `MINI_REX` → `REX` → `REX1` → `REX2` → `REX3` → `REX4`
+Progression: `EQUIVALENCE` → `MINI_REX` → `MINI_REX_1` → `MINI_REX_2` → `REX` → `REX1` → `REX2` → `REX3` → `REX4` → `REX5` → `REX6` (`MINI_REX_1`/`MINI_REX_2` are alias rungs executing `EQUIVALENCE` and `MINI_REX` behavior respectively)
 
 - **Spec** defines EVM behavior (what the EVM does).
   Defined in `crates/mega-evm/src/evm/spec.rs`.
   The code base **MUST** maintain **backward-compatibility**, which means the semantics (i.e., EVM behaviors) must remain the same for existing specs.
   The only exception for this is the **unstable** spec that is under active development (if exists, must be the latest one).
-  - _At present, all specs are stable. There is no unstable spec._
+  - _There is currently no unstable spec: every spec, through `REX6`, is frozen._
+    New EVM behavior requires introducing a new spec.
     When a new spec is introduced, this line should be updated to indicate the unstable spec.
-  - Specifications of each spec can be found in the upgrade pages under `docs/spec/upgrades/`.
+  - Frozen and activated are separate properties.
+    `REX6` is frozen and activated on both networks (see `block/chain.rs`).
+    Freezing forbids further semantic change; scheduling is a later, separate decision made in the node chainspecs and mirrored here in `block/chain.rs` for replay tooling.
+  - Specifications of each behavior-introducing spec can be found in the upgrade pages under `docs/spec/upgrades/`; alias rungs have no page of their own and are recorded in the upgrade overview and `docs/spec/hardfork-spec.md`.
 - **Hardfork** (`MegaHardfork`) defines network upgrade events (when specs activate).
-  Multiple hardforks can map to one spec.
-  `MiniRex1` and `MiniRex2` are hardforks that reuse `EQUIVALENCE` and `MINI_REX` respectively.
+  Every hardfork schedules a spec rung of its own — the fork→spec mapping is 1:1.
+  `MiniRex1` and `MiniRex2` schedule the alias specs `MINI_REX_1` and `MINI_REX_2`, whose `behavior()` projects to `EQUIVALENCE` and `MINI_REX` respectively.
   Defined in `crates/mega-evm/src/block/hardfork.rs`.
 - All specs use `OpSpecId::ISTHMUS` as the Optimism base layer.
   But this is subject to change in the future.
@@ -72,8 +82,13 @@ Progression: `EQUIVALENCE` → `MINI_REX` → `REX` → `REX1` → `REX2` → `R
 
 - **`evm/`** — Core mega-evm logic: spec definitions, context, factory, execution pipeline, modified opcodes (LOG, SELFDESTRUCT), host hooks, precompiles.
   This module collects all our modifications and customizations of EVM's behavior for mega-evm based on the revm.
-- **`block/`** — Block execution: executor, factory, hardfork-to-spec mapping, limit enforcement.
+- **`block/`** — Block execution: executor, factory, hardfork-to-spec mapping, limit enforcement, and the canonical per-chain hardfork schedules.
   This module defines how a block in MegaETH block should be executed.
+  `block/chain.rs` is the single source of truth for the mainnet/testnet chain IDs and activation-timestamp schedules (`hardfork_schedule(chain_id)`, `MAINNET_CHAIN_ID`, `TESTNET_CHAIN_ID`, `mainnet_hardforks()`, `testnet_hardforks()`); look there to find or change when a fork activates on a given chain.
+  Its unknown-chain fallback pins a named spec (currently `REX6`) rather than following the latest one, so introducing a spec does not move chains that run from genesis; advancing that pin is a deliberate edit made when a spec is sealed.
+  Forks map 1:1 onto an ascending spec ladder, so the resolved `spec_id` is monotone; rollbacks are alias specs (`MINI_REX_1`, `MINI_REX_2`) whose `behavior()` projects to an earlier spec.
+  One value, two projections that must not be confused: `is_enabled` compares behavior and gates EVM semantics (rolls back in alias windows); `reaches` compares ladder position and gates one-way chain setup such as predeploys and pre-block rules (never rolls back).
+  The `is_<fork>_active_at_timestamp` predicates are position projections for behavior-introducing forks and raw event queries for alias forks, and `MegaHardforks::validate_schedule` is the load-time check that a published schedule climbs the ladder without gaps.
 - **`limit/`** — Resource limit tracking: compute gas, data size, KV updates, state growth (each in its own module).
   MegaETH introduces additional resource metering mechanism and this module implements their logic as utility structs to be used by mega-evm.
 - **`access/`** — Block env access tracking and volatile data detection for parallel execution.
@@ -92,7 +107,7 @@ Progression: `EQUIVALENCE` → `MINI_REX` → `REX` → `REX1` → `REX2` → `R
 
 #### Backward Compatibility of Specs
 
-The spec system (`MegaSpecId`) forms a linear progression where each newer spec includes all previous behaviors.
+The spec system (`MegaSpecId`) forms a linear progression where each newer behavior-introducing spec includes all previous behaviors; the alias rungs are the exception, re-executing an earlier spec's behavior instead.
 The codebase **MUST** maintain backward-compatibility: EVM semantics must never change for existing (stable) specs.
 The only exception is the latest spec if explicitly marked as **unstable**.
 Consequently:
@@ -107,7 +122,7 @@ Consequently:
 MegaETH separates EVM gas into two independent dimensions tracked during execution:
 
 - **Compute gas**: Measures pure computational cost.
-  Every opcode's gas consumption is recorded via wrapped instructions (`compute_gas_ext` in `evm/instructions.rs`).
+  Every opcode's gas consumption is recorded via wrapped instructions in `evm/instructions.rs` after the opcode body completes: `compute_gas_ext::*` for plain opcodes records via `compute_gas!` (through `wrap_op_compute_gas!`), and `storage_gas_ext::*` for storage-affecting opcodes (SSTORE, LOG, CALL-family, CREATE/CREATE2, SELFDESTRUCT) records via `record_storage_compute_gas!`.
   Subject to a per-spec compute gas limit and further restricted by gas detention (see below).
 - **Storage gas**: Charges for persistent state modifications (SSTORE, account creation, contract deployment).
   These costs scale dynamically with SALT bucket capacity (see External Environment Dependencies below).
@@ -118,7 +133,7 @@ A transaction can be halted by exceeding either limit.
 
 #### Multidimensional Resource Limits
 
-Beyond the dual gas model, mega-evm enforces **four independent per-transaction resource limits** via `AdditionalLimit` (`limit/mod.rs`):
+Beyond the dual gas model, mega-evm enforces **four independent per-transaction resource limits** via `AdditionalLimit` (`limit/limit.rs`):
 
 - **Compute gas** — Computational opcode cost
 - **Data size** — Calldata + logs + storage writes + code deploy + account updates
@@ -138,7 +153,7 @@ MegaETH's parallel EVM needs to minimize conflicts between concurrent transactio
 
 - Different volatile data categories (block env/beneficiary, oracle) have different cap levels defined in `constants.rs`.
 - The **most restrictive cap wins** when multiple volatile sources are accessed.
-- Caps are applied via host hooks (`evm/host.rs`) that mark access in a `VolatileDataAccessTracker` (`access/tracker.rs`), then enforced after each volatile opcode via `wrap_op_detain_gas!` in `evm/instructions.rs`.
+- Caps are applied via host hooks (`evm/host.rs`) that mark access in a `VolatileDataAccessTracker` (`access/tracker.rs`), then enforced after each volatile opcode via `wrap_op_detain_gas_{unconditional,conditional}!` in `evm/instructions.rs`.
 
 This forces transactions that touch volatile data to terminate quickly, reducing parallel execution conflicts without banning the access outright.
 Detained gas is effectively refunded — users only pay for actual computation performed.
@@ -146,12 +161,12 @@ Detained gas is effectively refunded — users only pay for actual computation p
 #### Storage Gas Stipend (Rex4+)
 
 MegaETH's 10× storage gas multiplier on LOG opcodes causes even `LOG1` to cost 4,500 gas, exceeding the EVM's `CALL_STIPEND` of 2,300.
-Rex4 introduces `STORAGE_CALL_STIPEND` (23,000 gas) for internal (`depth > 0`) value-transferring `CALL`/`CALLCODE`.
-The stipend inflates the child's total gas but a per-frame compute gas cap keeps the extra gas usable only for storage-gas-heavy operations (LOG topic/data costs).
-Unused stipend is burned on return — the caller never recovers it.
+Rex4 introduced `STORAGE_CALL_STIPEND` (23,000 gas) for internal (`depth > 0`) value-transferring `CALL`/`CALLCODE`; Rex5 reworked it into a separated allowance, so the tracker is dual-mode.
+Under Rex5 the stipend is a per-frame allowance that does NOT inflate the child's `gas_limit`: it is drawn only at MegaETH's storage-gas surcharge sites (LOG topic/data, new-account materialization, first-time-write SSTORE, contract-creation storage, SELFDESTRUCT beneficiary creation), is structurally unspendable on compute, and is neither returned to the caller nor rescued for the sender — nothing is burned because nothing ever enters the frame's gas limit.
+Under Rex4 (legacy mode) the stipend instead inflates the child's `gas_limit`, a per-frame compute gas cap keeps the extra gas usable only for storage-gas-heavy operations, and unused stipend is burned on return.
 
 The stipend lifecycle is managed by `StorageCallStipendTracker` (`limit/storage_call_stipend.rs`), which maintains a per-frame stack aligned with the EVM call stack.
-The tracker's `before_frame_init` method is called inside `AdditionalLimit::before_frame_init`, after all four sub-trackers push their frames (so the compute gas frame exists for `cap_current_frame_limit`).
+The tracker's `before_frame_init` method is called inside `AdditionalLimit::before_frame_init`, after all four sub-trackers push their frames (so the compute gas frame exists for the Rex4 legacy-mode per-frame cap).
 
 The storage gas stipend is subject to the general gas leakage pitfalls described below.
 
@@ -167,11 +182,16 @@ They are deployed idempotently during `pre_execution_changes()` in `block/execut
 | Keyless Deploy           | `...0003`      | Deterministic contract deployment via Nick's Method |
 | MegaAccessControl        | `...0004`      | Access control (disableVolatileDataAccess)          |
 | MegaLimitControl         | `...0005`      | Limit query/control (currently remainingComputeGas) |
+| SequencerRegistry        | `...0006`      | System address and sequencer role registry          |
 
 Key design aspects:
 
-- Solidity sources in `crates/system-contracts/contracts/`, compiled by Foundry, with Rust ABI bindings generated via `alloy-sol-types`.
-- Bytecode is versioned and hash-verified at build time (`crates/system-contracts/build.rs`).
+- Solidity sources live in `crates/system-contracts/contracts/`, with Rust ABI bindings generated via `alloy-sol-types`.
+- Cargo builds use the checked-in Rust constants and check them against the versioned artifacts when present, without writing to the source tree or invoking Foundry.
+- The required `lint` CI job uses `cargo run --locked -p system-contract-artifacts -- attest` to check the contract inventory, reproduce the latest bytecode for the pinned Osaka EVM target, and compare the SequencerRegistry storage layout with the Rust slot constants.
+- The job also checks the generated Rust constants and requires attestation to reject a changed Solidity version in a temporary copy.
+- Rust tests pin the code hashes and latest versions in a literal table.
+- Run `mise run system-contracts:generate` after updating the artifacts to regenerate the Rust constants.
 - The **MEGA_SYSTEM_ADDRESS** can call whitelisted system contracts as deposit-like transactions — no signature or fee required.
   This is how the sequencer updates oracle storage.
 - **Any system contract modification requires a new spec** to preserve backward compatibility.
@@ -207,10 +227,32 @@ The following paths are common sources of leakage:
 
 When adding a new per-frame gas mechanism, verify that all three paths handle it correctly and add tests for each.
 
+### Resource-Limit Check Protocol
+
+The per-opcode hot path records and checks only the compute-gas dimension (`AdditionalLimit::record_compute_gas`).
+Correctness of the other three dimensions (data size, KV updates, state growth) rests on a protocol instead of a per-opcode fan-out across all four trackers:
+
+1. **Every non-compute mutation site must latch.**
+   Any code that records data-size/KV/state-growth usage during execution (`on_sstore`, `on_log`, `record_oracle_hint_bytes`, the frame-lifecycle hooks) must run `check_limit()` itself, latching any exceed into `has_exceeded_limit`.
+   The latch is surfaced by the leading short-circuit of the next `record_compute_gas` call, so the halt lands on the same opcode as the pre-protocol fan-out did.
+2. **Pre-inner recorders must NOT latch.**
+   A site that records usage _before_ its inner instruction executes (currently SELFDESTRUCT's two beneficiary recorders: empty-beneficiary creation and the REX6+ existing-beneficiary credit) must record without latching: the inner instruction can still fail, the frame then discards the usage, and an early latch would stick and rewrite the frame's real result.
+   Such opcodes use a trailing all-dimension check (`record_compute_gas_all_dims`) that runs only after the inner instruction succeeds.
+3. **Compute gas is always recorded.**
+   `record_compute_gas` must record before surfacing any latched exceed — the recorded total feeds the transaction outcome and block-level compute accounting even for transactions halted on another dimension.
+
+The protocol governs mutation sites that run during execution; the REX6+ post-execution fee-reward accounting is deliberately outside it.
+That accounting merges usage into the transaction's reported totals and the block-level cumulative counters after the execution result is final, without latching, and never retroactively fails the transaction.
+
+Rule 1 is backed by a `debug_assert!` in `record_compute_gas`: if a non-compute dimension is over its limit but not yet latched, the assert trips at the exact opcode whose mutation site forgot to call `check_limit()`.
+The sub-tracker checks are non-mutating, so the guard compiles out of release builds.
+
+When adding an opcode or mutation site that touches a non-compute dimension, decide whether it records after or before its inner instruction, follow the matching case above, and add a test asserting the exceed halts at that opcode.
+
 ## Test Organization (`crates/mega-evm/tests/`)
 
-Tests are organized by spec: `equivalence/`, `mini_rex/` (11 modules), `rex/`, `rex2/`, and `block_executor/`.
-Each module tests specific features of that spec.
+Tests are organized by spec: `equivalence/`, `mini_rex/`, `rex/`, `rex2/`, `rex3/`, `rex4/`, `rex5/`, `rex6/`, plus `block_executor/`, `compute_gas/` (cross-spec compute-gas snapshot harness), and `mutation/` (mutation-killing system tests).
+Each spec module tests specific features of that spec.
 
 ## Version Control
 
@@ -267,23 +309,40 @@ When the agent is requested to implement a new feature or bug fix, it should con
 - **Add benchmarks for performance-sensitive changes.**
   Changes on the EVM execution hot path must be accompanied by benchmarks.
   This includes new or modified opcode behavior, gas mechanics, system contract interception, resource limit tracking, and block executor pipeline changes.
+  Per-PR instruction-count reports for these benchmarks are produced automatically by the CodSpeed CI workflow.
 - **Always run benchmarks locally before committing.**
   New or modified benchmarks must be executed locally (`cargo bench -p mega-evm --bench <name>`) to verify they pass before committing.
   Benchmarks may compile but panic at runtime due to missing setup (e.g., required block fields), so compilation alone is not sufficient.
+  For instruction-count deltas across a PR, use the CodSpeed report posted on the PR rather than local wall-clock numbers.
 - **Use `test_` prefix for Rust test function names.**
   New `#[test]` functions should be named with a `test_` prefix for consistency with this repository and upstream revm style.
   If editing nearby tests in the same module, align names to the same `test_` style when reasonable.
 - **Do NOT modify behavior for existing stable specs.**
-  All specs in `MegaSpecId` are currently stable (frozen).
-  New EVM behavior, gas cost changes, or opcode modifications **must** introduce a new spec and be gated with `spec.is_enabled(MegaSpecId::NEW_SPEC)`.
-  Never change what an existing spec does.
+  There is currently no unstable spec: every spec, through `REX6`, is frozen.
+  A spec being frozen is independent of whether any network has scheduled it — a frozen spec is off-limits to behavior changes whether or not a timestamp has been published.
+  New EVM behavior, gas cost changes, or opcode modifications for stable specs **must** introduce a new spec and be gated with `spec.is_enabled(MegaSpecId::NEW_SPEC)`.
+  Never change what an existing stable spec does.
 - **System contract changes require a new spec.**
   Do not modify system contract Solidity sources or their Rust integration without also introducing a new spec for backward compatibility.
+- **Override `HardforkParams::validate()` for every new params type.**
+  The default implementation accepts any value silently.
+  Override it with field-level invariant checks (e.g., non-zero addresses) so that `with_params()` panics loudly at chain-config load time rather than allowing the error to surface at the first block where the fork activates.
+  Also register the fork-requires-params rule in `MegaHardforks::validate_schedule` so a schedule that activates the fork without its params fails validation, not the fork's first block.
+- **Reset new per-transaction state in `MegaContext::discard_tx`.**
+  An embedder that catches a panic out of transaction execution calls `MegaBlockExecutor::discard_transaction` (which forwards to `MegaEvm::discard_tx`) before the next transaction, because the unwind skips the handler's own cleanup.
+  A new per-transaction field on `MegaContext` must be reset there as well, unless every transaction overwrites it before reading it, and the case belongs in `tests/block_executor/discard_transaction.rs`.
+  State the next transaction inherits from the previous one (the pre-REX1 detained compute gas limit) is recorded in `MegaContext::on_tx_end` at the end of every run, not snapshotted at `on_new_tx`: the panic can land before `on_new_tx` runs, as in the block executor's deposit sender read.
+- **Pre-block helpers must return state, not commit directly.**
+  Any helper participating in `pre_execution_changes` (system contract deploys, pre-block system calls, etc.) MUST return `Option<EvmState>` and never call `db.commit(...)` directly.
+  Full convention: `crates/mega-evm/src/system/AGENTS.md` → `PRE-BLOCK STATE CHANGE CONTRACT`.
 - **Define value-transfer policy explicitly for system contract interceptors.**
   For read-only or control methods, reject calls with non-zero `transfer_value` in the interceptor.
   If a method intentionally accepts value, document the reason in spec and code comments and add dedicated tests.
 - **Do not intercept unknown selectors for system contracts.**
   Unknown selectors should fall through to on-chain bytecode and revert with a stable custom error such as `NotIntercepted()`.
+- **Only `CALL` and `STATICCALL` reach interceptor dispatch.**
+  `CALLCODE` and `DELEGATECALL` are rejected by the call-scheme guard in `frame_init` before any interceptor is consulted.
+  Do not expect these schemes to trigger system contract interception.
 - **System contract interceptor tests must cover boundary behaviors.**
   Include tests for normal intercepted path, non-zero value behavior, unknown selector fallback, and CALL vs DELEGATECALL/CALLCODE interception boundaries.
 - **Respect `no_std` in `mega-evm` crate.**
@@ -311,6 +370,9 @@ When the agent is requested to implement a new feature or bug fix, it should con
   Also update this `AGENTS.md` when relevant (e.g., unstable spec marker, spec progression list, system contract table).
 - **One sentence, one line.**
   When writing markdown or similar format files, put each sentence in a separate line.
+- **Run Prettier on docs before committing.**
+  `docs/` markdown files are checked by Prettier in CI (`prettier --check 'docs/**/*.md'`).
+  After editing any `docs/` file, run `npx prettier --write 'docs/**/*.md'` to fix formatting.
 
 ## Documentation Conventions (`docs/`)
 

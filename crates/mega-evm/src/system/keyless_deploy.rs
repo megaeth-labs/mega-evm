@@ -19,12 +19,9 @@
 
 use alloy_evm::Database;
 use alloy_primitives::{address, Address};
-use revm::{
-    database::State,
-    state::{Account, Bytecode, EvmState},
-};
+use revm::state::EvmState;
 
-use crate::MegaHardforks;
+use crate::{MegaHardforks, MegaSpecId, SystemContractSpec};
 
 // Re-export error types and transaction functions from sandbox
 pub use crate::sandbox::{
@@ -49,35 +46,97 @@ pub use mega_system_contracts::keyless_deploy::IKeylessDeploy;
 pub fn transact_deploy_keyless_deploy_contract<DB: Database>(
     hardforks: impl MegaHardforks,
     block_timestamp: u64,
-    db: &mut State<DB>,
+    db: &mut DB,
 ) -> Result<Option<EvmState>, DB::Error> {
-    if !hardforks.is_rex_2_active_at_timestamp(block_timestamp) {
-        return Ok(None);
+    keyless_deploy_spec(hardforks.spec_id(block_timestamp))
+        .map(|s| crate::transact_deploy(db, &s))
+        .transpose()
+}
+
+/// Builds the [`SystemContractSpec`] for the keyless-deploy contract active under
+/// `spec`, or `None` if `REX2` is not yet enabled.
+///
+/// `spec` is the scheduled spec, compared by position — see
+/// [`oracle_spec`](crate::system::oracle::oracle_spec).
+pub(crate) fn keyless_deploy_spec(spec: MegaSpecId) -> Option<SystemContractSpec> {
+    spec.reaches(MegaSpecId::REX2).then(|| {
+        SystemContractSpec::new(
+            KEYLESS_DEPLOY_ADDRESS,
+            KEYLESS_DEPLOY_CODE,
+            KEYLESS_DEPLOY_CODE_HASH,
+        )
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::MegaHardforkConfig;
+    use revm::{
+        database::{InMemoryDB, State},
+        state::{AccountInfo, Bytecode},
+    };
+
+    #[test]
+    fn test_deploy_keyless_deploy_contract_on_fresh_db() {
+        let mut db = InMemoryDB::default();
+        let mut state = State::builder().with_database(&mut db).build();
+        let hardforks = MegaHardforkConfig::default().with_all_activated();
+
+        let result = transact_deploy_keyless_deploy_contract(&hardforks, 0, &mut state)
+            .expect("Deployment should succeed")
+            .expect("Should return state");
+
+        let account = result.get(&KEYLESS_DEPLOY_ADDRESS).expect("Account should exist");
+        assert!(account.is_touched());
+        assert!(account.is_created(), "fresh deploy must mark account as created");
+        assert_eq!(account.info.code_hash, KEYLESS_DEPLOY_CODE_HASH);
     }
 
-    // Load the keyless deploy contract account from the cache
-    let acc = db.load_cache_account(KEYLESS_DEPLOY_ADDRESS)?;
+    /// Covers the `account_existed = true` branch: an account already exists with wrong code,
+    /// so the deploy updates the code without marking the account as created.
+    #[test]
+    fn test_deploy_keyless_deploy_contract_existing_account_not_marked_created() {
+        let wrong_code = alloy_primitives::bytes!("0x6000");
+        let wrong_code_hash = alloy_primitives::keccak256(&wrong_code);
 
-    // If the contract is already deployed with the correct code, return early
-    if let Some(account_info) = acc.account_info() {
-        if account_info.code_hash == KEYLESS_DEPLOY_CODE_HASH {
-            // Although we do not need to update the account, we need to mark it as read
-            return Ok(Some(EvmState::from_iter([(
-                KEYLESS_DEPLOY_ADDRESS,
-                Account { info: account_info, ..Default::default() },
-            )])));
-        }
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(
+            KEYLESS_DEPLOY_ADDRESS,
+            AccountInfo {
+                balance: revm::primitives::U256::ZERO,
+                nonce: 0,
+                code_hash: wrong_code_hash,
+                code: Some(Bytecode::new_raw(wrong_code)),
+                account_id: None,
+            },
+        );
+
+        let mut state = State::builder().with_database(&mut db).build();
+        let hardforks = MegaHardforkConfig::default().with_all_activated();
+
+        let result = transact_deploy_keyless_deploy_contract(&hardforks, 0, &mut state)
+            .expect("Deployment should succeed")
+            .expect("Should return state");
+
+        let account = result.get(&KEYLESS_DEPLOY_ADDRESS).expect("Account should exist");
+        assert_eq!(account.info.code_hash, KEYLESS_DEPLOY_CODE_HASH);
+        assert!(account.is_touched());
+        assert!(
+            !account.is_created(),
+            "in-place bytecode update of an existing account must not mark it as created"
+        );
     }
 
-    // Update the account info with the contract code
-    let mut acc_info = acc.account_info().unwrap_or_default();
-    acc_info.code_hash = KEYLESS_DEPLOY_CODE_HASH;
-    acc_info.code = Some(Bytecode::new_raw(KEYLESS_DEPLOY_CODE));
+    #[test]
+    fn test_deploy_keyless_deploy_contract_requires_rex2() {
+        let mut db = InMemoryDB::default();
+        let mut state = State::builder().with_database(&mut db).build();
+        // A complete ladder topping out at Rex1: Rex2 is genuinely not reached.
+        let hardforks = MegaHardforkConfig::default().with_all_activated_through(MegaSpecId::REX1);
 
-    // Convert the cache account back into a revm account and mark it as touched.
-    let mut revm_acc: revm::state::Account = acc_info.into();
-    revm_acc.mark_touch();
-    revm_acc.mark_created();
-
-    Ok(Some(EvmState::from_iter([(KEYLESS_DEPLOY_ADDRESS, revm_acc)])))
+        let result = transact_deploy_keyless_deploy_contract(&hardforks, 0, &mut state)
+            .expect("Should succeed");
+        assert_eq!(result, None, "should not deploy before Rex2 activation");
+    }
 }

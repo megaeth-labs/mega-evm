@@ -8,10 +8,11 @@ use std::convert::Infallible;
 use alloy_primitives::{address, Address, Bytes, U256};
 use alloy_sol_types::{SolCall, SolError};
 use mega_evm::{
+    alloy_op_evm::OpTxError,
     constants::mini_rex::BLOCK_ENV_ACCESS_COMPUTE_GAS,
     test_utils::{BytecodeBuilder, MemoryDatabase},
     EvmTxRuntimeLimits, IMegaLimitControl, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId,
-    MegaTransaction, MegaTransactionError, LIMIT_CONTROL_ADDRESS, LIMIT_CONTROL_CODE,
+    MegaTransaction, MegaTransactionNew as _, LIMIT_CONTROL_ADDRESS, LIMIT_CONTROL_CODE,
 };
 use revm::{
     bytecode::opcode::{CALL, CALLCODE, DELEGATECALL, MSTORE, POP, RETURN, STATICCALL, TIMESTAMP},
@@ -46,7 +47,7 @@ fn transact(
     spec: MegaSpecId,
     db: &mut MemoryDatabase,
     tx: TxEnv,
-) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, MegaTransactionError>> {
+) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, OpTxError>> {
     let mut context = MegaContext::new(db, spec);
     context.modify_chain(|chain| {
         chain.operator_fee_scalar = Some(U256::from(0));
@@ -95,8 +96,7 @@ fn transact_with_compute_limit(
     db: &mut MemoryDatabase,
     tx_compute_gas_limit: u64,
     tx: TxEnv,
-) -> Result<(ResultAndState<MegaHaltReason>, u64, u64), EVMError<Infallible, MegaTransactionError>>
-{
+) -> Result<(ResultAndState<MegaHaltReason>, u64, u64), EVMError<Infallible, OpTxError>> {
     let mut context = MegaContext::new(db, spec).with_tx_runtime_limits(
         EvmTxRuntimeLimits::no_limits().with_tx_compute_gas_limit(tx_compute_gas_limit),
     );
@@ -669,6 +669,8 @@ fn test_inspector_sees_remaining_compute_gas_system_call() {
 // ============================================================================
 
 /// DELEGATECALL to the contract should NOT be intercepted.
+/// The scheme guard in `frame_init` rejects `DELEGATECALL` and `CALLCODE` before any
+/// interceptor sees the call; the unit-level coverage lives in `src/system/intercept.rs`.
 #[test]
 fn test_delegatecall_not_intercepted() {
     // Parent: DELEGATECALL to LIMIT_CONTROL_ADDRESS with selector,
@@ -700,6 +702,7 @@ fn test_delegatecall_not_intercepted() {
 }
 
 /// CALLCODE to the contract should NOT be intercepted.
+/// Same scheme-guard policy as `DELEGATECALL` above.
 #[test]
 fn test_callcode_not_intercepted() {
     // Parent: CALLCODE to LIMIT_CONTROL_ADDRESS with selector,

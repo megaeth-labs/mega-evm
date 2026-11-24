@@ -1,6 +1,6 @@
 ---
 description: MegaETH precompile gas overrides — KZG Point Evaluation and ModExp cost schedules diverging from standard Ethereum.
-spec: Rex4
+spec: Rex6
 ---
 
 # Precompiles
@@ -16,7 +16,10 @@ The overrides on this page exist to reduce that denial-of-service risk by bringi
 
 ## Specification
 
+The overrides on this page begin at MiniRex; under Equivalence a node runs the inherited precompile table unmodified.
 A node MUST inherit the standard precompile set from the Optimism Isthmus / Ethereum Prague baseline except for the following MegaETH-specific overrides.
+A node MUST preserve these MegaETH-specific overrides whenever it refreshes or reselects its internal precompile table.
+If multiple MegaETH specs share the same inherited upstream baseline, an implementation MUST NOT reconstruct the MegaETH precompile table from the upstream baseline identifier alone.
 
 | Precompile           | Address | MegaETH-Specific Behavior                                                             |
 | -------------------- | ------- | ------------------------------------------------------------------------------------- |
@@ -24,19 +27,34 @@ A node MUST inherit the standard precompile set from the Optimism Isthmus / Ethe
 | ModExp               | `0x05`  | Uses the Osaka / [EIP-7883](https://eips.ethereum.org/EIPS/eip-7883) pricing schedule |
 
 For KZG Point Evaluation, if the supplied gas is less than `KZG_POINT_EVALUATION_GAS_COST`, the precompile MUST fail with `OutOfGas`.
-Otherwise the node MUST charge exactly `KZG_POINT_EVALUATION_GAS_COST` gas for the precompile.
+Otherwise the precompile runs, and on a successful return the node MUST charge exactly `KZG_POINT_EVALUATION_GAS_COST` gas for it.
+
+The fixed charge applies to a successful return only.
+If the precompile runs and then fails — for example on malformed input — the inherited EVM's precompile-failure semantics apply unchanged, and the caller loses the entire gas limit it forwarded rather than the fixed cost.
+The compute gas recorded for that failure is a separate amount; see [Compute Gas Accounting](compute-gas.md#precompiles).
 
 For ModExp, the node MUST use the Osaka / [EIP-7883](https://eips.ethereum.org/EIPS/eip-7883) pricing schedule instead of the earlier inherited pricing schedule.
+
+One input shape deviates from the EIP-7883 formula: a call whose header declares `base_length = 0` and `modulus_length = 0` MUST be charged the flat `MODEXP_MIN_GAS_COST` minimum, regardless of the declared exponent length.
+This preserves the behavior of the implementation the schedule was adopted through, which returned the minimum before computing the formula cost; EIP-7883 as written has no such special case, and under its formula a large declared exponent length always prices these inputs above the minimum.
+The [EIP-7823](https://eips.ethereum.org/EIPS/eip-7823) input-size limits MUST still be enforced before this short-circuit: an oversized declared length fails the call even when base and modulus lengths are zero.
 
 All other precompiles MUST behave according to the inherited EVM baseline unless explicitly overridden elsewhere in this specification.
 
 ## Constants
 
-| Constant                        | Value   | Description                                            |
-| ------------------------------- | ------- | ------------------------------------------------------ |
-| `KZG_POINT_EVALUATION_GAS_COST` | 100,000 | Fixed gas cost for the KZG Point Evaluation precompile |
+| Constant                        | Value   | Description                                                                                           |
+| ------------------------------- | ------- | ----------------------------------------------------------------------------------------------------- |
+| `KZG_POINT_EVALUATION_GAS_COST` | 100,000 | Fixed gas cost for the KZG Point Evaluation precompile                                                |
+| `MODEXP_MIN_GAS_COST`           | 500     | Minimum charge for the ModExp precompile; the flat charge for the zero-base-and-modulus short-circuit |
+
+## Security Considerations
+
+This page has no security considerations.
 
 ## Spec History
 
 - [MiniRex](../upgrades/minirex.md) introduced the stable KZG Point Evaluation and ModExp overrides.
 - [Rex](../upgrades/rex.md), [Rex1](../upgrades/rex1.md), [Rex2](../upgrades/rex2.md), and [Rex3](../upgrades/rex3.md) retain the same stable overrides.
+- [Rex4](../upgrades/rex4.md) retains the same stable overrides; no change to KZG or ModExp pricing.
+- [Rex5](../upgrades/rex5.md) refines the KZG error-path compute-gas recording.

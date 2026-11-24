@@ -1,189 +1,40 @@
 # MegaETH EVM
 
-A specialized Ethereum Virtual Machine (EVM) implementation tailored for MegaETH specifications, built on top of [revm](https://github.com/bluealloy/revm) and [op-revm](https://github.com/bluealloy/op-revm).
+A specialized Ethereum Virtual Machine (EVM) implementation tailored for MegaETH specifications, built on top of [revm](https://github.com/bluealloy/revm) and [op-revm](https://github.com/ethereum-optimism/optimism/tree/develop/rust/op-revm).
 
-## Overview
+## Crates
 
-This repository contains a customized version of the revm EVM implementation specifically designed for MegaETH. The implementation extends the Optimism EVM (op-revm) with MegaETH-specific modifications and optimizations to support high-performance blockchain operations.
+| Crate                                            | Description                                                               |
+| ------------------------------------------------ | ------------------------------------------------------------------------- |
+| [mega-evm](crates/mega-evm)                      | Core EVM implementation with MegaETH specs (`EQUIVALENCE` through `REX6`) |
+| [mega-system-contracts](crates/system-contracts) | Solidity system contracts with Rust bindings                              |
+| [mega-evme](bin/mega-evme)                       | CLI tool for EVM execution (`run`, `tx`, `replay`, `cache`)               |
+| [mega-t8n](bin/mega-t8n)                         | Standalone state transition (t8n) tool                                    |
+| [mega-state-test](crates/mega-state-test)        | Ethereum state test fixtures and runner library (EEST-compatible)         |
+| [state-test](crates/state-test)                  | Thin CLI front-end over `mega-state-test`                                 |
 
-## EVM Version
+## Installation
 
-- **Base EVM**: [revm v27.1.0 (v83)](https://github.com/bluealloy/revm)
-- **Optimism EVM**: [op-revm v8.1.0 (v83)](https://github.com/bluealloy/op-revm)
-- **Alloy EVM**: [alloy-evm v0.15.0](https://github.com/alloy-rs/alloy-evm)
+The Rust build embeds checked-in system-contract bytecode.
 
-## Terminology: Spec vs Hardfork
-
-This codebase distinguishes between two related concepts:
-
-- **Spec (`MegaSpecId`)**: Defines EVM behavior - what the EVM does. Values: `EQUIVALENCE`, `MINI_REX`, `REX`, `REX1`, `REX2`, `REX3`, `REX4`
-- **Hardfork (`MegaHardfork`)**: Defines network upgrade events - when specs are activated. Values: `MiniRex`, `MiniRex1`, `MiniRex2`, `Rex`, `Rex1`, `Rex2`, `Rex3`, `Rex4`
-
-Multiple hardforks can map to the same spec. For example, both `MiniRex` and `MiniRex2` hardforks use the `MINI_REX` spec.
-
-## Key Features
-
-### EQUIVALENCE Spec
-
-- **Optimism Compatibility**: Maintains full compatibility with Optimism Isthmus EVM
-- **Parallel Execution Support**: Block environment access tracking for conflict detection
-
-### MINI_REX Spec
-
-- **Multidimensional Gas Model**: Independent tracking for compute gas (1B), data size (3.125 MB), and KV updates (125K)
-- **Compute Gas Tracking**: Separate limit for computational work with gas detention for volatile data access
-- **Dynamic Gas Costs**: SALT bucket-based scaling preventing state bloat
-- **Split LOG Costs**: Compute gas (standard) + storage gas (10× multiplier) for independent resource pricing
-- **SELFDESTRUCT Prohibition**: Complete disabling for contract integrity
-- **Large Contract Support**: 512 KB contracts (21x increase from 24 KB)
-- **Gas Detention**: Volatile data access (block env, beneficiary, oracle) triggers gas limiting with refunds
-- **Enhanced Security**: Comprehensive limit enforcement preserving remaining gas on limit violations
-
-For complete MiniRex specification, see the [MiniRex upgrade page](https://megaeth-labs.github.io/mega-evm/upgrades/minirex.html).
-
-### REX Spec
-
-- **Refined Storage Gas Economics**: Optimized storage gas formulas with gradual scaling (20K-32K base costs vs. MiniRex's 2M)
-- **Transaction Intrinsic Storage Gas**: 39,000 storage gas baseline for all transactions (total 60K with compute gas)
-- **Zero Cost Fresh Storage**: Storage operations in minimum-sized SALT buckets charge 0 storage gas
-- **Separate Contract Creation Cost**: Distinct storage gas for contract creation (32K base) vs. account creation (25K base)
-- **Critical Security Fixes**: DELEGATECALL, STATICCALL, and CALLCODE now properly enforce 98/100 gas forwarding and oracle access detection
-- **MiniRex Foundation**: Inherits all MiniRex features including multidimensional gas model, compute gas detention, and enhanced security
-
-For complete Rex specification, see the [Rex upgrade page](https://megaeth-labs.github.io/mega-evm/upgrades/rex.html).
-
-### REX1 Spec
-
-- **Limit Reset Fix**: Resets compute gas limits at the start of each transaction
-- **No Other Behavioral Changes**: Inherits Rex semantics fully
-
-For complete Rex1 specification, see the [Rex1 upgrade page](https://megaeth-labs.github.io/mega-evm/upgrades/rex1.html).
-
-### REX2 Spec
-
-- **SELFDESTRUCT Restored**: Re-enabled with EIP-6780 semantics
-- **KeylessDeploy System Contract**: Enables keyless deployment (Nick's Method) with custom gas limits
-- **Rex1 Baseline**: Inherits Rex1 behavior for all other features
-
-For complete Rex2 specification, see the [Rex2 upgrade page](https://megaeth-labs.github.io/mega-evm/upgrades/rex2.html).
-
-### REX3 Spec
-
-- **Increased Oracle Access Gas Limit**: Oracle access compute gas limit raised from 1M to 20M, allowing more post-oracle computation
-- **SLOAD-based Oracle Detention**: Oracle gas detention triggers on SLOAD from oracle storage instead of CALL to oracle contract
-- **Keyless Deploy Compute Gas Tracking**: Records the 100K keyless deploy overhead as compute gas
-- **Rex2 Baseline**: Inherits all Rex2 behavior
-
-For complete Rex3 specification, see the [Rex3 upgrade page](https://megaeth-labs.github.io/mega-evm/upgrades/rex3.html).
-
-### REX4 Spec
-
-- **Per-Call-Frame Resource Budgets**: All four resource dimensions (compute gas, data size, KV updates, state growth) are bounded per call frame with 98/100 forwarding
-- **Relative Gas Detention**: Effective detained limit is `current_usage + cap` instead of an absolute cap
-- **Storage Gas Stipend**: Value-transferring CALL/CALLCODE receives an additional 23,000 gas for storage gas operations
-- **MegaAccessControl System Contract**: Allows contracts to proactively disable volatile data access for a call subtree
-- **MegaLimitControl System Contract**: Allows querying effective remaining compute gas under detention and call frame limits
-- **Rex3 Baseline**: Inherits all Rex3 behavior
-
-For complete Rex4 specification, see the [Rex4 upgrade page](https://megaeth-labs.github.io/mega-evm/upgrades/rex4.html).
-
-## Quick Start
-
-### Basic Usage
-
-```rust
-use mega_evm::{Context, Evm, SpecId, Transaction};
-use revm::{
-    context::TxEnv,
-    database::{CacheDB, EmptyDB},
-    inspector::NoOpInspector,
-    primitives::TxKind,
-};
-
-// Create EVM instance with MINI_REX spec
-let mut db = CacheDB::<EmptyDB>::default();
-let spec = SpecId::MINI_REX;
-let mut context = Context::new(db, spec);
-let mut evm = Evm::new(context, NoOpInspector);
-
-// Execute transaction
-let tx = Transaction {
-    base: TxEnv {
-        caller: address!("..."),
-        kind: TxKind::Call(target_address),
-        data: Bytes::default(),
-        value: U256::ZERO,
-        gas_limit: 1000000,
-        ..Default::default()
-    },
-    ..Default::default()
-};
-
-let result = alloy_evm::Evm::transact_raw(&mut evm, tx)?;
-```
-
-## Command Line Tool: `mega-evme`
-
-The `mega-evme` binary provides a command-line interface for executing and debugging EVM transactions, similar to go-ethereum's `evm` tool.
-
-### Installation
+From GitHub:
 
 ```bash
-cargo build --release -p mega-evme
-# Binary will be at ./target/release/mega-evme
+cargo install --git https://github.com/megaeth-labs/mega-evm --locked mega-evme
 ```
 
-### Commands
-
-| Command  | Description                                     |
-| -------- | ----------------------------------------------- |
-| `run`    | Execute arbitrary EVM bytecode directly         |
-| `tx`     | Run a transaction with full transaction context |
-| `replay` | Replay an existing transaction from RPC         |
-
-### Basic Usage
+From a Git checkout:
 
 ```bash
-# Execute bytecode directly
-mega-evme run 0x60016000526001601ff3
-
-# Run a transaction with state forking
-mega-evme tx --fork --fork.rpc https://rpc.example.com \
-  --receiver 0x1234... --input 0x...
-
-# Replay a transaction from RPC
-mega-evme replay 0xTxHash --rpc https://rpc.example.com
+git clone --recursive https://github.com/megaeth-labs/mega-evm
+cd mega-evm
+cargo install --locked --path bin/mega-evme
 ```
-
-### Spec Selection
-
-Spec names are case-sensitive and match `MegaSpecId` strings: `Equivalence`, `MiniRex`, `Rex`,
-`Rex1`, `Rex2`, `Rex3`, `Rex4`. Use `--spec` for `run`/`tx`, and `--override.spec` for `replay`.
-
-```bash
-# Run with a specific spec
-mega-evme run 0x60016000526001601ff3 --spec Rex2
-```
-
-### Transaction Types
-
-The `tx` command supports multiple transaction types with type-specific options:
-
-| Type | Name     | Specific Options                                 |
-| ---- | -------- | ------------------------------------------------ |
-| 0    | Legacy   | -                                                |
-| 1    | EIP-2930 | `--access ADDRESS:KEY1,KEY2,...`                 |
-| 2    | EIP-1559 | `--priority-fee`, `--access`                     |
-| 4    | EIP-7702 | `--auth AUTHORITY:NONCE->DELEGATION`, `--access` |
-| 126  | Deposit  | `--source-hash`, `--mint`                        |
-
-For detailed documentation, see [mega-evme README](bin/mega-evme/README.md).
 
 ## Development
 
-### Cloning the Repository
-
-This repository uses git submodules. Clone with submodules:
+This repository uses git submodules.
+Clone with submodules:
 
 ```bash
 git clone --recursive https://github.com/megaeth-labs/mega-evm.git
@@ -201,21 +52,28 @@ git submodule update --init --recursive
 cargo build
 ```
 
+Cargo checks the system-contract artifacts against the checked-in Rust constants in a repository checkout.
+The check is read-only.
+Published crates use the same embedded constants.
+
+### System contracts
+
+Run `mise run system-contracts:attest` with Foundry v1.7.1 and initialized submodules.
+Attestation checks the contract inventory, reproduces the latest deployed bytecode with the pinned Osaka EVM target, and checks the SequencerRegistry storage layout.
+After updating versioned artifacts and their latest aliases, run `mise run system-contracts:generate` to regenerate the Rust constants.
+The required `lint` CI job runs attestation, checks that changing a Solidity version in a temporary copy makes attestation fail, and verifies that the Rust constants match the artifacts.
+Rust tests pin each versioned artifact's code hash and the version selected by each latest alias.
+
 ### Testing
 
 ```bash
-cargo test
-```
-
-### Running Examples
-
-```bash
-cargo run --example block_env_tracking
+cargo test --workspace
 ```
 
 ## Documentation
 
-- **[ARCH.md](ARCH.md)**: Detailed implementation architecture and technical specifications
+- [mega-evm specification](https://docs.megaeth.com/spec/)
+- [Architecture](ARCH.md)
 
 ## License
 

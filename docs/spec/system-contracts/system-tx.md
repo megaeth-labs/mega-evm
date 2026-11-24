@@ -1,6 +1,6 @@
 ---
 description: Mega system transactions — sender/recipient identification rules, whitelisted contracts, and execution bypass semantics.
-spec: Rex4
+spec: Rex6
 ---
 
 # Mega System Transactions
@@ -10,12 +10,18 @@ These transactions provide protocol-level maintenance access to whitelisted syst
 
 ## Motivation
 
-MegaETH needs a protocol-native mechanism for sequencer-managed maintenance operations such as updating Oracle state.
+MegaETH needs a protocol-native mechanism for protocol-managed maintenance operations such as updating Oracle state.
 Those operations must execute with special fee and validation semantics while remaining part of the verifiable execution model.
 
 Mega System Transactions provide that mechanism.
 
 ## Specification
+
+### Resolution
+
+`MEGA_SYSTEM_ADDRESS` is the authorized system-transaction sender for the current block.
+A node MUST resolve it per block from [`SequencerRegistry.currentSystemAddress()`](sequencer-registry.md) after all pre-block changes are committed.
+The fixed constant `0xA887dCB9D5f39Ef79272801d05Abdf707CFBbD1d` is the genesis seed value for this address (see [Constants](#constants)); subsequent rotations are reflected by the registry value.
 
 ### Identification
 
@@ -45,6 +51,33 @@ Although nonce validation is bypassed, the sender nonce MUST still increment aft
 
 Mega System Transactions MUST NOT cause state changes to the block beneficiary or fee vaults.
 
+Before applying the special semantics above, a node MUST validate the transaction's chain id, nonce, and sender-code status against the same canonical rules that ordinary transactions follow:
+
+- The transaction's chain id MUST be present and MUST equal the node's configured chain id, unless the chain-id check is disabled by node configuration.
+- The transaction's nonce MUST equal the current account nonce of `MEGA_SYSTEM_ADDRESS`, unless the nonce check is disabled by node configuration.
+- If `MEGA_SYSTEM_ADDRESS` carries code, the EIP-3607 sender-has-code rule applies, unless EIP-3607 enforcement is disabled by node configuration.
+
+A transaction failing any of these checks MUST be rejected with the corresponding canonical invalid-transaction error (missing chain id, invalid chain id, nonce too low, nonce too high, or caller-has-code rejection) before any state mutation, signature bypass, or fee bypass takes effect.
+The remaining bypasses (signature, gas-fee charging, balance) MUST still apply once these checks pass.
+
+### System-Originated Transaction Metering Exemption
+
+A transaction is **system-originated** when either:
+
+- its caller is the [EIP-2935](https://eips.ethereum.org/EIPS/eip-2935) / [EIP-4788](https://eips.ethereum.org/EIPS/eip-4788) system address `0xfffffffffffffffffffffffffffffffffffffffe`, which is how the protocol issues its pre-block system calls (block-hash and beacon-root updates, and `SequencerRegistry.applyPendingChanges()`); or
+- it is a Mega System Transaction, recognized both before and after its deposit promotion.
+
+Ordinary user transactions — including user deposit transactions — are never system-originated.
+
+A node MUST exempt a system-originated transaction from MegaETH's per-transaction resource metering:
+
+- Dynamic storage gas MUST be charged at the [minimum bucket capacity](../evm/dual-gas-model.md#dynamic-salt-multiplier) (`multiplier = 1`), so the cost does not depend on actual SALT bucket capacity.
+- The four [runtime transaction-level resource limits](../evm/resource-limits.md#runtime-transaction-level-limits) (compute gas, data size, KV updates, state growth) MUST NOT halt the transaction.
+- The [gas detention](../evm/gas-detention.md) compute-gas cap MUST NOT halt the transaction.
+- Resource usage MUST still be recorded; only the per-transaction halt decision is suppressed.
+
+The transaction's standard EVM `gas_limit` — for the pre-block system calls, floored at `SYSTEM_CALL_GAS_LIMIT_FLOOR` (30,000,000) — remains the only bound that can halt a system-originated transaction.
+
 ### Scope
 
 This page specifies the execution semantics of Mega System Transactions.
@@ -67,7 +100,30 @@ Giving them distinct execution treatment makes that behavior explicit.
 Whitelisted target contracts must be able to distinguish protocol-maintenance calls from ordinary user calls.
 Preserving the caller identity provides that signal without introducing a separate call context type.
 
+**Why restore the chain-id, nonce, and EIP-3607 checks?**
+Earlier specs bypassed all four canonical pre-checks via OP-style deposit promotion.
+OP deposits can do this because L1 derivation and per-deposit source-hash uniqueness provide replay protection at a higher layer.
+MegaETH system transactions have neither, so the canonical chain-id, nonce, and sender-code checks are restored to guard against replay and cross-chain misuse.
+The configuration toggles for these checks are honored so that the system-transaction validation path stays symmetric with the ordinary user-transaction validation path for debugging, state-test, and replay tooling.
+
+## Security Considerations
+
+**The no-fee/no-nonce exemption MUST apply exclusively to addresses in `MEGA_SYSTEM_TX_WHITELIST`.**
+If the whitelist check were absent or misconfigured, any legacy transaction from `MEGA_SYSTEM_ADDRESS` could bypass gas fees and nonce validation for arbitrary targets, enabling cost-free state manipulation across the entire chain.
+
+**Adding an address to `MEGA_SYSTEM_TX_WHITELIST` is a consensus-critical change.**
+Any modification to the stable whitelist changes which transactions receive privileged processing.
+Such changes MUST be gated by a spec upgrade to ensure all nodes agree on the new whitelist contents at the same activation point.
+
+**CREATE transactions from `MEGA_SYSTEM_ADDRESS` MUST NOT receive privileged processing.**
+Allowing fee-exempt contract creation would let `MEGA_SYSTEM_ADDRESS` deploy arbitrary code at no cost, which is outside the intended maintenance scope.
+
 ## Spec History
 
 - [MiniRex](../upgrades/minirex.md) introduced Mega System Transactions and the `MEGA_SYSTEM_ADDRESS` mechanism.
 - [Rex](../upgrades/rex.md), [Rex1](../upgrades/rex1.md), [Rex2](../upgrades/rex2.md), and [Rex3](../upgrades/rex3.md) retain the same stable semantics.
+- [Rex5](../upgrades/rex5.md) dynamized the system address — it is no longer a compile-time constant but is resolved per block from `SequencerRegistry.currentSystemAddress()` — and restored the canonical chain-id, nonce, and EIP-3607 sender-code checks that earlier specs bypassed via deposit promotion.
+  Blocks before Rex5 continue to use the legacy `MEGA_SYSTEM_ADDRESS` constant and the deposit-promotion bypasses.
+  The system transaction identification logic and whitelist are unchanged.
+- [Rex6](../upgrades/rex6.md) exempts system-originated transactions (pre-block system calls and Mega System Transactions) from per-transaction resource metering: dynamic storage gas is charged at minimum bucket capacity, and the four resource-limit dimensions plus gas detention no longer halt them; usage is still recorded and the standard `gas_limit` remains the only halting bound.
+  Specs through Rex5 meter every transaction, including the protocol's own, identically to user transactions.

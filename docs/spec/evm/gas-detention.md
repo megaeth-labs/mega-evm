@@ -1,6 +1,6 @@
 ---
 description: MegaETH gas detention specification — compute gas caps triggered by volatile data access (block environment, oracle SLOAD).
-spec: Rex4
+spec: Rex6
 ---
 
 # Gas Detention
@@ -72,6 +72,12 @@ A node MUST apply beneficiary gas detention with cap `BENEFICIARY_DETENTION_CAP`
 
 `SELFDESTRUCT` targeting the beneficiary MUST also trigger beneficiary gas detention.
 
+When a `CALL`, `CALLCODE`, `DELEGATECALL`, or `STATICCALL` loads a target account whose code is an [EIP-7702](https://eips.ethereum.org/EIPS/eip-7702) delegation designation, the node MUST resolve the delegation one hop and mark beneficiary access when either the raw target or the resolved delegate equals the beneficiary.
+
+A node MUST also apply beneficiary gas detention when an _applied_ EIP-7702 authorization — one that passes the chain-id, nonce, and code application gates and therefore writes the authority account — has an authority address equal to the block beneficiary.
+Applying such an authorization mutates beneficiary state (nonce and delegation code), so the node MUST mark beneficiary access and re-derive the effective compute-gas detention cap during transaction validation, even though no opcode in the list above was executed.
+A skipped authorization whose authority equals the beneficiary MUST NOT trigger detention.
+
 #### Oracle Access
 
 A node MUST apply oracle gas detention with cap `ORACLE_DETENTION_CAP` when a transaction performs `SLOAD` against the storage of the [oracle contract](../system-contracts/oracle.md).
@@ -107,6 +113,9 @@ When a volatile-data trigger occurs, the node MUST perform the following steps i
 
 After detention has been applied, any subsequent execution step that would cause `compute_gas_used` to exceed the effective detained limit MUST halt the transaction with `VolatileDataAccessOutOfGas`.
 
+The detained compute-gas limit MUST NOT halt a [system-originated transaction](../system-contracts/system-tx.md#system-originated-transaction-metering-exemption).
+Volatile-data accesses by such a transaction are still tracked, but the detention cap is not enforced against it; its standard EVM `gas_limit` remains the only halting bound.
+
 ### Refund Semantics
 
 Gas detention does not consume the detained portion of the transaction's gas budget.
@@ -136,6 +145,26 @@ If a child call frame triggers detention, the reduced effective compute gas limi
 If volatile access occurs inside a call frame that later reverts, the compute gas already consumed remains consumed.
 The detained compute gas limit MUST remain in effect for the rest of the transaction.
 
+#### Frames That Run Out of Gas on the Triggering Opcode
+
+Detention is triggered by the volatile read itself, not by the successful completion of the opcode that issues it.
+`BALANCE`, `EXTCODESIZE`, `EXTCODEHASH`, `EXTCODECOPY`, `SLOAD` and `SELFDESTRUCT` consume their operands and register their volatile access before that access is charged for.
+For `EXTCODECOPY` this includes its copy cost and its memory expansion: both are charged after the access is registered.
+A frame that reaches one of them holding less gas than the access costs therefore still registers the access, and the registration MUST survive that frame's out-of-gas halt for the rest of the transaction.
+`SELFDESTRUCT` checks for a static context before it consumes its operand, so a `SELFDESTRUCT` rejected in a static frame registers nothing.
+From Rex5, a `SELFDESTRUCT` that sends a nonzero balance to an empty beneficiary first charges the new-account storage gas, and registers the access only if that charge succeeds.
+The CALL-family opcodes register the access when they read the target account.
+That read follows the operand consumption, the new-account storage gas where one is charged, the rejection of a value transfer from a static context, and the input and output memory expansion, but precedes the base access cost and the value-transfer cost.
+A CALL-family frame that halts on the base access cost or the value-transfer cost therefore still registers the access, and one that halts on any earlier step does not.
+From Rex6, a CALL-family opcode whose target delegates through EIP-7702 to the beneficiary registers the access in the same way.
+The reduced compute gas limit binds at detention enforcement points.
+Once execution has started, these are the volatile-guarded opcodes that complete, and, before Rex3, a call into the oracle contract that registers oracle access, as its frame starts.
+The volatile-guarded opcodes are the block-environment opcodes listed above together with `BALANCE`, `EXTCODESIZE`, `EXTCODECOPY` and `EXTCODEHASH`, `SLOAD` from Rex3, and `SELFBALANCE`, `SELFDESTRUCT` and the CALL-family opcodes from Rex4; each is an enforcement point whatever account or slot it reads.
+A volatile-guarded opcode that halts, or that `disableVolatileDataAccess()` rejects, enforces nothing, with one exception: from Rex4 the CALL-family opcodes enforce the limit even when their frame halts, so a registration they make binds at once.
+A registration made by any other halting frame takes effect at the next enforcement point the transaction reaches, in any frame.
+If a halting read leaves a registration unapplied and the transaction reaches no later enforcement point, its remainder runs under the limit already in effect.
+An access blocked by [`disableVolatileDataAccess()`](../system-contracts/mega-access-control.md) is the exception: the blocked opcode never runs, so it reads nothing and triggers nothing.
+
 ## Constants
 
 | Constant                       | Value      | Description                                                          |
@@ -144,6 +173,8 @@ The detained compute gas limit MUST remain in effect for the rest of the transac
 | `BENEFICIARY_DETENTION_CAP`    | 20,000,000 | Relative compute gas cap after beneficiary access                    |
 | `ORACLE_DETENTION_CAP`         | 20,000,000 | Relative compute gas cap after oracle storage access                 |
 | `ORACLE_DETENTION_CAP_MINIREX` | 1,000,000  | Historical absolute compute gas cap after oracle access (superseded) |
+
+`BLOCK_ENV_DETENTION_CAP` and `BENEFICIARY_DETENTION_CAP` have the same value: block-environment and beneficiary access are detained at the same level.
 
 ## Rationale
 
@@ -165,6 +196,13 @@ Allowing a less restrictive later trigger to relax an earlier cap would make det
 The purpose of detention is to bound the remainder of execution after volatile access.
 If the cap were scoped only to the triggering call frame, contracts could evade the limit by returning to a parent frame and continuing computation there.
 
+## Security Considerations
+
+**If detention is call-frame-scoped rather than transaction-scoped**, a contract can trigger volatile access inside a child call frame, revert the frame, and resume unbounded execution in the parent — entirely bypassing detention.
+Transaction-level scoping is essential to preserve the invariant that compute gas after any volatile access is bounded.
+
+**If detention applied in a call frame that later reverts is reversed**, an attacker can trigger volatile access inside a frame it then reverts to escape the detention cap for the rest of the transaction.
+
 ## Spec History
 
 Gas detention semantics evolved across specs:
@@ -174,3 +212,4 @@ Gas detention semantics evolved across specs:
 - [Rex1](../upgrades/rex1.md) — reset detained compute gas limit between transactions in the same block
 - [Rex3](../upgrades/rex3.md) — raised oracle cap to 20M and changed oracle detection from CALL-based to SLOAD-based
 - [Rex4](../upgrades/rex4.md) — changes absolute detention to relative detention and adds additional beneficiary-triggered behavior
+- [Rex6](../upgrades/rex6.md) — adds a beneficiary-detention trigger for an applied EIP-7702 authorization whose authority equals the block beneficiary; resolves a CALL-family target's EIP-7702 delegation one hop before the beneficiary comparison, so a call through a delegator whose delegate is the beneficiary triggers detention (through Rex5 only the raw target is compared); and stops enforcing the detention cap against system-originated transactions, whose volatile accesses are still tracked

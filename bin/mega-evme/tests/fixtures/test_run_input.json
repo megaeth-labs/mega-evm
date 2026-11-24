@@ -1,0 +1,10 @@
+{
+  "description": "Calldata is passed to bytecode and echoed back via CALLDATACOPY + RETURN",
+  "args": ["run", "--input", "0xdeadbeef", "0x366000600037366000f3"],
+  "expected": {
+    "success": true,
+    "gas_used": 60726,
+    "output": "0xdeadbeef",
+    "logs_count": 0
+  }
+}

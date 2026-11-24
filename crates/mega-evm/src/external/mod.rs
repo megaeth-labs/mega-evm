@@ -20,6 +20,8 @@ use core::fmt::Debug;
 
 mod factory;
 mod gas;
+#[cfg(any(test, feature = "test-utils"))]
+mod hasher;
 mod oracle;
 mod salt;
 #[cfg(any(test, feature = "test-utils"))]
@@ -27,6 +29,8 @@ mod test_utils;
 
 pub use factory::*;
 pub use gas::*;
+#[cfg(any(test, feature = "test-utils"))]
+pub use hasher::*;
 pub use oracle::*;
 pub use salt::*;
 #[cfg(any(test, feature = "test-utils"))]

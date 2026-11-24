@@ -32,11 +32,14 @@ Uses a single gas price (`--basefee`) for all gas costs.
 
 ```bash
 mega-evme tx --tx-type 0 \
+  --sender.balance 1ether \
   --receiver 0x4200000000000000000000000000000000000006 \
   --gas 100000 \
   --basefee 1000000000 \
   --input 0x06fdde03
 ```
+
+A transaction with a non-zero `--basefee` requires the sender to hold enough balance to cover `gas × basefee`; fund it with `--sender.balance` (or run against forked/prestate state).
 
 ## Type 1 — EIP-2930 (Access List)
 
@@ -54,11 +57,13 @@ Access list entry format:
 - `ADDRESS` — pre-warm an address (no storage keys)
 - `ADDRESS:KEY1,KEY2,...` — pre-warm an address and specific storage keys (comma-separated)
 
+Storage keys are full 32-byte hex values (64 hex digits, `0x`-prefixed); abbreviated forms like `0x0` are rejected.
+
 ```bash
 mega-evme tx --tx-type 1 \
   --receiver 0x4200000000000000000000000000000000000006 \
   --access "0x4200000000000000000000000000000000000006" \
-  --access "0x28B7E77f82B25B95953825F1E3eA0E36c1c29861:0x0,0x1" \
+  --access "0x28B7E77f82B25B95953825F1E3eA0E36c1c29861:0x0000000000000000000000000000000000000000000000000000000000000000,0x0000000000000000000000000000000000000000000000000000000000000001" \
   --input 0x06fdde03
 ```
 
@@ -69,10 +74,11 @@ Also supports access lists.
 
 ```bash
 mega-evme tx --tx-type 2 \
+  --sender.balance 1ether \
   --receiver 0x4200000000000000000000000000000000000006 \
   --basefee 30000000000 \
   --priority-fee 1000000000 \
-  --access "0x4200000000000000000000000000000000000006:0x0" \
+  --access "0x4200000000000000000000000000000000000006:0x0000000000000000000000000000000000000000000000000000000000000000" \
   --input 0x06fdde03
 ```
 

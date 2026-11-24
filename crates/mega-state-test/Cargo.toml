@@ -1,0 +1,41 @@
+[package]
+name = "mega-state-test"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Self-contained EEST-compatible state-test fixtures and runner for mega-evm"
+# The integration tests read fixtures from `bench/replay/fixtures/`, which is
+# outside this crate directory and thus absent from the published package.
+exclude = ["tests/"]
+
+[lints]
+workspace = true
+
+[dependencies]
+mega-evm = { workspace = true, features = ["default", "test-utils"] }
+
+# alloy
+alloy-eips = { workspace = true, features = ["serde"] }
+alloy-primitives.workspace = true
+alloy-rlp.workspace = true
+alloy-serde.workspace = true
+
+# misc
+hash-db.workspace = true
+indicatif.workspace = true
+k256.workspace = true
+plain_hasher.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+triehash.workspace = true
+walkdir.workspace = true
+
+# Published as `mega-state-test`; the library keeps the `state_test` import name
+# so the `state-test` CLI and the mega-evme / mega-t8n consumers are unaffected.
+[lib]
+name = "state_test"
+path = "src/lib.rs"

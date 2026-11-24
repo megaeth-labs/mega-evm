@@ -3,11 +3,18 @@
 //! This module provides functionality to replay historical transactions
 //! by fetching them from an RPC endpoint and re-executing them.
 
+mod batch;
 mod cmd;
+mod coherence;
+mod fixture;
 mod hardforks;
+mod header;
+mod kernel;
+mod verify;
+mod world;
 
 pub use cmd::Cmd;
 pub use hardforks::*;
 
 // Re-export EvmeError and Result from common module
-pub use crate::common::{EvmeError as ReplayError, Result};
+pub use crate::common::{EvmeError as ReplayError, Result, RpcArgs};

@@ -1,0 +1,13 @@
+# mega-evme replay equivalence baseline
+# case:    single_override_gas_limit_human
+# capture: replay_offline.cache.json
+# argv:    replay --rpc.replay-file <CAPTURE> --override.gas-limit 50000 0x41d34e7e13dfe0f85da9d407e2b2c381955d8c7eed428b17dc82327b2616b000
+
+== exit code ==
+1
+
+== stdout ==
+(empty)
+
+== stderr ==
+error: Block execution error: EVM reported invalid transaction (0x41d34e7e13dfe0f85da9d407e2b2c381955d8c7eed428b17dc82327b2616b000): call gas cost (64092) exceeds the gas limit (50000)

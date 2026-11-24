@@ -5,9 +5,25 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 description = "System contracts for the MegaETH EVM"
+homepage.workspace = true
+repository.workspace = true
+exclude = [
+    "artifacts/",
+    "contracts/*.sol",
+    "lib/",
+    "scripts/",
+    "test/",
+    "foundry.toml",
+    "foundry.lock",
+    "remappings.txt",
+]
 
 [build-dependencies]
+# alloy
 alloy-primitives = { workspace = true, features = ["serde"] }
+
+# misc
+anyhow = { workspace = true, features = ["std"] }
 semver = { workspace = true, features = ["serde"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true, features = ["std"] }
@@ -18,6 +34,9 @@ workspace = true
 [dependencies]
 alloy-primitives.workspace = true
 alloy-sol-types.workspace = true
+
+[dev-dependencies]
+serde_json = { workspace = true, features = ["std"] }
 
 [features]
 default = ["std"]

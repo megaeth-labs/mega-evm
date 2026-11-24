@@ -1,42 +1,81 @@
-//! `MegaEVM` CLI tool for Ethereum state transitions and testing
+//! `mega-evme` CLI binary.
 //!
-//! This tool provides a command-line interface for executing Ethereum state transitions
-//! using the `MegaEVM` implementation.
+//! All business logic lives in the `mega_evme` library crate (`src/lib.rs`).
+//! This binary is intentionally minimal: parse CLI arguments, install the panic
+//! hook, dispatch to the parsed command, and exit.
+//!
+//! This is the only place a finished command becomes a process status; the
+//! taxonomy of statuses lives in `common::exit`.
+
+use std::process::ExitCode;
 
 use clap::Parser;
-
-mod cmd;
-mod common;
-mod hasher;
-/// Replay module for fetching and executing transactions from RPC
-pub mod replay;
-/// Run module for executing arbitrary EVM bytecode
-pub mod run;
-/// T8N (state transition) module containing all transition-related functionality
-pub mod t8n;
-/// TX module for executing arbitrary transactions
-pub mod tx;
-
-pub use cmd::*;
-pub use common::*;
+use mega_evme::{
+    cmd::MainCmd, print_json_error, raw_argv_wants_json, report_command_result,
+    set_thread_panic_hook,
+};
 
 #[tokio::main]
-async fn main() -> std::result::Result<(), Error> {
+async fn main() -> ExitCode {
     set_thread_panic_hook();
-    MainCmd::parse().run().await.inspect_err(|e| println!("{e:?}"))
+
+    // Test-only injection: force a panic after the process-wide hook is
+    // installed so integration tests can pin the structured JSON envelope on
+    // an open stdout. Same gate as the fixture pre-state inject
+    // (`test-utils`, enabled for the test-profile binary via the self
+    // dev-dependency). Production builds never carry this branch.
+    // `manual_assert` is allowed: this must be a plain `panic!` payload so the
+    // hook message stays `panic: …`, not an assertion-failure rewrite.
+    #[cfg(feature = "test-utils")]
+    #[allow(clippy::manual_assert)]
+    if std::env::var_os("MEGA_EVME_INJECT_PANIC").is_some() {
+        panic!("injected panic for panic-hook JSON envelope test");
+    }
+
+    let cmd = match MainCmd::try_parse() {
+        Ok(cmd) => cmd,
+        Err(err) => {
+            // `--help` / `--version` are not failures: clap writes them to
+            // stdout and the run exits 0. A usage error is bad input, which the
+            // taxonomy classifies with the other input errors.
+            let _ = err.print();
+            if !err.use_stderr() {
+                return ExitCode::SUCCESS;
+            }
+            let code = mega_evme::ExitCode::ExecutionError;
+            // The parsed command does not exist yet, so the output mode is read
+            // off the raw arguments: a `--json` run must end its stdout with the
+            // structured error object even when it never got as far as running.
+            if raw_argv_wants_json() {
+                print_json_error(code, &parse_error_summary(&err));
+            }
+            return ExitCode::from(code);
+        }
+    };
+
+    // Read the output mode before `run` consumes the command.
+    let json = cmd.json_output();
+    let result = cmd.run().await;
+    ExitCode::from(report_command_result(result, json))
 }
 
-/// Sets thread panic hook, useful for having tests that panic.
-fn set_thread_panic_hook() {
-    use std::{
-        backtrace::Backtrace,
-        panic::{set_hook, take_hook},
-        process::exit,
-    };
-    let orig_hook = take_hook();
-    set_hook(Box::new(move |panic_info| {
-        println!("Custom backtrace: {}", Backtrace::capture());
-        orig_hook(panic_info);
-        exit(1);
-    }));
+/// One-line summary of an argument parsing failure.
+///
+/// `clap` renders a multi-line report — the message, the usage block, and the
+/// help hint — of which only the leading message paragraph describes what went
+/// wrong; it is joined into the single line the structured object carries.
+fn parse_error_summary(err: &clap::Error) -> String {
+    let rendered = err.to_string();
+    let summary = rendered
+        .lines()
+        .map(str::trim)
+        .take_while(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let summary = summary.strip_prefix("error: ").unwrap_or(&summary).trim();
+    if summary.is_empty() {
+        "invalid command-line arguments".to_string()
+    } else {
+        summary.to_string()
+    }
 }

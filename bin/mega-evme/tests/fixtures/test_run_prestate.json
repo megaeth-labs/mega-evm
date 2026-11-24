@@ -1,0 +1,17 @@
+{
+  "description": "--prestate loads dumped state: SLOAD reads 0xaa from slot 0 of preloaded account",
+  "args": [
+    "run",
+    "--prestate", "{fixtures}/prestate_data.json",
+    "--sender", "0x1111111111111111111111111111111111111111",
+    "--sender.balance", "1ether",
+    "--receiver", "0x0000000000000000000000000000000000000000",
+    "0x60005460005260206000f3"
+  ],
+  "expected": {
+    "success": true,
+    "gas_used": 62118,
+    "output": "0x00000000000000000000000000000000000000000000000000000000000000aa",
+    "logs_count": 0
+  }
+}

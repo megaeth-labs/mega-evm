@@ -2,6 +2,16 @@
 //!
 //! It groups the constants for different EVM specs as sub-modules.
 
+/// Frozen gas limit for pre-REX5 system calls (EIP-2935 / EIP-4788 pre-block helpers
+/// and the default `SystemCallEvm` / `transact_system_call` entry points).
+///
+/// Value is intentionally independent of
+/// [`revm::handler::system_call::SYSTEM_CALL_GAS_LIMIT`], which revm 40 redefined as
+/// `30_000_000 + state-gas reservoir` (`31_566_720` under bal-devnet-7). Frozen `MegaETH`
+/// specs must keep the historical 30M budget for replay parity; do not alias or follow
+/// the upstream constant.
+pub const PRE_REX5_SYSTEM_CALL_GAS_LIMIT: u64 = 30_000_000;
+
 /// Constants for the `EQUIVALENCE` spec.
 pub mod equivalence {
     use revm::interpreter::gas;
@@ -129,6 +139,31 @@ pub mod rex4 {
     /// On return, unused `STORAGE_CALL_STIPEND` is burned — it is never returned to the caller.
     pub const STORAGE_CALL_STIPEND: u64 = 23_000;
 }
+
+/// Constants for the `REX5` spec.
+pub mod rex5 {
+    /// Floor for the gas limit assigned to REX5 pre-block system calls that opt
+    /// into the live block gas budget via
+    /// [`crate::MegaEvm::transact_system_call_with_gas_limit`] — currently the
+    /// `SequencerRegistry.applyPendingChanges()`, EIP-2935 history-storage, and
+    /// EIP-4788 beacon-roots pre-block calls.
+    ///
+    /// Same historical 30M value as [`super::PRE_REX5_SYSTEM_CALL_GAS_LIMIT`],
+    /// and a floor so chains whose block gas limit is smaller still receive
+    /// that budget.
+    ///
+    /// Do NOT raise this to follow upstream
+    /// [`revm::handler::system_call::SYSTEM_CALL_GAS_LIMIT`]: revm 40 redefined
+    /// it as `30_000_000 + eip8037::SSTORE_SET_BYTES *
+    /// eip8037::CPSB_GLAMSTERDAM * SYSTEM_MAX_SSTORES_PER_CALL` (`31_566_720`),
+    /// and all three factors are bal-devnet-7 parameters that drift as upstream
+    /// evolves. A frozen spec's budget cannot hang off a drifting upstream
+    /// constant.
+    pub const SYSTEM_CALL_GAS_LIMIT_FLOOR: u64 = super::PRE_REX5_SYSTEM_CALL_GAS_LIMIT;
+}
+
+/// Constants for the `REX6` spec.
+pub mod rex6 {}
 
 /// Constants for the `REX` spec.
 pub mod rex {

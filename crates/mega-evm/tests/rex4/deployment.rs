@@ -5,7 +5,7 @@ use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
 use alloy_primitives::{Address, Bytes, B256};
 use mega_evm::{
     test_utils::MemoryDatabase, BlockLimits, EmptyExternalEnv, MegaBlockExecutionCtx,
-    MegaBlockExecutor, MegaEvm, MegaEvmFactory, MegaHardfork, MegaHardforkConfig, MegaSpecId,
+    MegaBlockExecutor, MegaEvm, MegaEvmFactory, MegaHardforkConfig, MegaSpecId,
     ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE, ACCESS_CONTROL_CODE_HASH, LIMIT_CONTROL_ADDRESS,
     LIMIT_CONTROL_CODE, LIMIT_CONTROL_CODE_HASH,
 };
@@ -21,12 +21,15 @@ type TestEvm<'a, 'db> = MegaEvm<&'a mut TestState<'db>, NoOpInspector, EmptyExte
 type TestExecutor<'a, 'db> =
     MegaBlockExecutor<MegaHardforkConfig, TestEvm<'a, 'db>, OpAlloyReceiptBuilder>;
 
+// Complete ladders topping out at the target fork. Expressing these as
+// `with_all_activated().without(Rex5)` instead would leave Rex6 activated, and pre-block setup
+// gates compare rung positions — which would still report REX6 and open every lower gate.
 fn rex4_chain_spec() -> MegaHardforkConfig {
-    MegaHardforkConfig::default().with_all_activated()
+    MegaHardforkConfig::default().with_all_activated_through(MegaSpecId::REX4)
 }
 
 fn rex3_chain_spec() -> MegaHardforkConfig {
-    MegaHardforkConfig::default().with_all_activated().without(MegaHardfork::Rex4)
+    MegaHardforkConfig::default().with_all_activated_through(MegaSpecId::REX3)
 }
 
 fn make_block_env(timestamp: u64) -> BlockEnv {

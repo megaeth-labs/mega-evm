@@ -10,7 +10,7 @@ Resource metering subsystem for transaction and frame limits across compute gas,
 - `kv_update.rs`: tx/frame KV accounting with revert-aware discard paths.
 - `state_growth.rs`: net-new account/slot growth accounting.
 - `frame_limit.rs`: generic 98/100 frame-limit tracker utilities.
-- `storage_call_stipend.rs`: Rex4 stipend grant, cap, and burn-on-return logic.
+- `storage_call_stipend.rs`: dual-mode stipend — REX5+ separated allowance drained at `storage_gas_ext` sites; REX4 legacy inflation with compute cap and burn-on-return.
 - `mod.rs`: `LimitKind`, `LimitCheck`, revert-data ABI surface.
 
 ## KEY PATTERNS
@@ -20,6 +20,7 @@ Resource metering subsystem for transaction and frame limits across compute gas,
 - Synthetic frame results still require empty-frame pushes for stack alignment.
 - Gas rescue must exclude any system-granted stipend gas.
 - Revert paths must roll back discardable usage for data/KV/state growth trackers.
+- `after_tx_end` records what the next transaction inherits (the pre-REX1 detained limit) at the end of every run; `discard` restores it for a transaction that panicked, however early the panic landed.
 
 ## ANTI-PATTERNS
 - Do not introduce per-frame gas grants without explicit unwind-on-return behavior.

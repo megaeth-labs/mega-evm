@@ -1,0 +1,736 @@
+# Mutation-testing suppressions.
+#
+# A suppressed mutant is one that survives the test suite but is NOT a test gap:
+# it is either an *equivalent mutant* (cannot change observable behavior) or
+# dead/defensive code that is impractical-but-correct to leave unkillable.
+#
+# Suppressing a mutant requires a justification and a reviewer. Adding an entry
+# here is a reviewed decision — treat it with the same scrutiny as disabling a
+# test. The PR gate (scripts/mutation_gate.py) excludes these from "new survivor"
+# accounting.
+#
+# Two granularities (the "hybrid" model):
+#   kind = "function"  -> matched as an --exclude-re against the mutant NAME.
+#                         Use for whole functions that are entirely equivalent or
+#                         dead (stable across line moves). `pattern` is a regex.
+#   kind = "line"      -> matched against one mutant line of missed.txt OR
+#                         timeout.txt (`file:line:col: text`): `file`, `line` and
+#                         `column` must name its location and `mutant` must be its
+#                         exact text (without the "file:line:col: " prefix). Use for
+#                         a single surviving mutant inside an otherwise-tested
+#                         function, or to accept a genuinely non-terminating or
+#                         equivalent timed-out mutant. The anchor keeps the entry
+#                         to the one reviewed mutant: the same mutation text
+#                         elsewhere in the function (a new `&&`, say) stays gated.
+#                         When the code above it moves, the entry stops matching
+#                         (fail closed: the mutant is gated again) and the
+#                         suppression-hygiene job reports it as stale, with the
+#                         location the text has moved to; re-anchor it after
+#                         checking the justification still holds.
+#
+# Every entry also carries:
+#   category = "equivalent" | "dead"
+#     "equivalent" -> reachable code, but the mutation cannot change observable
+#                     behavior on any valid input.
+#     "dead"       -> the mutated code is unreachable (zero call sites / an
+#                     unsatisfiable bound / not reachable from the public API).
+#   justification  -> the proof; reviewer -> who signed off.
+#
+# Inline `#[mutants::skip]` on a function is also honored natively by
+# cargo-mutants and is appropriate for truly dead helpers; prefer this file when
+# the decision needs a recorded justification.
+#
+# CAVEAT — suppression rot. A `kind = "function"` entry becomes an --exclude-re,
+# so the function is never mutated again: if a "dead today" function later gains
+# a caller, its mutants silently stop being generated and no gap is reported.
+# `kind = "line"` is safer — the mutant is still generated and run every time, so
+# if the code changes such that a test now kills it, it simply shows up as caught
+# and the suppression becomes a harmless no-op; if it moves, it is gated again. Prefer "line" unless the whole
+# function is genuinely, permanently dead, and re-audit the "function" entries
+# (and every "dead" justification) whenever their surrounding code changes. The
+# nightly full-crate run (.github/workflows/mutation.yml) re-checks "line"
+# entries against real source for exactly this reason.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# crates/mega-evm/src/limit/ survivors.
+#
+# The real test gap here — `AdditionalLimit::before_frame_run -> None`
+# (limit.rs:585) — is closed behaviorally by
+# `crates/mega-evm/tests/mutation/limit.rs`. The remaining survivors below are
+# provably equivalent / dead and are recorded here with justification.
+
+# --- Dead `tx_limit()` trait methods (equivalent: zero call sites) ----------------
+#
+# `<impl TxRuntimeLimit for {DataSize,KVUpdate,StateGrowth}Tracker>::tx_limit` is a
+# trivial passthrough to the inherent `FrameLimitTracker::tx_limit()`. Every internal
+# consumer (each tracker's own `check_limit()` / `current_call_remaining()`, and
+# `AdditionalLimit`) calls `self.frame_tracker.tx_limit()` directly; the *trait* method
+# on these three trackers is never invoked anywhere in the crate (verified by grepping
+# all `.tx_limit()` call sites — only `ComputeGasTracker`'s trait method is live, since
+# its `check_limit` calls `self.tx_limit()` and composes it with `detained_limit`).
+# Because the function is dead, replacing its body (`-> 0` / `-> 1`) cannot change any
+# observable behavior: the full mega-evm test suite passes with the mutation applied.
+# These are required only to satisfy the `TxRuntimeLimit` trait contract.
+[[suppress]]
+kind = "function"
+category = "dead"
+file = "crates/mega-evm/src/limit/data_size.rs"
+pattern = "<impl TxRuntimeLimit for DataSizeTracker>::tx_limit"
+justification = "Dead/equivalent: this trait method has zero call sites; all callers use the inherent frame_tracker.tx_limit(). Mutating it (-> 0 / -> 1) changes no observable behavior (full suite green with the mutant). Required only to satisfy the TxRuntimeLimit trait."
+reviewer = "improve-mutation-score (William Aaron Cheung)"
+
+[[suppress]]
+kind = "function"
+category = "dead"
+file = "crates/mega-evm/src/limit/kv_update.rs"
+pattern = "<impl TxRuntimeLimit for KVUpdateTracker>::tx_limit"
+justification = "Dead/equivalent: this trait method has zero call sites; all callers use the inherent frame_tracker.tx_limit(). Mutating it (-> 0 / -> 1) changes no observable behavior (full suite green with the mutant). Required only to satisfy the TxRuntimeLimit trait."
+reviewer = "improve-mutation-score (William Aaron Cheung)"
+
+[[suppress]]
+kind = "function"
+category = "dead"
+file = "crates/mega-evm/src/limit/state_growth.rs"
+pattern = "<impl TxRuntimeLimit for StateGrowthTracker>::tx_limit"
+justification = "Dead/equivalent: this trait method has zero call sites; all callers use the inherent frame_tracker.tx_limit(). Mutating it (-> 0 / -> 1) changes no observable behavior (full suite green with the mutant). Required only to satisfy the TxRuntimeLimit trait."
+reviewer = "improve-mutation-score (William Aaron Cheung)"
+
+# --- effective_remaining_for_rescue boundary (equivalent) -------------------------
+#
+# `if stipend > 0 { gas.remaining().min(gas.limit() - stipend) } else { gas.remaining() }`.
+# The `> 0` -> `>= 0` mutant only diverges when `stipend == 0`, in which case the then-
+# branch computes `gas.remaining().min(gas.limit() - 0) = gas.remaining().min(gas.limit())`.
+# Since `gas.remaining() <= gas.limit()` is invariant in revm (remaining starts at limit and
+# only decreases; the REX4 stipend inflates both limit and remaining together), this equals
+# `gas.remaining()` — identical to the else-branch. The four other mutants in this function
+# are caught by the rex4 storage_call_stipend tests; only this true boundary equivalent
+# survives.
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/limit/storage_call_stipend.rs"
+line = 189
+column = 20
+mutant = "replace > with >= in StorageCallStipendTracker::effective_remaining_for_rescue"
+justification = "Equivalent: the > vs >= boundary only differs when stipend == 0, where the then-branch reduces to gas.remaining().min(gas.limit()) == gas.remaining() (the else-branch) because remaining <= limit is invariant. No reachable input observes the difference."
+reviewer = "improve-mutation-score (William Aaron Cheung)"
+
+# --- before_frame_return_result de-dup flag (equivalent) --------------------------
+#
+# `let duplicate_return_frame_result = LAST_FRAME && !has_active_frame();`. The `&&` -> `||`
+# mutant can only diverge when (a) LAST_FRAME is true while a frame is still active, or
+# (b) LAST_FRAME is false while no frame is active. Neither is reachable: the `<true>`
+# (`last_frame_result`) call always runs after the frame's tracker has already been popped
+# by the preceding `<false>` (`frame_return_result`) pass, so `has_active_frame()` is always
+# false at `<true>` calls (making `&& X` == `|| X` == true); and at `<false>` calls
+# LAST_FRAME is false. The full mega-evm suite — including all nested/parent-child/sibling
+# and top-level frame-local & TX-level-detention exceed tests — passes with the mutant
+# applied, confirming no observable difference.
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/limit/limit.rs"
+line = 809
+column = 56
+mutant = "replace && with || in AdditionalLimit::before_frame_return_result"
+justification = "Equivalent: at every <true> (last_frame_result) call has_active_frame() is already false (the frame was popped by the preceding <false> frame_return_result pass), so LAST_FRAME && !has_active == LAST_FRAME || !has_active == true; at <false> calls LAST_FRAME is false in both. Full suite (incl. all multi-frame exceed tests) green with the mutant."
+reviewer = "improve-mutation-score (William Aaron Cheung)"
+
+# --- EmptyExternalEnv::external_envs (equivalent) ---------------------------------
+# EmptyExternalEnv is a unit struct. The real body constructs
+# ExternalEnvs { salt_env: EmptyExternalEnv, oracle_env: EmptyExternalEnv }; the mutant
+# `from(Default::default())` resolves to Default for ExternalEnvs<EmptyExternalEnv>
+# (mod.rs:70-74), yielding identical fields. Value-identical, no observable difference.
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/external/mod.rs"
+line = 94
+column = 9
+mutant = "replace <impl ExternalEnvFactory for EmptyExternalEnv>::external_envs -> ExternalEnvs<Self::EnvTypes> with ExternalEnvs::from(Default::default())"
+justification = "EmptyExternalEnv is a unit struct; real body builds ExternalEnvs{salt_env:EmptyExternalEnv, oracle_env:EmptyExternalEnv}; from(Default::default()) resolves to Default for ExternalEnvs<EmptyExternalEnv> producing identical fields. Value-identical, no observable behavioral difference."
+reviewer = "improve-mutation-score (William Aaron Cheung)"
+
+# --- DeterministicHasher::write line-125 `|` combine (equivalent) ------------------
+# `let combined = (value[0] as u128) | ((value[1] as u128) << 64);` where
+# `value: [u64; 2] = read_small(data)`. The first operand `value[0] as u128` is a u64 widened
+# to u128, so it occupies ONLY bits 0..63 (bits 64..127 are always zero). The second operand
+# `(value[1] as u128) << 64` occupies ONLY bits 64..127 (bits 0..63 are always zero). The two
+# operands therefore have DISJOINT set bits for every possible input, so `a | b == a ^ b`
+# identically — `|` and `^` agree on all inputs at this site. This is structurally guaranteed
+# by the u64->u128 widening + 64-bit shift, independent of the bytes hashed, so no reachable
+# input distinguishes `|` from `^` here. (Pinning a specific bucket id, e.g. for "hello",
+# cannot kill it: the combined value — and thus the hash and bucket id — is identical under
+# the mutant.) The sibling line-120 `|` combine over `front`/`back<<64` has the same shape and
+# is equivalent for the same reason: `ahash_bucket_id_mid_input_is_pinned` pins its bucket id,
+# but the mutant leaves that id unchanged, and the full-crate run reports it as surviving. It
+# has its own entry below.
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/external/hasher/fallback.rs"
+line = 125
+column = 47
+mutant = "replace | with ^ in <impl core::hash::Hasher for DeterministicHasher>::write"
+justification = "Equivalent: `(value[0] as u128) | ((value[1] as u128) << 64)` ORs a u64-widened low half (bits 0..63 only) with a u64-widened high half shifted into bits 64..127 only. The operands have disjoint set bits by construction for every input, so | == ^ identically; no reachable input distinguishes them."
+reviewer = "improve-mutation-score (William Aaron Cheung)"
+
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/external/hasher/fallback.rs"
+line = 120
+column = 48
+mutant = "replace | with ^ in <impl core::hash::Hasher for DeterministicHasher>::write"
+justification = "Equivalent: in `(front as u128) | ((back as u128) << 64)` front and back are u64 (read_u64 / read_last_u64), so the left operand occupies bits 0..63 only and the shifted right operand bits 64..127 only. The operands have disjoint set bits for every input, so | == ^ identically; no input distinguishes them."
+reviewer = "RealiCZ (cz)"
+
+# --- DeterministicHasher typed write_uN / update mutants (dead: unreachable from public API) -------
+# `AHashBucketHasher` — the crate's ONLY public hasher — computes bucket ids via
+# `hash(bytes)` (hasher/mod.rs), which calls `DeterministicHasher::write(&[u8])` (the slice
+# write) and `finish()`. The slice `write` routes exclusively through `large_update`; it
+# never calls the typed `write_u8/u16/u32/u64/u128` methods nor the `update` helper.
+#
+# `update` is reached ONLY from `write_u8/u16/u32/u64` (and `write_usize` -> `write_u64`);
+# those typed `write_uN` methods are reached ONLY through `core::hash::Hasher` trait dispatch.
+# `DeterministicHasher` / `RandomState` are `pub(crate)` and are NOT re-exported, so no
+# integration test (a separate crate) can construct a hasher and drive the typed writes; and
+# a grep of the whole `mega-evm` src confirms ZERO non-test callers of any typed `write_uN`,
+# `.update(`, `build_hasher`, `DeterministicHasher`, or `RandomState` outside the hasher
+# module itself. The typed methods exist solely to satisfy the `core::hash::Hasher` trait
+# contract; they are dead with respect to every reachable code path of the public API.
+#
+# Because they are unreachable, mutating them (`write_uN -> ()`, or `^` -> `|`/`&` inside the
+# dead `update`) cannot change any observable output of `AHashBucketHasher::bucket_id` (the
+# full mega-evm suite is green with each mutant applied). The inline `#[cfg(test)]` unit test
+# `test_hasher_typed_write_methods` does exercise them via the crate-internal `RandomState`,
+# but the mutation run builds the integration test targets only, so that unit test cannot
+# kill them — and the public API offers no path to do so. Recorded here as dead code.
+[[suppress]]
+kind = "line"
+category = "dead"
+file = "crates/mega-evm/src/external/hasher/fallback.rs"
+line = 58
+column = 48
+mutant = "replace ^ with | in DeterministicHasher::update"
+justification = "Dead/unreachable from the public API: AHashBucketHasher::bucket_id drives only the slice write() -> large_update; update() is reached solely via the typed write_uN methods, which are unreachable (pub(crate) DeterministicHasher/RandomState are not re-exported, no integration test can construct them, and zero non-test callers exist crate-wide). The ^->| mutant changes no observable bucket_id output."
+reviewer = "improve-mutation-score (William Aaron Cheung)"
+
+[[suppress]]
+kind = "line"
+category = "dead"
+file = "crates/mega-evm/src/external/hasher/fallback.rs"
+line = 58
+column = 48
+mutant = "replace ^ with & in DeterministicHasher::update"
+justification = "Dead/unreachable from the public API: see the ^->| entry for update — update() is only reached via the unreachable typed write_uN methods. The ^->& mutant changes no observable bucket_id output."
+reviewer = "improve-mutation-score (William Aaron Cheung)"
+
+[[suppress]]
+kind = "line"
+category = "dead"
+file = "crates/mega-evm/src/external/hasher/fallback.rs"
+line = 73
+column = 9
+mutant = "replace <impl core::hash::Hasher for DeterministicHasher>::write_u8 with ()"
+justification = "Dead/unreachable from the public API: bucket_id uses only the slice write() -> large_update; write_u8 is reached only via core::hash::Hasher trait dispatch on the pub(crate), non-re-exported DeterministicHasher, which no integration test (or any non-test crate caller) can invoke. Stubbing it to () changes no observable bucket_id output."
+reviewer = "improve-mutation-score (William Aaron Cheung)"
+
+[[suppress]]
+kind = "line"
+category = "dead"
+file = "crates/mega-evm/src/external/hasher/fallback.rs"
+line = 78
+column = 9
+mutant = "replace <impl core::hash::Hasher for DeterministicHasher>::write_u16 with ()"
+justification = "Dead/unreachable from the public API: same as write_u8 — write_u16 is reached only via trait dispatch on the non-re-exported pub(crate) hasher; never on any bucket_id path. Stubbing it to () changes no observable output."
+reviewer = "improve-mutation-score (William Aaron Cheung)"
+
+[[suppress]]
+kind = "line"
+category = "dead"
+file = "crates/mega-evm/src/external/hasher/fallback.rs"
+line = 83
+column = 9
+mutant = "replace <impl core::hash::Hasher for DeterministicHasher>::write_u32 with ()"
+justification = "Dead/unreachable from the public API: same as write_u8 — write_u32 is reached only via trait dispatch on the non-re-exported pub(crate) hasher; never on any bucket_id path. Stubbing it to () changes no observable output."
+reviewer = "improve-mutation-score (William Aaron Cheung)"
+
+[[suppress]]
+kind = "line"
+category = "dead"
+file = "crates/mega-evm/src/external/hasher/fallback.rs"
+line = 88
+column = 9
+mutant = "replace <impl core::hash::Hasher for DeterministicHasher>::write_u64 with ()"
+justification = "Dead/unreachable from the public API: same as write_u8 — write_u64 (and write_usize, which delegates to it) is reached only via trait dispatch on the non-re-exported pub(crate) hasher; never on any bucket_id path. Stubbing it to () changes no observable output."
+reviewer = "improve-mutation-score (William Aaron Cheung)"
+
+[[suppress]]
+kind = "line"
+category = "dead"
+file = "crates/mega-evm/src/external/hasher/fallback.rs"
+line = 93
+column = 9
+mutant = "replace <impl core::hash::Hasher for DeterministicHasher>::write_u128 with ()"
+justification = "Dead/unreachable from the public API: bucket_id's slice write() never delegates to write_u128 (it calls large_update directly); write_u128 is reached only via trait dispatch on the non-re-exported pub(crate) hasher, which no non-test caller invokes. Stubbing it to () changes no observable output."
+reviewer = "improve-mutation-score (William Aaron Cheung)"
+
+# --- DeterministicHasher::write line-109 `> 16` -> `>= 16` (equivalent) ------------
+# `if data.len() > 16 { large branch } else { mid branch }`. The `>=` mutant only diverges
+# from `>` at the boundary len == 16. There both branches produce the SAME single
+# `large_update(value)` call with the SAME u128:
+#   * mid branch (taken by `>`):  front = le_u64(bytes[0..8]), back = le_u64(bytes[8..16]),
+#     value = (front as u128) | ((back as u128) << 64) = le_u128(bytes[0..16]).
+#   * large branch (taken by `>=`): value = read_last_u128() = le_u128(bytes[0..16]) (split_at
+#     at len-16 == 0 reads the whole 16-byte slice), then `while data.len() > 16` is false, so
+#     NO loop pass runs and no extra update happens.
+# Both paths therefore feed the identical little-endian u128 to a single large_update, yielding
+# the identical buffer and bucket id. (Pinning a len-16 input cannot kill it; the test
+# ahash_bucket_id_len16 was removed for this reason.) The two SIBLING `> 16` -> `>= 16` mutants
+# that share this same mutant text — line 108 (`> 8`) and the line-112 loop guard — are NOT
+# equivalent and are killed by ahash_bucket_id_len8_boundary_is_pinned /
+# ahash_bucket_id_len32_loop_boundary_is_pinned; cargo-mutants reports them CAUGHT, so only the
+# line-109 survivor reaches this filter.
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/external/hasher/fallback.rs"
+line = 109
+column = 27
+mutant = "replace > with >= in <impl core::hash::Hasher for DeterministicHasher>::write"
+justification = "Equivalent (line 109 `> 16`): the > vs >= boundary only differs at len == 16, where both the mid branch (front | (back<<64)) and the large branch (read_last_u128, with no loop pass since 16 is not > 16) feed the identical le_u128(bytes[0..16]) to a single large_update. Same buffer, same bucket id; no input distinguishes them. The line-108 and line-112 mutants sharing this text are non-equivalent and are caught by the len-8 / len-32 tests."
+reviewer = "improve-mutation-score (William Aaron Cheung)"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# spec-gate operator survivors (universalmutator + comby; scripts/umutate.py).
+#
+# Equivalent mutants of backward-compat spec gates in src/limit/. The one real
+# survivor (limit.rs:203) is closed behaviorally by
+# `test_intrinsic_check_for_tx_requires_rex5_spec`. Several sites share identical
+# source text (the three state_growth gates, and the `rex4_enabled`/`rex5_enabled`
+# fields of several trackers), so each entry is anchored to the site it reviews.
+
+# --- data_size.rs:173 defensive invariant guard (equivalent) -----------------
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/limit/data_size.rs"
+line = 74
+column = 1
+mutant = "spec-gate rex5_enabled: spec.is_enabled(MegaSpecId::REX5), -> rex5_enabled: spec.is_enabled(MegaSpecId::REX4),"
+justification = "Equivalent: rex5_enabled only feeds the debug_assert! at data_size.rs:173, which executes only inside the `used > limit` branch with an active frame — a TX-level data-size exceed while a frame is live. Pre-REX5 that state is unreachable in valid execution (before_tx_start, the only mid-execution tx_entry writer, runs before any frame; an exceed there halts before a frame is pushed). Relaxing the guard to REX4 cannot change behavior on any reachable input."
+reviewer = "improve-mutation-score (William Aaron Cheung)"
+
+# --- frame_limit.rs:113 per-frame derivation gate (equivalent: coupled) -------
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/limit/frame_limit.rs"
+line = 119
+column = 1
+mutant = "spec-gate rex4_enabled: spec.is_enabled(MegaSpecId::REX4), -> rex4_enabled: spec.is_enabled(MegaSpecId::REX3),"
+justification = "Equivalent (coupled gates): frame_limit rex4_enabled gates only per-frame limit DERIVATION (push_call_frame_info, line 339). ENFORCEMENT (exceeds_current_frame_limit) is gated separately on each dimension's own REX4 check. Shifting derivation to REX3 sets per-frame limits that no dimension checks at REX3 — their checks stay TX-level — so net_usage and every limit outcome are unchanged."
+reviewer = "improve-mutation-score (William Aaron Cheung)"
+
+# --- state_growth.rs REX4 per-frame gates (equivalent: coupled/REX5-only) -----
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/limit/state_growth.rs"
+line = 121
+column = 1
+mutant = "spec-gate if self.spec.is_enabled(MegaSpecId::REX4) { -> if self.spec.is_enabled(MegaSpecId::REX3) {"
+justification = "Equivalent (coupled): push_frame shifted to REX3 derives per-frame state-growth limits at REX3, but check_limit (line 206, unmutated) skips the per-frame check pre-REX4 and uses TX-level net_usage only. The derived frame limits are never read, so no observable change."
+reviewer = "improve-mutation-score (William Aaron Cheung)"
+
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/limit/state_growth.rs"
+line = 206
+column = 1
+mutant = "spec-gate if self.spec.is_enabled(MegaSpecId::REX4) { -> if self.spec.is_enabled(MegaSpecId::REX3) {"
+justification = "Equivalent (coupled): check_limit shifted to REX3 runs the per-frame check at REX3, but push_frame (line 121, unmutated) pushes frames with u64::MAX limit pre-REX4, so exceeds_current_frame_limit never fires and control falls through to the identical TX-level check."
+reviewer = "improve-mutation-score (William Aaron Cheung)"
+
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/limit/state_growth.rs"
+line = 169
+column = 1
+mutant = "spec-gate if self.spec.is_enabled(MegaSpecId::REX4) { -> if self.spec.is_enabled(MegaSpecId::REX3) {"
+justification = "Equivalent: current_call_remaining is only read when building a child sandbox budget (sandbox/execution.rs:1037, KeylessDeploy, REX5+); it is never called at REX3/REX4. And at REX3 frames carry u64::MAX limits (push_frame, line 121), so frame_remaining.min(tx_remaining) == tx_remaining regardless."
+reviewer = "improve-mutation-score (William Aaron Cheung)"
+
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/limit/state_growth.rs"
+line = 169
+column = 1
+mutant = "spec-gate if self.spec.is_enabled(MegaSpecId::REX4) { -> if self.spec.is_enabled(MegaSpecId::REX5) {"
+justification = "Equivalent: current_call_remaining is only read by the REX5+ KeylessDeploy sandbox (sandbox/execution.rs:1037). The REX4->REX5 shift differs only at exactly REX4, where the function is never called — no observable change."
+reviewer = "improve-mutation-score (William Aaron Cheung)"
+
+# --- precompiles.rs:136 legacy Osaka ModExp size check, first `||` (equivalent) ---
+#
+# `if base_len > L || mod_len > L || exp_len > L { return halt(ModexpEip7823LimitSize) }`, with
+# L = `eip7823::INPUT_SIZE_LIMIT`. Turning the FIRST `||` (line 136) into `&&` weakens the guard
+# to `(base_len > L && mod_len > L) || exp_len > L`, so it stops halting only when exactly one of
+# `base_len` / `mod_len` exceeds L while `exp_len` does not. Every such input yields the identical
+# value:
+#   * the zero-base/zero-modulus short-circuit below cannot intervene — it requires
+#     `base_len == 0 && mod_len == 0`, and the length that exceeds L is non-zero;
+#   * so control reaches `precompile::modexp::osaka_run`, whose own EIP-7823 check is
+#     `base_len > L || mod_len > L || exp_len > L` over lengths parsed from the same input (its
+#     minimum-gas check already passed at line 123), returning `Err(ModexpEip7823LimitSize)`;
+#   * the wrapper maps that to `PrecompileOutput::halt(ModexpEip7823LimitSize, reservoir)` — the
+#     same status, zero `gas_used`, empty output and same reservoir the unmutated line returns.
+# The full mega-evm suite is green with the mutant applied. The SECOND `||` (line 137) is NOT
+# equivalent: weakening it lets an over-limit `exp_len` fall through to the short-circuit and be
+# charged the flat minimum, which `test_modexp_oversized_exp_len_halts_before_short_circuit`
+# rejects. The two mutants share identical mutation text, so this entry uses the full
+# `file:line:col:` form to suppress only the line-136 one.
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/evm/precompiles.rs"
+line = 136
+column = 49
+mutant = "replace || with && in modexp::run_osaka_legacy"
+justification = "Equivalent: weakening the first || only skips the early halt when exactly one of base_len/mod_len exceeds the EIP-7823 limit while exp_len does not. The zero-base/zero-modulus short-circuit cannot fire there (the offending length is non-zero), so control reaches upstream osaka_run, whose identical EIP-7823 check returns Err(ModexpEip7823LimitSize); the wrapper maps it to the same PrecompileOutput::halt(ModexpEip7823LimitSize, reservoir) the unmutated line returns. Full suite green with the mutant applied."
+reviewer = "RealiCZ (cz)"
+
+# --- host.rs:oracle_sload debug_assert MINI_REX→EQUIVALENCE (equivalent) ---------
+#
+# The mutated conjunct lives in the `debug_assert!` at the top of `oracle_sload`
+# (`host.rs:425`), which restates the sole caller's guard
+# (`sload_skip_cold_load`, host.rs:181-182). `is_enabled(EQUIVALENCE)` is
+# vacuously true, so the mutant only weakens an assertion that never fires on
+# guarded code, and `debug_assert!` is compiled out of release builds. The
+# guard's own spec-gate mutants are killed. Do not add a `#[should_panic]` test.
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/evm/host.rs"
+line = 442
+column = 1
+mutant = "spec-gate self.spec.is_enabled(MegaSpecId::MINI_REX) && address == ORACLE_CONTRACT_ADDRESS, -> self.spec.is_enabled(MegaSpecId::EQUIVALENCE) && address == ORACLE_CONTRACT_ADDRESS,"
+justification = "Equivalent: the mutated conjunct lives in the debug_assert! at the top of oracle_sload, which restates the sole caller's guard (sload_skip_cold_load, host.rs:181-182). is_enabled(EQUIVALENCE) is vacuously true, so the mutant only weakens an assertion that never fires on guarded code, and debug_assert! is compiled out of release builds. The guard's own spec-gate mutants are killed."
+reviewer = "RealiCZ (cz)"
+
+# --- host.rs: read_declined_slot / read_declined_account DB-error arm (equivalent) ---
+#
+# Both helpers re-issue a read revm 40 declined and map a `LoadError::DBError` result to
+# `LoadError::DBError`, anything else to `LoadError::ColdLoadSkipped`. Deleting the `DBError` arm
+# reports `ColdLoadSkipped` for a failed read too, so the opcode halts `OutOfGas` instead of
+# `FatalExternalError`. That cannot change the outcome: revm's `Context` stashes the database
+# error in its error slot before returning (revm-context 18.0.3 `context.rs` `sload_skip_cold_load`
+# / `load_account_info_skip_cold_load`), and revm takes that slot as soon as the halted frame's
+# result is handed back (`EthFrame::return_result`) or the transaction result is built
+# (`Handler::execution_result`), so the transaction fails with the same database error either way
+# and no gas, state or result is ever produced. The database-error cases in
+# `tests/rex4/declined_reads.rs` pass with either mutant applied.
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/evm/host.rs"
+line = 386
+column = 13
+mutant = "delete match arm Err(LoadError::DBError) in MegaContext<DB, ExtEnvs>::read_declined_slot"
+justification = "Equivalent: revm's Context stashes the database error before returning DBError, and revm takes it when the halted frame returns (EthFrame::return_result) or the transaction result is built (Handler::execution_result), so reporting ColdLoadSkipped (an OutOfGas halt) instead of DBError (a FatalExternalError halt) fails the transaction with the same database error. The declined-SLOAD database-error test passes with the mutant applied."
+reviewer = "RealiCZ (cz)"
+
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/evm/host.rs"
+line = 398
+column = 13
+mutant = "delete match arm Err(LoadError::DBError) in MegaContext<DB, ExtEnvs>::read_declined_account"
+justification = "Equivalent: revm's Context stashes the database error before returning DBError, and revm takes it when the halted frame returns (EthFrame::return_result) or the transaction result is built (Handler::execution_result), so reporting ColdLoadSkipped (an OutOfGas halt) instead of DBError (a FatalExternalError halt) fails the transaction with the same database error. The declined-SELFDESTRUCT database-error test passes with the mutant applied."
+reviewer = "RealiCZ (cz)"
+
+# --- host.rs: recreate_reverted_account_read, resident-delegate guard (equivalent) ---
+#
+# The recreated CALL-family read loads the EIP-7702 delegate only when the journal holds no entry
+# for it. Forcing the guard to `true` also re-loads a resident delegate. The caller's frame is
+# halting, so every journaled effect of that load (the `AccountWarmed` entry of a cold one) is
+# undone by the frame's revert. The unjournaled cold-load effects in revm-context 18.0.3
+# `load_account_mut_optional` are no-ops for any entry reachable here: `set_current_info_as_original`
+# rewrites the original info with the current one, which equal each other while the entry is cold
+# (an entry turns cold only through the revert of the frame that warmed it, which also restores
+# its info); `unmark_created_locally` finds the flag already cleared (that revert unmarks the
+# creation too); the local-selfdestruct cleanup needs an entry left over from an earlier
+# transaction, and the journal starts empty for every transaction. An untouched entry is skipped
+# on commit, and the entry stays resident either way, so the state the transaction hands back has
+# the same keys.
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/evm/host.rs"
+line = 730
+column = 31
+mutant = "replace match guard !journal.state.contains_key(&delegate) with true in <impl HostExt for MegaContext<DB, ExtEnvs>>::recreate_reverted_account_read"
+justification = "Equivalent: re-loading a delegate that is already resident happens in a halting frame, whose revert undoes the journaled warm-up; revm's unjournaled cold-load effects are no-ops for such an entry (current info equals original info while cold, the created-locally flag was cleared by the same revert that cooled it, and no entry survives from an earlier transaction), and the entry stays resident either way, so gas, state, result and the returned state keys are unchanged. Full suite green with the mutant applied."
+reviewer = "RealiCZ (cz)"
+
+# --- instructions.rs: recreate_unreached_call_load, stipend-drained new-account charge (equivalent) ---
+#
+# On a frame too poor for the CALL family's 100-gas static charge, the recreation replays the
+# storage-gas wrapper's new-account charge as `budget.checked_sub(cost - drained)` with
+# `budget <= 99`, where `drained <= min(cost, STORAGE_CALL_STIPEND = 23,000)`. Turning `-` into `+`
+# (the function's only subtraction) can only change the outcome when `cost - drained <= 99 <
+# cost + drained`, i.e. `0 < cost <= drained + 99 <= 23,099`. No spec charges a new account that
+# little: REX-family cost is `25,000 × (multiplier − 1)` (0 at the minimum bucket, then at least
+# 25,000), MINI_REX is `2,000,000 × multiplier`. At cost 0 nothing is drained and both forms
+# subtract 0; at any other cost both underflow the budget.
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/evm/instructions.rs"
+line = 1400
+column = 73
+mutant = "replace - with + in volatile_data_ext::recreate_unreached_call_load"
+justification = "Equivalent: the recreation runs only below the 100-gas static charge (budget <= 99) and drained <= min(cost, 23,000); cost - drained and cost + drained can straddle the budget only for 0 < cost <= 23,099, but new-account storage gas is 0 or at least 25,000 on every spec (25,000 x (multiplier - 1) for REX, 2,000,000 x multiplier for MINI_REX), so both forms subtract 0 at cost 0 and both underflow otherwise. Full suite green with the mutant applied."
+reviewer = "RealiCZ (cz)"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Equivalent survivors of the full-crate run (the rest of that run's survivors are
+# killed by tests).
+
+# --- state.rs: merge_account_status, `|` -> `^` in the per-transaction flag mask (equivalent) ---
+#
+# `other -= AccountStatus::Cold | AccountStatus::CreatedLocal | AccountStatus::SelfDestructedLocal`
+# builds a mask of three disjoint single-bit flags (revm-state 12.0.1: `Cold = 0b0001_0000`,
+# `SelfDestructedLocal = 0b0100_0000`, `CreatedLocal = 0b1000_0000`). For disjoint bits `a ^ b`
+# equals `a | b`, and `^` binds tighter than `|`, so turning either `|` into `^` builds the same
+# mask. The two mutants (columns 34 and 64) share the same text and have one entry each; the
+# function's `*this |= other` is a different mutation text and stays gated.
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/evm/state.rs"
+line = 155
+column = 34
+mutant = "replace | with ^ in merge_account_status"
+justification = "Equivalent: Cold (0b0001_0000), SelfDestructedLocal (0b0100_0000) and CreatedLocal (0b1000_0000) are disjoint single-bit AccountStatus flags, and for disjoint bits a ^ b == a | b; ^ binds tighter than |, so replacing either | of the mask with ^ builds the same mask and other -= removes the same bits."
+reviewer = "RealiCZ (cz)"
+
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/evm/state.rs"
+line = 155
+column = 64
+mutant = "replace | with ^ in merge_account_status"
+justification = "Equivalent: Cold (0b0001_0000), SelfDestructedLocal (0b0100_0000) and CreatedLocal (0b1000_0000) are disjoint single-bit AccountStatus flags, and for disjoint bits a ^ b == a | b; ^ binds tighter than |, so replacing either | of the mask with ^ builds the same mask and other -= removes the same bits."
+reviewer = "RealiCZ (cz)"
+
+# --- salt.rs: EmptyExternalEnv bucket ids -> Default::default() (equivalent) ---
+#
+# `BucketId` is `u32`, so `Default::default()` is `0`, the value both functions already return
+# (`0 as BucketId`).
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/external/salt.rs"
+line = 105
+column = 9
+mutant = "replace <impl SaltEnv for EmptyExternalEnv>::bucket_id_for_account -> BucketId with Default::default()"
+justification = "Equivalent: BucketId is a u32 alias, so Default::default() is 0, exactly the value the function returns (0 as BucketId); the mutant returns the same bucket id for every account."
+reviewer = "RealiCZ (cz)"
+
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/external/salt.rs"
+line = 109
+column = 9
+mutant = "replace <impl SaltEnv for EmptyExternalEnv>::bucket_id_for_slot -> BucketId with Default::default()"
+justification = "Equivalent: BucketId is a u32 alias, so Default::default() is 0, exactly the value the function returns (0 as BucketId); the mutant returns the same bucket id for every storage slot."
+reviewer = "RealiCZ (cz)"
+
+# --- sandbox/execution.rs: explicit zero fields of the sandbox TxEnv (equivalent) ---
+#
+# Both sandbox `TxEnv` literals end in `..Default::default()`, and `TxEnv::default()` is
+# `TxEnvBuilder::new().build()`, whose `gas_price` and `nonce` are `0` (revm-context 18.0.3
+# `tx.rs`). Deleting an explicit `nonce: 0` or `gas_price: 0` therefore builds the same `TxEnv`.
+# The fields stay written out because the sandbox's fee-free and Nick's-method semantics depend
+# on them.
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/sandbox/execution.rs"
+line = 356
+column = 13
+mutant = "delete field nonce from struct TxEnv expression in execute_keyless_deploy_call"
+justification = "Equivalent: the pre-REX5 sandbox TxEnv literal ends in ..Default::default(), and TxEnv::default() (TxEnvBuilder::new().build(), revm-context 18.0.3) has nonce 0, so deleting the explicit nonce: 0 builds an identical TxEnv."
+reviewer = "RealiCZ (cz)"
+
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/sandbox/execution.rs"
+line = 531
+column = 9
+mutant = "delete field gas_price from struct TxEnv expression in build_fee_free_sandbox_deposit_tx"
+justification = "Equivalent: the deposit-style sandbox TxEnv literal ends in ..Default::default(), and TxEnv::default() (TxEnvBuilder::new().build(), revm-context 18.0.3) has gas_price 0, so deleting the explicit gas_price: 0 builds an identical TxEnv."
+reviewer = "RealiCZ (cz)"
+
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/sandbox/execution.rs"
+line = 532
+column = 9
+mutant = "delete field nonce from struct TxEnv expression in build_fee_free_sandbox_deposit_tx"
+justification = "Equivalent: the deposit-style sandbox TxEnv literal ends in ..Default::default(), and TxEnv::default() (TxEnvBuilder::new().build(), revm-context 18.0.3) has nonce 0, so deleting the explicit nonce: 0 builds an identical TxEnv."
+reviewer = "RealiCZ (cz)"
+
+# --- sandbox/state_merge.rs: same-hash code copy, `&&` -> `||` (equivalent) ---
+#
+# When the sandbox and the parent agree on an account's code hash, the merge copies the sandbox's
+# bytecode into the parent only if the parent's hash is non-empty and its cached code is missing
+# or empty (a stale cache). With `||` it also copies in two more cases, neither of which changes
+# what any reader sees:
+#   * non-empty hash, parent code already present: the copy has the same hash, so the same bytes;
+#   * empty hash (`KECCAK_EMPTY`): the copied bytecode hashes to `KECCAK_EMPTY`, so it is empty,
+#     and the parent's `None` or empty code becomes `Some(empty)`. revm itself stores
+#     `Some(Bytecode::default())` without a database read whenever it loads the code of an
+#     empty-hash account (revm-context-interface 19.0.3 `load_code_preserve_error`), so every
+#     reader already treats `None` and `Some(empty)` alike.
+# Gas, results, the journal and the committed state are unchanged.
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/sandbox/state_merge.rs"
+line = 173
+column = 49
+mutant = "replace && with || in apply_sandbox_state_journaled_inner"
+justification = "Equivalent: on equal code hashes, || adds only two copies: a parent that already has code receives the same-hash (identical) bytecode, and an empty-hash parent has None or empty code replaced by the sandbox's empty bytecode, the Some(Bytecode::default()) revm stores itself on any code load of an empty-hash account, so no read, gas cost, result or committed state changes."
+reviewer = "RealiCZ (cz)"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# spec-gate survivors from the nightly sweep (run 44009245120, main cdcce16d), restricted to the
+# gates that remain unobservable after the alias-window tests in
+# tests/mini_rex/alias_window_gates.rs and the context-reuse tests in evm/gate_reuse_tests.rs.
+#
+# Each entry is either unreachable at the spec where the flip takes effect, or reached but unable to
+# change anything a block, transaction, receipt or tracer can observe. The MiniRex1 alias window on
+# mainnet (block/chain.rs:38-39) does execute these code paths with the gate off, so the reason is
+# never "this spec never ran".
+#
+# The sandbox survivor at sandbox/execution.rs:603 is closed by a test
+# (test_rex5_sandbox_balance_precheck_ignores_gas_price).
+# ─────────────────────────────────────────────────────────────────────────────
+
+# --- crates/mega-evm/src/evm/execution.rs:1774 ---
+
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/evm/execution.rs"
+line = 1774
+column = 1
+mutant = "spec-gate let gas_remaining_before = match (&action, ctx.spec.is_enabled(MegaSpecId::MINI_REX)) { -> let gas_remaining_before = match (&action, ctx.spec.is_enabled(MegaSpecId::EQUIVALENCE)) {"
+justification = "Unobservable in the window: the inspected-return path reads gas into the same local snapshot and passes it to the same `after_frame_run`, which returns before reading it in the alias window (execution.rs:509). Neither the normal nor the intercepted callback can observe the snapshot."
+reviewer = "RealiCZ (cz)"
+
+# --- crates/mega-evm/src/evm/execution.rs:1586 ---
+
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/evm/execution.rs"
+line = 1586
+column = 1
+mutant = "spec-gate if self.ctx_ref().spec.is_enabled(MegaSpecId::REX4) { -> if self.ctx_ref().spec.is_enabled(MegaSpecId::REX3) {"
+justification = "Reachable check, unobservable state: this line clears a volatile-access disable on frame return. A disable is created only by `AccessControlInterceptor::handle_disable` (system/intercept.rs:357), whose `ACTIVATION_SPEC` is `MegaSpecId::REX4` (system/intercept.rs:340), and the tx-start reset sets the depth to `None`. At REX3 `disable_depth` is therefore always `None`, so `enable_access_if_returning` has nothing to clear; a normal REX3 transaction cannot build the state this clears. Producing one by calling the public `disable_access` from a callback is outside this proof."
+reviewer = "RealiCZ (cz)"
+
+# --- crates/mega-evm/src/evm/execution.rs:1539 ---
+
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/evm/execution.rs"
+line = 1539
+column = 1
+mutant = "spec-gate let gas_remaining_before = match (&action, context.spec.is_enabled(MegaSpecId::MINI_REX)) { -> let gas_remaining_before = match (&action, context.spec.is_enabled(MegaSpecId::EQUIVALENCE)) {"
+justification = "Unobservable in the window: the value recorded here is a local snapshot consumed only by `after_frame_run` (execution.rs:1557). In the alias window that consumer returns before reading it (`!is_enabled(MINI_REX)` at execution.rs:509), and `process_next_action` never receives the snapshot."
+reviewer = "RealiCZ (cz)"
+
+# --- crates/mega-evm/src/evm/host.rs:639 ---
+
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/evm/host.rs"
+line = 639
+column = 1
+mutant = "spec-gate debug_assert!(self.spec.is_enabled(MegaSpecId::REX)); -> debug_assert!(self.spec.is_enabled(MegaSpecId::MINI_REX));"
+justification = "`debug_assert!` only: the assertion's own gate is `REX`, not `MINI_REX`. `create_contract_storage_gas` is reached from instructions.rs:2616-2621 and evm/execution.rs:815-822, both of which select `new_account_storage_gas` under `MINI_REX`, so the `REX` paths keep calling it; the REX6-only path at :2718 satisfies the original assertion as well. Compiled out in release."
+reviewer = "RealiCZ (cz)"
+
+# --- crates/mega-evm/src/evm/host.rs:602 ---
+
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/evm/host.rs"
+line = 602
+column = 1
+mutant = "spec-gate debug_assert!(self.spec.is_enabled(MegaSpecId::MINI_REX)); -> debug_assert!(self.spec.is_enabled(MegaSpecId::EQUIVALENCE));"
+justification = "`debug_assert!` only. `additional_limit()` is called from the instruction tables and from the intrinsic accounting at evm/execution.rs:744-752, both guarded by the same spec gate; relaxing the assert removes a debug-time invariant and is compiled out in release."
+reviewer = "RealiCZ (cz)"
+
+# --- crates/mega-evm/src/evm/host.rs:608 ---
+
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/evm/host.rs"
+line = 608
+column = 1
+mutant = "spec-gate debug_assert!(self.spec.is_enabled(MegaSpecId::MINI_REX)); -> debug_assert!(self.spec.is_enabled(MegaSpecId::EQUIVALENCE));"
+justification = "`debug_assert!` only: SSTORE enters at instructions.rs:927 and the helper is called at :2862, and the alias window installs the stock handler (instructions.rs:203). Relaxing the assert removes a debug-time invariant and is compiled out in release."
+reviewer = "RealiCZ (cz)"
+
+# --- crates/mega-evm/src/evm/host.rs:625 ---
+
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/evm/host.rs"
+line = 625
+column = 1
+mutant = "spec-gate debug_assert!(self.spec.is_enabled(MegaSpecId::MINI_REX)); -> debug_assert!(self.spec.is_enabled(MegaSpecId::EQUIVALENCE));"
+justification = "`debug_assert!` only. Besides the instruction tables, the helper is called from top-level CREATE and empty-account transfer validation at evm/execution.rs:747, :821 and :844, all under the same spec gate. Relaxing the assert is compiled out in release."
+reviewer = "RealiCZ (cz)"
+
+# --- crates/mega-evm/src/evm/instructions.rs:3083 ---
+
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/evm/instructions.rs"
+line = 3083
+column = 1
+mutant = "spec-gate .is_enabled(MegaSpecId::REX5) && -> .is_enabled(MegaSpecId::REX4) &&"
+justification = "The gate is evaluated on MINI_REX/MINI_REX_2 CALLCODE, but its true branch is the CALL_STIPEND subtraction, and that branch is unreachable there: the wrapped handler is installed only by the mini_rex table (instructions.rs:201-203, CALLCODE assignment at :1015); from `mod rex` the entry is `forward_gas_ext::call_code` (:305) and from REX4 `volatile_data_ext::call_code` (:418); `mod rex5` inherits rex4's table (:467). On the specs that reach this line `is_enabled(REX4)`, `is_enabled(REX5)` and `is_enabled(REX6)` are all false, so `stipend_from_revm` stays 0. The macro's DELEGATECALL and STATICCALL schemes cannot satisfy the value condition at :3084 either."
+reviewer = "RealiCZ (cz)"
+
+# --- crates/mega-evm/src/evm/instructions.rs:3083 ---
+
+[[suppress]]
+kind = "line"
+category = "equivalent"
+file = "crates/mega-evm/src/evm/instructions.rs"
+line = 3083
+column = 1
+mutant = "spec-gate .is_enabled(MegaSpecId::REX5) && -> .is_enabled(MegaSpecId::REX6) &&"
+justification = "The gate is evaluated on MINI_REX/MINI_REX_2 CALLCODE, but its true branch is the CALL_STIPEND subtraction, and that branch is unreachable there: the wrapped handler is installed only by the mini_rex table (instructions.rs:201-203, CALLCODE assignment at :1015); from `mod rex` the entry is `forward_gas_ext::call_code` (:305) and from REX4 `volatile_data_ext::call_code` (:418); `mod rex5` inherits rex4's table (:467). On the specs that reach this line `is_enabled(REX4)`, `is_enabled(REX5)` and `is_enabled(REX6)` are all false, so `stipend_from_revm` stays 0. The macro's DELEGATECALL and STATICCALL schemes cannot satisfy the value condition at :3084 either."
+reviewer = "RealiCZ (cz)"

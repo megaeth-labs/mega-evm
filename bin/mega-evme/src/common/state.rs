@@ -1,20 +1,22 @@
 //! State management for mega-evme with optional RPC forking support
 
-use std::{path::PathBuf, str::FromStr};
+use std::{collections::BTreeMap, path::PathBuf, str::FromStr};
 
 use alloy_network::Network;
-use alloy_primitives::{map::DefaultHashBuilder, Address, BlockNumber, Bytes, B256, U256};
-use alloy_provider::{DynProvider, Provider};
+use alloy_primitives::{Address, BlockNumber, Bytes, B256, U256};
+use alloy_provider::Provider;
 use clap::Parser;
+use op_alloy_network::Optimism;
+
 use mega_evm::revm::{
     database::{AlloyDB, CacheDB, EmptyDB, WrapDatabaseAsync},
     primitives::HashMap,
-    state::{Account, AccountInfo, Bytecode, EvmState, EvmStorageSlot},
+    state::{Account, AccountInfo, Bytecode, EvmState, EvmStorageSlot, TransactionId},
     Database, DatabaseRef,
 };
 use tracing::{debug, info, trace};
 
-use super::{EvmeError, Result};
+use super::{EvmeError, Result, RpcCacheStore};
 
 /// Pre-execution state configuration arguments
 #[derive(Parser, Debug, Clone)]
@@ -28,10 +30,6 @@ pub struct PreStateArgs {
     /// block is used. Only used if `fork` is true.
     #[arg(long = "fork.block")]
     pub fork_block: Option<u64>,
-
-    /// RPC URL to use for the fork. Only used if `fork` is true.
-    #[arg(long = "fork.rpc", default_value = "http://localhost:8545", env = "RPC_URL")]
-    pub fork_rpc: String,
 
     /// JSON file with prestate (genesis) config. This overrides the state in the
     /// forked remote state (if applicable).
@@ -226,11 +224,21 @@ impl PreStateArgs {
                     EvmeError::InvalidInput(format!("Failed to parse prestate JSON: {}", e))
                 })?;
             trace!(loaded_prestate = ?loaded_prestate, "Prestate loaded from file");
-            let mut prestate = EvmState::with_capacity_and_hasher(
-                loaded_prestate.len(),
-                DefaultHashBuilder::default(),
-            );
+            let mut prestate =
+                EvmState::with_capacity_and_hasher(loaded_prestate.len(), Default::default());
             for (address, account_state) in loaded_prestate {
+                // An entry marked as self-destructed describes an address the dumping run
+                // erased from the state. Loading it as an account would resurrect balance,
+                // nonce, code, and storage that the commit deleted, and leaving it out would
+                // let a forked backend serve them again, so it is kept as an erased entry
+                // that reads as nonexistent with empty storage.
+                if account_state.is_selfdestructed() {
+                    debug!(address = %address, "Loading self-destructed account in prestate as erased");
+                    let mut erased = Account::default();
+                    erased.mark_selfdestruct();
+                    prestate.insert(address, erased);
+                    continue;
+                }
                 let account = account_state.into_account()?;
                 prestate.insert(address, account);
             }
@@ -254,7 +262,7 @@ impl PreStateArgs {
                 .entry(address)
                 .or_default()
                 .storage
-                .insert(slot, EvmStorageSlot::new(value, 0));
+                .insert(slot, EvmStorageSlot::new(value, TransactionId::ZERO));
         }
 
         // Set balance for the sender if specified (overrides prestate)
@@ -273,64 +281,42 @@ impl PreStateArgs {
         Ok(prestate)
     }
 
-    /// Create a new provider for the network if forking is enabled
-    pub fn create_provider<N>(&self) -> Result<Option<DynProvider<N>>>
-    where
-        N: alloy_network::Network + Sized,
-    {
-        if self.fork {
-            debug!(rpc_url = %self.fork_rpc, "Forking state from RPC");
-            let url = self.fork_rpc.parse().map_err(|e| {
-                EvmeError::Other(format!("Invalid RPC URL '{}': {}", self.fork_rpc, e))
-            })?;
-            let provider = alloy_provider::ProviderBuilder::new()
-                .disable_recommended_fillers()
-                .network::<N>()
-                .connect_http(url);
-            Ok(Some(DynProvider::new(provider)))
-        } else {
-            debug!("No forking state specified");
-            Ok(None)
-        }
-    }
-
-    /// Creates the initial state for execution. This provides a Evm database based on the prestate
-    /// and remote forked chain.
-    pub async fn create_initial_state<N>(
+    /// Build the initial execution state and the clean-exit RPC cache store.
+    ///
+    /// Fork mode (`self.fork == true`) builds a forked state at `self.fork_block` via
+    /// `rpc_args.build_provider()` and returns the caller-owned [`RpcCacheStore`] for
+    /// persist-on-exit. Non-fork mode builds an empty local state, ignores `rpc_args`,
+    /// and returns a no-op store. Either way the call site persists unconditionally.
+    pub async fn create_initial_state(
         &self,
         sender: &Address,
-    ) -> Result<EvmeState<N, DynProvider<N>>>
-    where
-        N: alloy_network::Network,
-    {
-        let provider = self.create_provider()?;
-
-        // Load prestate
+        rpc_args: &super::RpcArgs,
+    ) -> Result<(EvmeState<Optimism, super::OpProvider>, RpcCacheStore)> {
         let prestate = self.load_prestate(sender)?;
-
-        // Parse block hashes
         let block_hashes = self.parse_block_hashes()?;
 
-        // Create the appropriate state based on whether provider is provided
-        if let Some(provider) = provider {
+        if self.fork {
             debug!("Creating forked state");
-            EvmeState::new_forked(provider, self.fork_block, prestate, block_hashes).await
+            if rpc_args.rpc_url.is_none() {
+                return Err(EvmeError::InvalidInput("'--fork' requires '--rpc <URL>'".to_string()));
+            }
+            if rpc_args.capture_file.is_some() || rpc_args.replay_file.is_some() {
+                return Err(EvmeError::InvalidInput(
+                    "'--rpc.capture-file' and '--rpc.replay-file' are not supported with '--fork' \
+                     in this version"
+                        .to_string(),
+                ));
+            }
+            let super::BuildProviderOutput { provider, cache_store, .. } =
+                rpc_args.build_provider().await?;
+            let state =
+                EvmeState::new_forked(provider, self.fork_block, prestate, block_hashes).await?;
+            Ok((state, cache_store))
         } else {
             debug!("Creating local state");
-            Ok(EvmeState::new_empty(prestate, block_hashes))
+            Ok((EvmeState::new_empty(prestate, block_hashes), RpcCacheStore::noop()))
         }
     }
-}
-
-/// Dumps [`EvmState`] as JSON string.
-pub fn convert_evm_state_to_json(evm_state: &EvmState) -> Result<String> {
-    let account_states = evm_state
-        .iter()
-        .map(|(address, account)| (address, AccountState::from_account(account.clone())))
-        .collect::<HashMap<_, _>>();
-    let state_json = serde_json::to_string_pretty(&account_states)
-        .map_err(|e| EvmeError::ExecutionError(format!("Failed to serialize state: {}", e)))?;
-    Ok(state_json)
 }
 
 /// State dump configuration arguments
@@ -347,13 +333,20 @@ pub struct StateDumpArgs {
 }
 
 impl StateDumpArgs {
-    /// Serializes [`EvmState`] as JSON string.
+    /// Whether any state dump option was set on the command line.
+    pub fn any_set(&self) -> bool {
+        self.dump || self.dump_output_file.is_some()
+    }
+
+    /// Serializes [`EvmState`] as JSON string with deterministic key ordering.
     pub fn serialize_evm_state(&self, evm_state: &EvmState) -> Result<String> {
         trace!(evm_state = ?evm_state, "Serializing EVM state");
-        let account_states = evm_state
+        let account_states: BTreeMap<_, _> = evm_state
             .iter()
-            .map(|(address, account)| (address, AccountState::from_account(account.clone())))
-            .collect::<HashMap<_, _>>();
+            .filter_map(|(address, account)| {
+                DumpedAccount::from_account(account.clone()).map(|dumped| (address, dumped))
+            })
+            .collect();
         let state_json = serde_json::to_string_pretty(&account_states)
             .map_err(|e| EvmeError::ExecutionError(format!("Failed to serialize state: {}", e)))?;
         Ok(state_json)
@@ -369,18 +362,56 @@ impl StateDumpArgs {
         println!("=== State Dump ===");
         if let Some(ref output_file) = self.dump_output_file {
             debug!(output_file = ?output_file, "Writing dumped state to file");
-            // Write state to file
             std::fs::write(output_file, state_json).map_err(|e| {
                 EvmeError::ExecutionError(format!("Failed to write state to file: {}", e))
             })?;
             println!("State dump written to: {}", output_file.display());
         } else {
             debug!("Printing dumped state to console");
-            // Print state to console
             println!("{}", state_json);
         }
 
         Ok(())
+    }
+}
+
+/// One account entry of a serialized state dump.
+///
+/// An account that survives the transaction is written as its full [`AccountState`].
+/// An account destroyed by `SELFDESTRUCT` no longer exists once the state is committed —
+/// its balance, nonce, code, and storage are all gone — so it is written as the bare
+/// marker `{"selfdestructed": true}` instead of the account it used to be.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(untagged)]
+pub enum DumpedAccount {
+    /// An account present in the post-execution state.
+    Live(AccountState),
+    /// An address erased from the state by `SELFDESTRUCT` during the transaction.
+    SelfDestructed {
+        /// Always `true`, marking the address as erased by `SELFDESTRUCT`.
+        selfdestructed: bool,
+    },
+}
+
+impl DumpedAccount {
+    /// Classifies a post-execution account for the state dump.
+    ///
+    /// `None` omits the address entirely: the run only ever observed it as
+    /// nonexistent and it still holds no balance, nonce, or code, so there is no
+    /// account to describe on either side of the commit — printing it as an
+    /// existing empty account would let a round-tripped prestate answer
+    /// `EXTCODEHASH` with the empty-code hash where the chain answers zero.
+    /// The self-destruct check runs first: an account created and destroyed in
+    /// one transaction also started as nonexistent, and it is reported as its
+    /// marker, not omitted.
+    pub fn from_account(account: Account) -> Option<Self> {
+        if account.is_selfdestructed() {
+            return Some(Self::SelfDestructed { selfdestructed: true });
+        }
+        if account.is_loaded_as_not_existing() && account.info.is_empty() {
+            return None;
+        }
+        Some(Self::Live(AccountState::from_account(account)))
     }
 }
 
@@ -399,23 +430,53 @@ pub struct AccountState {
     /// Code hash
     /// B256 already uses hex format with 0x prefix (always 32 bytes)
     pub code_hash: Option<B256>,
-    /// Storage slots (uses quantity format for keys and values)
-    pub storage: Option<HashMap<U256, U256>>,
+    /// Storage slots (sorted by key for deterministic output)
+    pub storage: Option<BTreeMap<U256, U256>>,
+    /// Marks an address that `SELFDESTRUCT` erased from the state.
+    ///
+    /// Never written for a live account, and read back as "this address does not exist":
+    /// a prestate load skips such an entry instead of reconstructing an account from the
+    /// remaining fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selfdestructed: Option<bool>,
 }
 
 impl AccountState {
+    /// Whether this entry marks an address erased by `SELFDESTRUCT`.
+    pub fn is_selfdestructed(&self) -> bool {
+        self.selfdestructed.unwrap_or(false)
+    }
+
     /// Creates a new [`AccountState`] from [`Account`].
+    ///
+    /// When `AccountInfo.code` is `Some`, `code_hash` is recomputed from the actual
+    /// bytes (guards against stale hashes from direct `info.code` assignment).
+    /// When `code` is `None` (lazy-loaded, e.g. forked accounts whose bytecode hasn't
+    /// been fetched), the original `code_hash` is preserved so the account is not
+    /// silently downgraded to an EOA.
     pub fn from_account(account: Account) -> Self {
-        let AccountInfo { balance, nonce, code_hash, code } = account.info;
-        let code = code.map(|c| c.original_byte_slice().to_vec()).unwrap_or_default().into();
-        let storage =
+        let (code, code_hash) = match &account.info.code {
+            Some(bytecode) => {
+                let bytes: Bytes = bytecode.original_byte_slice().to_vec().into();
+                let hash = if bytes.is_empty() {
+                    B256::from(alloy_primitives::KECCAK256_EMPTY)
+                } else {
+                    alloy_primitives::keccak256(&bytes)
+                };
+                (Some(bytes), hash)
+            }
+            // Code not materialized (lazy loading) — preserve original hash.
+            None => (None, account.info.code_hash),
+        };
+        let storage: BTreeMap<U256, U256> =
             account.storage.into_iter().map(|(slot, value)| (slot, value.present_value)).collect();
         Self {
-            balance: Some(balance),
-            nonce: Some(nonce),
-            code: Some(code),
+            balance: Some(account.info.balance),
+            nonce: Some(account.info.nonce),
+            code,
             code_hash: Some(code_hash),
             storage: Some(storage),
+            selfdestructed: None,
         }
     }
 
@@ -447,7 +508,7 @@ impl AccountState {
             .storage
             .unwrap_or_default()
             .into_iter()
-            .map(|(slot, value)| (slot, EvmStorageSlot::new(value, 0)));
+            .map(|(slot, value)| (slot, EvmStorageSlot::new(value, TransactionId::ZERO)));
         Ok(Account::from(info).with_storage(storage))
     }
 }
@@ -463,6 +524,25 @@ where
     Empty(EmptyDB),
     /// Forked state from RPC
     Forked(Box<CacheDB<WrapDatabaseAsync<AlloyDB<N, P>>>>),
+}
+
+/// Normalizes an account fetched over RPC, mapping the all-zero answer to "does not exist".
+///
+/// JSON-RPC cannot express account non-existence: `eth_getBalance`, `eth_getTransactionCount`,
+/// and `eth_getCode` all answer `0`/`0`/empty for an account that was never created, so the RPC
+/// backend materializes it as an *existing* empty account. That flips every consumer of
+/// existence, most visibly the EIP-7702 per-authorization refund: a brand-new authority is
+/// judged "already in the trie" and the replay refunds 12,500 gas per authorization that the
+/// chain did not.
+///
+/// Mapping all-zero back to `None` is safe because an existing-but-empty account cannot occur
+/// on `MegaETH`: EIP-161 (Spurious Dragon) removes empty accounts on touch and forbids creating
+/// them, every chain this tool replays activated it from genesis, and the genesis allocs carry
+/// balance or code. The one shape this cannot distinguish — an account with zero
+/// balance/nonce/code that still holds storage — also cannot exist post-EIP-161, since storage
+/// is only reachable through code and contracts have a non-empty code hash or nonce.
+fn normalize_rpc_account(account: Option<AccountInfo>) -> Option<AccountInfo> {
+    account.filter(|info| !info.is_empty())
 }
 
 /// State database that can be backed by either [`EmptyDB`] or [`AlloyDB`] (forked from RPC)
@@ -500,35 +580,29 @@ where
         Self { backend: EvmeBackend::Empty(EmptyDB::default()), prestate, code_map, block_hashes }
     }
 
-    /// Inserts an account override
-    /// This will override the existing account if it exists.
-    pub fn insert_account(&mut self, address: Address, account: Account) {
-        // Add code to code_map if present
-        if let Some(ref code) = account.info.code {
-            self.code_map.insert(account.info.code_hash, code.clone());
+    /// The prestate's answer for `address`, if it has one.
+    ///
+    /// An address the prestate marks as erased reads as nonexistent until an
+    /// override gives it a balance, nonce, or code.
+    fn prestate_basic(&self, address: &Address) -> Option<Option<AccountInfo>> {
+        let account = self.prestate.get(address)?;
+        if account.is_selfdestructed() && account.info.is_empty() {
+            return Some(None);
         }
-        self.prestate.insert(address, account);
+        Some(Some(account.info.clone()))
     }
 
-    /// Inserts storage overrides for an account
-    pub fn insert_storage(&mut self, address: Address, storage: HashMap<U256, EvmStorageSlot>) {
-        self.prestate.entry(address).or_default().storage.extend(storage);
-    }
-
-    /// Inserts an account with storage.
-    /// This will override the existing account if it exists.
-    pub fn insert_account_with_storage(
-        &mut self,
-        address: Address,
-        info: AccountInfo,
-        storage: HashMap<U256, EvmStorageSlot>,
-    ) {
-        // Add code to code_map if present
-        if let Some(ref code) = info.code {
-            self.code_map.insert(info.code_hash, code.clone());
+    /// The prestate's answer for a storage slot, if it has one.
+    ///
+    /// An address the prestate marks as erased holds no storage beyond the
+    /// slots written over it, so its other slots read as zero instead of being
+    /// read from the backend.
+    fn prestate_storage(&self, address: &Address, index: &U256) -> Option<U256> {
+        let account = self.prestate.get(address)?;
+        match account.storage.get(index) {
+            Some(slot) => Some(slot.present_value),
+            None => account.is_selfdestructed().then_some(U256::ZERO),
         }
-        let account = Account::from(info).with_storage(storage.into_iter());
-        self.prestate.insert(address, account);
     }
 
     /// Set the balance for an account.
@@ -536,55 +610,38 @@ where
         self.prestate.entry(address).or_default().info.balance = balance;
     }
 
-    /// Set the nonce for an account.
-    pub fn set_account_nonce(&mut self, address: Address, nonce: u64) {
-        self.prestate.entry(address).or_default().info.nonce = nonce;
-    }
-
     /// Set the code for an account.
     pub fn set_account_code(&mut self, address: Address, code: Bytecode) {
         self.code_map.insert(code.hash_slow(), code.clone());
-        self.prestate.entry(address).or_default().info.code = Some(code);
-    }
-
-    /// Set the storage for an account.
-    pub fn set_account_storage(&mut self, address: Address, storage: HashMap<U256, U256>) {
-        self.prestate
-            .entry(address)
-            .or_default()
-            .storage
-            .extend(storage.into_iter().map(|(slot, value)| (slot, EvmStorageSlot::new(value, 0))));
+        self.prestate.entry(address).or_default().info.set_code(code);
     }
 
     /// Deploys system contracts based on the given spec.
     pub fn deploy_system_contracts(&mut self, spec: mega_evm::MegaSpecId) {
         use mega_evm::{
-            MegaSpecId, HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS,
-            HIGH_PRECISION_TIMESTAMP_ORACLE_CODE, KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_CODE,
-            ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE, ORACLE_CONTRACT_CODE_REX2,
+            flat_system_contract_specs, MegaSpecId, SEQUENCER_REGISTRY_ADDRESS,
+            SEQUENCER_REGISTRY_CODE, SEQUENCER_REGISTRY_CODE_REX6,
         };
 
-        // MiniRex+: Oracle Contract (v1.0.0 or v1.1.0 based on Rex2)
-        if spec >= MegaSpecId::MINI_REX {
-            let code = if spec >= MegaSpecId::REX2 {
-                ORACLE_CONTRACT_CODE_REX2
+        // Flat predeploys (Oracle, high-precision timestamp Oracle, KeylessDeploy,
+        // MegaAccessControl, MegaLimitControl) come from the canonical registry shared
+        // with the block executor. mega-evme runs with a fixed spec, so activations are
+        // resolved via a `FixedHardfork` at timestamp 0, and the bytecode is applied as a
+        // raw state patch (no witness / storage seeding needed for local execution).
+        for contract in flat_system_contract_specs(super::FixedHardfork::new(spec), 0) {
+            self.set_account_code(contract.address, Bytecode::new_raw(contract.code));
+        }
+
+        // Rex5+: SequencerRegistry (v1.0.0 pre-Rex6, v2.0.0 from Rex6). Only the bytecode
+        // is installed here — a local run has no chain-config sequencer/admin to seed (the
+        // registry's storage is otherwise read from forked state).
+        if spec.reaches(MegaSpecId::REX5) {
+            let code = if spec.reaches(MegaSpecId::REX6) {
+                SEQUENCER_REGISTRY_CODE_REX6
             } else {
-                ORACLE_CONTRACT_CODE
+                SEQUENCER_REGISTRY_CODE
             };
-            self.set_account_code(ORACLE_CONTRACT_ADDRESS, Bytecode::new_raw(code));
-        }
-
-        // MiniRex+: High Precision Timestamp Oracle
-        if spec >= MegaSpecId::MINI_REX {
-            self.set_account_code(
-                HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS,
-                Bytecode::new_raw(HIGH_PRECISION_TIMESTAMP_ORACLE_CODE),
-            );
-        }
-
-        // Rex2+: Keyless Deploy Contract
-        if spec >= MegaSpecId::REX2 {
-            self.set_account_code(KEYLESS_DEPLOY_ADDRESS, Bytecode::new_raw(KEYLESS_DEPLOY_CODE));
+            self.set_account_code(SEQUENCER_REGISTRY_ADDRESS, Bytecode::new_raw(code));
         }
     }
 }
@@ -646,9 +703,9 @@ where
 
     fn basic(&mut self, address: Address) -> std::result::Result<Option<AccountInfo>, Self::Error> {
         // Check prestate overrides first
-        if let Some(account) = self.prestate.get(&address) {
+        if let Some(account) = self.prestate_basic(&address) {
             trace!(address = %address, account = ?account, "Loaded account basic from prestate");
-            return Ok(Some(account.info.clone()));
+            return Ok(account);
         }
 
         // Query backend database
@@ -659,9 +716,9 @@ where
                 Ok(account)
             }
             EvmeBackend::Forked(db) => {
-                let account = db.basic(address).map_err(|e| {
+                let account = normalize_rpc_account(db.basic(address).map_err(|e| {
                     EvmeError::RpcError(format!("Failed to fetch account {}: {:?}", address, e))
-                })?;
+                })?);
                 trace!(address = %address, account = ?account, "Loaded account basic from forked state");
                 Ok(account)
             }
@@ -700,11 +757,9 @@ where
 
     fn storage(&mut self, address: Address, index: U256) -> std::result::Result<U256, Self::Error> {
         // Check storage overrides first
-        if let Some(account) = self.prestate.get(&address) {
-            if let Some(slot) = account.storage.get(&index) {
-                trace!(address = %address, index = %index, slot = %slot.present_value, "Loaded storage from prestate");
-                return Ok(slot.present_value);
-            }
+        if let Some(value) = self.prestate_storage(&address, &index) {
+            trace!(address = %address, index = %index, slot = %value, "Loaded storage from prestate");
+            return Ok(value);
         }
 
         // Query backend database
@@ -767,9 +822,9 @@ where
 
     fn basic_ref(&self, address: Address) -> std::result::Result<Option<AccountInfo>, Self::Error> {
         // Check prestate overrides first
-        if let Some(account) = self.prestate.get(&address) {
+        if let Some(account) = self.prestate_basic(&address) {
             trace!(address = %address, account = ?account, "Loaded account basic from prestate");
-            return Ok(Some(account.info.clone()));
+            return Ok(account);
         }
 
         // Query backend database
@@ -780,9 +835,9 @@ where
                 Ok(account)
             }
             EvmeBackend::Forked(db) => {
-                let account = db.basic_ref(address).map_err(|e| {
+                let account = normalize_rpc_account(db.basic_ref(address).map_err(|e| {
                     EvmeError::RpcError(format!("Failed to fetch account {}: {:?}", address, e))
-                })?;
+                })?);
                 trace!(address = %address, account = ?account, "Loaded account basic from forked state");
                 Ok(account)
             }
@@ -795,6 +850,7 @@ where
     ) -> std::result::Result<Bytecode, Self::Error> {
         // Check code_map first (for prestate accounts)
         if let Some(code) = self.code_map.get(&code_hash) {
+            trace!(code_hash = %code_hash, code = ?code, "Loaded code by hash from prestate");
             return Ok(code.clone());
         }
 
@@ -820,10 +876,9 @@ where
 
     fn storage_ref(&self, address: Address, index: U256) -> std::result::Result<U256, Self::Error> {
         // Check storage overrides first
-        if let Some(account) = self.prestate.get(&address) {
-            if let Some(slot) = account.storage.get(&index) {
-                return Ok(slot.present_value);
-            }
+        if let Some(value) = self.prestate_storage(&address, &index) {
+            trace!(address = %address, index = %index, slot = %value, "Loaded storage from prestate");
+            return Ok(value);
         }
 
         // Query backend database
@@ -874,5 +929,193 @@ where
                 Ok(hash)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_primitives::address;
+
+    const LIVE: Address = address!("0x00000000000000000000000000000000000000aa");
+    const DESTROYED: Address = address!("0x00000000000000000000000000000000000000bb");
+
+    /// A contract account holding `code` and a single storage slot.
+    fn contract_account(balance: u64, nonce: u64, code: &[u8]) -> Account {
+        let bytecode = Bytecode::new_raw(Bytes::from(code.to_vec()));
+        let info = AccountInfo::new(U256::from(balance), nonce, bytecode.hash_slow(), bytecode);
+        Account::from(info).with_storage(std::iter::once((
+            U256::from(1),
+            EvmStorageSlot::new(U256::from(0x42), TransactionId::ZERO),
+        )))
+    }
+
+    fn dump_args() -> StateDumpArgs {
+        StateDumpArgs { dump: true, dump_output_file: None }
+    }
+
+    /// A live account is serialized in full, byte for byte as before the
+    /// self-destruct marker existed: every field present, none skipped.
+    #[test]
+    fn test_serialize_evm_state_live_account_is_written_in_full() {
+        let mut state = EvmState::default();
+        state.insert(LIVE, contract_account(7, 3, &[0x60, 0x00]));
+
+        let json = dump_args().serialize_evm_state(&state).expect("serialize");
+
+        assert_eq!(
+            json,
+            r#"{
+  "0x00000000000000000000000000000000000000aa": {
+    "balance": "0x7",
+    "nonce": "0x3",
+    "code": "0x6000",
+    "codeHash": "0x07ad118d6cc8642c86c03827f276d8b791a65e5c99a3845faf186be720a1455d",
+    "storage": {
+      "0x1": "0x42"
+    }
+  }
+}"#
+        );
+    }
+
+    /// An address the run only observed as nonexistent — and that still holds
+    /// no balance, nonce, or code — is omitted: no account exists on either
+    /// side of the commit, so there is nothing to describe.
+    #[test]
+    fn test_serialize_evm_state_omits_a_never_existing_empty_account() {
+        let mut state = EvmState::default();
+        let mut ghost = Account::new_not_existing(TransactionId::ZERO);
+        ghost.mark_touch();
+        state.insert(DESTROYED, ghost);
+        state.insert(LIVE, contract_account(7, 3, &[0x60, 0x00]));
+
+        let json = dump_args().serialize_evm_state(&state).expect("serialize");
+
+        assert!(
+            !json.contains("0x00000000000000000000000000000000000000bb"),
+            "ghost printed: {json}"
+        );
+        assert!(
+            json.contains("0x00000000000000000000000000000000000000aa"),
+            "live dropped: {json}"
+        );
+    }
+
+    /// An account that started as nonexistent but gained substance during the
+    /// transaction (a funded fresh address) exists after the commit and is
+    /// written in full.
+    #[test]
+    fn test_serialize_evm_state_keeps_a_funded_fresh_account() {
+        let mut state = EvmState::default();
+        let mut funded = Account::new_not_existing(TransactionId::ZERO);
+        funded.mark_touch();
+        funded.info.balance = U256::from(5);
+        state.insert(LIVE, funded);
+
+        let json = dump_args().serialize_evm_state(&state).expect("serialize");
+
+        assert!(
+            json.contains("0x00000000000000000000000000000000000000aa") &&
+                json.contains("\"balance\": \"0x5\""),
+            "funded fresh account must be written in full: {json}"
+        );
+    }
+
+    /// The self-destruct marker outranks the omission rule: an account created
+    /// and destroyed in one transaction also started as nonexistent, and it is
+    /// reported as its marker rather than silently dropped.
+    #[test]
+    fn test_serialize_evm_state_selfdestruct_marker_outranks_omission() {
+        let mut state = EvmState::default();
+        let mut account = Account::new_not_existing(TransactionId::ZERO);
+        account.mark_touch();
+        account.mark_selfdestruct();
+        state.insert(DESTROYED, account);
+
+        let json = dump_args().serialize_evm_state(&state).expect("serialize");
+
+        assert!(
+            json.contains("\"selfdestructed\": true"),
+            "the marker must win over omission: {json}"
+        );
+    }
+
+    /// An account destroyed by `SELFDESTRUCT` is reduced to the marker: none of
+    /// the state the commit erases (code, storage, balance, nonce) is printed.
+    #[test]
+    fn test_serialize_evm_state_selfdestructed_account_is_marker_only() {
+        let mut state = EvmState::default();
+        state.insert(LIVE, contract_account(7, 3, &[0x60, 0x00]));
+        state.insert(DESTROYED, contract_account(0, 1, &[0x33, 0xff]).with_selfdestruct_mark());
+
+        let json = dump_args().serialize_evm_state(&state).expect("serialize");
+        let parsed: BTreeMap<Address, serde_json::Value> =
+            serde_json::from_str(&json).expect("valid JSON");
+
+        assert_eq!(
+            parsed[&DESTROYED],
+            serde_json::json!({ "selfdestructed": true }),
+            "destroyed account must carry the marker and nothing else",
+        );
+        let live = &parsed[&LIVE];
+        assert_eq!(live["code"], "0x6000", "live account keeps its code");
+        assert_eq!(live["storage"]["0x1"], "0x42", "live account keeps its storage");
+        assert!(live.get("selfdestructed").is_none(), "live account carries no marker");
+    }
+
+    /// The marker round-trips: an entry a dump marked as destroyed loads as an
+    /// erased address with nothing of its own, while its neighbours load normally.
+    #[test]
+    fn test_load_prestate_keeps_selfdestructed_entry_as_erased() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("prestate.json");
+        std::fs::write(
+            &path,
+            format!(
+                r#"{{
+                  "{LIVE}": {{
+                    "balance": "0x7",
+                    "nonce": "0x3",
+                    "code": "0x6000",
+                    "storage": {{ "0x1": "0x42" }}
+                  }},
+                  "{DESTROYED}": {{ "selfdestructed": true }}
+                }}"#
+            ),
+        )
+        .expect("write prestate");
+
+        let args = PreStateArgs::parse_from(["mega-evme", "--prestate", path.to_str().unwrap()]);
+        let prestate = args.load_prestate(&Address::ZERO).expect("load prestate");
+
+        let destroyed = prestate.get(&DESTROYED).expect("destroyed address kept as erased");
+        assert!(destroyed.is_selfdestructed(), "destroyed address is marked erased");
+        assert!(destroyed.info.is_empty(), "destroyed address carries no account fields");
+        assert!(destroyed.storage.is_empty(), "destroyed address carries no storage");
+        let live = prestate.get(&LIVE).expect("live account loaded");
+        assert_eq!(live.info.nonce, 3);
+        assert_eq!(
+            live.storage.get(&U256::from(1)).map(|s| s.present_value),
+            Some(U256::from(0x42))
+        );
+    }
+
+    /// Only the marker's `true` value means "erased". An entry that spells the
+    /// field out as `false` is an ordinary account and is loaded as written.
+    #[test]
+    fn test_load_prestate_keeps_entry_marked_not_selfdestructed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("prestate.json");
+        std::fs::write(
+            &path,
+            format!(r#"{{ "{LIVE}": {{ "nonce": "0x3", "selfdestructed": false }} }}"#),
+        )
+        .expect("write prestate");
+
+        let args = PreStateArgs::parse_from(["mega-evme", "--prestate", path.to_str().unwrap()]);
+        let prestate = args.load_prestate(&Address::ZERO).expect("load prestate");
+
+        assert_eq!(prestate.get(&LIVE).expect("account loaded").info.nonce, 3);
     }
 }

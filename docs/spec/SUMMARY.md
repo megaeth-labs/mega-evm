@@ -7,6 +7,7 @@
 
 - [Overview](evm/overview.md)
 - [Dual Gas Model](evm/dual-gas-model.md)
+- [Compute Gas Accounting](evm/compute-gas.md)
 - [Resource Limits](evm/resource-limits.md)
 - [Resource Accounting](evm/resource-accounting.md)
 - [Gas Detention](evm/gas-detention.md)
@@ -23,6 +24,7 @@
 - [Keyless Deployment](system-contracts/keyless-deploy.md)
 - [MegaAccessControl](system-contracts/mega-access-control.md)
 - [MegaLimitControl](system-contracts/mega-limit-control.md)
+- [SequencerRegistry](system-contracts/sequencer-registry.md)
 - [Call Interception](system-contracts/interception.md)
 - [Mega System Transactions](system-contracts/system-tx.md)
 
@@ -35,6 +37,8 @@
 - [Rex2](upgrades/rex2.md)
 - [Rex3](upgrades/rex3.md)
 - [Rex4](upgrades/rex4.md)
+- [Rex5](upgrades/rex5.md)
+- [Rex6](upgrades/rex6.md)
 
 ## Reference
 

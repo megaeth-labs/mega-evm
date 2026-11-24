@@ -9,9 +9,10 @@ use std::convert::Infallible;
 use alloy_primitives::{address, Address, Bytes, U256};
 use alloy_sol_types::{SolCall, SolError};
 use mega_evm::{
+    alloy_op_evm::OpTxError,
     test_utils::{BytecodeBuilder, MemoryDatabase},
     IMegaAccessControl, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
-    MegaTransactionError, TestExternalEnvs, VolatileDataAccessType, ACCESS_CONTROL_ADDRESS,
+    MegaTransactionNew as _, TestExternalEnvs, VolatileDataAccessType, ACCESS_CONTROL_ADDRESS,
     ORACLE_CONTRACT_ADDRESS,
 };
 use revm::{
@@ -72,7 +73,7 @@ fn decode_volatile_data_access_disabled(
 fn transact(
     db: &mut MemoryDatabase,
     tx: TxEnv,
-) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, MegaTransactionError>> {
+) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, OpTxError>> {
     let mut context = MegaContext::new(db, MegaSpecId::REX4);
     context.modify_chain(|chain| {
         chain.operator_fee_scalar = Some(U256::from(0));
@@ -162,6 +163,23 @@ fn append_staticcall(builder: BytecodeBuilder, target: Address, gas: u64) -> Byt
         .push_number(0_u64) // argsSize
         .push_number(0_u64) // argsOffset
         .push_address(target)
+        .push_number(gas)
+        .append(STATICCALL)
+}
+
+/// Builds bytecode that STATICCALLs the access control contract with the given selector.
+fn append_access_control_staticcall(
+    builder: BytecodeBuilder,
+    selector: [u8; 4],
+    gas: u64,
+) -> BytecodeBuilder {
+    let builder = builder.mstore(0x0, selector);
+    builder
+        .push_number(0_u64) // retSize
+        .push_number(0_u64) // retOffset
+        .push_number(4_u64) // argsSize
+        .push_number(0_u64) // argsOffset
+        .push_address(ACCESS_CONTROL_ADDRESS)
         .push_number(gas)
         .append(STATICCALL)
 }
@@ -435,7 +453,7 @@ fn test_reverted_inner_call_returns_gas() {
 
     // The gas used should be relatively small since child reverted immediately
     // and gas was returned to parent
-    let gas_used = result.result.gas_used();
+    let gas_used = result.result.tx_gas_used();
     assert!(gas_used < 5_000_000, "Gas used ({gas_used}) should be relatively small");
 }
 
@@ -805,6 +823,57 @@ fn test_enable_when_not_disabled_is_noop() {
         result.result.is_success(),
         "enableVolatileDataAccess() when not disabled should succeed"
     );
+}
+
+/// STATICCALL to `disableVolatileDataAccess()` should apply the same restriction as CALL.
+#[test]
+fn test_staticcall_disable_volatile_data_access_is_intercepted() {
+    let child_code = BytecodeBuilder::default().append(TIMESTAMP).append(POP).stop().build();
+
+    let parent_code = append_access_control_staticcall(
+        BytecodeBuilder::default(),
+        DISABLE_VOLATILE_DATA_ACCESS_SELECTOR,
+        100_000,
+    );
+    let parent_code = append_log_call_status(parent_code);
+    let parent_code = append_call(parent_code, CHILD, 50_000_000);
+    let parent_code = append_log_call_status(parent_code).stop().build();
+
+    let mut db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(1_000_000))
+        .account_code(PARENT, parent_code)
+        .account_code(CHILD, child_code);
+
+    let result = transact(&mut db, default_tx(PARENT)).unwrap();
+    assert!(result.result.is_success(), "Parent tx should succeed");
+    assert_log_call_status(&result, 0, true);
+    assert_log_call_status(&result, 1, false);
+}
+
+/// STATICCALL to `enableVolatileDataAccess()` should re-enable access when the caller disabled it.
+#[test]
+fn test_staticcall_enable_volatile_data_access_is_intercepted() {
+    let child_code = BytecodeBuilder::default().append(TIMESTAMP).append(POP).stop().build();
+
+    let parent_code = call_disable_volatile_data_access(BytecodeBuilder::default());
+    let parent_code = append_access_control_staticcall(
+        parent_code,
+        ENABLE_VOLATILE_DATA_ACCESS_SELECTOR,
+        100_000,
+    );
+    let parent_code = append_log_call_status(parent_code);
+    let parent_code = append_call(parent_code, CHILD, 50_000_000);
+    let parent_code = append_log_call_status(parent_code).stop().build();
+
+    let mut db = MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(1_000_000))
+        .account_code(PARENT, parent_code)
+        .account_code(CHILD, child_code);
+
+    let result = transact(&mut db, default_tx(PARENT)).unwrap();
+    assert!(result.result.is_success(), "Parent tx should succeed");
+    assert_log_call_status(&result, 0, true);
+    assert_log_call_status(&result, 1, true);
 }
 
 // ============================================================================
@@ -1354,7 +1423,7 @@ fn append_callcode(builder: BytecodeBuilder, target: Address, gas: u64) -> Bytec
 fn transact_with_oracle(
     db: &mut MemoryDatabase,
     tx: TxEnv,
-) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, MegaTransactionError>> {
+) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, OpTxError>> {
     let external_envs = TestExternalEnvs::<Infallible>::new()
         .with_oracle_storage(U256::from(0), U256::from(0x1234));
     let mut context =

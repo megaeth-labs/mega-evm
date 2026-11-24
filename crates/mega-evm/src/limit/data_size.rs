@@ -30,6 +30,9 @@ pub const SALT_VALUE_DELTA_STORAGE_SLOT_SIZE: u64 = 32;
 pub const ACCOUNT_INFO_WRITE_SIZE: u64 = SALT_KEY_SIZE + SALT_VALUE_DELTA_ACCOUNT_INFO_SIZE;
 /// The originated data size for writing a storage slot.
 pub const STORAGE_SLOT_WRITE_SIZE: u64 = SALT_KEY_SIZE + SALT_VALUE_DELTA_STORAGE_SLOT_SIZE;
+/// REX6+ per-log base overhead: one value unit (`LOG_TOPIC_SIZE`) for the address every receipt log
+/// carries, so an empty `LOG0` is not free in the `data_size` lane.
+pub const LOG_BASE_SIZE: u64 = 32;
 
 /// A tracker for the total data size (in bytes) generated from transaction execution.
 ///
@@ -59,6 +62,8 @@ pub const STORAGE_SLOT_WRITE_SIZE: u64 = SALT_KEY_SIZE + SALT_VALUE_DELTA_STORAG
 #[derive(Debug, Clone)]
 pub(crate) struct DataSizeTracker {
     rex4_enabled: bool,
+    rex5_enabled: bool,
+    rex6_enabled: bool,
     frame_tracker: FrameLimitTracker<CallFrameInfo>,
 }
 
@@ -66,21 +71,9 @@ impl DataSizeTracker {
     pub(crate) fn new(spec: MegaSpecId, tx_limit: u64) -> Self {
         Self {
             rex4_enabled: spec.is_enabled(MegaSpecId::REX4),
-            frame_tracker: FrameLimitTracker::new(tx_limit),
-        }
-    }
-
-    /// Pushes a new frame onto the tracker.
-    ///
-    /// In Rex4+, delegates to `FrameLimitTracker::push_frame()` which uses
-    /// `tx_entry.remaining()` for the top-level frame (accounts for intrinsic usage)
-    /// and parent's remaining × 98/100 for nested frames.
-    /// In pre-Rex4, pushes with `u64::MAX` since per-frame limits are not enforced.
-    fn push_frame(&mut self, info: CallFrameInfo) {
-        if self.rex4_enabled {
-            self.frame_tracker.push_frame(info);
-        } else {
-            self.frame_tracker.push_frame_with_limit(u64::MAX, info);
+            rex5_enabled: spec.is_enabled(MegaSpecId::REX5),
+            rex6_enabled: spec.is_enabled(MegaSpecId::REX6),
+            frame_tracker: FrameLimitTracker::new(spec, tx_limit),
         }
     }
 
@@ -91,15 +84,64 @@ impl DataSizeTracker {
 
     /// Records discardable data in the current frame.
     fn record_discardable(&mut self, size: u64) {
-        if let Some(entry) = self.frame_tracker.frame_mut() {
-            entry.discardable_usage += size;
-        }
+        self.frame_tracker.add_frame_discardable(size);
+    }
+
+    /// Records discardable usage into the PARENT frame (one below the top). Used for a
+    /// child-CREATE's creator-side account-info write, whose on-chain effect (the creator
+    /// nonce bump) is undone only by the parent's revert, not the child's.
+    fn record_parent_discardable(&mut self, size: u64) {
+        self.frame_tracker.add_parent_discardable(size);
     }
 
     /// Records a refund (negative data) in the current frame.
     fn record_refund(&mut self, size: u64) {
-        if let Some(entry) = self.frame_tracker.frame_mut() {
-            entry.refund += size;
+        self.frame_tracker.add_frame_refund(size);
+    }
+
+    /// REX5+: meter an oracle-hint payload against the TX intrinsic data-size lane.
+    ///
+    /// Hints are a TX-scoped side-channel into the off-chain oracle backend. They do not
+    /// belong to any call frame (the inner Oracle frame may revert, but the hint has already
+    /// flowed out), so we record into `tx_entry.persistent_usage` — the same lane as calldata
+    /// — rather than the current frame's discardable usage.
+    pub(crate) fn record_oracle_hint_bytes(&mut self, len: u64) {
+        self.frame_tracker.add_tx_persistent(len);
+    }
+
+    /// Records an account info write (40 bytes) as discardable data in the current frame.
+    ///
+    /// Used by SELFDESTRUCT beneficiary metering (REX5+) to charge data size for
+    /// creating a new beneficiary account.
+    pub(crate) fn record_account_write(&mut self) {
+        self.record_discardable(ACCOUNT_INFO_WRITE_SIZE);
+    }
+
+    /// Records an account info write (40 bytes) as TX-level persistent (non-discardable) data.
+    ///
+    /// Used by the REX6 EIP-7702 authorization scan, which runs in `validate` before any frame
+    /// exists, so the charge cannot go through the frame-scoped `record_account_write`.
+    pub(crate) fn record_persistent_account_write(&mut self) {
+        self.frame_tracker.add_tx_persistent(ACCOUNT_INFO_WRITE_SIZE);
+    }
+
+    /// Merges external persistent usage into the TX-level entry.
+    ///
+    /// Used by `KeylessDeploy` (REX5+) to propagate sandbox data size consumption
+    /// back to the parent transaction.
+    pub(crate) fn merge_persistent_usage(&mut self, amount: u64) {
+        self.frame_tracker.add_tx_persistent(amount);
+    }
+
+    /// Returns the remaining data size budget for the current call frame, capped by
+    /// the TX-level remaining.
+    pub(crate) fn current_call_remaining(&self) -> u64 {
+        let tx_remaining =
+            self.frame_tracker.tx_limit().saturating_sub(self.frame_tracker.net_usage());
+        if self.rex4_enabled {
+            self.frame_tracker.current_frame_remaining().min(tx_remaining)
+        } else {
+            tx_remaining
         }
     }
 }
@@ -141,8 +183,14 @@ impl TxRuntimeLimit for DataSizeTracker {
         let used = self.tx_usage();
         let limit = self.frame_tracker.tx_limit();
         if used > limit {
+            // Defense-in-depth: pre-REX5, the only mid-execution writer to `tx_entry` is
+            // `before_tx_start` (which runs before any frame is pushed), so a TX-level
+            // exceed with an active frame indicates a budget-accounting bug. REX5+ adds
+            // `record_oracle_hint_bytes` which legitimately writes to `tx_entry` mid-
+            // execution to meter oracle-hint payloads as TX-scoped side-channel cost, so
+            // the invariant is only asserted on pre-REX5 specs.
             debug_assert!(
-                !self.rex4_enabled || !self.frame_tracker.has_active_frame(),
+                !self.rex4_enabled || self.rex5_enabled || !self.frame_tracker.has_active_frame(),
                 "DataSize TX-level exceeded with active frame — budget invariant violated"
             );
             super::LimitCheck::ExceedsLimit {
@@ -175,17 +223,24 @@ impl TxRuntimeLimit for DataSizeTracker {
             .map(|item| item.map(|access| access.size() as u64).sum::<u64>())
             .unwrap_or_default();
         size += tx.authorization_list_len() as u64 * AUTHORIZATION_SIZE;
-        self.frame_tracker.tx_mut().persistent_usage += size;
+        self.frame_tracker.add_tx_persistent(size);
 
-        // EIP-7702 authority account updates (non-discardable)
-        for authorization in tx.authorization_list() {
-            if authorization.authority().is_some() {
-                self.frame_tracker.tx_mut().persistent_usage += ACCOUNT_INFO_WRITE_SIZE;
+        // EIP-7702 authority account updates (non-discardable).
+        //
+        // Pre-REX6: charged here for every authorization with a recoverable authority, even ones
+        // that fail the chain-id / nonce / code application gates and never write the account.
+        // REX6+ moves this charge into the journal-aware authorization scan in `validate` so only
+        // *applied* authorities are charged; skip it here.
+        if !self.rex6_enabled {
+            for authorization in tx.authorization_list() {
+                if authorization.authority().is_some() {
+                    self.frame_tracker.add_tx_persistent(ACCOUNT_INFO_WRITE_SIZE);
+                }
             }
         }
 
         // Caller account update (non-discardable)
-        self.frame_tracker.tx_mut().persistent_usage += ACCOUNT_INFO_WRITE_SIZE;
+        self.frame_tracker.add_tx_persistent(ACCOUNT_INFO_WRITE_SIZE);
     }
 
     /// Called when inspector intercepts and skips a call/create.
@@ -194,7 +249,7 @@ impl TxRuntimeLimit for DataSizeTracker {
     /// the frame stack aligned with the EVM's call stack.
     #[inline]
     fn push_empty_frame(&mut self) {
-        self.push_frame(CallFrameInfo { target_address: None, target_updated: false });
+        self.frame_tracker.push_dummy_frame();
     }
 
     /// Hook called before a new execution frame is initialized.
@@ -213,37 +268,36 @@ impl TxRuntimeLimit for DataSizeTracker {
         match &frame_init.frame_input {
             FrameInput::Call(call_inputs) => {
                 let has_transfer = call_inputs.transfers_value();
-                // Check if parent's account info needs updating BEFORE pushing the child frame.
-                // Note: we do NOT set parent's target_updated to true — matching the old tracker,
-                // which never mutates it after frame creation.
-                let parent_needs_update = has_transfer &&
-                    self.frame_tracker
-                        .frame_mut()
-                        .is_some_and(|entry| !entry.info.target_updated);
-                // Push new frame
-                self.push_frame(CallFrameInfo {
-                    target_address: Some(call_inputs.target_address),
-                    target_updated: has_transfer,
-                });
+                let parent_needs_update =
+                    self.frame_tracker.push_call_frame(call_inputs.target_address, has_transfer);
                 if has_transfer {
                     if parent_needs_update {
-                        // Parent's account info update goes to child's discardable,
+                        // Parent's account info update goes to child's discardable.
                         self.record_discardable(ACCOUNT_INFO_WRITE_SIZE);
                     }
-                    // Record target account info update in child's discardable
-                    self.record_discardable(ACCOUNT_INFO_WRITE_SIZE);
+                    // A value transfer to the caller itself touches a single account, already
+                    // accounted by the caller-side write above (or, at the top level, by the
+                    // `before_tx_start` caller record). Recording the target side again would
+                    // double-count that one account, so skip it under REX6.
+                    if !(self.rex6_enabled && call_inputs.target_address == call_inputs.caller) {
+                        // Record target account info update in child's discardable.
+                        self.record_discardable(ACCOUNT_INFO_WRITE_SIZE);
+                    }
                 }
             }
             FrameInput::Create(_) => {
-                // Check if parent's account info needs updating BEFORE pushing the child frame.
-                let parent_needs_update =
-                    self.frame_tracker.frame_mut().is_some_and(|entry| !entry.info.target_updated);
-                // Push new frame (address unknown until after init)
-                self.push_frame(CallFrameInfo { target_address: None, target_updated: true });
+                let parent_needs_update = self.frame_tracker.push_create_frame();
                 if parent_needs_update {
-                    // Parent's account info update goes to child's discardable,
-                    // matching the old tracker's behavior.
-                    self.record_discardable(ACCOUNT_INFO_WRITE_SIZE);
+                    if self.rex6_enabled {
+                        // The creator's nonce bump survives the child's revert (revm bumps it
+                        // before the create checkpoint), so charge it to the parent frame —
+                        // see `FrameLimitTracker::add_parent_discardable`.
+                        self.record_parent_discardable(ACCOUNT_INFO_WRITE_SIZE);
+                    } else {
+                        // Pre-REX6: the creator nonce-bump charge is bundled into the child frame's
+                        // discardable lane (frozen behavior).
+                        self.record_discardable(ACCOUNT_INFO_WRITE_SIZE);
+                    }
                 }
             }
             FrameInput::Empty => unreachable!(),
@@ -258,12 +312,9 @@ impl TxRuntimeLimit for DataSizeTracker {
         if frame.data.is_create() {
             let created_address =
                 frame.data.created_address().expect("created address is none for create frame");
-            if let Some(entry) = self.frame_tracker.frame_mut() {
-                assert!(entry.info.target_address.is_none(), "created account already recorded");
-                entry.info.target_address = Some(created_address);
-                // Record account info update for created address
-                entry.discardable_usage += ACCOUNT_INFO_WRITE_SIZE;
-            }
+            self.frame_tracker.set_created_address(created_address);
+            // Record account info update for created address
+            self.record_discardable(ACCOUNT_INFO_WRITE_SIZE);
         }
     }
 
@@ -288,9 +339,15 @@ impl TxRuntimeLimit for DataSizeTracker {
     /// Pops the current frame from the tracker:
     /// - **On success**: merges the frame's data into the parent frame.
     /// - **On revert/failure**: discards the frame's discardable data.
+    ///
+    /// Rex5+: if the reverting child had set the parent's account-update flag, the flag
+    /// is reset so the next successful call from the same parent still charges the parent
+    /// account (avoiding undercounting after a revert-then-retry pattern). The unwind is
+    /// owned by `FrameLimitTracker::pop_frame_unwind_parent`.
     fn before_frame_return_result<const LAST_FRAME: bool>(&mut self, result: &FrameResult) {
         assert!(LAST_FRAME || self.frame_tracker.has_active_frame(), "frame stack is empty");
-        self.frame_tracker.pop_frame(result.instruction_result().is_ok());
+        let is_success = result.instruction_result().is_ok();
+        self.frame_tracker.pop_frame_unwind_parent(is_success);
     }
 
     /// Hook called when a storage slot is written via `SSTORE`.
@@ -317,9 +374,39 @@ impl TxRuntimeLimit for DataSizeTracker {
 
     /// Hook called when a log is emitted.
     ///
-    /// Records: (`num_topics` * 32 bytes) + `data_size` as discardable.
+    /// Records `LOG_BASE_SIZE` (REX6+ only) + `num_topics * 32` + `data_size` as discardable.
     fn after_log(&mut self, num_topics: u64, data_size: u64) {
-        let size = num_topics * LOG_TOPIC_SIZE + data_size;
+        let base = if self.rex6_enabled { LOG_BASE_SIZE } else { 0 };
+        let size = base + num_topics * LOG_TOPIC_SIZE + data_size;
         self.record_discardable(size);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The originated data-size constants are *sums* of their salt key/value components,
+    /// not products. Pin the values against independent literals so an arithmetic slip
+    /// (e.g. `+` -> `*`) is caught (8 + 32 = 40, not 8 * 32 = 256).
+    #[test]
+    fn test_originated_data_size_constants() {
+        assert_eq!(STORAGE_SLOT_WRITE_SIZE, 40);
+        assert_eq!(ACCOUNT_INFO_WRITE_SIZE, 40);
+    }
+
+    /// `has_active_frame` must reflect the underlying frame stack, not a constant.
+    #[test]
+    fn test_has_active_frame_reflects_frame_stack() {
+        let mut tracker = DataSizeTracker::new(MegaSpecId::MINI_REX, u64::MAX);
+        assert!(!tracker.has_active_frame(), "no frame pushed yet");
+        tracker.push_empty_frame();
+        assert!(tracker.has_active_frame(), "a frame is on the stack");
+    }
+
+    /// The `TxRuntimeLimit::tx_limit` accessor must report the configured TX-level budget.
+    #[test]
+    fn test_tx_limit_reports_configured_limit() {
+        assert_eq!(DataSizeTracker::new(MegaSpecId::MINI_REX, 4_321).tx_limit(), 4_321);
     }
 }

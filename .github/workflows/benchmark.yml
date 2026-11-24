@@ -4,22 +4,65 @@ on:
   schedule:
     - cron: '0 2 * * 1' # Weekly Monday 2am UTC
   workflow_dispatch:
+    inputs:
+      aa_check:
+        description: 'A/A self-check: compare HEAD against itself to measure the noise floor (no real change should be flagged).'
+        type: boolean
+        default: false
   issue_comment:
     types: [created]
 
+# The group is suffixed with "is this a real trigger": issue_comment fires for
+# EVERY new comment (codecov, mutation bots, humans chatting), and with a single
+# group + cancel-in-progress an unrelated comment lands in the same group and
+# cancels a live benchmark mid-flight. Non-trigger comment runs now share their
+# own group and only ever cancel each other; real runs still debounce real
+# re-triggers. The suffix mirrors the prepare job's FULL trigger gate
+# (PR-comment + /benchmark + author association) — any comment that would fail
+# the gate must not share a group with real runs, or it cancels a live run it
+# cannot replace (a benchmark-DoS on public PRs); keep the two in sync.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.issue.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.issue.number || github.ref }}-${{ github.event_name != 'issue_comment' || (github.event.issue.pull_request && contains(github.event.comment.body, '/benchmark') && contains(fromJSON('["MEMBER","COLLABORATOR","OWNER"]'), github.event.comment.author_association)) }}
   cancel-in-progress: true
 
+# Paired, order-interleaved A/B knobs. The harness runs the feature and baseline
+# bench binaries back-to-back for BENCH_ROUNDS short rounds (A B / B A / ...),
+# then takes the mean of the per-round paired Δ% with a bootstrap CI. Short
+# per-round configs keep the wall-clock close to the old single sequential pass;
+# precision is recovered across rounds, not within one. Tune here.
+env:
+  # Keep BENCH_ROUNDS even: the within-pair order alternates each round
+  # (feature-first / baseline-first), so an even count runs each side first
+  # exactly as often and the order-effect cancels in the mean. An odd count
+  # leaves a one-round imbalance that biases even the A/A self-check.
+  BENCH_ROUNDS: '16'
+  BENCH_SAMPLE_SIZE: '10'
+  BENCH_WARMUP: '0.2'
+  BENCH_MEAS: '0.5'
+  BOOTSTRAP_ITERS: '2000'
+
+# Least privilege by default: only the jobs that post to the PR get write, and
+# the job that compiles + runs untrusted PR code (`bench`) gets read-only — so a
+# malicious PR run with `/benchmark` has no write-scoped token to abuse.
 permissions:
   contents: read
-  pull-requests: write
 
 jobs:
-  benchmark:
-    name: Criterion performance check
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
+  # Resolve the exact commits ONCE, up front. Every bench job then checks out
+  # these fixed SHAs, so a push to the PR while the run is queued/in-flight
+  # cannot make different jobs measure different code (or mislabel the result).
+  prepare:
+    name: Resolve commits
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 10
+    # Reacts to the triggering comment; does not execute PR code.
+    # `issues: write` is required to react to the (issue) comment — PR
+    # conversation comments live under the issues API; `pull-requests: write`
+    # does not cover their reactions.
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
     if: >-
       github.event_name != 'issue_comment' || (
         github.event.issue.pull_request &&
@@ -28,206 +71,342 @@ jobs:
          github.event.comment.author_association == 'COLLABORATOR' ||
          github.event.comment.author_association == 'OWNER')
       )
+    outputs:
+      feature_sha: ${{ steps.resolve.outputs.feature_sha }}
+      baseline_sha: ${{ steps.resolve.outputs.baseline_sha }}
+      compare: ${{ steps.resolve.outputs.compare }}
+      aa_check: ${{ steps.resolve.outputs.aa_check }}
+    steps:
+      # Resolve the feature/baseline commits via the API ONLY — no checkout and
+      # no fetch of the PR ref. This write-privileged job therefore never brings
+      # untrusted PR code (or even a PR-controlled ref) into the workspace; the
+      # actual PR code is only ever materialized in the read-only `bench` job.
+      - name: Resolve commits and react
+        id: resolve
+        uses: actions/github-script@v7
+        with:
+          script: |
+            if (context.eventName === 'workflow_dispatch' &&
+                context.payload.inputs && context.payload.inputs.aa_check === 'true') {
+              // A/A self-check: compare the checked-out commit against ITSELF.
+              // A correctly-paired harness must flag nothing — the spread it
+              // measures is the pure noise floor.
+              core.setOutput('feature_sha', context.sha);
+              core.setOutput('baseline_sha', context.sha);
+              core.setOutput('compare', 'true');
+              core.setOutput('aa_check', 'true');
+              return;
+            }
+            if (context.eventName !== 'issue_comment') {
+              // schedule / workflow_dispatch: benchmark the checked-out ref,
+              // no baseline comparison.
+              core.setOutput('feature_sha', context.sha);
+              core.setOutput('baseline_sha', '');
+              core.setOutput('compare', 'false');
+              core.setOutput('aa_check', 'false');
+              return;
+            }
+            const { owner, repo } = context.repo;
+            const pull_number = context.payload.issue.number;
+            const pr = await github.rest.pulls.get({ owner, repo, pull_number });
+            const featureSha = pr.data.head.sha;
+            // GitHub's compare endpoint returns the merge-base of the PR base
+            // branch and the PR head — same commit `git merge-base` would pick.
+            const cmp = await github.rest.repos.compareCommitsWithBasehead({
+              owner,
+              repo,
+              basehead: `${pr.data.base.ref}...${featureSha}`,
+            });
+            const baselineSha = cmp.data.merge_base_commit.sha;
+            core.setOutput('feature_sha', featureSha);
+            core.setOutput('baseline_sha', baselineSha);
+            core.setOutput('compare', 'true');
+            core.setOutput('aa_check', 'false');
+            core.info(`Feature: ${featureSha}  Baseline: ${baselineSha}`);
+            // Best-effort acknowledgement: the outputs above are already set, so
+            // a failed reaction must NOT fail this job (which would skip bench +
+            // compare). Swallow any error and carry on.
+            try {
+              await github.rest.reactions.createForIssueComment({
+                owner,
+                repo,
+                comment_id: context.payload.comment.id,
+                content: 'rocket',
+              });
+            } catch (e) {
+              core.warning(`could not add :rocket: reaction: ${e.message}`);
+            }
+
+      # Claim/refresh THE report comment right away: it names the action run so
+      # a watcher knows where the benchmark lives, and the compare job later
+      # edits this same comment in place — repeated /benchmark runs never stack
+      # a second giant report. Best-effort: a failed post must not skip bench.
+      - name: Post in-progress status comment
+        if: github.event_name == 'issue_comment'
+        continue-on-error: true
+        uses: actions/github-script@v7
+        env:
+          FEATURE_SHA: ${{ steps.resolve.outputs.feature_sha }}
+          BASELINE_SHA: ${{ steps.resolve.outputs.baseline_sha }}
+        with:
+          script: |
+            const marker = '<!-- criterion-benchmark-report -->';
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const short = (s) => (s || '').slice(0, 12);
+            const body = [
+              marker,
+              '## Criterion Benchmark Comparison',
+              '',
+              `:hourglass_flowing_sand: **Benchmark in progress** — [watch the run](${runUrl})`,
+              '',
+              `Comparing \`${short(process.env.BASELINE_SHA)}\` (baseline) → ` +
+                `\`${short(process.env.FEATURE_SHA)}\` (feature). ` +
+                'This comment is updated in place when the run finishes.',
+            ].join('\n');
+            const { owner, repo } = context.repo;
+            const issue_number = context.payload.issue.number;
+            const comments = await github.paginate(github.rest.issues.listComments,
+              { owner, repo, issue_number, per_page: 100 });
+            const mine = comments.filter(c => c.user && c.user.login === 'github-actions[bot]'
+              && c.body && c.body.includes(marker)).pop();
+            if (mine) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: mine.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }
+
+  # One job per bench target. Each job builds BOTH the feature and baseline bench
+  # binaries up front (no rebuild during measurement), then runs them paired and
+  # order-interleaved on the SAME runner for BENCH_ROUNDS short rounds. Pairing
+  # the two sides inside each round cancels the runner's slow drift, which the
+  # old "whole feature suite, then whole baseline suite" pass turned into a
+  # ±2-5% phantom delta. Jobs run in parallel across targets.
+  bench:
+    name: Bench ${{ matrix.target }}
+    needs: prepare
+    runs-on: blacksmith-32vcpu-ubuntu-2404
+    # Paired interleaving runs each round's measurement ~1.5x the old single
+    # pass, and re-pays per-bench setup once per round; give heavy-setup targets
+    # (block_bench / attack_replay / comp_cost) generous headroom. Lower
+    # BENCH_ROUNDS in env to trade back time.
+    timeout-minutes: 180
+    # This job compiles and runs untrusted PR code — keep it read-only so there
+    # is no write-scoped token to exfiltrate. `pull-requests: read` lets
+    # `gh pr checkout` resolve the (fork) PR head.
+    permissions:
+      contents: read
+      pull-requests: read
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [revm_bench, mega_bench, block_bench, transact, comp_cost, ctt, attack_replay]
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
           fetch-depth: 0
 
-      - name: Checkout PR branch
-        if: github.event_name == 'issue_comment'
-        env:
-          GH_TOKEN: ${{ github.token }}
+      # Pin the measurement runner to the TRUSTED base-repo version. The initial
+      # checkout above is the default branch (for issue_comment events), so this
+      # copy is taken before any `git checkout <feature_sha>` swaps in PR code —
+      # a PR cannot alter how its own numbers are collected.
+      - name: Stash measurement script
         run: |
-          gh pr checkout ${{ github.event.issue.number }}
-          git submodule update --init --recursive
+          mkdir -p "$RUNNER_TEMP/scripts"
+          cp .github/scripts/bench_paired.sh "$RUNNER_TEMP/scripts/"
+          chmod +x "$RUNNER_TEMP/scripts/bench_paired.sh"
 
-      - name: React to comment
+      # Fetch the PR head commit by its pull ref, which GitHub keeps in the base
+      # repo for fork PRs and even after the source branch is deleted (merged
+      # PRs) — unlike `gh pr checkout`, which needs the source branch to exist.
+      # `git checkout <feature_sha>` below then resolves against the fetched
+      # commit.
+      - name: Fetch PR head
         if: github.event_name == 'issue_comment'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            github.rest.reactions.createForIssueComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              comment_id: context.payload.comment.id,
-              content: 'rocket'
-            });
+        run: git fetch --no-tags origin "pull/${{ github.event.issue.number }}/head"
 
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          # Empty rustflags overrides this action's default `-D warnings`.
+          # Measurement builds should not fail on unrelated warnings; the
+          # previous align-all-functions flag is gone (layout stabilization
+          # was ineffective), but the opt-out of `-D warnings` stays.
+          rustflags: ""
 
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
 
-      # Run feature benchmarks (current branch)
-      - name: Run feature benchmarks
-        env:
-          BENCH_TARGETS: revm_bench mega_bench block_bench transact comp_cost ctt
+      # Build the feature bench binary without running it, capture its path from
+      # cargo's JSON output, and copy it out of target/ so a later baseline build
+      # (or working-tree checkout) cannot disturb it.
+      - name: Build feature bench binary
         run: |
-          : > feature_output.txt
-          for bench in $BENCH_TARGETS; do
-            cargo bench -p mega-evm --bench "$bench" -- --output-format bencher | tee -a feature_output.txt
-          done
-
-      # On /benchmark comment: also run baseline benchmarks for comparison
-      - name: Determine baseline commit
-        if: github.event_name == 'issue_comment'
-        id: baseline
-        run: |
-          echo "feature_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-          BASELINE=$(git merge-base HEAD origin/main)
-          echo "commit=$BASELINE" >> "$GITHUB_OUTPUT"
-          echo "Baseline commit: $BASELINE"
-
-      - name: Run baseline benchmarks
-        if: github.event_name == 'issue_comment'
-        env:
-          BENCH_TARGETS: revm_bench mega_bench block_bench transact comp_cost ctt
-        run: |
-          git checkout ${{ steps.baseline.outputs.commit }}
-          trap 'git checkout -' EXIT
+          git checkout --quiet ${{ needs.prepare.outputs.feature_sha }}
           git submodule update --init --recursive
-          AVAILABLE_BENCHES=$(python3 - <<'PY'
-          bench_names = []
-          in_bench = False
+          bin=$(cargo bench --no-run -p mega-evm --bench ${{ matrix.target }} --message-format=json \
+            | jq -r 'select(.reason=="compiler-artifact" and .target.name=="${{ matrix.target }}" and (.target.kind|index("bench")) and .executable!=null) | .executable' \
+            | tail -1)
+          test -n "$bin" || { echo "could not locate feature bench binary"; exit 1; }
+          cp "$bin" "$RUNNER_TEMP/feature_bin"
+          echo "feature bench binary: $bin"
 
-          with open("crates/mega-evm/Cargo.toml", encoding="utf-8") as f:
-              for line in f:
-                  stripped = line.strip()
-                  if stripped == "[[bench]]":
-                      in_bench = True
-                      continue
-                  if stripped.startswith("[") and stripped != "[[bench]]":
-                      in_bench = False
-                  if in_bench and stripped.startswith("name = "):
-                      name = stripped.split("=", 1)[1].strip().strip('"')
-                      bench_names.append(name)
-                      in_bench = False
+      # Build the baseline binary too (skipped for the A/A self-check, where it
+      # is identical, and when the target did not exist at the baseline commit).
+      - name: Build baseline bench binary
+        if: needs.prepare.outputs.compare == 'true'
+        run: |
+          if [ "${{ needs.prepare.outputs.aa_check }}" = "true" ]; then
+            cp "$RUNNER_TEMP/feature_bin" "$RUNNER_TEMP/baseline_bin"
+            echo "A/A self-check: baseline binary = feature binary"
+            exit 0
+          fi
+          git checkout --quiet ${{ needs.prepare.outputs.baseline_sha }}
+          git submodule update --init --recursive
+          if ! grep -q 'name = "${{ matrix.target }}"' crates/mega-evm/Cargo.toml; then
+            echo "target '${{ matrix.target }}' absent at baseline commit — feature-only"
+            exit 0
+          fi
+          bin=$(cargo bench --no-run -p mega-evm --bench ${{ matrix.target }} --message-format=json \
+            | jq -r 'select(.reason=="compiler-artifact" and .target.name=="${{ matrix.target }}" and (.target.kind|index("bench")) and .executable!=null) | .executable' \
+            | tail -1)
+          test -n "$bin" || { echo "could not locate baseline bench binary"; exit 1; }
+          cp "$bin" "$RUNNER_TEMP/baseline_bin"
+          echo "baseline bench binary: $bin"
 
-          for name in bench_names:
-              print(name)
-          PY
-          )
-          : > baseline_output.txt
-          for bench in $BENCH_TARGETS; do
-            if printf '%s\n' "$AVAILABLE_BENCHES" | grep -qx "$bench"; then
-              cargo bench -p mega-evm --bench "$bench" -- --output-format bencher | tee -a baseline_output.txt
-            else
-              echo "Skipping baseline benchmark '$bench' (not present at baseline commit)"
-            fi
-          done
+      # Check out the feature working tree so BOTH prebuilt binaries read the same
+      # (PR) fixtures at runtime — a fair comparison on identical inputs.
+      - name: Prepare measurement working tree
+        run: |
+          git checkout --quiet ${{ needs.prepare.outputs.feature_sha }}
+          git submodule update --init --recursive
 
-      - name: Compare and comment on PR
+      - name: Run paired interleaved benchmark
+        if: needs.prepare.outputs.compare == 'true'
+        run: |
+          mkdir -p rounds
+          baseline_bin=""
+          [ -f "$RUNNER_TEMP/baseline_bin" ] && baseline_bin="$RUNNER_TEMP/baseline_bin"
+          "$RUNNER_TEMP/scripts/bench_paired.sh" \
+            "${{ matrix.target }}" \
+            "$RUNNER_TEMP/feature_bin" \
+            "$baseline_bin" \
+            rounds \
+            "$BENCH_ROUNDS" "$BENCH_SAMPLE_SIZE" "$BENCH_WARMUP" "$BENCH_MEAS"
+
+      # Schedule / dispatch (no comparison): one full-config feature run, kept for
+      # the artifact history only — there is no PR to comment on.
+      - name: Run standalone benchmark
+        if: needs.prepare.outputs.compare != 'true'
+        run: |
+          "$RUNNER_TEMP/feature_bin" --bench --output-format bencher --noplot \
+            | tee "feature_${{ matrix.target }}.txt"
+
+      - name: Upload round results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-rounds-${{ matrix.target }}
+          path: |
+            rounds/
+            feature_${{ matrix.target }}.txt
+          if-no-files-found: ignore
+
+  # Join all per-target round files and post the comparison comment. Cheap (no
+  # compile, no benches) so it gets a short budget.
+  compare:
+    name: Compare and comment on PR
+    needs: [prepare, bench]
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 10
+    # `!cancelled()` (NOT `always()`): a failed bench leg still updates the
+    # status comment (partial rounds aggregated under a warning banner), but a
+    # CANCELLED run must not run compare — the newer run that cancelled it owns
+    # the shared comment now, and `always()` would overwrite its fresh
+    # "in progress" status with this run's stale partial report.
+    if: >-
+      ${{ !cancelled() && needs.prepare.result == 'success' &&
+          needs.prepare.outputs.compare == 'true' }}
+    # Posts the comparison comment; consumes artifacts plus the TRUSTED base-repo
+    # aggregation script (checked out below from the default branch, never PR
+    # code).
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Download all round results
+        # May find nothing when every bench leg failed; the aggregate step
+        # tolerates an empty dir and the comment step banners the failure.
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: bench-rounds-*
+          path: all_rounds
+          merge-multiple: true
+
+      - name: Aggregate rounds into a comparison
+        env:
+          # Point at the download root; upload-artifact collapses the `rounds/`
+          # prefix, so the round files land directly under here. The comparator
+          # globs recursively, so a one-level-deeper layout also works.
+          ROUNDS_DIR: all_rounds
+          OUT: comparison.md
+          FEATURE_SHA: ${{ needs.prepare.outputs.feature_sha }}
+          BASELINE_SHA: ${{ needs.prepare.outputs.baseline_sha }}
+          REPO_URL: ${{ github.event.repository.html_url }}
+          AA_CHECK: ${{ needs.prepare.outputs.aa_check }}
+          BOOTSTRAP_ITERS: ${{ env.BOOTSTRAP_ITERS }}
+        run: |
+          mkdir -p all_rounds
+          python3 .github/scripts/bench_compare.py
+
+      # Update the status comment the prepare job claimed (create if it is
+      # somehow missing) — one report comment per PR, edited in place, never a
+      # growing stack of giant comments.
+      - name: Comment on PR
         if: github.event_name == 'issue_comment'
         uses: actions/github-script@v7
+        env:
+          BENCH_RESULT: ${{ needs.bench.result }}
         with:
           script: |
             const fs = require('fs');
-
-            function parseBencher(text) {
-              const results = {};
-              for (const line of text.split('\n')) {
-                // Format: "test name ... bench: 123 ns/iter (+/- 45)"
-                const match = line.match(/^test\s+(.+?)\s+\.\.\.\s+bench:\s+([\d,]+)\s+ns\/iter\s+\(\+\/- ([\d,]+)\)/);
-                if (match) {
-                  const name = match[1].trim();
-                  const ns = parseInt(match[2].replace(/,/g, ''));
-                  const variance = parseInt(match[3].replace(/,/g, ''));
-                  results[name] = { ns, variance };
-                }
-              }
-              return results;
+            const marker = '<!-- criterion-benchmark-report -->';
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            let report;
+            try {
+              report = fs.readFileSync('comparison.md', 'utf8');
+            } catch (e) {
+              report = '## Criterion Benchmark Comparison\n\n_No comparison was produced._\n';
             }
-
-            const featureText = fs.readFileSync('feature_output.txt', 'utf8');
-            const feature = parseBencher(featureText);
-
-            if (!fs.existsSync('baseline_output.txt')) {
-              console.log('No baseline output found');
-              return;
+            let banner = '';
+            if (process.env.BENCH_RESULT !== 'success') {
+              banner = `> :warning: **Some bench jobs did not succeed** ` +
+                `(bench: \`${process.env.BENCH_RESULT}\`) — results below may be ` +
+                `partial; see the [run log](${runUrl}).\n\n`;
             }
-            const baselineText = fs.readFileSync('baseline_output.txt', 'utf8');
-            const baseline = parseBencher(baselineText);
-
-            const allNames = [...new Set([...Object.keys(baseline), ...Object.keys(feature)])].sort();
-            if (allNames.length === 0) {
-              console.log('No benchmark results to compare');
-              return;
-            }
-
-            let body = '## Criterion Benchmark Comparison\n\n';
-            const featureSha = '${{ steps.baseline.outputs.feature_sha }}';
-            body += `> Comparing [\`baseline\`](${context.payload.repository.html_url}/commit/${{ steps.baseline.outputs.commit }})`;
-            body += ` → [\`feature\`](${context.payload.repository.html_url}/commit/${featureSha})\n\n`;
-
-            let regressions = 0;
-            let warnings = 0;
-            let improvements = 0;
-            const comparisons = [];
-
-            for (const name of allNames) {
-              const b = baseline[name];
-              const f = feature[name];
-              if (!b || !f) continue;
-
-              const delta = ((f.ns - b.ns) / b.ns * 100);
-              let icon = ':white_check_mark:';
-              if (delta > 30) { icon = ':x:'; regressions++; }
-              else if (delta > 15) { icon = ':warning:'; warnings++; }
-              else if (delta < -10) { icon = ':rocket:'; improvements++; }
-
-              const bUs = (b.ns / 1000).toFixed(1);
-              const fUs = (f.ns / 1000).toFixed(1);
-              const sign = delta > 0 ? '+' : '';
-              comparisons.push({
-                delta,
-                row: `| ${name} | ${bUs} us | ${fUs} us | ${sign}${delta.toFixed(1)}% | ${icon} |`,
-              });
-            }
-
-            const rows = comparisons.map(({ row }) => row);
-
-            if (rows.length > 20) {
-              // Show only significant changes if too many
-              const significant = comparisons
-                .filter(({ delta }) => Math.abs(delta) > 5)
-                .map(({ row }) => row);
-              if (significant.length > 0 && significant.length < rows.length) {
-                body += `<details><summary>${rows.length} benchmarks total, ${significant.length} with >5% change</summary>\n\n`;
-                body += '| Benchmark | Baseline | Feature | Delta | |\n';
-                body += '|-----------|----------|---------|-------|-|\n';
-                body += rows.join('\n') + '\n';
-                body += '\n</details>\n\n';
-                body += '**Significant changes (>5%):**\n\n';
-                body += '| Benchmark | Baseline | Feature | Delta | |\n';
-                body += '|-----------|----------|---------|-------|-|\n';
-                body += significant.join('\n') + '\n';
-              } else {
-                body += '| Benchmark | Baseline | Feature | Delta | |\n';
-                body += '|-----------|----------|---------|-------|-|\n';
-                body += rows.join('\n') + '\n';
-              }
+            const body = `${marker}\n${banner}${report}\n_Produced by [this run](${runUrl})._`;
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const comments = await github.paginate(github.rest.issues.listComments,
+              { owner, repo, issue_number, per_page: 100 });
+            const mine = comments.filter(c => c.user && c.user.login === 'github-actions[bot]'
+              && c.body && c.body.includes(marker)).pop();
+            if (mine) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: mine.id, body });
             } else {
-              body += '| Benchmark | Baseline | Feature | Delta | |\n';
-              body += '|-----------|----------|---------|-------|-|\n';
-              body += rows.join('\n') + '\n';
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
             }
 
-            body += `\n**${rows.length} benchmarks**: ${regressions} regressions, ${warnings} warnings, ${improvements} improvements\n`;
-
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: body
-            });
-
-      - name: Upload results
+      - name: Upload comparison
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: criterion-benchmark-results
           path: |
-            feature_output.txt
-            baseline_output.txt
+            comparison.md
+            all_rounds

@@ -1,9 +1,11 @@
 mod env;
 mod error;
+mod exit;
 mod hardfork;
 mod hex;
 mod logging;
 mod outcome;
+mod provider;
 mod state;
 mod trace;
 mod tx;
@@ -11,10 +13,12 @@ mod tx_override;
 
 pub use env::*;
 pub use error::*;
+pub use exit::*;
 pub use hardfork::*;
 pub use hex::*;
 pub use logging::*;
 pub use outcome::*;
+pub use provider::*;
 pub use state::*;
 pub use trace::*;
 pub use tx::*;

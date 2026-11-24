@@ -2,6 +2,14 @@
 lychee = "latest"
 "npm:markdownlint-cli2" = "latest"
 "npm:prettier" = "latest"
+# universalmutator (`mutate`, `analyze_mutants`) for the custom-operator mutation
+# engine (scripts/umutate.py). Pinned (like cargo-mutants@27.1.0 in
+# mutation.yml): a new release can change the set of generated mutants, which
+# would silently shift the gate baseline. comby is NOT managed here: its only
+# prebuilt links against Debian sonames — fine on the Ubuntu CI runners, but on
+# Arch it must be the patched AUR build (`paru -S comby-bin`), so mise must not
+# shadow it (comby itself is pinned to a known version in the CI installer).
+"pipx:universalmutator" = "1.14.1"
 
 [tasks.lint]
 description = "Run all doc checks (links, lint, format)"
@@ -22,3 +30,20 @@ run = "prettier --check 'docs/**/*.md' '*.md'"
 [tasks.fmt]
 description = "Auto-fix formatting"
 run = "prettier --write 'docs/**/*.md' '*.md'"
+
+[tasks."system-contracts:attest"]
+description = "Attest the latest system contract artifacts against Solidity using Foundry"
+usage = 'arg "[crate-dir]" default="crates/system-contracts"'
+run = '''
+target_dir=$(mktemp -d)
+trap 'rm -rf -- "$target_dir"' EXIT
+CARGO_TARGET_DIR="$target_dir" cargo run --quiet --locked -p system-contract-artifacts -- attest "${usage_crate_dir?}"
+'''
+
+[tasks."system-contracts:generate"]
+description = "Regenerate system contract Rust constants from checked-in artifacts"
+run = "cargo run --quiet --locked -p system-contract-artifacts -- generate"
+
+[tasks.mutate-custom-plan]
+description = "Plan custom-operator (spec-gate) mutants — read-only, runs no tests"
+run = "python3 scripts/umutate.py plan"

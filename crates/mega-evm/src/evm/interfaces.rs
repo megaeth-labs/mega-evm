@@ -1,4 +1,5 @@
 use alloy_evm::{precompiles::PrecompilesMap, Database, EvmEnv};
+use alloy_op_evm::{map_op_err, OpTxError};
 use alloy_primitives::{Address, Bytes};
 use revm::{
     context::{
@@ -12,8 +13,8 @@ use revm::{
 };
 
 use crate::{
-    ExternalEnvTypes, IntoMegaethCfgEnv, MegaContext, MegaEvm, MegaHaltReason, MegaHandler,
-    MegaSpecId, MegaTransaction, MegaTransactionError,
+    constants, ExternalEnvTypes, IntoMegaethCfgEnv, MegaContext, MegaEvm, MegaHaltReason,
+    MegaHandler, MegaSpecId, MegaTransaction, MegaTransactionError,
 };
 
 /// Implementation of [`alloy_evm::Evm`] for `MegaETH` EVM.
@@ -28,14 +29,23 @@ where
 {
     type DB = DB;
     type Tx = MegaTransaction;
-    type Error = EVMError<DB::Error, MegaTransactionError>;
+    // `alloy_evm::Evm::Error` requires the transaction error to implement
+    // `alloy_evm::InvalidTxError`, which cannot be implemented for the foreign
+    // `OpTransactionError`. `alloy-op-evm` exposes the `OpTxError` newtype for exactly this, so
+    // the internal handler error is mapped at this boundary.
+    type Error = EVMError<DB::Error, OpTxError>;
     type HaltReason = MegaHaltReason;
     type Spec = MegaSpecId;
+    type BlockEnv = BlockEnv;
     type Precompiles = PrecompilesMap;
     type Inspector = INSP;
 
     fn block(&self) -> &BlockEnv {
         self.block_env_ref()
+    }
+
+    fn cfg_env(&self) -> &revm::context::CfgEnv<Self::Spec> {
+        self.cfg_env_ref()
     }
 
     fn chain_id(&self) -> u64 {
@@ -47,9 +57,9 @@ where
         tx: Self::Tx,
     ) -> Result<ResultAndState<Self::HaltReason>, Self::Error> {
         if self.inspect {
-            InspectEvm::inspect_tx(self, tx)
+            InspectEvm::inspect_tx(self, tx).map_err(map_op_err)
         } else {
-            revm::ExecuteEvm::transact(self, tx)
+            revm::ExecuteEvm::transact(self, tx).map_err(map_op_err)
         }
     }
 
@@ -73,14 +83,19 @@ where
     /// # Note
     ///
     /// This function copies the logic from `alloy_op_evm::OpEvm::transact_system_call`
-    /// to maintain compatibility with the Optimism EVM system call interface.
+    /// to maintain compatibility with the Optimism EVM system call interface. The
+    /// transaction's gas limit is `MegaETH`'s frozen pre-REX5 30M
+    /// ([`constants::PRE_REX5_SYSTEM_CALL_GAS_LIMIT`]), not upstream revm's
+    /// `SYSTEM_CALL_GAS_LIMIT` (which drifted to `31_566_720`). Callers that need the live
+    /// block gas budget — e.g. REX5 pre-block helpers whose cost is sensitive to dynamic
+    /// storage gas — should use [`MegaEvm::transact_system_call_with_gas_limit`] instead.
     fn transact_system_call(
         &mut self,
         caller: Address,
         contract: Address,
         data: Bytes,
     ) -> Result<ResultAndState<Self::HaltReason>, Self::Error> {
-        self.transact_system_call_with_caller_finalize(caller, contract, data)
+        self.system_call_with_caller(caller, contract, data).map_err(map_op_err)
     }
 
     fn finish(self) -> (Self::DB, EvmEnv<Self::Spec>)
@@ -135,14 +150,16 @@ where
         self.inner.ctx.journal_mut().finalize()
     }
 
+    /// Finalizes the journal whether or not the transaction succeeded, as
+    /// [`transact`](revm::ExecuteEvm::transact) does; see [`MegaEvm`] on the entry points and the
+    /// journal. revm's own `Evm::replay` finalizes only on success.
     fn replay(
         &mut self,
     ) -> Result<ExecResultAndState<Self::ExecutionResult, Self::State>, Self::Error> {
-        let mut h = MegaHandler::<_, _, EthFrame<EthInterpreter>>::new();
-        revm::handler::Handler::run(&mut h, self).map(|result| {
-            let state = self.finalize();
-            ExecResultAndState::new(result, state)
-        })
+        let mut h = MegaHandler::<_, Self::Error, EthFrame<EthInterpreter>>::new();
+        let output_or_error = revm::handler::Handler::run(&mut h, self);
+        let state = self.finalize();
+        Ok(ExecResultAndState::new(output_or_error?, state))
     }
 }
 
@@ -152,6 +169,15 @@ where
 {
     fn commit(&mut self, state: Self::State) {
         self.ctx().db_mut().commit(state);
+    }
+
+    /// Finalizes the journal whether or not the transaction succeeded, and commits it only on
+    /// success. The trait's default commits through `transact_one` and leaves the journal
+    /// unfinalized on an error.
+    fn transact_commit(&mut self, tx: Self::Tx) -> Result<Self::ExecutionResult, Self::Error> {
+        let ExecResultAndState { result, state } = revm::ExecuteEvm::transact(self, tx)?;
+        self.commit(state);
+        Ok(result)
     }
 }
 
@@ -171,6 +197,29 @@ where
         let mut h = MegaHandler::<_, _, EthFrame<EthInterpreter>>::new();
         revm::inspector::InspectorHandler::inspect_run(&mut h, self)
     }
+
+    /// Finalizes the journal whether or not the transaction succeeded, as
+    /// [`ExecuteEvm::transact`](revm::ExecuteEvm::transact) does; see [`MegaEvm`] on the entry
+    /// points and the journal. The trait's provided method returns before finalizing on an error.
+    fn inspect_tx(
+        &mut self,
+        tx: Self::Tx,
+    ) -> Result<ExecResultAndState<Self::ExecutionResult, Self::State>, Self::Error> {
+        let output_or_error = self.inspect_one_tx(tx);
+        let state = revm::ExecuteEvm::finalize(self);
+        let output = output_or_error?;
+        Ok(ExecResultAndState::new(output, state))
+    }
+
+    /// Sets the inspector and runs [`Self::inspect_tx`], which finalizes on both outcomes.
+    fn inspect(
+        &mut self,
+        tx: Self::Tx,
+        inspector: Self::Inspector,
+    ) -> Result<ExecResultAndState<Self::ExecutionResult, Self::State>, Self::Error> {
+        self.set_inspector(inspector);
+        self.inspect_tx(tx)
+    }
 }
 
 impl<DB, INSP, ExtEnvs: ExternalEnvTypes> revm::InspectCommitEvm for MegaEvm<DB, INSP, ExtEnvs>
@@ -178,22 +227,93 @@ where
     DB: Database + DatabaseCommit,
     INSP: Inspector<MegaContext<DB, ExtEnvs>>,
 {
+    /// Finalizes the journal whether or not the transaction succeeded, and commits it only on
+    /// success. The trait's default leaves the journal unfinalized on an error.
+    fn inspect_tx_commit(&mut self, tx: Self::Tx) -> Result<Self::ExecutionResult, Self::Error> {
+        let ExecResultAndState { result, state } = self.inspect_tx(tx)?;
+        revm::ExecuteCommitEvm::commit(self, state);
+        Ok(result)
+    }
+
+    /// Sets the inspector and runs
+    /// [`inspect_tx_commit`](revm::InspectCommitEvm::inspect_tx_commit).
+    fn inspect_commit(
+        &mut self,
+        tx: Self::Tx,
+        inspector: Self::Inspector,
+    ) -> Result<Self::ExecutionResult, Self::Error> {
+        self.set_inspector(inspector);
+        self.inspect_tx_commit(tx)
+    }
 }
 
 impl<DB, INSP, ExtEnvs: ExternalEnvTypes> revm::SystemCallEvm for MegaEvm<DB, INSP, ExtEnvs>
 where
     DB: Database,
 {
-    fn transact_system_call_with_caller(
+    fn system_call_one_with_caller(
         &mut self,
         caller: Address,
         contract: Address,
         data: Bytes,
     ) -> Result<Self::ExecutionResult, Self::Error> {
-        self.ctx().set_tx(<MegaTransaction as SystemCallTx>::new_system_tx_with_caller(
-            caller, contract, data,
-        ));
+        // Override upstream `SystemCallTx` gas limit: revm 40's
+        // `SYSTEM_CALL_GAS_LIMIT` is 31_566_720 (30M + bal-devnet-7 state-gas
+        // reservoir). Frozen MegaETH keeps the historical 30M.
+        let mut tx =
+            <MegaTransaction as SystemCallTx>::new_system_tx_with_caller(caller, contract, data);
+        tx.base.gas_limit = constants::PRE_REX5_SYSTEM_CALL_GAS_LIMIT;
+        self.ctx().set_tx(tx);
         let mut h = MegaHandler::<_, _, EthFrame<EthInterpreter>>::new();
         revm::handler::Handler::run_system_call(&mut h, self)
+    }
+
+    /// Finalizes the journal whether or not the system call succeeded. The trait's default
+    /// returns before finalizing on an error.
+    fn system_call_with_caller(
+        &mut self,
+        caller: Address,
+        contract: Address,
+        data: Bytes,
+    ) -> Result<ExecResultAndState<Self::ExecutionResult, Self::State>, Self::Error> {
+        let output_or_error = self.system_call_one_with_caller(caller, contract, data);
+        let state = revm::ExecuteEvm::finalize(self);
+        Ok(ExecResultAndState::new(output_or_error?, state))
+    }
+}
+
+impl<DB, INSP, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, INSP, ExtEnvs>
+where
+    DB: Database,
+{
+    /// Transact a system call with an explicit gas limit and finalize.
+    ///
+    /// Behaves like [`alloy_evm::Evm::transact_system_call`] but lets the caller specify
+    /// the gas limit instead of `MegaETH`'s frozen pre-REX5 30M default. This is intended
+    /// for REX5+ pre-block helpers (e.g. `transact_apply_pending_changes` in
+    /// `system::sequencer_registry`) whose real cost is sensitive to dynamic storage gas
+    /// and is no longer guaranteed to fit within 30M on activation blocks.
+    ///
+    /// The recommended argument is
+    /// `block.gas_limit.max(crate::constants::rex5::SYSTEM_CALL_GAS_LIMIT_FLOOR)`.
+    pub fn transact_system_call_with_gas_limit(
+        &mut self,
+        caller: Address,
+        contract: Address,
+        data: Bytes,
+        gas_limit: u64,
+    ) -> Result<ResultAndState<MegaHaltReason>, EVMError<DB::Error, MegaTransactionError>> {
+        let mut tx =
+            <MegaTransaction as SystemCallTx>::new_system_tx_with_caller(caller, contract, data);
+        tx.base.gas_limit = gas_limit;
+        self.ctx().set_tx(tx);
+        let mut h = MegaHandler::<
+            _,
+            EVMError<DB::Error, MegaTransactionError>,
+            EthFrame<EthInterpreter>,
+        >::new();
+        let output_or_error = revm::handler::Handler::run_system_call(&mut h, self);
+        let state = self.inner.ctx.journal_mut().finalize();
+        Ok(ResultAndState { result: output_or_error?, state })
     }
 }

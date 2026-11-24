@@ -7,12 +7,9 @@
 use alloy_evm::Database;
 use alloy_primitives::{address, Address};
 use alloy_sol_types::SolError;
-use revm::{
-    database::State,
-    state::{Account, Bytecode, EvmState},
-};
+use revm::state::EvmState;
 
-use crate::MegaHardforks;
+use crate::{MegaHardforks, MegaSpecId, SystemContractSpec};
 
 /// The address of the access control system contract.
 pub const ACCESS_CONTROL_ADDRESS: Address = address!("0x6342000000000000000000000000000000000004");
@@ -51,43 +48,36 @@ pub const DISABLED_BY_PARENT_REVERT_DATA: [u8; 4] = IMegaAccessControl::Disabled
 pub fn transact_deploy_access_control_contract<DB: Database>(
     hardforks: impl MegaHardforks,
     block_timestamp: u64,
-    db: &mut State<DB>,
+    db: &mut DB,
 ) -> Result<Option<EvmState>, DB::Error> {
-    if !hardforks.is_rex_4_active_at_timestamp(block_timestamp) {
-        return Ok(None);
-    }
+    access_control_spec(hardforks.spec_id(block_timestamp))
+        .map(|s| crate::transact_deploy(db, &s))
+        .transpose()
+}
 
-    // Load the access control contract account from the cache
-    let acc = db.load_cache_account(ACCESS_CONTROL_ADDRESS)?;
-
-    // If the contract is already deployed with the correct code, return early
-    if let Some(account_info) = acc.account_info() {
-        if account_info.code_hash == ACCESS_CONTROL_CODE_HASH {
-            return Ok(Some(EvmState::from_iter([(
-                ACCESS_CONTROL_ADDRESS,
-                Account { info: account_info, ..Default::default() },
-            )])));
-        }
-    }
-
-    // Update the account info with the contract code
-    let mut acc_info = acc.account_info().unwrap_or_default();
-    acc_info.code_hash = ACCESS_CONTROL_CODE_HASH;
-    acc_info.code = Some(Bytecode::new_raw(ACCESS_CONTROL_CODE));
-
-    // Convert the cache account back into a revm account and mark it as touched.
-    let mut revm_acc: revm::state::Account = acc_info.into();
-    revm_acc.mark_touch();
-    revm_acc.mark_created();
-
-    Ok(Some(EvmState::from_iter([(ACCESS_CONTROL_ADDRESS, revm_acc)])))
+/// Builds the [`SystemContractSpec`] for the access-control contract active under
+/// `spec`, or `None` if `REX4` is not yet enabled.
+///
+/// `spec` is the scheduled spec, compared by position — see
+/// [`oracle_spec`](crate::system::oracle::oracle_spec).
+pub(crate) fn access_control_spec(spec: MegaSpecId) -> Option<SystemContractSpec> {
+    spec.reaches(MegaSpecId::REX4).then(|| {
+        SystemContractSpec::new(
+            ACCESS_CONTROL_ADDRESS,
+            ACCESS_CONTROL_CODE,
+            ACCESS_CONTROL_CODE_HASH,
+        )
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use alloy_primitives::{keccak256, B256};
-    use revm::{database::InMemoryDB, state::AccountInfo};
+    use revm::{
+        database::{InMemoryDB, State},
+        state::{AccountInfo, Bytecode},
+    };
 
     use crate::{MegaHardfork, MegaHardforkConfig};
     use alloy_hardforks::ForkCondition;
@@ -164,6 +154,7 @@ mod tests {
                 nonce: 0,
                 code_hash: ACCESS_CONTROL_CODE_HASH,
                 code: Some(Bytecode::new_raw(ACCESS_CONTROL_CODE)),
+                account_id: None,
             },
         );
         let mut state = State::builder().with_database(&mut db).build();
@@ -208,6 +199,7 @@ mod tests {
                 nonce: 0,
                 code_hash: B256::ZERO,
                 code: Some(Bytecode::new_raw(alloy_primitives::Bytes::from_static(&[0x60, 0x00]))),
+                account_id: None,
             },
         );
         let mut state = State::builder().with_database(&mut db).build();
@@ -219,7 +211,10 @@ mod tests {
 
         assert_eq!(account.info.code_hash, ACCESS_CONTROL_CODE_HASH);
         assert_eq!(account.info.code.as_ref().unwrap().original_bytes(), ACCESS_CONTROL_CODE);
-        assert!(account.is_created());
         assert!(account.is_touched());
+        assert!(
+            !account.is_created(),
+            "in-place bytecode update of an existing account must not mark it as created"
+        );
     }
 }

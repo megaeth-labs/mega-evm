@@ -34,6 +34,7 @@ use crate::{MegaSpecId, MegaTransaction};
 #[derive(Debug, Clone)]
 pub(crate) struct KVUpdateTracker {
     rex4_enabled: bool,
+    rex6_enabled: bool,
     frame_tracker: FrameLimitTracker<CallFrameInfo>,
 }
 
@@ -41,35 +42,61 @@ impl KVUpdateTracker {
     pub(crate) fn new(spec: MegaSpecId, tx_limit: u64) -> Self {
         Self {
             rex4_enabled: spec.is_enabled(MegaSpecId::REX4),
-            frame_tracker: FrameLimitTracker::new(tx_limit),
-        }
-    }
-
-    /// Pushes a new frame onto the tracker.
-    ///
-    /// In Rex4+, delegates to `FrameLimitTracker::push_frame()` which uses
-    /// `tx_entry.remaining()` for the top-level frame (accounts for intrinsic usage)
-    /// and parent's remaining × 98/100 for nested frames.
-    /// In pre-Rex4, pushes with `u64::MAX` since per-frame limits are not enforced.
-    fn push_frame(&mut self, info: CallFrameInfo) {
-        if self.rex4_enabled {
-            self.frame_tracker.push_frame(info);
-        } else {
-            self.frame_tracker.push_frame_with_limit(u64::MAX, info);
+            rex6_enabled: spec.is_enabled(MegaSpecId::REX6),
+            frame_tracker: FrameLimitTracker::new(spec, tx_limit),
         }
     }
 
     /// Records a discardable KV update in the current frame.
     fn record_discardable(&mut self, n: u64) {
-        if let Some(entry) = self.frame_tracker.frame_mut() {
-            entry.discardable_usage += n;
-        }
+        self.frame_tracker.add_frame_discardable(n);
+    }
+
+    /// Records discardable usage into the PARENT frame (one below the top). Used for a
+    /// child-CREATE's creator-side account-info write, whose on-chain effect (the creator
+    /// nonce bump) is undone only by the parent's revert, not the child's.
+    fn record_parent_discardable(&mut self, n: u64) {
+        self.frame_tracker.add_parent_discardable(n);
     }
 
     /// Records a KV update refund in the current frame.
     fn record_refund(&mut self, n: u64) {
-        if let Some(entry) = self.frame_tracker.frame_mut() {
-            entry.refund += n;
+        self.frame_tracker.add_frame_refund(n);
+    }
+
+    /// Records a single account update as discardable KV update in the current frame.
+    ///
+    /// Used by SELFDESTRUCT beneficiary metering (REX5+) to charge a KV update for
+    /// creating a new beneficiary account.
+    pub(crate) fn record_account_update(&mut self) {
+        self.record_discardable(1);
+    }
+
+    /// Records a single account update as TX-level persistent (non-discardable) KV usage.
+    ///
+    /// Used by the REX6 EIP-7702 authorization scan, which runs in `validate` before any frame
+    /// exists, so the charge cannot go through the frame-scoped `record_account_update`.
+    pub(crate) fn record_persistent_account_update(&mut self) {
+        self.frame_tracker.add_tx_persistent(1);
+    }
+
+    /// Merges external persistent usage into the TX-level entry.
+    ///
+    /// Used by `KeylessDeploy` (REX5+) to propagate sandbox KV update consumption
+    /// back to the parent transaction.
+    pub(crate) fn merge_persistent_usage(&mut self, amount: u64) {
+        self.frame_tracker.add_tx_persistent(amount);
+    }
+
+    /// Returns the remaining KV update budget for the current call frame, capped by
+    /// the TX-level remaining.
+    pub(crate) fn current_call_remaining(&self) -> u64 {
+        let tx_remaining =
+            self.frame_tracker.tx_limit().saturating_sub(self.frame_tracker.net_usage());
+        if self.rex4_enabled {
+            self.frame_tracker.current_frame_remaining().min(tx_remaining)
+        } else {
+            tx_remaining
         }
     }
 }
@@ -135,20 +162,26 @@ impl TxRuntimeLimit for KVUpdateTracker {
     ///
     /// All recorded as pre-frame (non-discardable) since no frame exists yet.
     fn before_tx_start(&mut self, tx: &MegaTransaction) {
-        // EIP-7702 authority account updates (non-discardable)
-        for authorization in tx.authorization_list() {
-            if authorization.authority().is_some() {
-                self.frame_tracker.tx_mut().persistent_usage += 1;
+        // EIP-7702 authority account updates (non-discardable).
+        //
+        // Pre-REX6: charged here for every recoverable authority, including ones that fail the
+        // application gates. REX6+ moves this into the journal-aware authorization scan in
+        // `validate` so only *applied* authorities are charged; skip here.
+        if !self.rex6_enabled {
+            for authorization in tx.authorization_list() {
+                if authorization.authority().is_some() {
+                    self.frame_tracker.add_tx_persistent(1);
+                }
             }
         }
 
         // Caller account update (non-discardable)
-        self.frame_tracker.tx_mut().persistent_usage += 1;
+        self.frame_tracker.add_tx_persistent(1);
     }
 
     #[inline]
     fn push_empty_frame(&mut self) {
-        self.push_frame(CallFrameInfo { target_address: None, target_updated: false });
+        self.frame_tracker.push_dummy_frame();
     }
 
     /// Hook called before a new execution frame is initialized.
@@ -167,37 +200,36 @@ impl TxRuntimeLimit for KVUpdateTracker {
         match &frame_init.frame_input {
             FrameInput::Call(call_inputs) => {
                 let has_transfer = call_inputs.transfers_value();
-                // Check if parent's account info needs updating BEFORE pushing the child frame.
-                // Note: we do NOT set parent's target_updated to true — matching the old tracker,
-                // which never mutates it after frame creation.
-                let parent_needs_update = has_transfer &&
-                    self.frame_tracker
-                        .frame_mut()
-                        .is_some_and(|entry| !entry.info.target_updated);
-                // Push new frame
-                self.push_frame(CallFrameInfo {
-                    target_address: Some(call_inputs.target_address),
-                    target_updated: has_transfer,
-                });
+                let parent_needs_update =
+                    self.frame_tracker.push_call_frame(call_inputs.target_address, has_transfer);
                 if has_transfer {
                     if parent_needs_update {
-                        // Parent's account info update goes to child's discardable,
-                        // matching the old tracker's behavior.
+                        // Parent's account info update goes to child's discardable.
                         self.record_discardable(1);
                     }
-                    // Record target account info update in child's discardable
-                    self.record_discardable(1);
+                    // A value transfer to the caller itself touches a single account, already
+                    // accounted by the caller-side write above (or, at the top level, by the
+                    // transaction-start caller record). Recording the target side again would
+                    // double-count that one account, so skip it under REX6.
+                    if !(self.rex6_enabled && call_inputs.target_address == call_inputs.caller) {
+                        // Record target account info update in child's discardable.
+                        self.record_discardable(1);
+                    }
                 }
             }
             FrameInput::Create(_) => {
-                // Check if parent's account info needs updating BEFORE pushing the child frame.
-                let parent_needs_update =
-                    self.frame_tracker.frame_mut().is_some_and(|entry| !entry.info.target_updated);
-                // Push new frame (address unknown until after init)
-                self.push_frame(CallFrameInfo { target_address: None, target_updated: true });
+                let parent_needs_update = self.frame_tracker.push_create_frame();
                 if parent_needs_update {
-                    // Parent's account info update goes to child's discardable,
-                    self.record_discardable(1);
+                    if self.rex6_enabled {
+                        // The creator's nonce bump survives the child's revert (revm bumps it
+                        // before the create checkpoint), so charge it to the parent frame —
+                        // see `FrameLimitTracker::add_parent_discardable`.
+                        self.record_parent_discardable(1);
+                    } else {
+                        // Pre-REX6: the creator nonce-bump charge is bundled into the child frame's
+                        // discardable lane (frozen behavior).
+                        self.record_discardable(1);
+                    }
                 }
             }
             FrameInput::Empty => unreachable!(),
@@ -212,19 +244,22 @@ impl TxRuntimeLimit for KVUpdateTracker {
         if frame.data.is_create() {
             let created_address =
                 frame.data.created_address().expect("created address is none for create frame");
-            if let Some(entry) = self.frame_tracker.frame_mut() {
-                assert!(entry.info.target_address.is_none(), "created account already recorded");
-                entry.info.target_address = Some(created_address);
-                // Record account info update for created address
-                entry.discardable_usage += 1;
-            }
+            self.frame_tracker.set_created_address(created_address);
+            // Record account info update for created address
+            self.record_discardable(1);
         }
     }
 
     /// Hook called when a frame returns its result to the parent frame.
+    ///
+    /// Rex5+: if the reverting child had set the parent's account-update flag, the flag
+    /// is reset so the next successful call from the same parent still charges the parent
+    /// account (avoiding undercounting after a revert-then-retry pattern). The unwind is
+    /// owned by `FrameLimitTracker::pop_frame_unwind_parent`.
     fn before_frame_return_result<const LAST_FRAME: bool>(&mut self, result: &FrameResult) {
         assert!(LAST_FRAME || self.frame_tracker.has_active_frame(), "frame stack is empty");
-        self.frame_tracker.pop_frame(result.instruction_result().is_ok());
+        let is_success = result.instruction_result().is_ok();
+        self.frame_tracker.pop_frame_unwind_parent(is_success);
     }
 
     /// Hook called when a storage slot is written via `SSTORE`.
@@ -243,5 +278,27 @@ impl TxRuntimeLimit for KVUpdateTracker {
         } else if store_result.is_original_eq_new() {
             self.record_refund(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `record_account_update` must charge exactly one KV update against the current frame
+    /// (used by REX5+ SELFDESTRUCT-beneficiary metering); it must not be a no-op.
+    #[test]
+    fn test_record_account_update_charges_one_kv() {
+        let mut tracker = KVUpdateTracker::new(MegaSpecId::MINI_REX, u64::MAX);
+        tracker.push_empty_frame();
+        assert_eq!(tracker.tx_usage(), 0);
+        tracker.record_account_update();
+        assert_eq!(tracker.tx_usage(), 1, "record_account_update must add exactly 1 KV update");
+    }
+
+    /// The `TxRuntimeLimit::tx_limit` accessor must report the configured TX-level budget.
+    #[test]
+    fn test_tx_limit_reports_configured_limit() {
+        assert_eq!(KVUpdateTracker::new(MegaSpecId::MINI_REX, 4_321).tx_limit(), 4_321);
     }
 }

@@ -1,0 +1,264 @@
+name: Replay Throughput Benchmark
+
+# Replays a corpus of real, characteristic MegaETH mainnet transactions
+# (committed self-contained fixtures, timed by `state-test --bench`) and compares
+# PR throughput against the merge-base, so a change that slows down (or speeds
+# up) real-transaction execution is visible on the PR.
+#
+# This is the real-transaction counterpart to the synthetic Criterion suite in
+# benchmark.yml, and follows the same hardened structure: the job that compiles
+# and runs untrusted PR code (`bench`) is read-only, and only the jobs that touch
+# the PR (`prepare`, `compare`) get a write-scoped token — so a malicious PR run
+# triggered with `/replay-bench` has no write token to abuse.
+
+on:
+  schedule:
+    - cron: '0 3 * * 1' # Weekly Monday 3am UTC (after the Criterion job)
+  workflow_dispatch:
+  issue_comment:
+    types: [created]
+
+# Suffixed with "is this a real trigger" so unrelated comments (bots, chat)
+# land in their own group instead of cancelling a live run — same fix as
+# benchmark.yml: mirror the FULL trigger gate (PR-comment + /replay-bench +
+# author association); a comment that would fail the gate must not cancel a
+# live run it cannot replace.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.issue.number || github.ref }}-${{ github.event_name != 'issue_comment' || (github.event.issue.pull_request && contains(github.event.comment.body, '/replay-bench') && contains(fromJSON('["MEMBER","COLLABORATOR","OWNER"]'), github.event.comment.author_association)) }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # Resolve the exact commits ONCE, up front, via the API only — no checkout and
+  # no fetch of the PR ref — so this write-privileged job never brings untrusted
+  # PR code (or even a PR-controlled ref) into the workspace.
+  prepare:
+    name: Resolve commits
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: write
+      # The comment-reaction endpoint needs Issues write (a PR comment is an
+      # issue comment); the reaction is also wrapped non-fatally below.
+      issues: write
+    if: >-
+      github.event_name != 'issue_comment' || (
+        github.event.issue.pull_request &&
+        contains(github.event.comment.body, '/replay-bench') &&
+        (github.event.comment.author_association == 'MEMBER' ||
+         github.event.comment.author_association == 'COLLABORATOR' ||
+         github.event.comment.author_association == 'OWNER')
+      )
+    outputs:
+      feature_sha: ${{ steps.resolve.outputs.feature_sha }}
+      baseline_sha: ${{ steps.resolve.outputs.baseline_sha }}
+      compare: ${{ steps.resolve.outputs.compare }}
+    steps:
+      - name: Resolve commits and react
+        id: resolve
+        uses: actions/github-script@v7
+        with:
+          script: |
+            if (context.eventName !== 'issue_comment') {
+              // schedule / workflow_dispatch: measure the checked-out ref,
+              // no baseline comparison.
+              core.setOutput('feature_sha', context.sha);
+              core.setOutput('baseline_sha', '');
+              core.setOutput('compare', 'false');
+              return;
+            }
+            const { owner, repo } = context.repo;
+            const pull_number = context.payload.issue.number;
+            const pr = await github.rest.pulls.get({ owner, repo, pull_number });
+            const featureSha = pr.data.head.sha;
+            // The compare endpoint's merge_base is the commit `git merge-base`
+            // would pick for the PR base branch and head.
+            const cmp = await github.rest.repos.compareCommitsWithBasehead({
+              owner,
+              repo,
+              basehead: `${pr.data.base.ref}...${featureSha}`,
+            });
+            core.setOutput('feature_sha', featureSha);
+            core.setOutput('baseline_sha', cmp.data.merge_base_commit.sha);
+            core.setOutput('compare', 'true');
+            core.info(`Feature: ${featureSha}  Baseline: ${cmp.data.merge_base_commit.sha}`);
+            // Cosmetic acknowledgement — never let it fail the run (and so block
+            // the benchmark) if the token lacks the reaction permission.
+            try {
+              await github.rest.reactions.createForIssueComment({
+                owner,
+                repo,
+                comment_id: context.payload.comment.id,
+                content: 'rocket',
+              });
+            } catch (e) {
+              core.warning(`Could not react to the comment: ${e.message}`);
+            }
+
+  # Compiles and runs untrusted PR code (the PR's state-test binary + driver +
+  # corpus), so it is read-only: there is no write-scoped token to exfiltrate.
+  # `pull-requests: read` lets `gh pr checkout` resolve a fork PR head.
+  bench:
+    name: Replay throughput
+    needs: prepare
+    runs-on: blacksmith-32vcpu-ubuntu-2404
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+          # This job builds and runs untrusted PR code; don't leave a git
+          # credential on disk for that code to pick up.
+          persist-credentials: false
+
+      - name: Fetch PR head
+        if: github.event_name == 'issue_comment'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh pr checkout ${{ github.event.issue.number }}
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+
+      # Only the binary under test changes between feature and baseline; the
+      # driver + corpus always come from the PR-head checkout. Build each binary
+      # at its pinned SHA into its own directory the driver resolves.
+      - name: Build feature binary
+        run: |
+          git checkout --quiet ${{ needs.prepare.outputs.feature_sha }}
+          git submodule update --init --recursive
+          cargo build --release -p state-test
+          mkdir -p /tmp/pr && cp target/release/state-test /tmp/pr/
+
+      - name: Build baseline binary
+        if: needs.prepare.outputs.compare == 'true'
+        run: |
+          git checkout --quiet ${{ needs.prepare.outputs.baseline_sha }}
+          git submodule update --init --recursive
+          cargo build --release -p state-test
+          mkdir -p /tmp/base && cp target/release/state-test /tmp/base/
+
+      # Restore the PR-head driver + corpus, then run. If the baseline predates
+      # `state-test --bench` (the feature this PR may introduce), fall back to
+      # measuring the feature binary alone instead of failing.
+      - name: Run replay benchmark
+        run: |
+          git checkout --quiet ${{ needs.prepare.outputs.feature_sha }}
+          git submodule update --init --recursive
+          BINS=(--bin "pr=/tmp/pr")
+          if [ "${{ needs.prepare.outputs.compare }}" = "true" ] && \
+             /tmp/base/state-test --bench --bench-runs 1 --bench-warmup 0 \
+               bench/replay/fixtures/medium_call.json >/dev/null 2>&1; then
+            BINS=(--bin "base=/tmp/base" --bin "pr=/tmp/pr")
+            echo "Comparing PR vs baseline."
+          else
+            echo "Measuring the PR binary only (no baseline, or baseline predates the fixture bench)."
+          fi
+          python3 bench/replay/run.py "${BINS[@]}" \
+            --rounds 7 --threshold-pct 7 \
+            --markdown-out replay-bench.md \
+            --json-out replay-bench.json
+
+      - name: Write job summary
+        if: always()
+        run: |
+          if [ -f replay-bench.md ]; then
+            {
+              cat replay-bench.md
+              echo
+              echo "> Comparing \`baseline\` (${{ needs.prepare.outputs.baseline_sha }}) → \`feature\` (${{ needs.prepare.outputs.feature_sha }})."
+              echo "> Sub-10µs cases are noisy on shared runners; read the larger cases and the trend for real signal."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # Upload the machine-readable JSON (not just the rendered markdown): the
+      # trusted compare job re-renders the table from these numbers so it never
+      # posts PR-controlled strings (case names/notes) verbatim. The markdown is
+      # kept only for the job summary above.
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: replay-bench-report
+          path: |
+            replay-bench.json
+            replay-bench.md
+          if-no-files-found: ignore
+
+  # Posts the comparison comment. Consumes only the report artifact, never PR
+  # code, so it can safely hold a write-scoped token.
+  compare:
+    name: Comment on PR
+    needs: [prepare, bench]
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 10
+    if: needs.prepare.outputs.compare == 'true'
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Download report
+        uses: actions/download-artifact@v4
+        with:
+          name: replay-bench-report
+
+      - name: Comment on PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            // Re-render the table here, in the trusted (write-scoped) job, from the
+            // numbers the bench job computed — never the markdown the PR's driver
+            // emitted. Case name/category come from the PR's manifest, so escape
+            // them; everything else is a number formatted locally.
+            if (!fs.existsSync('replay-bench.json')) return;
+            const summary = JSON.parse(fs.readFileSync('replay-bench.json', 'utf8'));
+            const esc = (s) => String(s ?? '').replace(/\r?\n/g, ' ').replace(/[|`<>\\]/g, '\\$&').slice(0, 80);
+            const fmtNs = (ns) => ns >= 1e6 ? `${(ns / 1e6).toFixed(3)} ms` : ns >= 1e3 ? `${(ns / 1e3).toFixed(2)} µs` : `${Math.round(ns)} ns`;
+            const fmtInt = (n) => Math.round(n).toLocaleString('en-US');
+            const labels = summary.labels || [];
+            const compare = labels.length === 2;
+            const lines = [];
+            if (compare) {
+              const [base, pr] = labels;
+              lines.push(`| transaction | category | gas | \`${esc(base)}\` median | \`${esc(pr)}\` median | Δ time | \`${esc(base)}\` Mgas/s | \`${esc(pr)}\` Mgas/s | verdict |`);
+              lines.push('|---|---|--:|--:|--:|--:|--:|--:|---|');
+              for (const c of summary.cases) {
+                const d = `${c.delta_pct >= 0 ? '+' : ''}${c.delta_pct.toFixed(1)}%`;
+                lines.push(`| ${esc(c.name)} | ${esc(c.category)} | ${fmtInt(c.gas)} | ${fmtNs(c.base_median_ns)} | ${fmtNs(c.pr_median_ns)} | ${d} | ${fmtInt(c.base_mgas_per_sec)} | ${fmtInt(c.pr_mgas_per_sec)} | ${esc(c.verdict)} |`);
+              }
+            } else {
+              const only = labels[0] || 'pr';
+              lines.push(`| transaction | category | gas | \`${esc(only)}\` median | \`${esc(only)}\` Mgas/s |`);
+              lines.push('|---|---|--:|--:|--:|');
+              for (const c of summary.cases) {
+                lines.push(`| ${esc(c.name)} | ${esc(c.category)} | ${fmtInt(c.gas)} | ${fmtNs(c.median_ns)} | ${fmtInt(c.mgas_per_sec)} |`);
+              }
+            }
+            let table = lines.join('\n');
+            if (compare) {
+              table += `\n\n**${summary.cases.length} transactions — ${fmtInt(summary.regressions)} regression(s), ${fmtInt(summary.improvements)} improvement(s)** (threshold ±${Number(summary.threshold_pct).toFixed(1)}% on median time; ABBA-interleaved).`;
+            }
+            const base = '${{ needs.prepare.outputs.baseline_sha }}';
+            const head = '${{ needs.prepare.outputs.feature_sha }}';
+            const repo = context.payload.repository.html_url;
+            const body =
+              table +
+              `\n\n> Comparing [\`baseline\`](${repo}/commit/${base}) → [\`feature\`](${repo}/commit/${head}).` +
+              `\n> Sub-10µs cases are noisy on shared runners; read the larger cases and the overall trend.`;
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body,
+            });

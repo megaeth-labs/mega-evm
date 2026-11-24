@@ -6,7 +6,7 @@
 
 use alloy_primitives::{address, Address, Bytes, U256};
 use mega_evm::{
-    is_deposit_like_transaction, is_mega_system_transaction,
+    is_deposit_like_transaction, is_mega_system_transaction_with,
     test_utils::{BytecodeBuilder, MemoryDatabase},
     EmptyExternalEnv, MegaContext, MegaEvm, MegaHaltReason, MegaSpecId, MegaTransaction,
     MEGA_SYSTEM_ADDRESS, MEGA_SYSTEM_TRANSACTION_SOURCE_HASH, ORACLE_CONTRACT_ADDRESS,
@@ -70,7 +70,7 @@ fn execute_transaction(
     value: U256,
     data: Bytes,
 ) -> ResultAndState<MegaHaltReason> {
-    let tx = MegaTransaction {
+    let tx = MegaTransaction(op_revm::OpTransaction {
         base: TxEnv {
             caller,
             kind: TxKind::Call(to),
@@ -81,7 +81,7 @@ fn execute_transaction(
             ..Default::default()
         },
         ..Default::default()
-    };
+    });
 
     alloy_evm::Evm::transact_raw(evm, tx).expect("Transaction should execute")
 }
@@ -97,30 +97,30 @@ fn execute_transaction(
 #[test]
 fn test_utility_functions() {
     // Test is_mega_system_address_transaction
-    let mega_system_tx = MegaTransaction {
+    let mega_system_tx = MegaTransaction(op_revm::OpTransaction {
         base: TxEnv {
             caller: MEGA_SYSTEM_ADDRESS,
             kind: TxKind::Call(WHITELISTED_ADDR),
             ..Default::default()
         },
         ..Default::default()
-    };
+    });
 
-    let regular_tx = MegaTransaction {
+    let regular_tx = MegaTransaction(op_revm::OpTransaction {
         base: TxEnv {
             caller: REGULAR_CALLER,
             kind: TxKind::Call(CONTRACT_ADDR),
             ..Default::default()
         },
         ..Default::default()
-    };
+    });
 
-    assert!(is_mega_system_transaction(&mega_system_tx));
-    assert!(!is_mega_system_transaction(&regular_tx));
+    assert!(is_mega_system_transaction_with(&mega_system_tx, MEGA_SYSTEM_ADDRESS));
+    assert!(!is_mega_system_transaction_with(&regular_tx, MEGA_SYSTEM_ADDRESS));
 
     // Test is_deposit_like_transaction
-    assert!(is_deposit_like_transaction(&mega_system_tx));
-    assert!(!is_deposit_like_transaction(&regular_tx));
+    assert!(is_deposit_like_transaction(&mega_system_tx, MEGA_SYSTEM_ADDRESS));
+    assert!(!is_deposit_like_transaction(&regular_tx, MEGA_SYSTEM_ADDRESS));
 }
 
 /// Tests that mega system transactions execute successfully and behave as deposit-like
@@ -257,7 +257,7 @@ fn test_mega_system_transaction_sets_source_hash() {
     let mut evm = create_evm(db);
 
     // Create a mega system transaction
-    let tx = MegaTransaction {
+    let tx = MegaTransaction(op_revm::OpTransaction {
         base: TxEnv {
             caller: MEGA_SYSTEM_ADDRESS,
             kind: TxKind::Call(WHITELISTED_ADDR),
@@ -266,10 +266,10 @@ fn test_mega_system_transaction_sets_source_hash() {
             ..Default::default()
         },
         ..Default::default()
-    };
+    });
 
     // The transaction should be detected as from mega system address
-    assert!(is_mega_system_transaction(&tx));
+    assert!(is_mega_system_transaction_with(&tx, MEGA_SYSTEM_ADDRESS));
 
     // Set the transaction in the context
     evm.ctx().set_tx(tx);
@@ -298,24 +298,24 @@ fn test_mega_system_transaction_sets_source_hash() {
 #[test]
 fn test_deposit_transaction_behavior_preserved() {
     // Create a transaction that looks like a deposit transaction
-    let mut deposit_tx = MegaTransaction {
+    let mut deposit_tx = MegaTransaction(op_revm::OpTransaction {
         base: TxEnv {
             caller: REGULAR_CALLER,
             kind: TxKind::Call(WHITELISTED_ADDR),
             ..Default::default()
         },
         ..Default::default()
-    };
+    });
 
     // Manually set it as a deposit transaction type
     deposit_tx.deposit.source_hash = MEGA_SYSTEM_TRANSACTION_SOURCE_HASH; // Any non-zero hash makes it a deposit
 
     // Should be detected as deposit-like
     assert!(deposit_tx.tx_type() == DEPOSIT_TRANSACTION_TYPE);
-    assert!(is_deposit_like_transaction(&deposit_tx));
+    assert!(is_deposit_like_transaction(&deposit_tx, MEGA_SYSTEM_ADDRESS));
 
     // But should NOT be detected as mega system address transaction
-    assert!(!is_mega_system_transaction(&deposit_tx));
+    assert!(!is_mega_system_transaction_with(&deposit_tx, MEGA_SYSTEM_ADDRESS));
 }
 
 /// Tests that mega system transactions do not deduct gas fees from the system address balance.
@@ -606,7 +606,7 @@ fn test_mega_system_transaction_to_non_whitelisted_address_fails() {
     let mut evm = create_evm(db);
 
     // Attempt to execute transaction from mega system address to non-whitelisted address
-    let tx = MegaTransaction {
+    let tx = MegaTransaction(op_revm::OpTransaction {
         base: TxEnv {
             caller: MEGA_SYSTEM_ADDRESS,
             kind: TxKind::Call(NON_WHITELISTED_ADDR),
@@ -617,7 +617,7 @@ fn test_mega_system_transaction_to_non_whitelisted_address_fails() {
             ..Default::default()
         },
         ..Default::default()
-    };
+    });
 
     // Transaction should fail due to whitelist check
     let result = alloy_evm::Evm::transact_raw(&mut evm, tx);
@@ -646,7 +646,7 @@ fn test_mega_system_transaction_create_fails() {
     let mut evm = create_evm(db);
 
     // Attempt to execute CREATE transaction from mega system address
-    let tx = MegaTransaction {
+    let tx = MegaTransaction(op_revm::OpTransaction {
         base: TxEnv {
             caller: MEGA_SYSTEM_ADDRESS,
             kind: TxKind::Create,
@@ -657,7 +657,7 @@ fn test_mega_system_transaction_create_fails() {
             ..Default::default()
         },
         ..Default::default()
-    };
+    });
 
     // Transaction should fail since CREATE is not supported for system transactions
     let result = alloy_evm::Evm::transact_raw(&mut evm, tx);

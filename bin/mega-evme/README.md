@@ -10,26 +10,37 @@ A command-line tool for executing and debugging EVM bytecode, similar to go-ethe
   - [run](#run-command)
   - [tx](#tx-command)
   - [replay](#replay-command)
+  - [cache](#cache-command)
 - [Common Options](#common-options)
 - [Examples](#examples)
 
 ## Overview
 
-`mega-evme` provides three main commands for EVM execution:
+`mega-evme` provides four commands:
 
 | Command  | Description                                     |
 | -------- | ----------------------------------------------- |
 | `run`    | Execute arbitrary EVM bytecode directly         |
 | `tx`     | Run a transaction with full transaction context |
 | `replay` | Replay an existing transaction from RPC         |
+| `cache`  | Offline RPC cache utilities (`cache merge`)     |
 
 ## Installation
 
-```bash
-# Build from source
-cargo build --release -p mega-evme
+The Rust build uses checked-in system-contract bytecode.
 
-# The binary will be at target/release/mega-evme
+From GitHub:
+
+```bash
+cargo install --git https://github.com/megaeth-labs/mega-evm --locked mega-evme
+```
+
+From a Git checkout:
+
+```bash
+git clone --recursive https://github.com/megaeth-labs/mega-evm
+cd mega-evm
+cargo install --locked --path bin/mega-evme
 ```
 
 ## Commands
@@ -49,7 +60,7 @@ mega-evme run --codefile contract.hex
 mega-evme run 0x60016000526001601ff3 --input 0x1234567890
 
 # Deploy a contract (create mode)
-mega-evme run --create 0x6080604052...
+mega-evme run --create true 0x6080604052...
 ```
 
 #### Code Input Options
@@ -79,7 +90,7 @@ mega-evme run --create 0x6080604052...
 | `--input <HEX>`      | Input data as hex string           |
 | `--inputfile <PATH>` | Path to file containing input data |
 
-For detailed documentation, see [run/README.md](src/run/README.md).
+For detailed documentation, see [the `run` command reference](../../docs/mega-evme/commands/run.md).
 
 ---
 
@@ -92,10 +103,10 @@ Run a transaction with full transaction context. Similar to `run`, but with addi
 mega-evme tx --input 0x1234 --receiver 0x1234...
 
 # Fork state from remote RPC
-mega-evme tx --fork --fork.rpc https://rpc.example.com --receiver 0x1234...
+mega-evme tx --fork --rpc https://rpc.example.com --receiver 0x1234...
 
 # Fork from specific block
-mega-evme tx --fork --fork.block 12345678 --receiver 0x1234...
+mega-evme tx --fork --rpc https://rpc.example.com --fork.block 12345678 --receiver 0x1234...
 ```
 
 #### Transaction Options
@@ -139,7 +150,7 @@ mega-evme tx --tx-type 1 \
 # Access list with storage keys
 mega-evme tx --tx-type 2 \
   --access "0xContractAddr:0x0000000000000000000000000000000000000000000000000000000000000001" \
-  --access "0xAnotherAddr:0x02,0x03" \
+  --access "0xAnotherAddr:0x0000000000000000000000000000000000000000000000000000000000000002,0x0000000000000000000000000000000000000000000000000000000000000003" \
   --receiver 0x...
 ```
 
@@ -168,11 +179,11 @@ mega-evme tx --tx-type 4 \
 
 #### Fork Options
 
-| Option                  | Default               | Description                          |
-| ----------------------- | --------------------- | ------------------------------------ |
-| `--fork`                | false                 | Enable state forking from RPC        |
-| `--fork.rpc <URL>`      | http://localhost:8545 | RPC URL for forking (env: `RPC_URL`) |
-| `--fork.block <NUMBER>` | latest                | Block number to fork from            |
+| Option                  | Default                       | Description                                                               |
+| ----------------------- | ----------------------------- | ------------------------------------------------------------------------- |
+| `--fork`                | false                         | Enable state forking from RPC                                             |
+| `--rpc <URL>`           | none (required with `--fork`) | RPC URL for forking (alias: `--rpc-url`); no environment variable is read |
+| `--fork.block <NUMBER>` | latest                        | Block number to fork from                                                 |
 
 ---
 
@@ -182,54 +193,72 @@ Replay an existing transaction from RPC. Fetches the transaction and its executi
 
 ```bash
 # Replay a transaction
-mega-evme replay 0x1234...txhash...5678
+mega-evme replay 0x1234...txhash...5678 --rpc https://rpc.example.com
 
-# Replay with custom RPC
-mega-evme replay 0x1234...txhash --rpc https://rpc.example.com
+# Replay every transaction of a block
+mega-evme replay --block 12345678 --rpc https://rpc.example.com
 
 # Replay with execution trace
-mega-evme replay 0x1234...txhash --trace
+mega-evme replay 0x1234...txhash --rpc https://rpc.example.com --trace
 ```
 
 #### Arguments
 
-| Argument  | Description                           |
-| --------- | ------------------------------------- |
-| `TX_HASH` | Transaction hash to replay (required) |
+| Argument  | Description                                                                                 |
+| --------- | ------------------------------------------------------------------------------------------- |
+| `TX_HASH` | Transaction hash to replay; exactly one of `TX_HASH`, `--tx-file`, or `--block` is required |
 
 #### Options
 
-| Option        | Default               | Description                       |
-| ------------- | --------------------- | --------------------------------- |
-| `--rpc <URL>` | http://localhost:8545 | RPC URL to fetch transaction from |
+| Option             | Default | Description                                                                                          |
+| ------------------ | ------- | ---------------------------------------------------------------------------------------------------- |
+| `--rpc <URL>`      | none    | RPC URL to fetch transaction from (alias: `--rpc-url`); required unless `--rpc.replay-file` is given |
+| `--tx-file <PATH>` | -       | Replay every transaction hash listed in the file, one per line (batch mode)                          |
+| `--block <N>`      | -       | Replay every transaction of block `N` (batch mode)                                                   |
+
+For batch replay, receipt and block verification, and offline RPC fixtures, see [the `replay` command reference](../../docs/mega-evme/commands/replay.md).
 
 #### Transaction Override Options
 
 Override transaction fields when replaying. Useful for testing "what-if" scenarios.
 
-| Option                       | Description                                 |
-| ---------------------------- | ------------------------------------------- |
-| `--override.gas-limit <GAS>` | Override transaction gas limit              |
-| `--override.value <WEI>`     | Override transaction value (in wei)         |
-| `--override.input <HEX>`     | Override transaction input data (hex)       |
-| `--override.input-file <FILE>` | Override input data from file (hex content) |
+| Option                         | Description                                                                           |
+| ------------------------------ | ------------------------------------------------------------------------------------- |
+| `--override.gas-limit <GAS>`   | Override transaction gas limit                                                        |
+| `--override.value <VALUE>`     | Override transaction value (wei, or with a unit suffix such as `1ether` or `100gwei`) |
+| `--override.input <HEX>`       | Override transaction input data (hex)                                                 |
+| `--override.input-file <FILE>` | Override input data from file (hex content)                                           |
 
 ```bash
 # Replay with reduced gas limit
-mega-evme replay 0x1234...txhash --override.gas-limit 100000
+mega-evme replay 0x1234...txhash --rpc https://rpc.example.com --override.gas-limit 100000
 
 # Replay with different input data
-mega-evme replay 0x1234...txhash --override.input 0xabcdef
+mega-evme replay 0x1234...txhash --rpc https://rpc.example.com --override.input 0xabcdef
 
 # Replay with input from file
-mega-evme replay 0x1234...txhash --override.input-file calldata.hex
+mega-evme replay 0x1234...txhash --rpc https://rpc.example.com --override.input-file calldata.hex
 ```
+
+---
+
+### cache Command
+
+Offline utilities for RPC cache files.
+`cache merge` unions cache envelopes written by `--rpc.capture-file` or `--rpc.cache-dir` into one file without contacting a network.
+
+```bash
+mega-evme cache merge capture-a.json capture-b.json --output merged.json
+```
+
+For detailed documentation, see [the `cache` command reference](../../docs/mega-evme/commands/cache.md).
 
 ---
 
 ## Common Options
 
-These options are available across all commands.
+These options are available on `run` and `tx`.
+`replay` accepts only the SALT bucket, execution tracing, and state dump (`--dump`, `--dump.output`) options, and `cache` accepts none of them.
 
 ### State Management
 
@@ -242,10 +271,10 @@ These options are available across all commands.
 
 ### Chain Configuration
 
-| Option                 | Default | Description                               |
-| ---------------------- | ------- | ----------------------------------------- |
-| `--spec <SPEC>`        | Rex2    | Spec: `Equivalence`, `MiniRex`, `Rex`, `Rex1`, `Rex2`     |
-| `--chain-id <ID>`      | 6342    | Chain ID                                  |
+| Option            | Default | Description                                                                                                                                                                                  |
+| ----------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--spec <SPEC>`   | Rex6    | Spec: `Equivalence`, `MiniRex`, `MiniRex1`, `MiniRex2`, `Rex`, `Rex1`, `Rex2`, `Rex3`, `Rex4`, `Rex5`, `Rex6` (`MiniRex1`/`MiniRex2` are aliases executing `Equivalence`/`MiniRex` behavior) |
+| `--chain-id <ID>` | 6342    | Chain ID                                                                                                                                                                                     |
 
 ### Block Environment
 
@@ -268,7 +297,7 @@ These options are available across all commands.
 
 ```bash
 # Configure multiple buckets
-mega-evme run contract.hex \
+mega-evme run --codefile contract.hex \
   --bucket-capacity 123:1000000 \
   --bucket-capacity 456:2000000
 ```
@@ -320,7 +349,7 @@ mega-evme run 0x60016000526001601ff3
 
 ```bash
 # Deploy a contract with init code
-mega-evme run --create 0x6080604052... --dump
+mega-evme run --create true 0x6080604052... --dump
 ```
 
 ### Example 3: Transaction with State Fork
@@ -329,7 +358,7 @@ mega-evme run --create 0x6080604052... --dump
 # Fork mainnet state and execute against a contract
 mega-evme tx \
   --fork \
-  --fork.rpc https://eth-mainnet.example.com \
+  --rpc https://eth-mainnet.example.com \
   --receiver 0xContractAddress \
   --input 0xMethodSelector...
 ```
@@ -349,10 +378,10 @@ mega-evme replay 0xTransactionHash \
 
 ```bash
 # Execute and dump state
-mega-evme run contract.hex --dump --dump.output state1.json
+mega-evme run --codefile contract.hex --dump --dump.output state1.json
 
-# Continue execution with saved state
-mega-evme run next_contract.hex --prestate state1.json --dump
+# Continue execution with saved state (the dump records the sender's bumped nonce)
+mega-evme run --codefile next_contract.hex --prestate state1.json --nonce 1 --dump
 ```
 
 ### Example 6: Testing with Custom Block Environment
@@ -387,4 +416,4 @@ State files use JSON format with Ethereum quantity encoding:
 
 ## See Also
 
-- [run Command Documentation](src/run/README.md)
+- [run Command Documentation](../../docs/mega-evme/commands/run.md)

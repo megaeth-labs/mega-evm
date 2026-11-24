@@ -15,9 +15,10 @@ use std::convert::Infallible;
 use alloy_primitives::{address, Address, Bytes, U256};
 use alloy_sol_types::SolCall;
 use mega_evm::{
+    alloy_op_evm::OpTxError,
     test_utils::{BytecodeBuilder, MemoryDatabase},
     EvmTxRuntimeLimits, IKeylessDeploy, IMegaAccessControl, MegaContext, MegaEvm, MegaHaltReason,
-    MegaSpecId, MegaTransaction, MegaTransactionError, ACCESS_CONTROL_ADDRESS,
+    MegaSpecId, MegaTransaction, MegaTransactionNew as _, ACCESS_CONTROL_ADDRESS,
     KEYLESS_DEPLOY_ADDRESS,
 };
 use revm::{
@@ -59,7 +60,7 @@ fn transact(
     spec: MegaSpecId,
     db: &mut MemoryDatabase,
     tx: TxEnv,
-) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, MegaTransactionError>> {
+) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, OpTxError>> {
     transact_with_limits(spec, db, tx, EvmTxRuntimeLimits::no_limits())
 }
 
@@ -69,7 +70,7 @@ fn transact_with_limits(
     db: &mut MemoryDatabase,
     tx: TxEnv,
     limits: EvmTxRuntimeLimits,
-) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, MegaTransactionError>> {
+) -> Result<ResultAndState<MegaHaltReason>, EVMError<Infallible, OpTxError>> {
     let mut context = MegaContext::new(db, spec).with_tx_runtime_limits(limits);
     context.modify_chain(|chain| {
         chain.operator_fee_scalar = Some(U256::from(0));
@@ -122,6 +123,22 @@ fn build_callcode_transfer_contract(to: Address) -> Bytes {
         .push_number(32_u64) // size
         .push_number(0_u64) // offset
         .append(RETURN)
+        .build()
+}
+
+/// Builds bytecode for a contract that does `CALL(gas=forwarded_gas`, to, value=1 wei, ...).
+/// This is used when the child needs more compute gas than a plain transfer stipend provides.
+fn build_value_call_contract(to: Address, forwarded_gas: u64) -> Bytes {
+    BytecodeBuilder::default()
+        .push_number(0_u64) // retSize
+        .push_number(0_u64) // retOffset
+        .push_number(0_u64) // argsSize
+        .push_number(0_u64) // argsOffset
+        .push_number(1_u64) // value = 1 wei
+        .push_address(to)
+        .push_number(forwarded_gas)
+        .append(CALL)
+        .append(STOP)
         .build()
 }
 
@@ -204,6 +221,15 @@ fn build_log2_receiver() -> Bytes {
         .append(LOG2)
         .append(STOP)
         .build()
+}
+
+/// Appends approximately `target_gas` worth of compute gas burn via repeated PUSH1/POP pairs.
+fn append_burn_gas(mut builder: BytecodeBuilder, target_gas: u64) -> BytecodeBuilder {
+    let iterations = target_gas / 5;
+    for _ in 0..iterations {
+        builder = builder.push_number(0_u8).append(POP);
+    }
+    builder
 }
 
 /// Sets up a database with CALLER having enough ETH and the given contracts deployed.
@@ -367,7 +393,7 @@ fn test_storage_call_stipend_burned_on_return() {
         setup_db(&[(SENDER_CONTRACT, sender_with_value), (EMPTY_RECEIVER, empty_code.clone())]);
     let result_with_value = transact(MegaSpecId::REX4, &mut db_with_value, default_tx()).unwrap();
     let gas_used_with_value = match &result_with_value.result {
-        ExecutionResult::Success { gas_used, .. } => *gas_used,
+        ExecutionResult::Success { gas, .. } => gas.tx_gas_used(),
         other => panic!("expected Success, got {other:?}"),
     };
 
@@ -385,7 +411,7 @@ fn test_storage_call_stipend_burned_on_return() {
         .build_fill();
     let result_no_value = transact(MegaSpecId::REX4, &mut db_no_value, tx_no_value).unwrap();
     let gas_used_no_value = match &result_no_value.result {
-        ExecutionResult::Success { gas_used, .. } => *gas_used,
+        ExecutionResult::Success { gas, .. } => gas.tx_gas_used(),
         other => panic!("expected Success, got {other:?}"),
     };
 
@@ -534,7 +560,7 @@ fn test_storage_call_stipend_burned_on_revert() {
     // The key check: the transaction's total gas_used should be reasonable.
     // The STORAGE_CALL_STIPEND should have been burned, not leaked back to the parent.
     let gas_used = match &result.result {
-        ExecutionResult::Success { gas_used, .. } => *gas_used,
+        ExecutionResult::Success { gas, .. } => gas.tx_gas_used(),
         _ => unreachable!(),
     };
     // Gas used should be at least the intrinsic + CALLVALUE cost.
@@ -682,14 +708,14 @@ fn test_top_level_keyless_deploy_value_call_preserves_gas_accounting() {
     let mut rex3_db = setup_db(&[]);
     let rex3_result = transact(MegaSpecId::REX3, &mut rex3_db, tx.clone()).unwrap();
     let rex3_gas_used = match rex3_result.result {
-        ExecutionResult::Revert { gas_used, .. } => gas_used,
+        ExecutionResult::Revert { gas, .. } => gas.tx_gas_used(),
         other => panic!("expected Revert, got {other:?}"),
     };
 
     let mut rex4_db = setup_db(&[]);
     let rex4_result = transact(MegaSpecId::REX4, &mut rex4_db, tx).unwrap();
     let rex4_gas_used = match rex4_result.result {
-        ExecutionResult::Revert { gas_used, .. } => gas_used,
+        ExecutionResult::Revert { gas, .. } => gas.tx_gas_used(),
         other => panic!("expected Revert, got {other:?}"),
     };
 
@@ -807,7 +833,7 @@ fn test_stipend_not_leaked_on_frame_local_limit_exceed() {
 
     // Verify gas accounting: if the 23,000 stipend leaked, gas_used would be ~23,000 lower.
     let gas_used = match &result.result {
-        ExecutionResult::Success { gas_used, .. } => *gas_used,
+        ExecutionResult::Success { gas, .. } => gas.tx_gas_used(),
         _ => unreachable!(),
     };
     // Intrinsic gas (~21,000) + CALL costs (cold access 2,600 + new account 25,000 +
@@ -841,7 +867,7 @@ fn test_stipend_burned_on_eoa_value_transfer() {
     }
 
     let gas_used = match &result.result {
-        ExecutionResult::Success { gas_used, .. } => *gas_used,
+        ExecutionResult::Success { gas, .. } => gas.tx_gas_used(),
         _ => unreachable!(),
     };
     // Intrinsic gas + CALL costs (cold access 2,600 + value transfer 9,000 +
@@ -852,4 +878,88 @@ fn test_stipend_burned_on_eoa_value_transfer() {
         gas_used > 50_000,
         "gas_used {gas_used} is too low — STORAGE_CALL_STIPEND may have leaked on EOA transfer"
     );
+}
+
+/// On the REX4 legacy-inflation path, when a value-transferring child frame that received a
+/// `STORAGE_CALL_STIPEND` hits a TX-level detained compute-gas limit, `rescue_gas` must EXCLUDE
+/// the stipend from the gas rescued back to the sender (system-granted gas must not leak).
+///
+/// This pins the exact `gas_used` so the stipend exclusion is observable end-to-end: with the
+/// exclusion (correct) the rescued gas is capped at the pre-stipend limit; without it the full
+/// child `gas.remaining()` is rescued, refunding ~13k extra gas and lowering `gas_used`.
+///
+/// Kills the mutant `current_frame_stipend -> 0` in `storage_call_stipend.rs`: with the mutant,
+/// `effective_remaining_for_rescue` skips the exclusion and `gas_used` drops from `69_321` to
+/// `56_325`.
+#[test]
+fn test_stipend_excluded_from_rescued_gas_on_tx_level_detention_exceed() {
+    let sender_code = build_value_call_contract(RECEIVER, 100_000);
+    let receiver_code =
+        append_burn_gas(BytecodeBuilder::default().append(TIMESTAMP).append(POP), 20_000)
+            .append(STOP)
+            .build();
+    let mut db = setup_db(&[(SENDER_CONTRACT, sender_code), (RECEIVER, receiver_code)]);
+
+    let tx = default_tx();
+    let limits = EvmTxRuntimeLimits::no_limits()
+        .with_tx_compute_gas_limit(1_000_000)
+        .with_block_env_access_compute_gas_limit(10_000);
+    let result = transact_with_limits(MegaSpecId::REX4, &mut db, tx, limits).unwrap();
+
+    match &result.result {
+        ExecutionResult::Halt {
+            reason: MegaHaltReason::VolatileDataAccessOutOfGas { .. },
+            gas,
+            ..
+        } => {
+            let gas_used = gas.tx_gas_used();
+            // Exact gas_used with the stipend correctly excluded from the rescued gas.
+            // If `current_frame_stipend` returns 0 (mutant), the exclusion is skipped, the full
+            // child `gas.remaining()` is rescued, and gas_used drops to 56_325.
+            assert_eq!(
+                gas_used, 69_321,
+                "STORAGE_CALL_STIPEND must be excluded from rescued gas on TX-level exceed; \
+                 a lower gas_used means the system-granted stipend leaked back to the sender"
+            );
+        }
+        other => panic!("expected VolatileDataAccessOutOfGas halt, got {other:?}"),
+    }
+}
+
+/// If a value-transferring child frame with an active `STORAGE_CALL_STIPEND` hits a TX-level
+/// detained compute gas limit, `rescue_gas` must cap the refund at the pre-stipend limit instead
+/// of panicking in debug builds.
+#[test]
+fn test_stipend_with_tx_level_detention_exceed_does_not_panic() {
+    let sender_code = build_value_call_contract(RECEIVER, 100_000);
+    let receiver_code =
+        append_burn_gas(BytecodeBuilder::default().append(TIMESTAMP).append(POP), 20_000)
+            .append(STOP)
+            .build();
+    let mut db = setup_db(&[(SENDER_CONTRACT, sender_code), (RECEIVER, receiver_code)]);
+
+    let tx = default_tx();
+    let limits = EvmTxRuntimeLimits::no_limits()
+        .with_tx_compute_gas_limit(1_000_000)
+        .with_block_env_access_compute_gas_limit(10_000);
+    let result = transact_with_limits(MegaSpecId::REX4, &mut db, tx, limits).unwrap();
+
+    match &result.result {
+        ExecutionResult::Halt {
+            reason: MegaHaltReason::VolatileDataAccessOutOfGas { limit, .. },
+            gas,
+            ..
+        } => {
+            let gas_used = gas.tx_gas_used();
+            assert!(
+                *limit <= 1_000_000,
+                "detained limit should stay within the tx compute gas limit, got {limit}"
+            );
+            assert!(
+                gas_used < 200_000,
+                "gas_used should reflect rescued gas rather than the full child gas limit, got {gas_used}"
+            );
+        }
+        other => panic!("expected VolatileDataAccessOutOfGas, got {other:?}"),
+    }
 }

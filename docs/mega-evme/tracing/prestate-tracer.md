@@ -54,6 +54,12 @@ Running `mega-evme run 0x60016000526001601ff3 --trace --tracer pre-state` produc
   "0x4200000000000000000000000000000000000019": {
     "balance": "0x0"
   },
+  "0x420000000000000000000000000000000000001a": {
+    "balance": "0x0"
+  },
+  "0x420000000000000000000000000000000000001b": {
+    "balance": "0x0"
+  },
   "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266": {
     "balance": "0x0"
   }
@@ -108,7 +114,7 @@ Capture pre-state:
 ```bash
 # Capture pre-state for a WETH.balanceOf call
 mega-evme tx \
-  --fork --fork.rpc https://mainnet.megaeth.com/rpc \
+  --fork --rpc https://mainnet.megaeth.com/rpc \
   --sender.balance 1ether \
   --receiver 0x4200000000000000000000000000000000000006 \
   --input 0x70a08231000000000000000000000000f39fd6e51aad88f6f4ce6ab8827279cfffb92266 \
@@ -121,7 +127,7 @@ Capture state diff (before/after):
 ```bash
 # WETH.deposit() modifies balances — diff mode shows the change
 mega-evme tx \
-  --fork --fork.rpc https://mainnet.megaeth.com/rpc \
+  --fork --rpc https://mainnet.megaeth.com/rpc \
   --sender.balance 1ether \
   --receiver 0x4200000000000000000000000000000000000006 \
   --input 0xd0e30db0 \

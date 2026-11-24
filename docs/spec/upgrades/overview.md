@@ -1,5 +1,5 @@
 ---
-description: MegaETH network upgrade history — hardfork timeline from MiniRex through Rex4 with activation dates and behavioral deltas.
+description: MegaETH network upgrade history — hardfork timeline from MiniRex through Rex6 with activation dates and behavioral deltas.
 ---
 
 # Overview
@@ -32,7 +32,7 @@ N/A
 {% endtab %}
 {% endtabs %}
 
-Rollback: reverted to Equivalence spec (maps to `EQUIVALENCE`).
+Rollback: schedules the alias spec `MINI_REX_1`, whose behavior is `EQUIVALENCE`.
 The MiniRex features were deactivated on the network; no chain reorg or state rollback occurred.
 Contracts deployed during MiniRex remained on-chain.
 
@@ -47,7 +47,7 @@ N/A
 {% endtab %}
 {% endtabs %}
 
-Restoration: re-activated MiniRex spec (maps to `MINI_REX`).
+Restoration: schedules the alias spec `MINI_REX_2`, whose behavior is `MINI_REX`.
 All MiniRex features (dual gas model, resource limits, gas detention) were re-enabled.
 
 ### [Rex](rex.md)
@@ -104,7 +104,42 @@ SELFDESTRUCT re-enabled ([EIP-6780](https://eips.ethereum.org/EIPS/eip-6780)), [
 
 ### [Rex4](rex4.md)
 
+{% tabs %}
+{% tab title="Testnet" %}
+`1776400000` (Apr 17, 2026, 04:26 UTC)
+{% endtab %}
+{% tab title="Mainnet" %}
+`1776659200` (Apr 20, 2026, 04:26 UTC)
+{% endtab %}
+{% endtabs %}
+
 Per-[call-frame](../glossary.md#call-frame) resource budgets, relative gas detention, [storage gas stipend](../glossary.md#storage-gas-stipend), MegaAccessControl, MegaLimitControl, sandbox environment inheritance.
+
+### [Rex5](rex5.md)
+
+{% tabs %}
+{% tab title="Testnet" %}
+`1780459200` (Jun 3, 2026, 04:00 UTC)
+{% endtab %}
+{% tab title="Mainnet" %}
+`1780632000` (Jun 5, 2026, 04:00 UTC)
+{% endtab %}
+{% endtabs %}
+
+[SequencerRegistry](../system-contracts/sequencer-registry.md) system contract, [Oracle](../system-contracts/oracle.md) v2.0.0 with dynamic system address, caller-account update deduplication for [data size](../evm/resource-accounting.md#data-size) and [KV updates](../evm/resource-accounting.md#kv-updates), [storage gas stipend](../glossary.md#storage-gas-stipend) separated-allowance model, value-transfer CALL/CALLCODE parent [compute gas](../glossary.md#compute-gas) attribution, CREATE code-deposit compute-gas atomicity, EIP-2935/EIP-4788 pre-block gas floor with fail-closed block rejection, CREATE2 empty-initcode short-circuit, [KeylessDeploy](../system-contracts/keyless-deploy.md) trailing-bytes rejection, sandbox resource accounting, and empty-code log forwarding, precompile compute gas correction, EIP-7702 [state growth](../evm/resource-accounting.md#state-growth) tracking, non-delegating metering inspection, SELFDESTRUCT beneficiary accounting.
+
+### [Rex6](rex6.md)
+
+{% tabs %}
+{% tab title="Testnet" %}
+`1786330800` (Aug 10, 2026, 03:00 UTC)
+{% endtab %}
+{% tab title="Mainnet" %}
+`1787626800` (Aug 25, 2026, 03:00 UTC)
+{% endtab %}
+{% endtabs %}
+
+Unified per-opcode [gas metering order](../evm/dual-gas-model.md#gas-metering-order), consolidated EIP-7702 authorization accounting with dynamic SALT account-creation gas for net-new authorities, CREATE-frame accounting corrections, [KeylessDeploy](../system-contracts/keyless-deploy.md) sandbox hardening, post-execution fee-reward accounting, [system-originated transaction](../system-contracts/system-tx.md#system-originated-transaction-metering-exemption) metering exemption, extended beneficiary detention / volatile-access coverage, per-log [data size](../evm/resource-accounting.md#data-size) base, forwarded-gas return on compute-limit halts, value self-transfer account-info dedup, [SequencerRegistry](../system-contracts/sequencer-registry.md) v2.0.0 rotation hardening (EIP-712 possession proof + minimum rotation delay).
 
 ## How to Read These Pages
 
@@ -112,6 +147,6 @@ Each upgrade page follows a consistent structure:
 
 - **Summary** — What changed and why
 - **What Changed** — Previous vs new behavior for each change
-- **Developer Impact** — What you need to care about
+- **Developer Impact** — What contract authors and integrators need to know
 - **Safety and Compatibility** — Backward-compatibility boundaries and failure-mode differences
 - **References** — Links to the normative spec and related documentation

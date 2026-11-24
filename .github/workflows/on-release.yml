@@ -1,0 +1,112 @@
+name: On Release
+
+# Publish targets for a mega-evm release. Runs when the release pipeline
+# publishes the GitHub Release (release-publish creates it after the tag),
+# and on demand for a rehearsal: dispatch with an existing tag and
+# dry_run=true runs the job with nothing uploaded.
+#
+# Target:
+#   mega-evme — the CLI binary to the MegaETH artifact registry
+#
+# crates.io publishing is paused. The OP crates are pinned to a git revision
+# (see the root Cargo.toml), and `cargo publish` rejects git dependencies, so
+# no crates are published. To resume once those crates are on crates.io,
+# restore the `crates` job from PR #424.
+#
+# `release-settle.yml` builds mega-evme and `release-publish` attaches it with
+# SHA256SUMS (`asset_files`) before the Release is published, because Releases
+# are immutable once published; this workflow keeps the registry upload.
+#
+# Rehearse on a tag ref (the job must run on a tag ref):
+#   gh workflow run on-release.yml --ref vX.Y.Z -f dry_run=true
+# The tag being released is always the run's own ref: the environment
+# authorises that ref, so nothing else may be checked out or published.
+#
+# The credential (GCP_AUTH_KEY) lives in the `release` environment, whose
+# deployment policy admits the default branch, release branches and v*
+# tags; the job below runs in it.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Verify and build mega-evme; upload nothing"
+        required: false
+        type: boolean
+        default: true
+
+# One run per tag: a release run and a dispatch on the same tag both end in
+# a registry upload, so overlapping runs would race.
+# Never cancel an upload mid-flight; queue instead.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  # The run's ref — the released tag on a release event, the dispatched tag
+  # on a rehearsal. Never an input: the release environment authorises this
+  # ref, so it must also be what gets built and published.
+  TAG: ${{ github.ref_name }}
+  # A release event is never a dry run; a dispatch defaults to one.
+  DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
+
+jobs:
+  mega-evme:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    environment: release
+    steps:
+      - name: Require a tag ref
+        run: |
+          [[ "$GITHUB_REF_TYPE" == "tag" ]] || { echo "::error::this workflow publishes the run's own ref, which must be a tag (got $GITHUB_REF_TYPE $GITHUB_REF_NAME); dispatch it with --ref vX.Y.Z"; exit 1; }
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          # The run's commit, not the tag name: checkout prefers a branch named like the tag.
+          ref: ${{ github.sha }}
+          submodules: recursive
+          persist-credentials: false
+
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        with:
+          cache: false
+
+      # Foundry and the submodules stay for release lines whose build.rs still runs forge.
+      - uses: foundry-rs/foundry-toolchain@b00af27efadbc7b4ca8b82abbd903b17cc874d2a # v1
+        with:
+          cache: false
+
+      - name: Build mega-evme
+        run: cargo build --release --locked -p mega-evme
+
+      # The built binary must report the tag's version (`mega-evme X.Y.Z`):
+      # a mismatch warns on a rehearsal and stops a release; a binary that
+      # cannot run stops both.
+      - uses: megaeth-labs/.github/.github/actions/release-verify-version@main
+        with:
+          command: target/release/mega-evme --version
+          version: ${{ env.TAG }}
+          dry_run: ${{ env.DRY_RUN }}
+
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          credentials_json: ${{ secrets.GCP_AUTH_KEY }}
+
+      - uses: megaeth-labs/.github/.github/actions/release-upload-artifact@main
+        id: registry
+        with:
+          file: target/release/mega-evme
+          kind: artifact-registry
+          project: devops-production-464602
+          location: asia-northeast1
+          repository: megaeth-generic-registry
+          package: mega-evme
+          version: ${{ env.TAG }}
+          dry_run: ${{ env.DRY_RUN }}
+
+      - run: 'echo "mega-evme ${{ env.TAG }}: registry=${{ steps.registry.outputs.status }} ${{ steps.registry.outputs.uri }} sha256=${{ steps.registry.outputs.sha256 }}"'

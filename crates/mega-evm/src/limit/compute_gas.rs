@@ -38,6 +38,16 @@ pub(crate) struct ComputeGasTracker {
     /// The effective compute gas limit, which may be dynamically lowered by gas detention
     /// (volatile data access). Always <= `frame_tracker.tx_limit()`.
     detained_limit: u64,
+    /// `detained_limit` as the last completed run left it: what stood between transactions when
+    /// the current one began, restored by [`Self::discard`].
+    ///
+    /// Before REX1 the detained limit persists across transactions, so a transaction that is
+    /// discarded must hand the next one the limit it inherited, not the one it lowered. It is
+    /// recorded when a run ends ([`Self::after_tx_end`]) rather than when the next one starts,
+    /// because a panic can land before the next transaction's `reset` (the block executor reads a
+    /// deposit's sender before the EVM runs) and the discard must then still find the limit that
+    /// transaction inherited, not the one its predecessor started under.
+    inherited_detained_limit: u64,
     frame_tracker: FrameLimitTracker<()>,
 }
 
@@ -45,7 +55,8 @@ impl ComputeGasTracker {
     pub(crate) fn new(spec: MegaSpecId, tx_limit: u64) -> Self {
         Self {
             detained_limit: tx_limit,
-            frame_tracker: FrameLimitTracker::new(tx_limit),
+            inherited_detained_limit: tx_limit,
+            frame_tracker: FrameLimitTracker::new(spec, tx_limit),
             rex1_enabled: spec.is_enabled(MegaSpecId::REX1),
             rex4_enabled: spec.is_enabled(MegaSpecId::REX4),
         }
@@ -80,6 +91,26 @@ impl ComputeGasTracker {
             cap
         };
         self.detained_limit = self.detained_limit.min(new_limit);
+    }
+
+    /// Drops the usage of a transaction that did not run to completion and puts the detained
+    /// limit back to the one that transaction inherited.
+    ///
+    /// The `reset` at the start of a transaction lets the detained limit carry over before REX1;
+    /// a discarded transaction must not carry anything over, including a cap it lowered by
+    /// accessing volatile data.
+    pub(crate) fn discard(&mut self) {
+        self.frame_tracker.reset();
+        self.detained_limit = self.inherited_detained_limit;
+    }
+
+    /// Records the detained limit as this run leaves it, for [`Self::discard`].
+    ///
+    /// Called when a run ends, with a result or with an error. A discard then puts the tracker
+    /// back to exactly this state, which is where the next transaction's `reset` would otherwise
+    /// have found it: kept as is before REX1, replaced by the transaction limit from REX1 on.
+    pub(crate) fn after_tx_end(&mut self) {
+        self.inherited_detained_limit = self.detained_limit;
     }
 
     /// Returns the remaining compute gas of the current call.
@@ -119,9 +150,15 @@ impl ComputeGasTracker {
 
     /// Caps the current (top) frame's compute gas budget.
     ///
-    /// Used by `STORAGE_CALL_STIPEND`: the child's total gas (`gas_limit`) includes the stipend,
-    /// but compute gas must remain bounded at the original `forwarded_gas + CALL_STIPEND`.
-    /// This method tightens the per-frame compute gas limit to enforce that cap.
+    /// Used by the **REX4 legacy** `STORAGE_CALL_STIPEND` path: the child's total gas
+    /// (`gas_limit`) is inflated by `STORAGE_CALL_STIPEND`, but compute gas must remain
+    /// bounded at the original `forwarded_gas + CALL_STIPEND` so the extra storage stipend
+    /// cannot be spent on compute opcodes. This method tightens the per-frame compute gas
+    /// limit to enforce that cap.
+    ///
+    /// REX5+ does not call this method: under the separated-allowance model the child's
+    /// `gas.limit()` is never inflated, so the per-frame compute budget already equals the
+    /// pre-inflation amount naturally.
     pub(crate) fn cap_current_frame_limit(&mut self, cap: u64) {
         if let Some(frame) = self.frame_tracker.frame_mut() {
             frame.limit = frame.limit.min(cap);
@@ -133,12 +170,19 @@ impl ComputeGasTracker {
     /// records to the `tx_entry`.
     ///
     /// Compute gas is always persistent because CPU cycles cannot be undone.
+    #[inline]
     pub(crate) fn record_gas_used(&mut self, gas: u64) {
-        if let Some(entry) = self.frame_tracker.frame_mut() {
-            entry.persistent_usage += gas;
-        } else {
-            self.frame_tracker.tx_mut().persistent_usage += gas;
+        if !self.frame_tracker.add_frame_persistent(gas) {
+            self.frame_tracker.add_tx_persistent(gas);
         }
+    }
+
+    /// Merges external persistent usage into the TX-level entry.
+    ///
+    /// Used by `KeylessDeploy` (REX5+) to propagate sandbox compute gas consumption
+    /// back to the parent transaction.
+    pub(crate) fn merge_persistent_usage(&mut self, amount: u64) {
+        self.frame_tracker.add_tx_persistent(amount);
     }
 }
 
@@ -228,5 +272,30 @@ impl TxRuntimeLimit for ComputeGasTracker {
     fn before_frame_return_result<const LAST_FRAME: bool>(&mut self, result: &FrameResult) {
         assert!(LAST_FRAME || self.frame_tracker.has_active_frame(), "frame stack is empty");
         self.frame_tracker.pop_frame(result.instruction_result().is_ok());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Usage exactly equal to the detained limit must NOT count as a detained exceed:
+    /// the predicate is strictly-greater-than (`used > detained_limit`), not `>=`.
+    #[test]
+    fn test_is_detained_exceed_is_strict_at_boundary() {
+        // tx_limit = 100, detained lowered to 50 (< tx_limit, so detention is binding).
+        let mut tracker = ComputeGasTracker::new(MegaSpecId::MINI_REX, 100);
+        tracker.set_detained_limit(50);
+
+        // Usage exactly at the detained limit: not exceeded.
+        tracker.record_gas_used(50);
+        assert!(
+            !tracker.is_detained_exceed(),
+            "usage == detained_limit must not be a detained exceed"
+        );
+
+        // One unit over the limit: exceeded.
+        tracker.record_gas_used(1);
+        assert!(tracker.is_detained_exceed(), "usage > detained_limit must be a detained exceed");
     }
 }

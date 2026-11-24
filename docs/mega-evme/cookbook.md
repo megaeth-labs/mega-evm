@@ -29,7 +29,7 @@ Run the same calldata against different specs to see how gas costs differ:
 ```bash
 # Under Rex3 — call WETH.balanceOf
 mega-evme tx \
-  --fork --fork.rpc https://mainnet.megaeth.com/rpc \
+  --fork --rpc https://mainnet.megaeth.com/rpc \
   --sender.balance 1ether \
   --receiver 0x4200000000000000000000000000000000000006 \
   --input 0x70a08231000000000000000000000000f39fd6e51aad88f6f4ce6ab8827279cfffb92266 \
@@ -37,7 +37,7 @@ mega-evme tx \
 
 # Under Rex4
 mega-evme tx \
-  --fork --fork.rpc https://mainnet.megaeth.com/rpc \
+  --fork --rpc https://mainnet.megaeth.com/rpc \
   --sender.balance 1ether \
   --receiver 0x4200000000000000000000000000000000000006 \
   --input 0x70a08231000000000000000000000000f39fd6e51aad88f6f4ce6ab8827279cfffb92266 \
@@ -93,7 +93,7 @@ This example patches WETH's slot 0 (total supply) and reads it back with `totalS
 
 ```bash
 mega-evme tx \
-  --fork --fork.rpc https://mainnet.megaeth.com/rpc \
+  --fork --rpc https://mainnet.megaeth.com/rpc \
   --sender.balance 1ether \
   --receiver 0x4200000000000000000000000000000000000006 \
   --storage "0x4200000000000000000000000000000000000006:0x0=0x0000000000000000000000000000000000000000000000000000000000000001" \
@@ -136,7 +136,7 @@ See exactly which accounts and storage slots a transaction modifies.
 
 ```bash
 mega-evme tx \
-  --fork --fork.rpc https://mainnet.megaeth.com/rpc \
+  --fork --rpc https://mainnet.megaeth.com/rpc \
   --sender.balance 1ether \
   --receiver 0x4200000000000000000000000000000000000006 \
   --input 0xd0e30db0 \
@@ -155,7 +155,7 @@ Call `HighPrecisionTimestamp.timestamp()` — it reads oracle storage, which tri
 
 ```bash
 mega-evme tx \
-  --fork --fork.rpc https://mainnet.megaeth.com/rpc \
+  --fork --rpc https://mainnet.megaeth.com/rpc \
   --sender.balance 1ether \
   --receiver 0x6342000000000000000000000000000000000002 \
   --input 0xb80777ea \

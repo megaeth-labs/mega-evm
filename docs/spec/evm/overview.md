@@ -1,6 +1,6 @@
 ---
 description: MegaEVM specification index — dual gas model, resource limits, gas detention, system contracts, and per-spec behavioral history.
-spec: Rex4
+spec: Rex6
 ---
 
 # MegaEVM Overview
@@ -27,6 +27,9 @@ Every transaction is charged for both compute gas and storage gas, and the trans
 
 Storage-heavy operations such as state writes, code deposit, logs, and calldata therefore carry additional cost beyond inherited EVM compute gas.
 For the complete formulas, constants, SALT multiplier rules, and charging lifecycle, see [Dual Gas Model](dual-gas-model.md).
+
+Compute gas is not an independent gas schedule but a derived measurement of the inherited EVM gas.
+For the measurement window, the per-opcode metering classes, the non-opcode recording sites, and the exceed behavior, see [Compute Gas Accounting](compute-gas.md).
 
 ### Runtime Resource Limits and Accounting
 
@@ -93,10 +96,13 @@ For the full precompile specification, including the inherited baseline and Mega
 
 MegaETH predeploys the following stable system contracts:
 
-| Contract                                                                    | Address                                      | Since                             | Purpose                              |
-| --------------------------------------------------------------------------- | -------------------------------------------- | --------------------------------- | ------------------------------------ |
-| [Oracle](../system-contracts/oracle.md)                                     | `0x6342000000000000000000000000000000000001` | [MiniRex](../upgrades/minirex.md) | Off-chain data key-value storage     |
-| [High-Precision Timestamp](../system-contracts/high-precision-timestamp.md) | `0x6342000000000000000000000000000000000002` | [MiniRex](../upgrades/minirex.md) | Sub-second timestamp oracle service  |
-| [KeylessDeploy](../system-contracts/keyless-deploy.md)                      | `0x6342000000000000000000000000000000000003` | [Rex2](../upgrades/rex2.md)       | Deterministic cross-chain deployment |
+| Contract                                                                    | Address                                      | Since                             | Purpose                                                  |
+| --------------------------------------------------------------------------- | -------------------------------------------- | --------------------------------- | -------------------------------------------------------- |
+| [Oracle](../system-contracts/oracle.md)                                     | `0x6342000000000000000000000000000000000001` | [MiniRex](../upgrades/minirex.md) | Off-chain data key-value storage                         |
+| [High-Precision Timestamp](../system-contracts/high-precision-timestamp.md) | `0x6342000000000000000000000000000000000002` | [MiniRex](../upgrades/minirex.md) | Sub-second timestamp oracle service                      |
+| [KeylessDeploy](../system-contracts/keyless-deploy.md)                      | `0x6342000000000000000000000000000000000003` | [Rex2](../upgrades/rex2.md)       | Deterministic cross-chain deployment                     |
+| [MegaAccessControl](../system-contracts/mega-access-control.md)             | `0x6342000000000000000000000000000000000004` | [Rex4](../upgrades/rex4.md)       | Volatile-data access control                             |
+| [MegaLimitControl](../system-contracts/mega-limit-control.md)               | `0x6342000000000000000000000000000000000005` | [Rex4](../upgrades/rex4.md)       | Query remaining compute-gas budget                       |
+| [SequencerRegistry](../system-contracts/sequencer-registry.md)              | `0x6342000000000000000000000000000000000006` | [Rex5](../upgrades/rex5.md)       | Dual-role registry for system address and sequencer keys |
 
 For the full registry and behavioral semantics, see [System Contracts Overview](../system-contracts/overview.md).

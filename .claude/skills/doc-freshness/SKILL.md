@@ -31,6 +31,8 @@ The documentation in `docs/` is the formal MegaETH specification covering EVM ex
 - Gas detention rule changes
 - Precompile behavior changes
 - SELFDESTRUCT semantics changes
+- New or modified mega-evme CLI commands, subcommands, or flags
+- Changes to mega-evme tracing, state management, or replay behavior
 
 **Usually doc-worthy** (include if impact is significant):
 
@@ -45,7 +47,6 @@ The documentation in `docs/` is the formal MegaETH specification covering EVM ex
 - CI/CD pipeline changes
 - Dependency bumps (unless they change behavior)
 - Build system changes
-- CLI tool (`mega-evme`) changes (not part of the spec)
 - Benchmark changes
 
 When uncertain, include the PR as "Possibly doc-worthy" with a note on why it's ambiguous.
@@ -66,6 +67,11 @@ When uncertain, include the PR as "Possibly doc-worthy" with a note on why it's 
 | `crates/mega-evm/src/system/` | `docs/spec/system-contracts/*.md` |
 | `crates/mega-evm/src/external/` | `docs/spec/evm/dual-gas-model.md`, `docs/spec/system-contracts/oracle.md` |
 | `crates/system-contracts/contracts/` | `docs/spec/system-contracts/*.md` |
+| `bin/mega-evme/src/cmd.rs` | `docs/mega-evme/overview.md` |
+| `bin/mega-evme/src/run/` | `docs/mega-evme/commands/run.md` |
+| `bin/mega-evme/src/tx/` | `docs/mega-evme/commands/tx.md` |
+| `bin/mega-evme/src/replay/` | `docs/mega-evme/commands/replay.md` |
+| `bin/mega-evme/src/common/` | `docs/mega-evme/configuration/*.md`, `docs/mega-evme/tracing/*.md` |
 
 ### Agent and Skill Files
 
@@ -81,6 +87,7 @@ These files contain code paths, constant names, system contract tables, and spec
 | `crates/mega-evm/src/constants.rs` | `AGENTS.md` (Key Concepts sections referencing constant names) |
 | `crates/mega-evm/src/system/` | `AGENTS.md`, `.claude/skills/doc-impact-check/SKILL.md`, `.claude/skills/doc-freshness/SKILL.md` (code-to-doc mapping tables) |
 | `crates/mega-evm/src/limit/` (new tracker) | `AGENTS.md` (Multidimensional Resource Limits section) |
+| `bin/mega-evme/src/` (new/renamed modules) | `bin/mega-evme/AGENTS.md` (STRUCTURE section) |
 | `docs/` (new pages added to SUMMARY.md) | `.claude/skills/doc-impact-check/SKILL.md`, `.claude/skills/doc-freshness/SKILL.md` (mapping tables need new entries) |
 
 ## Workflow

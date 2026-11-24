@@ -12,10 +12,8 @@ use mega_evm::{
         context::{block::BlockEnv, cfg::CfgEnv},
         primitives::eip4844,
     },
-    MegaContext, MegaSpecId, TestExternalEnvs,
+    AHashBucketHasher, MegaContext, MegaSpecId, TestExternalEnvs,
 };
-
-use crate::hasher::AHashBucketHasher;
 
 /// External environment type for mega-evme using the real AHash-based SALT bucket hasher.
 pub type EvmeExternalEnvs = TestExternalEnvs<Infallible, AHashBucketHasher>;
@@ -27,9 +25,10 @@ use super::{EvmeError, Result};
 #[derive(Args, Debug, Clone)]
 #[command(next_help_heading = "Chain Options")]
 pub struct ChainArgs {
-    /// Name of spec to use, possible values: `MiniRex`, `Equivalence`, `Rex`, `Rex1`, `Rex2`,
-    /// `Rex3`, `Rex4`
-    #[arg(long = "spec", default_value = "Rex4")]
+    /// Name of spec to use, possible values: `Equivalence`, `MiniRex`, `MiniRex1`, `MiniRex2`,
+    /// `Rex`, `Rex1`, `Rex2`, `Rex3`, `Rex4`, `Rex5`, `Rex6` (`MiniRex1`/`MiniRex2` are alias
+    /// specs executing `Equivalence`/`MiniRex` behavior)
+    #[arg(long = "spec", default_value = "Rex6")]
     pub spec: String,
 
     /// `ChainID` to use
@@ -40,18 +39,35 @@ pub struct ChainArgs {
 impl ChainArgs {
     /// Gets the spec ID from the spec name
     pub fn spec_id(&self) -> Result<MegaSpecId> {
-        MegaSpecId::from_str(&self.spec)
-            .map_err(|e| EvmeError::InvalidInput(format!("Invalid spec name: {:?}", e)))
+        parse_spec(&self.spec)
     }
 
     /// Creates [`CfgEnv`].
     pub fn create_cfg_env(&self) -> Result<CfgEnv<MegaSpecId>> {
-        let mut cfg = CfgEnv::default();
-        cfg.chain_id = self.chain_id;
-        cfg.spec = self.spec_id()?;
-        debug!(cfg = ?cfg, "Evm CfgEnv created");
-        Ok(cfg)
+        Ok(cfg_env(self.chain_id, self.spec_id()?))
     }
+}
+
+/// Parses a spec name (`Rex4`, `MiniRex`, …) into a [`MegaSpecId`].
+///
+/// The one spec parser every command uses, so an unknown name is rejected with
+/// the same message whichever flag carried it (`--spec`, `--override.spec`).
+pub fn parse_spec(name: &str) -> Result<MegaSpecId> {
+    MegaSpecId::from_str(name)
+        .map_err(|e| EvmeError::InvalidInput(format!("Invalid spec name: {:?}", e)))
+}
+
+/// Creates the [`CfgEnv`] for `chain_id` executing under `spec`.
+///
+/// Infallible: the spec is already resolved. Commands that start from a spec
+/// name parse it first ([`ChainArgs::create_cfg_env`]); replay resolves the spec
+/// from its hardfork schedule and calls this directly.
+pub fn cfg_env(chain_id: u64, spec: MegaSpecId) -> CfgEnv<MegaSpecId> {
+    let mut cfg = CfgEnv::default();
+    cfg.chain_id = chain_id;
+    cfg.set_spec_and_mainnet_gas_params(spec);
+    debug!(cfg = ?cfg, "Evm CfgEnv created");
+    cfg
 }
 
 /// Block environment configuration arguments
@@ -90,7 +106,7 @@ pub struct BlockEnvArgs {
     )]
     pub block_prevrandao: B256,
 
-    /// Excess blob gas for EIP-4844. Required for Cancun and later forks.
+    /// Excess blob gas for EIP-4844, from which the blob base fee is derived
     #[arg(long = "block.blobexcessgas", visible_aliases = ["block.blob-excess-gas"], default_value = "0")]
     pub block_blob_excess_gas: Option<u64>,
 }
@@ -107,6 +123,7 @@ impl BlockEnvArgs {
             difficulty: self.block_difficulty,
             prevrandao: Some(self.block_prevrandao),
             blob_excess_gas_and_price: None,
+            slot_num: 0,
         };
 
         // Set blob excess gas if provided
@@ -134,19 +151,27 @@ pub struct ExtEnvArgs {
 }
 
 impl ExtEnvArgs {
+    /// Parses every `--bucket-capacity` value, in command-line order.
+    pub fn parsed_bucket_capacities(&self) -> Result<Vec<(u32, u64)>> {
+        self.bucket_capacity.iter().map(|s| parse_bucket_capacity(s)).collect()
+    }
+
     /// Creates [`EvmeExternalEnvs`].
     pub fn create_external_envs(&self) -> Result<EvmeExternalEnvs> {
-        let mut external_envs = EvmeExternalEnvs::new();
-
-        // Parse and configure bucket capacities
-        for bucket_capacity_str in &self.bucket_capacity {
-            let (bucket_id, capacity) = parse_bucket_capacity(bucket_capacity_str)?;
-            external_envs = external_envs.with_bucket_capacity(bucket_id, capacity);
-        }
+        let external_envs = external_envs_from(&self.parsed_bucket_capacities()?);
         debug!(external_envs = ?external_envs, "Evm EvmeExternalEnvs created");
 
         Ok(external_envs)
     }
+}
+
+/// Creates [`EvmeExternalEnvs`] holding the given `(bucket_id, capacity)` pairs.
+///
+/// Pairs are applied in order, so a later pair for the same bucket wins.
+pub fn external_envs_from(bucket_capacities: &[(u32, u64)]) -> EvmeExternalEnvs {
+    bucket_capacities.iter().fold(EvmeExternalEnvs::new(), |envs, &(bucket_id, capacity)| {
+        envs.with_bucket_capacity(bucket_id, capacity)
+    })
 }
 
 /// Environment configuration arguments (chain config, block env, SALT bucket capacity)
@@ -171,29 +196,19 @@ impl EnvArgs {
         self.chain.spec_id()
     }
 
-    /// Creates [`CfgEnv`].
-    pub fn create_cfg_env(&self) -> Result<CfgEnv<MegaSpecId>> {
-        self.chain.create_cfg_env()
-    }
-
-    /// Creates [`BlockEnv`].
-    pub fn create_block_env(&self) -> Result<BlockEnv> {
-        self.block.create_block_env()
-    }
-
-    /// Creates [`EvmeExternalEnvs`].
-    pub fn create_external_envs(&self) -> Result<EvmeExternalEnvs> {
-        self.ext.create_external_envs()
-    }
-
     /// Creates a [`MegaContext`] with all environment configurations.
+    ///
+    /// The `system_address` defaults to `MEGA_SYSTEM_ADDRESS`. For `run`/`tx` modes this is
+    /// correct: these paths don't go through the block executor and don't resolve from
+    /// `SequencerRegistry`. If fork-state simulation with a changed sequencer is needed,
+    /// a `--system-address` CLI override can be added in the future.
     pub fn create_evm_context<DB: Database>(
         &self,
         db: DB,
     ) -> Result<MegaContext<DB, EvmeExternalEnvs>> {
-        let cfg = self.create_cfg_env()?;
-        let block = self.create_block_env()?;
-        let external_envs = self.create_external_envs()?;
+        let cfg = self.chain.create_cfg_env()?;
+        let block = self.block.create_block_env()?;
+        let external_envs = self.ext.create_external_envs()?;
 
         Ok(MegaContext::new(db, cfg.spec)
             .with_cfg(cfg)

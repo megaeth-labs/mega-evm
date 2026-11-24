@@ -1,6 +1,6 @@
 ---
 description: MegaETH per-transaction and per-block resource limits — compute gas, data size, KV updates, and state growth ceilings with enforcement semantics.
-spec: Rex4
+spec: Rex6
 ---
 
 # Multidimensional Resource Limits
@@ -38,22 +38,23 @@ MegaETH enforces seven distinct resource limits:
 Limits 1–3 are checked before execution.
 Limits 4–7 are enforced during execution and accumulated at block level after execution.
 
-For exact counting rules of compute gas, data size, KV updates, and state growth, see [Resource Accounting](resource-accounting.md).
+For exact counting rules of data size, KV updates, and state growth, see [Resource Accounting](resource-accounting.md).
+For compute gas — the measurement window, metering classes, recording sites, and exceed behavior — see [Compute Gas Accounting](compute-gas.md).
 For the relationship between total gas, compute gas, and storage gas, see [Dual Gas Model](dual-gas-model.md).
 
 ### Limit Set
 
 A node MUST enforce the following limits:
 
-| Resource                                                                                | Phase         | Transaction Limit       | Block Limit                        |
-| --------------------------------------------------------------------------------------- | ------------- | ----------------------- | ---------------------------------- |
-| [Gas Limit](https://ethereum.org/en/developers/docs/gas/#block-size)                    | Pre-execution | Sequencer-configured    | `block.gasLimit` from block header |
-| Transaction Size                                                                        | Pre-execution | Sequencer-configured    | Sequencer-configured               |
-| [DA Size](https://docs.optimism.io/stack/transactions/transaction-fees#the-l1-data-fee) | Pre-execution | Sequencer-configured    | Sequencer-configured               |
-| [Compute Gas](../glossary.md#compute-gas)                                               | Runtime       | `TX_COMPUTE_GAS_LIMIT`  | No separate limit                  |
-| Data Size                                                                               | Runtime       | `TX_DATA_LIMIT`         | `BLOCK_DATA_LIMIT`                 |
-| KV Updates                                                                              | Runtime       | `TX_KV_UPDATE_LIMIT`    | `BLOCK_KV_UPDATE_LIMIT`            |
-| State Growth                                                                            | Runtime       | `TX_STATE_GROWTH_LIMIT` | `BLOCK_STATE_GROWTH_LIMIT`         |
+| Resource                                                                   | Phase         | Transaction Limit       | Block Limit                        |
+| -------------------------------------------------------------------------- | ------------- | ----------------------- | ---------------------------------- |
+| [Gas Limit](https://ethereum.org/en/developers/docs/gas/#block-size)       | Pre-execution | Sequencer-configured    | `block.gasLimit` from block header |
+| Transaction Size                                                           | Pre-execution | Sequencer-configured    | Sequencer-configured               |
+| [DA Size](https://docs.optimism.io/op-stack/transactions/fees#l1-data-fee) | Pre-execution | Sequencer-configured    | Sequencer-configured               |
+| [Compute Gas](../glossary.md#compute-gas)                                  | Runtime       | `TX_COMPUTE_GAS_LIMIT`  | No separate limit                  |
+| Data Size                                                                  | Runtime       | `TX_DATA_LIMIT`         | `BLOCK_DATA_LIMIT`                 |
+| KV Updates                                                                 | Runtime       | `TX_KV_UPDATE_LIMIT`    | `BLOCK_KV_UPDATE_LIMIT`            |
+| State Growth                                                               | Runtime       | `TX_STATE_GROWTH_LIMIT` | `BLOCK_STATE_GROWTH_LIMIT`         |
 
 The absence of a separate block-level compute gas limit means that cumulative block compute gas is bounded only indirectly by the block gas limit.
 
@@ -96,6 +97,23 @@ If any runtime transaction-level limit is exceeded during execution, the transac
 4. and still be included in the block.
 
 The failed transaction's actual resource usage MUST still count toward the block's cumulative resource counters.
+
+When a single limit check finds more than one dimension over its limit, the reported dimension MUST be the first in the fixed order: data size, key-value updates, compute gas, state growth.
+
+Step 2 applies to every transaction-level exceed, including the one crossed while recording the [KeylessDeploy](../system-contracts/keyless-deploy.md) dispatch overhead.
+The rescued amount is excluded from the receipt's `gas_used` and refunded to the sender.
+See [Keyless Deploy Exceed](compute-gas.md#keyless-deploy-exceed).
+
+The four runtime transaction-level limits MUST NOT be enforced against a [system-originated transaction](../system-contracts/system-tx.md#system-originated-transaction-metering-exemption).
+The node MUST still record such a transaction's resource usage; only the per-transaction halt decision is suppressed.
+The transaction's standard EVM `gas_limit` — for the pre-block system calls, floored at 30,000,000 — remains the only bound that can halt it.
+
+#### Precompile Compute-Gas Bound
+
+A precompile invocation's compute-gas consumption MUST be bounded by the compute gas remaining in the current call frame.
+A node MUST cap the gas forwarded into a precompile at the minimum of the caller-supplied call gas limit and the remaining compute-gas budget, so a precompile cannot consume more compute gas than remains.
+A precompile whose minimum cost exceeds that cap MUST fail without performing its computation, halting with `PrecompileOOG`.
+On successful or reverting precompile returns, the caller's gas-refund accounting MUST reflect the originally forwarded gas limit minus the precompile's actual spent gas, so the cap does not alter the caller's observed refund on non-halting returns.
 
 ### Runtime Block-Level Limits
 
@@ -144,6 +162,40 @@ Only total gas (the standard EVM gas parameter in CALL-like opcodes) remains und
 If a child call frame exceeds its local budget, it MUST revert with `MegaLimitExceeded(uint8 kind, uint64 limit)`.
 The parent call frame MAY continue execution.
 
+The top-level call frame's budget MUST equal the transaction limit minus any resource usage already recorded before the first frame begins.
+These deductions include transaction-only intrinsic usage and any DB-dependent pre-execution usage that is resolved before the first frame starts.
+Each resource dimension deducts only the pre-frame items relevant to it:
+
+- **Data size** — base transaction data (110 bytes), calldata byte length, access-list entry sizes, EIP-7702 authorization records, applied EIP-7702 authority account updates, and the caller account update.
+- **KV updates** — applied EIP-7702 authority account updates and the caller account update.
+- **State growth** — applied EIP-7702 authorizations that create previously non-existent authority accounts.
+- **Compute gas** — standard EVM transaction intrinsic gas, enumerated normatively in [Transaction Intrinsic Gas](compute-gas.md#transaction-intrinsic-gas).
+
+These deductions ensure that pre-frame costs reduce the budget available to the first call frame, preventing transactions from front-loading pre-frame usage to escape per-frame limits.
+
+#### Authority State Growth Resolution
+
+A node MUST resolve the state-growth contribution of EIP-7702 authorizations during transaction validation, after the inherited intrinsic-gas validation and before the final gas-limit and fee-affordability checks — the ones that see the dynamic SALT account-creation gas this scan folds in.
+A transaction whose standard intrinsic gas already exceeds its own gas limit is therefore rejected by the inherited validation without the authority accounts being read at all.
+The set of authorities and the per-authority effects are derived from the same applied-authorization scan that drives the data-size and KV-update narrowing in [Resource Accounting](resource-accounting.md).
+
+#### Dynamic Authority Account-Creation Gas
+
+For each _applied_ EIP-7702 authorization that materializes a previously non-existent authority account, a node MUST charge dynamic new-account storage gas for that authority using the same SALT bucket pricing as other new-account materialization paths.
+This charge MUST be folded into the transaction's intrinsic gas so that it is deducted before the first call frame and enforced against the gas limit and fee affordability.
+A node MUST NOT charge this new-account gas twice when a value-transferring call materializes the same account that an applied authorization materializes.
+
+#### Authorization List Skip on Pre-Frame Limit Exceed
+
+A type-4 transaction's authorization list is applied — each applied authority's account written — during pre-execution, before the transaction's first call frame begins.
+A per-transaction limit that pre-frame accounting has already exceeded still halts the transaction at the first frame boundary, but a frame-boundary halt does not roll back writes performed before that frame began.
+Without a guard, a transaction halting on the state-growth limit could commit more net-new authority accounts than the per-transaction state-growth cap allows.
+
+For a type-4 transaction, if any per-transaction resource limit has already been exceeded at the point where the authorization list would be applied, a node MUST NOT apply any authorization in the list.
+The skip is all-or-nothing: once any per-transaction limit is exceeded — whether by the authorizations themselves or by the transaction's other pre-frame usage, such as calldata — no authorization in the list is applied, including ones that would fit under the limit.
+The transaction MUST still halt at the same frame boundary with the same limit-exceeded halt reason it would have reached without the skip.
+Because no authorization is applied, an already-existing authority forgoes the per-authorization refund it would otherwise earn.
+
 ## Constants
 
 | Constant                   | Value       | Description                                     |
@@ -177,9 +229,20 @@ Allowing the first over-limit transaction to be included maximizes block utiliza
 Cumulative block compute gas is already indirectly constrained by the block gas limit.
 The stable protocol therefore does not need a second independent block-level compute gas ceiling.
 
+**Why cap precompile gas at the remaining compute-gas budget?**
+A precompile whose natural cost exceeds the remaining compute-gas budget would otherwise execute fully and overshoot the budget, with the overshoot detected only after the work was already performed.
+Capping the forwarded gas at the remaining compute-gas budget converts that overshoot into a fail-fast `PrecompileOOG` before the computation runs, keeping the compute-gas limit enforceable for precompile work as well as ordinary opcodes.
+
+## Security Considerations
+
+**If a transaction that exceeds a runtime limit is excluded from the block rather than included as failed**, an attacker can force the sequencer to execute expensive but failing transactions at no cost — the sender never pays because the transaction is dropped.
+Including failed transactions ensures the sender always pays for consumed resources.
+
 ## Spec History
 
 - [MiniRex](../upgrades/minirex.md) introduced compute gas, data size, and KV update limits, with transaction-level data and KV limits set to 25% of the corresponding block limits.
 - [Rex](../upgrades/rex.md) changed the stable runtime transaction-level limits to `TX_COMPUTE_GAS_LIMIT = 200,000,000`, `TX_DATA_LIMIT = 13,107,200`, `TX_KV_UPDATE_LIMIT = 500,000`, and introduced state-growth limits.
 - [Rex3](../upgrades/rex3.md) retained the stable resource-limit set.
-- [Rex4](../upgrades/rex4.md) — added per-call-frame runtime budgets.
+- [Rex4](../upgrades/rex4.md) — added per-call-frame runtime budgets; intrinsic resource costs (always deducted before execution) are now reflected in the top-level frame budget before it is forwarded to child frames.
+- [Rex5](../upgrades/rex5.md) — bounded a precompile invocation's compute-gas consumption by the remaining compute-gas budget, failing the precompile with `PrecompileOOG` rather than letting it overshoot the budget.
+- [Rex6](../upgrades/rex6.md) — moved EIP-7702 authority state-growth resolution from pre-execution (after the caller nonce bump) to validation, and added dynamic SALT account-creation gas for each net-new applied authority to the pre-frame intrinsic gas deduction; removed the keyless-deploy exception to gas preservation, so remaining gas is now rescued on every transaction-level exceed; and stopped enforcing the four runtime transaction-level limits against system-originated transactions, whose usage is still recorded.

@@ -9,14 +9,21 @@ use std::convert::Infallible;
 
 use alloy_consensus::{Signed, TxLegacy};
 use alloy_evm::{block::BlockExecutor, EvmEnv, EvmFactory};
-use alloy_hardforks::ForkCondition;
 use alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder;
 use alloy_primitives::{address, Address, Bytes, Signature, TxKind, B256, U256};
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use mega_evm::{
     test_utils::{BytecodeBuilder, MemoryDatabase},
-    BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutor, MegaEvmFactory, MegaHardfork,
-    MegaHardforkConfig, MegaSpecId, MegaTxEnvelope, TestExternalEnvs,
+    BlockLimits, MegaBlockExecutionCtx, MegaBlockExecutor, MegaEvmFactory, MegaHardforkConfig,
+    MegaSpecId, MegaTxEnvelope, SequencerRegistryConfig, TestExternalEnvs, ACCESS_CONTROL_ADDRESS,
+    ACCESS_CONTROL_CODE, HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS,
+    HIGH_PRECISION_TIMESTAMP_ORACLE_CODE, KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_CODE,
+    LIMIT_CONTROL_ADDRESS, LIMIT_CONTROL_CODE, MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS,
+    ORACLE_CONTRACT_CODE_REX5, SEQUENCER_REGISTRY_ADDRESS, SEQUENCER_REGISTRY_CODE,
+};
+use mega_system_contracts::sequencer_registry::storage_slots::{
+    ADMIN, CURRENT_SEQUENCER, CURRENT_SYSTEM_ADDRESS, INITIAL_FROM_BLOCK, INITIAL_SEQUENCER,
+    INITIAL_SYSTEM_ADDRESS,
 };
 use revm::{
     bytecode::opcode::{ADD, LOG1, POP, SSTORE},
@@ -66,15 +73,20 @@ fn create_deploy_tx(
     alloy_consensus::transaction::Recovered::new_unchecked(tx, CALLER)
 }
 
-/// Hardfork config activating all hardforks from genesis.
-fn all_hardforks_config() -> MegaHardforkConfig {
-    MegaHardforkConfig::default()
-        .with(MegaHardfork::MiniRex, ForkCondition::Timestamp(0))
-        .with(MegaHardfork::Rex, ForkCondition::Timestamp(0))
-        .with(MegaHardfork::Rex1, ForkCondition::Timestamp(0))
-        .with(MegaHardfork::Rex2, ForkCondition::Timestamp(0))
-        .with(MegaHardfork::Rex3, ForkCondition::Timestamp(0))
-        .with(MegaHardfork::Rex4, ForkCondition::Timestamp(0))
+/// Hardfork schedule coherent with `spec`: everything through the spec's rung is active from
+/// genesis, with the params Rex5+ pre-block setup needs. Each benchmark row therefore measures
+/// one complete per-spec world — pre-block setup included — matching the executor's rule that
+/// setup follows the executing spec. (A REX6+ row would additionally need
+/// `SequencerRegistryRex6Config` attached here.)
+fn hardforks_for(spec: MegaSpecId) -> MegaHardforkConfig {
+    let mut config = MegaHardforkConfig::default().with_all_activated_through(spec);
+    if spec.reaches(MegaSpecId::REX5) {
+        config = config.with_params(SequencerRegistryConfig {
+            rex5_initial_sequencer: MEGA_SYSTEM_ADDRESS,
+            rex5_initial_admin: MEGA_SYSTEM_ADDRESS,
+        });
+    }
+    config
 }
 
 /// Create block EVM environment.
@@ -88,6 +100,36 @@ fn block_evm_env(spec: MegaSpecId) -> EvmEnv<MegaSpecId> {
         ..Default::default()
     };
     EvmEnv::new(cfg_env, block_env)
+}
+
+fn rex5_steady_state_db(contract_code: &Bytes) -> MemoryDatabase {
+    let mut db = MemoryDatabase::default();
+    db.set_account_code(CONTRACT, contract_code.clone());
+    db.set_account_balance(CALLER, U256::from(1_000_000_000_000_000u64));
+
+    // Predeploy all REX5 system contracts so this benchmark measures the steady-state
+    // pre-block path instead of repeatedly paying first-deploy cost.
+    db.set_account_code(ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE_REX5);
+    db.set_account_code(
+        HIGH_PRECISION_TIMESTAMP_ORACLE_ADDRESS,
+        HIGH_PRECISION_TIMESTAMP_ORACLE_CODE,
+    );
+    db.set_account_code(KEYLESS_DEPLOY_ADDRESS, KEYLESS_DEPLOY_CODE);
+    db.set_account_code(ACCESS_CONTROL_ADDRESS, ACCESS_CONTROL_CODE);
+    db.set_account_code(LIMIT_CONTROL_ADDRESS, LIMIT_CONTROL_CODE);
+    db.set_account_code(SEQUENCER_REGISTRY_ADDRESS, SEQUENCER_REGISTRY_CODE);
+
+    // Seed the bootstrap SequencerRegistry slots exactly once so deploy stays idempotent
+    // and resolve_system_address reads committed steady-state data.
+    let initial_address = U256::from_be_bytes(MEGA_SYSTEM_ADDRESS.into_word().0);
+    db.set_account_storage(SEQUENCER_REGISTRY_ADDRESS, CURRENT_SYSTEM_ADDRESS, initial_address);
+    db.set_account_storage(SEQUENCER_REGISTRY_ADDRESS, CURRENT_SEQUENCER, initial_address);
+    db.set_account_storage(SEQUENCER_REGISTRY_ADDRESS, ADMIN, initial_address);
+    db.set_account_storage(SEQUENCER_REGISTRY_ADDRESS, INITIAL_SYSTEM_ADDRESS, initial_address);
+    db.set_account_storage(SEQUENCER_REGISTRY_ADDRESS, INITIAL_SEQUENCER, initial_address);
+    db.set_account_storage(SEQUENCER_REGISTRY_ADDRESS, INITIAL_FROM_BLOCK, U256::from(1000));
+
+    db
 }
 
 /// Simple contract: just STOPs.
@@ -122,46 +164,49 @@ fn bench_block_empty_txs(c: &mut Criterion) {
     group.sample_size(10);
 
     let contract_code = empty_contract();
-    let spec = MegaSpecId::REX4;
+    let specs: &[(&str, MegaSpecId)] = &[("rex4", MegaSpecId::REX4), ("rex5", MegaSpecId::REX5)];
 
-    for n_txs in [1, 10, 50] {
-        group.bench_function(format!("rex4/{n_txs}_txs"), |b| {
-            b.iter(|| {
-                let mut db = MemoryDatabase::default();
-                db.set_account_code(CONTRACT, contract_code.clone());
-                db.set_account_balance(CALLER, U256::from(1_000_000_000_000_000u64));
+    for &(spec_name, spec) in specs {
+        for n_txs in [1, 10, 50] {
+            group.bench_function(format!("{spec_name}/{n_txs}_txs"), |b| {
+                b.iter(|| {
+                    let mut db = MemoryDatabase::default();
+                    db.set_account_code(CONTRACT, contract_code.clone());
+                    db.set_account_balance(CALLER, U256::from(1_000_000_000_000_000u64));
 
-                let mut state = State::builder().with_database(&mut db).build();
-                let external_envs = TestExternalEnvs::<Infallible>::new();
-                let evm_factory = MegaEvmFactory::new().with_external_env_factory(external_envs);
-                let evm = evm_factory.create_evm(&mut state, block_evm_env(spec));
+                    let mut state = State::builder().with_database(&mut db).build();
+                    let external_envs = TestExternalEnvs::<Infallible>::new();
+                    let evm_factory =
+                        MegaEvmFactory::new().with_external_env_factory(external_envs);
+                    let evm = evm_factory.create_evm(&mut state, block_evm_env(spec));
 
-                let block_ctx = MegaBlockExecutionCtx::new(
-                    B256::ZERO,
-                    Some(B256::ZERO),
-                    Bytes::new(),
-                    BlockLimits::no_limits(),
-                );
-                let mut executor = MegaBlockExecutor::new(
-                    evm,
-                    block_ctx,
-                    all_hardforks_config(),
-                    OpAlloyReceiptBuilder::default(),
-                );
-                executor
-                    .apply_pre_execution_changes()
-                    .expect("pre-execution changes should succeed");
+                    let block_ctx = MegaBlockExecutionCtx::new(
+                        B256::ZERO,
+                        Some(B256::ZERO),
+                        Bytes::new(),
+                        BlockLimits::no_limits(),
+                    );
+                    let mut executor = MegaBlockExecutor::new(
+                        evm,
+                        block_ctx,
+                        hardforks_for(spec),
+                        OpAlloyReceiptBuilder::default(),
+                    );
+                    executor
+                        .apply_pre_execution_changes()
+                        .expect("pre-execution changes should succeed");
 
-                for i in 0..n_txs {
-                    let tx = create_call_tx(i, 1_000_000);
-                    let gas = executor.execute_transaction(&tx).expect("should succeed");
-                    black_box(gas);
-                }
+                    for i in 0..n_txs {
+                        let tx = create_call_tx(i, 1_000_000);
+                        let gas = executor.execute_transaction(&tx).expect("should succeed");
+                        black_box(gas);
+                    }
 
-                let (_evm, block_result) = executor.finish().expect("finish should succeed");
-                black_box(block_result);
-            })
-        });
+                    let (_evm, block_result) = executor.finish().expect("finish should succeed");
+                    black_box(block_result);
+                })
+            });
+        }
     }
     group.finish();
 }
@@ -172,46 +217,49 @@ fn bench_block_mixed_txs(c: &mut Criterion) {
     group.sample_size(10);
 
     let contract_code = mixed_contract();
-    let spec = MegaSpecId::REX4;
+    let specs: &[(&str, MegaSpecId)] = &[("rex4", MegaSpecId::REX4), ("rex5", MegaSpecId::REX5)];
 
-    for n_txs in [1, 10] {
-        group.bench_function(format!("rex4/{n_txs}_txs"), |b| {
-            b.iter(|| {
-                let mut db = MemoryDatabase::default();
-                db.set_account_code(CONTRACT, contract_code.clone());
-                db.set_account_balance(CALLER, U256::from(1_000_000_000_000_000u64));
+    for &(spec_name, spec) in specs {
+        for n_txs in [1, 10] {
+            group.bench_function(format!("{spec_name}/{n_txs}_txs"), |b| {
+                b.iter(|| {
+                    let mut db = MemoryDatabase::default();
+                    db.set_account_code(CONTRACT, contract_code.clone());
+                    db.set_account_balance(CALLER, U256::from(1_000_000_000_000_000u64));
 
-                let mut state = State::builder().with_database(&mut db).build();
-                let external_envs = TestExternalEnvs::<Infallible>::new();
-                let evm_factory = MegaEvmFactory::new().with_external_env_factory(external_envs);
-                let evm = evm_factory.create_evm(&mut state, block_evm_env(spec));
+                    let mut state = State::builder().with_database(&mut db).build();
+                    let external_envs = TestExternalEnvs::<Infallible>::new();
+                    let evm_factory =
+                        MegaEvmFactory::new().with_external_env_factory(external_envs);
+                    let evm = evm_factory.create_evm(&mut state, block_evm_env(spec));
 
-                let block_ctx = MegaBlockExecutionCtx::new(
-                    B256::ZERO,
-                    Some(B256::ZERO),
-                    Bytes::new(),
-                    BlockLimits::no_limits(),
-                );
-                let mut executor = MegaBlockExecutor::new(
-                    evm,
-                    block_ctx,
-                    all_hardforks_config(),
-                    OpAlloyReceiptBuilder::default(),
-                );
-                executor
-                    .apply_pre_execution_changes()
-                    .expect("pre-execution changes should succeed");
+                    let block_ctx = MegaBlockExecutionCtx::new(
+                        B256::ZERO,
+                        Some(B256::ZERO),
+                        Bytes::new(),
+                        BlockLimits::no_limits(),
+                    );
+                    let mut executor = MegaBlockExecutor::new(
+                        evm,
+                        block_ctx,
+                        hardforks_for(spec),
+                        OpAlloyReceiptBuilder::default(),
+                    );
+                    executor
+                        .apply_pre_execution_changes()
+                        .expect("pre-execution changes should succeed");
 
-                for i in 0..n_txs {
-                    let tx = create_call_tx(i, 10_000_000);
-                    let gas = executor.execute_transaction(&tx).expect("should succeed");
-                    black_box(gas);
-                }
+                    for i in 0..n_txs {
+                        let tx = create_call_tx(i, 10_000_000);
+                        let gas = executor.execute_transaction(&tx).expect("should succeed");
+                        black_box(gas);
+                    }
 
-                let (_evm, block_result) = executor.finish().expect("finish should succeed");
-                black_box(block_result);
-            })
-        });
+                    let (_evm, block_result) = executor.finish().expect("finish should succeed");
+                    black_box(block_result);
+                })
+            });
+        }
     }
     group.finish();
 }
@@ -223,50 +271,55 @@ fn bench_block_deploy(c: &mut Criterion) {
 
     // Init code that deploys a small runtime: PUSH1 0x00 PUSH1 0x00 RETURN
     let init_code: Bytes = vec![0x60, 0x00, 0x60, 0x00, 0xf3].into();
-    let spec = MegaSpecId::REX4;
+    let specs: &[(&str, MegaSpecId)] = &[("rex4", MegaSpecId::REX4), ("rex5", MegaSpecId::REX5)];
 
-    group.bench_function("rex4/deploy_1", |b| {
-        b.iter(|| {
-            let mut db = MemoryDatabase::default();
-            db.set_account_balance(CALLER, U256::from(1_000_000_000_000_000u64));
+    for &(spec_name, spec) in specs {
+        group.bench_function(format!("{spec_name}/deploy_1"), |b| {
+            b.iter(|| {
+                let mut db = MemoryDatabase::default();
+                db.set_account_balance(CALLER, U256::from(1_000_000_000_000_000u64));
 
-            let mut state = State::builder().with_database(&mut db).build();
-            let external_envs = TestExternalEnvs::<Infallible>::new();
-            let evm_factory = MegaEvmFactory::new().with_external_env_factory(external_envs);
-            let evm = evm_factory.create_evm(&mut state, block_evm_env(spec));
+                let mut state = State::builder().with_database(&mut db).build();
+                let external_envs = TestExternalEnvs::<Infallible>::new();
+                let evm_factory = MegaEvmFactory::new().with_external_env_factory(external_envs);
+                let evm = evm_factory.create_evm(&mut state, block_evm_env(spec));
 
-            let block_ctx = MegaBlockExecutionCtx::new(
-                B256::ZERO,
-                Some(B256::ZERO),
-                Bytes::new(),
-                BlockLimits::no_limits(),
-            );
-            let mut executor = MegaBlockExecutor::new(
-                evm,
-                block_ctx,
-                all_hardforks_config(),
-                OpAlloyReceiptBuilder::default(),
-            );
-            executor.apply_pre_execution_changes().expect("pre-execution changes should succeed");
+                let block_ctx = MegaBlockExecutionCtx::new(
+                    B256::ZERO,
+                    Some(B256::ZERO),
+                    Bytes::new(),
+                    BlockLimits::no_limits(),
+                );
+                let mut executor = MegaBlockExecutor::new(
+                    evm,
+                    block_ctx,
+                    hardforks_for(spec),
+                    OpAlloyReceiptBuilder::default(),
+                );
+                executor
+                    .apply_pre_execution_changes()
+                    .expect("pre-execution changes should succeed");
 
-            let nonce = 0u64;
-            let tx = create_deploy_tx(nonce, 10_000_000, init_code.clone());
-            let gas = executor.execute_transaction(&tx).expect("deploy should succeed");
-            black_box(gas);
+                let nonce = 0u64;
+                let tx = create_deploy_tx(nonce, 10_000_000, init_code.clone());
+                let gas = executor.execute_transaction(&tx).expect("deploy should succeed");
+                black_box(gas);
 
-            let (_evm, block_result) = executor.finish().expect("finish should succeed");
-            black_box(block_result);
-        })
-    });
+                let (_evm, block_result) = executor.finish().expect("finish should succeed");
+                black_box(block_result);
+            })
+        });
+    }
     group.finish();
 }
 
 /// Benchmark spec comparison for block execution.
 ///
-/// NOTE: All specs run with `all_hardforks_config()`, so even `EQUIVALENCE` and `MINI_REX`
-/// deploy Rex4 system contracts during `pre_execution_changes`. This is intentional —
-/// the benchmark isolates EVM execution behavior differences across specs, not system
-/// contract deployment overhead.
+/// NOTE: Each spec runs against its own coherent world (`hardforks_for(spec)`), pre-block
+/// setup included: `EQUIVALENCE` deploys nothing while `REX5` bootstraps its predeploys and
+/// registry inside every iteration. Rows therefore compare whole-block costs per spec, not
+/// isolated EVM execution deltas — for the latter, the cross-spec compute-gas snapshot
+/// (`tests/compute_gas/`) is the tool.
 fn bench_block_spec_comparison(c: &mut Criterion) {
     let mut group = c.benchmark_group("block_executor_spec_comparison");
     group.sample_size(10);
@@ -276,6 +329,7 @@ fn bench_block_spec_comparison(c: &mut Criterion) {
         ("equivalence", MegaSpecId::EQUIVALENCE),
         ("mini_rex", MegaSpecId::MINI_REX),
         ("rex4", MegaSpecId::REX4),
+        ("rex5", MegaSpecId::REX5),
     ];
 
     for &(spec_name, spec) in specs {
@@ -299,7 +353,7 @@ fn bench_block_spec_comparison(c: &mut Criterion) {
                 let mut executor = MegaBlockExecutor::new(
                     evm,
                     block_ctx,
-                    all_hardforks_config(),
+                    hardforks_for(spec),
                     OpAlloyReceiptBuilder::default(),
                 );
                 executor
@@ -320,11 +374,111 @@ fn bench_block_spec_comparison(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmark the full REX5 pre-block path.
+///
+/// `bootstrap` starts from an empty DB and pays first-deploy cost for the REX5 system contracts.
+/// `no_change` starts from a steady-state DB where all deploy-only contracts already exist and
+/// the `SequencerRegistry` has no pending changes.
+fn bench_rex5_pre_block(c: &mut Criterion) {
+    let mut group = c.benchmark_group("rex5_pre_block");
+    group.sample_size(10);
+
+    let contract_code = empty_contract();
+    let spec = MegaSpecId::REX5;
+
+    // Bootstrap block: first REX5 pre-block on an empty state.
+    group.bench_function("bootstrap", |b| {
+        b.iter(|| {
+            let mut db = MemoryDatabase::default();
+            db.set_account_code(CONTRACT, contract_code.clone());
+            db.set_account_balance(CALLER, U256::from(1_000_000_000_000_000u64));
+
+            let mut state = State::builder().with_database(&mut db).build();
+            let external_envs = TestExternalEnvs::<Infallible>::new();
+            let evm_factory = MegaEvmFactory::new().with_external_env_factory(external_envs);
+            let evm = evm_factory.create_evm(&mut state, block_evm_env(spec));
+
+            let block_ctx = MegaBlockExecutionCtx::new(
+                B256::ZERO,
+                Some(B256::ZERO),
+                Bytes::new(),
+                BlockLimits::no_limits(),
+            );
+            let mut executor = MegaBlockExecutor::new(
+                evm,
+                block_ctx,
+                hardforks_for(spec),
+                OpAlloyReceiptBuilder::default(),
+            );
+            executor.apply_pre_execution_changes().expect("pre-execution changes should succeed");
+            black_box(());
+        })
+    });
+
+    // Steady-state block: all deploy-only system contracts already exist and the registry has no
+    // pending changes.
+    group.bench_function("no_change", |b| {
+        let baseline_db = rex5_steady_state_db(&contract_code);
+
+        b.iter(|| {
+            let mut db = baseline_db.clone();
+            let mut state = State::builder().with_database(&mut db).build();
+            let external_envs = TestExternalEnvs::<Infallible>::new();
+            let evm_factory = MegaEvmFactory::new().with_external_env_factory(external_envs);
+            let evm = evm_factory.create_evm(&mut state, block_evm_env(spec));
+            let block_ctx = MegaBlockExecutionCtx::new(
+                B256::ZERO,
+                Some(B256::ZERO),
+                Bytes::new(),
+                BlockLimits::no_limits(),
+            );
+            let mut executor = MegaBlockExecutor::new(
+                evm,
+                block_ctx,
+                hardforks_for(spec),
+                OpAlloyReceiptBuilder::default(),
+            );
+            executor.apply_pre_execution_changes().expect("pre-execution changes should succeed");
+            black_box(());
+        })
+    });
+
+    group.finish();
+}
+
+/// Benchmark hardfork-config resolution on the real mainnet schedule.
+///
+/// The position-projected predicates (`is_rex_5_active_at_timestamp`) are what downstream node
+/// components call once per block; `spec_id` is the executor's per-block resolution;
+/// `validate_schedule` is a once-per-config-load cost. Resolution's descending early-exit scan
+/// keeps the per-query cost at one or two activation lookups for chains near the top of the
+/// ladder, which this benchmark pins.
+fn bench_hardfork_resolution(c: &mut Criterion) {
+    use mega_evm::MegaHardforks;
+
+    let mut group = c.benchmark_group("hardfork_resolution");
+    let schedule = mega_evm::mainnet_hardforks();
+    // A timestamp after the last scheduled fork: every real query happens here.
+    let ts = 1_800_000_000u64;
+
+    group.bench_function("is_rex_5_active_at_timestamp", |b| {
+        b.iter(|| black_box(schedule.is_rex_5_active_at_timestamp(black_box(ts))))
+    });
+    group.bench_function("spec_id", |b| b.iter(|| black_box(schedule.spec_id(black_box(ts)))));
+    group.bench_function("validate_schedule", |b| {
+        b.iter(|| black_box(schedule.validate_schedule()))
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_block_empty_txs,
     bench_block_mixed_txs,
     bench_block_deploy,
     bench_block_spec_comparison,
+    bench_rex5_pre_block,
+    bench_hardfork_resolution,
 );
 criterion_main!(benches);

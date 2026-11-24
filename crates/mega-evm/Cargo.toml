@@ -7,6 +7,7 @@ license.workspace = true
 homepage.workspace = true
 repository.workspace = true
 description = "The evm tailored for the MegaETH"
+readme = "README.md"
 
 [lints]
 workspace = true
@@ -23,10 +24,10 @@ alloy-primitives.workspace = true
 alloy-sol-types.workspace = true
 op-alloy-consensus.workspace = true
 op-alloy-flz.workspace = true
-op-revm = { workspace = true, features = ["dev", "serde", "kzg-rs"] }
+op-revm = { workspace = true, features = ["dev", "serde"] }
 
 # revm
-revm = { workspace = true, features = ["dev", "serde", "kzg-rs"] }
+revm = { workspace = true, features = ["dev", "serde"] }
 
 # megaeth
 mega-system-contracts = { workspace = true, default-features = false }
@@ -39,11 +40,18 @@ derive_more.workspace = true
 once_cell.workspace = true
 serde = { workspace = true, features = ["derive"] }
 thiserror.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
-criterion.workspace = true
+# CodSpeed drop-in: `codspeed-criterion-compat` re-exports criterion's API, so
+# `use criterion::...` in the benches is unchanged. Under a normal `cargo bench`
+# it behaves exactly like criterion; under `cargo codspeed` it runs each bench
+# once under valgrind and reports layout-insensitive instruction counts.
+criterion = { package = "codspeed-criterion-compat", version = "5.0.1", default-features = false, features = ["cargo_bench_support", "html_reports", "plotters"] }
 hex.workspace = true
 mega-evm = { path = ".", features = ["test-utils"] }
+# The `revm-latest` / `op-revm-latest` benchmark baselines are gone: the main tree is now the
+# target version, and re-declaring the same crate under a second name is rejected by Cargo.
 rand = { workspace = true, features = ["thread_rng"] }
 revm-inspectors = { workspace = true, features = ["std"] }
 serde_json.workspace = true
@@ -55,6 +63,10 @@ std = ["revm/std", "op-revm/std", "revm/alloydb", "mega-system-contracts/std"]
 test-utils = []
 
 [[bench]]
+name = "attack_replay"
+harness = false
+
+[[bench]]
 name = "block_bench"
 harness = false
 
@@ -64,6 +76,10 @@ harness = false
 
 [[bench]]
 name = "ctt"
+harness = false
+
+[[bench]]
+name = "enriched_tx"
 harness = false
 
 [[bench]]

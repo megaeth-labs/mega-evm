@@ -1,0 +1,15 @@
+# mega-evme replay equivalence baseline
+# case:    single_trace_prestate_diff_human
+# capture: replay_offline.cache.json
+# argv:    replay --rpc.replay-file <CAPTURE> --trace --tracer prestate --trace.prestate.diff-mode 0x41d34e7e13dfe0f85da9d407e2b2c381955d8c7eed428b17dc82327b2616b000
+
+== exit code ==
+0
+
+== stdout (digest) ==
+bytes: 46367
+lines: 73
+keccak256: 0xd9da69f3e867bbde5c5c8c660855ee11bd82913fff972a9e631e1c8e819cc07e
+
+== stderr ==
+(empty)

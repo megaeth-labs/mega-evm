@@ -1,6 +1,6 @@
 ---
 description: MegaETH hardfork and spec versioning — how behavioral changes are versioned, activated, and tracked across network upgrades.
-spec: Rex4
+spec: Rex6
 ---
 
 # Hardforks and Specs
@@ -12,12 +12,38 @@ This page defines both concepts and summarizes what each spec introduces.
 
 The protocol distinguishes between two related concepts:
 
-- **[Hardfork](glossary.md#hardfork-megahardfork)** — A network upgrade event: _when_ changes are activated on the chain. A hardfork may include protocol-level changes beyond MegaEVM (e.g., networking, state sync, RPC behavior). Represented as `MegaHardfork` in the reference implementation.
-- **[Spec](glossary.md#spec-megaspecid)** — A set of MegaETH verifiable behaviors: _what_ a correct node does. A spec captures the execution-layer semantics that determine node correctness. Represented as `MegaSpecId` in the reference implementation.
+- **[Hardfork](glossary.md#hardfork-megahardfork)** — A network upgrade event: _when_ changes are activated on the chain. A hardfork may include protocol-level changes beyond MegaEVM (e.g., networking, state sync, RPC behavior).
+- **[Spec](glossary.md#spec-megaspecid)** — A set of MegaETH verifiable behaviors: _what_ a correct node does. A spec captures the execution-layer semantics that determine node correctness.
 
-Multiple hardforks can map to the same spec.
-A hardfork can also map to an older spec.
-For example: `MiniRex` → `MINI_REX`, `MiniRex1` → `EQUIVALENCE` (rollback), `MiniRex2` → `MINI_REX` (restoration).
+Hardforks map one-to-one onto specs: every hardfork schedules a spec rung of its own.
+A rollback is expressed by scheduling an alias spec — a rung whose behavior is identical to an earlier spec (see below).
+For example: `MiniRex` → `MINI_REX`, `MiniRex1` → `MINI_REX_1` (behavior: `EQUIVALENCE`), `MiniRex2` → `MINI_REX_2` (behavior: `MINI_REX`).
+
+### Alias Specs: Behavior vs. Position
+
+Hardforks map one-to-one onto specs, so the spec resolved for a block — the latest activated hardfork's spec — only ever climbs.
+A rollback is expressed by an **alias spec**: a rung of its own whose behavior is defined to be identical to an earlier spec.
+`MiniRex1` maps to the alias spec `MINI_REX_1` (behavior: `EQUIVALENCE`), and `MiniRex2` maps to `MINI_REX_2` (behavior: `MINI_REX`).
+
+The one resolved spec is therefore read through two projections that answer different questions.
+
+- **Behavior** — which semantics the EVM applies in this block.
+  An alias spec executes exactly its target's semantics: during the `MiniRex1` window MegaEVM behaves as `EQUIVALENCE` again.
+- **Position** — how far the ladder has climbed.
+  This is monotone and never decreases; an alias rung stands above the specs whose behavior it rolls back.
+
+The distinction matters for chain setup that is one-way.
+System contracts predeployed under a hardfork remain deployed, and pre-block rules remain in effect, even while an alias rung rolls the executing semantics back.
+A rollback changes how transactions execute; it does not un-deploy a contract or retract a system call.
+
+A node MUST determine pre-block setup — system-contract predeploys, their bytecode versions, and the fail-closed rules on the pre-block EIP-2935/EIP-4788 system calls — from the resolved spec's position.
+A node MUST determine all other behavior — opcode behavior, gas costs, resource limits, transaction classification — from the resolved spec's behavior.
+
+Spec ranges elsewhere in this specification — "from MiniRex onward", "MiniRex through Rex5" — are stated on behavior.
+An alias rung counts as its behavior target in such ranges: during the `MiniRex1` window, a rule stated "from MiniRex onward" does not apply, because the behavior in effect is `EQUIVALENCE`.
+
+A published hardfork schedule MUST climb the spec ladder rung by rung: a hardfork MUST NOT be scheduled unless every hardfork of a lower rung is scheduled, with one exception — a network MAY omit an alias hardfork, since an alias rung carries no setup of its own.
+Execution is additionally robust to a malformed schedule: because setup derives from position, a scheduled hardfork implies its predecessors' setup even if they were never scheduled.
 
 This documentation covers specs — the verifiable behavioral definitions that determine correctness of a MegaETH node.
 Protocol-level changes outside the verifiable execution layer (e.g., networking, peer discovery) that are part of a hardfork are not covered here.
@@ -25,26 +51,29 @@ Protocol-level changes outside the verifiable execution layer (e.g., networking,
 ## Spec Progression
 
 ```
-EQUIVALENCE → MINI_REX → REX → REX1 → REX2 → REX3 → REX4
+EQUIVALENCE → MINI_REX → MINI_REX_1 → MINI_REX_2 → REX → REX1 → REX2 → REX3 → REX4 → REX5 → REX6
 ```
 
-Each newer spec includes all previous behaviors.
+Each newer behavior-introducing spec includes all previous behaviors.
+The alias rungs `MINI_REX_1` (behavior: `EQUIVALENCE`) and `MINI_REX_2` (behavior: `MINI_REX`) are the exception: an alias rung introduces no behavior of its own and instead executes exactly its target's earlier behavior (see [Alias Specs](#alias-specs-behavior-vs-position)).
 All specs build on Optimism Isthmus (Ethereum Prague) as the base layer.
-All specs are currently stable.
-The latest spec may be marked **unstable** when a new spec is under development, meaning its semantics can still change before network activation.
+Every spec is frozen; there is currently no unstable spec.
+
+Frozen and activated are separate properties.
+A frozen spec's semantics no longer change, but it takes effect on a network only once that network schedules the corresponding hardfork.
 
 ### Backward Compatibility
 
-EVM semantics for stable (activated) specs are frozen.
-A new spec may add behavior or change the unstable spec, but it never alters what an existing stable spec does.
-Every spec carries the invariant: "Stable pre-{Spec} semantics MUST remain unchanged."
+A frozen spec's EVM semantics never change again.
+Freezing is what confers that guarantee — not activation: a frozen spec no network has scheduled is as immutable as one running on mainnet, because a future schedule would replay history against it.
+A new spec may add behavior, but it never alters what an existing frozen spec does.
 
 This means:
 
-- Contracts deployed under a given spec will continue to behave identically after future upgrades.
+- Contracts deployed under a given spec continue to behave identically after future upgrades.
 - Adding or modifying a system contract requires introducing a new spec.
 - Changing gas costs, opcode behavior, or resource limits requires a new spec.
-- Implementations MUST gate spec-specific behavior on the active spec.
+- Implementations gate spec-specific behavior on the active spec.
 
 ## Spec Summary
 
@@ -66,6 +95,15 @@ The first spec to introduce MegaETH-specific modifications:
 - **Large contract support** — 512 KB contracts (21x increase from 24 KB)
 
 _See [MiniRex Network Upgrade](upgrades/minirex.md) for full details._
+
+### MINI_REX_1 and MINI_REX_2
+
+Alias rungs with no behavior of their own.
+
+- `MINI_REX_1` (behavior: `EQUIVALENCE`) — scheduled by the `MiniRex1` hardfork; rolls execution semantics back to `EQUIVALENCE`.
+- `MINI_REX_2` (behavior: `MINI_REX`) — scheduled by the `MiniRex2` hardfork; restores `MINI_REX` semantics.
+
+See [Alias Specs](#alias-specs-behavior-vs-position) for how behavior and position project from an alias rung.
 
 ### REX
 
@@ -111,3 +149,36 @@ _See [Rex3 Network Upgrade](upgrades/rex3.md) for full details._
 - **[Keyless deploy](system-contracts/keyless-deploy.md) sandbox environment inheritance** — Sandbox inherits parent transaction's external environment for dynamic pricing and oracle behavior
 
 _See [Rex4 Network Upgrade](upgrades/rex4.md) for full details._
+
+### REX5
+
+- **[SequencerRegistry](system-contracts/sequencer-registry.md) system contract** — Tracks the system address and sequencer roles independently with on-chain change scheduling and history.
+- **Dynamic system address** — `MEGA_SYSTEM_ADDRESS` is resolved per block from `SequencerRegistry.currentSystemAddress()` instead of a hardcoded constant.
+- **Oracle v2.0.0** — `onlySystemAddress` reads the authority from `SequencerRegistry`. In-place Oracle bytecode upgrades preserve existing storage instead of clearing it.
+- **Caller-account update deduplication** — Fixes overcounting of caller-account data-size and KV updates across multiple value-transferring sub-calls or creates from the same parent frame.
+- **[KeylessDeploy](system-contracts/keyless-deploy.md) trailing-bytes rejection** — RLP encodings with trailing bytes after the signed payload are rejected with `MalformedEncoding()`.
+- **CALLCODE new-account storage gas fix** — New-account storage gas is now charged against the caller's storage context rather than the code-source address.
+- **Storage-gas-stipend separated allowance** — The `STORAGE_CALL_STIPEND` no longer inflates the callee's gas limit; it is a per-frame allowance drawn only at storage-gas surcharge sites and is neither burned nor rescued.
+- **Value-transfer CALL/CALLCODE compute attribution** — Compute gas recorded into the parent excludes the `CALL_STIPEND` granted to the callee.
+- **CREATE code-deposit compute-gas atomicity** — Contract-creation code-deposit compute gas is charged atomically with the deployment commit and not double-counted in post-execution accounting.
+- **EIP-2935 / EIP-4788 pre-block gas floor** — The history-storage and beacon-roots pre-block system calls use `max(block_gas_limit, 30,000,000)` and are fail-closed: a non-successful call rejects the block.
+- **CREATE2 empty-initcode short-circuit** — A `CREATE2` with zero-length init code short-circuits after the salt check using the empty-code hash, without offset conversion, memory expansion, or hashing.
+- **KeylessDeploy empty-code log forwarding** — An empty-runtime-code deployment success forwards the constructor's logs before returning.
+
+_See [Rex5 Network Upgrade](upgrades/rex5.md) for full details._
+
+### REX6
+
+REX6 is frozen and scheduled on both networks; see the [upgrade overview](upgrades/overview.md) for activation timestamps.
+
+- **Unified per-opcode gas metering order** — Every storage-affecting opcode charges storage gas before its body and records compute gas exactly once after the body completes; the `CREATE2` memory-expansion gas is folded into that single recording.
+- **Consolidated EIP-7702 authorization accounting** — Per-authorization data-size and KV-update charges are narrowed to applied authorizations, authority state growth resolves during validation, net-new authorities pay dynamic SALT account-creation gas, and an applied authority equal to the block beneficiary triggers beneficiary gas detention.
+- **CREATE-frame resource accounting** — The creator nonce-bump write is booked to the parent frame's discardable lane, and `CREATE` records state growth only for net-new addresses.
+- **[KeylessDeploy](system-contracts/keyless-deploy.md) sandbox hardening** — Unused gas is rescued on a transaction-level compute-gas halt, and a self-destructing constructor is classified as an empty-code deployment.
+- **Post-execution fee-reward accounting** — Account writes performed by the post-execution fee-reward step count toward resource accounting.
+- **System-originated transaction metering exemption** — Pre-block system calls and [Mega System Transactions](system-contracts/system-tx.md) charge storage gas at minimum bucket capacity and are not halted by resource limits or gas detention.
+- **Beneficiary detention / volatile-access coverage** — A `SELFDESTRUCT` executed by the beneficiary comes under `disableVolatileDataAccess`, and CALL-family targets whose EIP-7702 delegate resolves to the beneficiary come under both detention and `disableVolatileDataAccess`; a `SELFDESTRUCT` balance credit to an existing beneficiary counts toward resource accounting.
+- **Additional resource-accounting corrections** — A per-log data-size base is charged for the log address, and forwarded gas returns to the parent when a `CALL` / `CREATE` halts on the compute-gas limit.
+- **Value self-transfer dedup** — A value transfer whose target equals the caller is counted as a single account-info write.
+
+_See [Rex6 Network Upgrade](upgrades/rex6.md) for full details._

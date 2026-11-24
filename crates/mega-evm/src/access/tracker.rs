@@ -223,4 +223,83 @@ impl VolatileDataAccessTracker {
         self.compute_gas_limit = None;
         self.disable_depth = None;
     }
+
+    /// Unions a volatile-access bitmap snapshot into this tracker.
+    /// Footprint only — the parameter type intentionally excludes detention state
+    /// (`compute_gas_limit`, `disable_depth`), which is frame-local.
+    pub fn merge_accesses_from_bitmap(&mut self, other_bitmap: VolatileDataAccess) {
+        self.volatile_data_accessed |= other_bitmap;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::VolatileDataAccessType;
+
+    #[test]
+    fn test_merge_accesses_from_bitmap_unions_bitmap_and_preserves_other_state() {
+        let mut parent = VolatileDataAccessTracker::new(20_000_000, 20_000_000);
+
+        parent.mark_block_env_accessed(VolatileDataAccessType::Timestamp);
+        let parent_cap_before = parent.get_compute_gas_limit();
+        assert_eq!(parent_cap_before, Some(20_000_000));
+        assert!(parent.get_volatile_data_accessed().contains(VolatileDataAccess::TIMESTAMP));
+
+        let snapshot = VolatileDataAccess::BLOCK_NUMBER | VolatileDataAccess::ORACLE;
+
+        parent.merge_accesses_from_bitmap(snapshot);
+
+        let merged = parent.get_volatile_data_accessed();
+        assert!(merged.contains(VolatileDataAccess::TIMESTAMP));
+        assert!(merged.contains(VolatileDataAccess::BLOCK_NUMBER));
+        assert!(merged.contains(VolatileDataAccess::ORACLE));
+        assert!(!merged.contains(VolatileDataAccess::BENEFICIARY_BALANCE));
+
+        assert_eq!(parent.get_compute_gas_limit(), parent_cap_before);
+        assert!(!parent.volatile_access_disabled(0));
+        assert!(!parent.volatile_access_disabled(10));
+    }
+
+    #[test]
+    fn test_merge_accesses_from_bitmap_empty_snapshot_is_noop() {
+        let mut parent = VolatileDataAccessTracker::new(20_000_000, 20_000_000);
+        parent.mark_beneficiary_balance_accessed();
+        let before_bitmap = parent.get_volatile_data_accessed();
+        let before_cap = parent.get_compute_gas_limit();
+
+        parent.merge_accesses_from_bitmap(VolatileDataAccess::empty());
+
+        assert_eq!(parent.get_volatile_data_accessed(), before_bitmap);
+        assert_eq!(parent.get_compute_gas_limit(), before_cap);
+    }
+
+    #[test]
+    fn test_merge_accesses_from_bitmap_into_empty_parent_copies_bitmap_only() {
+        let mut parent = VolatileDataAccessTracker::new(20_000_000, 20_000_000);
+        let snapshot = VolatileDataAccess::COINBASE | VolatileDataAccess::ORACLE;
+
+        parent.merge_accesses_from_bitmap(snapshot);
+
+        let merged = parent.get_volatile_data_accessed();
+        assert!(merged.contains(VolatileDataAccess::COINBASE));
+        assert!(merged.contains(VolatileDataAccess::ORACLE));
+        assert_eq!(parent.get_compute_gas_limit(), None);
+        assert!(!parent.volatile_access_disabled(0));
+        assert!(!parent.volatile_access_disabled(3));
+    }
+
+    #[test]
+    fn test_merge_accesses_from_bitmap_is_idempotent() {
+        let mut parent = VolatileDataAccessTracker::new(20_000_000, 20_000_000);
+        let snapshot = VolatileDataAccess::TIMESTAMP | VolatileDataAccess::ORACLE;
+
+        parent.merge_accesses_from_bitmap(snapshot);
+        let after_first = parent.get_volatile_data_accessed();
+        let cap_after_first = parent.get_compute_gas_limit();
+
+        parent.merge_accesses_from_bitmap(snapshot);
+        assert_eq!(parent.get_volatile_data_accessed(), after_first);
+        assert_eq!(parent.get_compute_gas_limit(), cap_after_first);
+    }
 }
