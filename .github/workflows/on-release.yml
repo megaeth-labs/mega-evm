@@ -67,7 +67,8 @@ jobs:
 
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
-          ref: ${{ env.TAG }}
+          # The run's commit, not the tag name: checkout prefers a branch named like the tag.
+          ref: ${{ github.sha }}
           submodules: recursive
           persist-credentials: false
 
@@ -75,6 +76,7 @@ jobs:
         with:
           cache: false
 
+      # Foundry and the submodules stay for release lines whose build.rs still runs forge.
       - uses: foundry-rs/foundry-toolchain@b00af27efadbc7b4ca8b82abbd903b17cc874d2a # v1
 
       - name: Build mega-evme
