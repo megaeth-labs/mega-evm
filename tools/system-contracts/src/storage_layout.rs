@@ -3,8 +3,9 @@
 use std::{collections::HashMap, path::Path, process::Command};
 
 use alloy_primitives::U256;
-use anyhow::{ensure, Context, Result};
 use serde::Deserialize;
+
+use crate::artifact_checks::{ensure, with_context, Result};
 
 #[path = "../../../crates/system-contracts/src/sequencer_registry/storage_slots.rs"]
 #[expect(unreachable_pub, reason = "The shared constants are public in mega-system-contracts")]
@@ -53,7 +54,9 @@ pub(super) fn attest(project: &Path) -> Result<()> {
         .args(["inspect", "SequencerRegistry", "storageLayout", "--json"])
         .current_dir(project)
         .output()
-        .context("Could not execute forge inspect for SequencerRegistry")?;
+        .map_err(|err| {
+            with_context("Could not execute forge inspect for SequencerRegistry", err)
+        })?;
     ensure!(
         output.status.success(),
         "Could not inspect SequencerRegistry storage layout ({}): {}",
@@ -61,7 +64,7 @@ pub(super) fn attest(project: &Path) -> Result<()> {
         String::from_utf8_lossy(&output.stderr),
     );
     let layout: StorageLayout = serde_json::from_slice(&output.stdout)
-        .context("Could not decode SequencerRegistry storage layout")?;
+        .map_err(|err| with_context("Could not decode SequencerRegistry storage layout", err))?;
     ensure!(
         layout.storage.len() == EXPECTED_FIELD_COUNT,
         "SequencerRegistry storage field count changed: Foundry reports {}, expected {}",
@@ -71,8 +74,11 @@ pub(super) fn attest(project: &Path) -> Result<()> {
 
     let mut slots = HashMap::new();
     for field in &layout.storage {
-        let slot: u64 = field.slot.parse().with_context(|| {
-            format!("Invalid SequencerRegistry storage slot for `{}`", field.label)
+        let slot: u64 = field.slot.parse().map_err(|err| {
+            with_context(
+                format_args!("Invalid SequencerRegistry storage slot for `{}`", field.label),
+                err,
+            )
         })?;
         ensure!(
             slots.insert(field.label.as_str(), slot).is_none(),
@@ -83,7 +89,7 @@ pub(super) fn attest(project: &Path) -> Result<()> {
     for &(label, rust_slot) in FIELD_CONSTANTS {
         let forge_slot = slots
             .get(label)
-            .with_context(|| format!("SequencerRegistry storage layout has no field `{label}`"))?;
+            .ok_or_else(|| format!("SequencerRegistry storage layout has no field `{label}`"))?;
         ensure!(
             U256::from(*forge_slot) == rust_slot,
             "SequencerRegistry slot mismatch for `{label}`: Rust constant is {rust_slot}, Foundry reports {forge_slot}",

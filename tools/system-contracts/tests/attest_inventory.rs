@@ -1,11 +1,9 @@
 //! Inventory validation at the attestation command boundary.
 
-use std::{fs, path::Path, process::Command};
-
-use anyhow::Result;
+use std::{error::Error, fs, path::Path, process::Command};
 
 #[test]
-fn test_attest_rejects_a_short_inventory_before_compiling() -> Result<()> {
+fn test_attest_rejects_a_short_inventory_before_compiling() -> Result<(), Box<dyn Error>> {
     let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/system-contracts");
     for (dir, missing_file) in [
         ("artifacts", "Oracle-latest.json"),

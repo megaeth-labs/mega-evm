@@ -1,15 +1,38 @@
 //! Validates versioned artifacts and renders the Rust constants that embed them.
 
 use std::{
-    fmt::Write,
+    error::Error,
+    fmt::{Display, Write},
     fs,
     path::{Path, PathBuf},
 };
 
 use alloy_primitives::{hex, keccak256, Bytes, B256};
-use anyhow::{anyhow, ensure, Context, Result};
 use semver::Version;
 use serde::Deserialize;
+
+pub(super) type Result<T> = std::result::Result<T, Box<dyn Error>>;
+
+macro_rules! ensure {
+    ($condition:expr, $($message:tt)+) => {
+        if !$condition {
+            return Err(format_args!($($message)+).to_string().into());
+        }
+    };
+}
+
+pub(super) use ensure;
+
+pub(super) fn with_context(message: impl Display, error: impl Error) -> String {
+    let Some(source) = error.source() else {
+        return format!("{message}\n\nCaused by:\n    {error}");
+    };
+    let mut message = format!("{message}\n\nCaused by:\n    0: {error}");
+    for (index, cause) in std::iter::successors(Some(source), |&cause| cause.source()).enumerate() {
+        write!(message, "\n    {}: {cause}", index + 1).unwrap();
+    }
+    message
+}
 
 #[derive(Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -21,10 +44,10 @@ pub(super) struct ContractArtifact {
 
 impl ContractArtifact {
     pub(super) fn read(path: &Path) -> Result<Self> {
-        let content =
-            fs::read(path).with_context(|| format!("Could not read {}", path.display()))?;
+        let content = fs::read(path)
+            .map_err(|err| with_context(format_args!("Could not read {}", path.display()), err))?;
         let artifact: Self = serde_json::from_slice(&content)
-            .with_context(|| format!("Could not parse {}", path.display()))?;
+            .map_err(|err| with_context(format_args!("Could not parse {}", path.display()), err))?;
 
         let computed_hash = keccak256(&artifact.deployed_bytecode);
         ensure!(
@@ -58,9 +81,9 @@ impl Contract {
     fn versioned_artifacts(&self, artifacts_dir: &Path) -> Result<Vec<ContractArtifact>> {
         let prefix = format!("{}-", self.name);
         let mut versions = Vec::new();
-        for entry in fs::read_dir(artifacts_dir)
-            .with_context(|| format!("Could not list {}", artifacts_dir.display()))?
-        {
+        for entry in fs::read_dir(artifacts_dir).map_err(|err| {
+            with_context(format_args!("Could not list {}", artifacts_dir.display()), err)
+        })? {
             let entry = entry?;
             let filename = entry.file_name();
             let filename = filename.to_string_lossy();
@@ -74,7 +97,7 @@ impl Contract {
             }
 
             let version = Version::parse(filename_version)
-                .map_err(|err| anyhow!("Invalid version in artifact filename {filename}: {err}"))?;
+                .map_err(|err| format!("Invalid version in artifact filename {filename}: {err}"))?;
             let artifact = ContractArtifact::read(&entry.path())?;
             ensure!(
                 version == artifact.version,
@@ -126,8 +149,14 @@ pub(super) fn generated_sources(crate_dir: &Path) -> Result<Vec<(PathBuf, String
 
 pub(super) fn check_generated(crate_dir: &Path) -> Result<()> {
     for (path, expected) in generated_sources(crate_dir)? {
-        let actual = fs::read(&path).with_context(|| {
-            format!("Could not read {}. Run `mise run system-contracts:generate`.", path.display())
+        let actual = fs::read(&path).map_err(|err| {
+            with_context(
+                format_args!(
+                    "Could not read {}. Run `mise run system-contracts:generate`.",
+                    path.display()
+                ),
+                err,
+            )
         })?;
         ensure!(
             actual == expected.as_bytes(),
