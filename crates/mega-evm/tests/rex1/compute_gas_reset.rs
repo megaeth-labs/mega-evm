@@ -49,7 +49,7 @@ fn build_timestamp_access_contract() -> Bytes {
 }
 
 /// Build a contract that burns compute gas via KECCAK256 loops (~38 gas/iter).
-/// 55_000 iters ≈ 2.1M gas; 600_000 iters ≈ 22.8M gas.
+/// `55_000` iters ≈ 2.1M gas; `600_000` iters ≈ 22.8M gas.
 fn build_expensive_contract(iterations: u32) -> Bytes {
     let mut builder =
         BytecodeBuilder::default().push_number(0xdeadbeefu32).push_number(0u8).append(MSTORE);
@@ -186,11 +186,7 @@ fn test_rex1_block_env_detention_resets_between_txs() {
 
     let r1 = alloy_evm::Evm::transact_raw(&mut evm, make_tx(CONTRACT_VOLATILE)).unwrap();
     assert!(r1.result.is_success(), "TX1 should succeed, got: {:?}", r1.result);
-    assert_eq!(
-        compute_gas_limit(&evm),
-        BLOCK_ENV_DETENTION_CAP,
-        "TX1 should detain limit to 20M"
-    );
+    assert_eq!(compute_gas_limit(&evm), BLOCK_ENV_DETENTION_CAP, "TX1 should detain limit to 20M");
 
     let r2 = alloy_evm::Evm::transact_raw(&mut evm, make_tx(CONTRACT_EXPENSIVE)).unwrap();
     assert!(r2.result.is_success(), "TX2 should succeed after limit resets, got: {:?}", r2.result);
@@ -219,11 +215,7 @@ fn test_pre_rex1_block_env_detention_leaks_to_next_tx() {
 
     let r1 = alloy_evm::Evm::transact_raw(&mut evm, make_tx(CONTRACT_VOLATILE)).unwrap();
     assert!(r1.result.is_success(), "TX1 should succeed, got: {:?}", r1.result);
-    assert_eq!(
-        compute_gas_limit(&evm),
-        BLOCK_ENV_DETENTION_CAP,
-        "TX1 should detain limit to 20M"
-    );
+    assert_eq!(compute_gas_limit(&evm), BLOCK_ENV_DETENTION_CAP, "TX1 should detain limit to 20M");
 
     let r2 = alloy_evm::Evm::transact_raw(&mut evm, make_tx(CONTRACT_EXPENSIVE)).unwrap();
     assert!(!r2.result.is_success(), "TX2 should fail: detained limit not reset in pre-Rex1");
