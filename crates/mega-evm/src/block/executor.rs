@@ -1,23 +1,399 @@
 //! Block executor of the Satin engine.
 //!
-//! Block execution lands here with the block executor: alloy-evm's `BlockExecutor` over a
-//! [`MegaEvm`](crate::MegaEvm), the Karst block rules, the pre-block system calls and
-//! system contract deployments, and the block-level limits.
+//! [`MegaBlockExecutor`] is alloy-evm's [`BlockExecutor`] over a [`MegaEvm`]: it runs the block's
+//! transactions, holds them to the block's limits, builds their receipts and counts what the
+//! block spent on each of the three gas ledgers.
+//!
+//! # Where the limits come from
+//!
+//! The executor reads the limits every node must agree on from [`ProtocolLimits::for_spec`], for
+//! the spec the EVM executes, installs their per-transaction half on the EVM before every
+//! transaction, and holds the block to their three packing budgets — data size, KV updates and
+//! state growth — which refuse every non-deposit transaction once one is reached, a Mega System
+//! Transaction included. A node passes none of them. The node's context adds only the builder's
+//! policy ([`BlockLimits`]), which can tighten the budgets and never loosen them, and holds every
+//! non-deposit transaction alike; a validator leaves it at its default.
+//!
+//! # The block rules of the Karst base
+//!
+//! - **An activation block admits only deposits.** The executor works out whether a fork activates
+//!   in the block from the chain's schedule ([`MegaHardforks::admits_only_deposits`]), the block's
+//!   own timestamp and the parent's, which the caller supplies with
+//!   [`MegaBlockExecutionCtx::parent_timestamp`]. Both rules are decided once, when the executor is
+//!   built. A user transaction in such a block is refused before it executes. This mirrors
+//!   alloy-op-evm's rule of the same name. A block with a parent whose timestamp the caller leaves
+//!   out is refused where the omission could change the answer.
+//! - **The data-availability footprint is a block limit.** Each non-deposit transaction's footprint
+//!   is its compressed size times the footprint gas scalar the L1 block contract holds, accumulated
+//!   against the block's gas limit and reported as the block's blob gas used. With no scalar in
+//!   state the scalar is zero and the rule costs nothing. This mirrors alloy-op-evm's Jovian DA
+//!   footprint block limit.
+//! - **The L1 block info is read lazily, by the transaction that prices against it.** Block
+//!   execution fetches nothing before the block's transactions: op-revm's handler reads the L1
+//!   block contract when it deducts the caller of the first non-deposit transaction, which is after
+//!   the block's own L1 info deposit has committed, so every transaction prices against the values
+//!   that deposit set. An empty L1 block contract reads as zeroes, not as an error, and a caller
+//!   that placed its own info for this block keeps it. alloy-op-evm's executor pre-loads no info
+//!   either.
+//!
+//! # Committing an outcome
+//!
+//! alloy-evm's [`commit_transaction`](BlockExecutor::commit_transaction) cannot fail. Its contract
+//! is that a caller commits an outcome before it executes the next transaction, so the block's
+//! counters have not moved since the outcome was checked against them. A builder that executes
+//! several candidates and chooses among them commits through
+//! [`commit_transaction_outcome`](MegaBlockExecutor::commit_transaction_outcome), which checks the
+//! counters again and refuses an outcome the block no longer has room for. The trait's commit
+//! cannot refuse, and must not accept such an outcome silently either: a debug build makes the
+//! same check there and panics.
+//!
+//! The checked commit also holds an outcome to the state its sender had when it executed: one
+//! whose sender's nonce or balance another commit moved since is refused
+//! ([`MegaBlockExecutionError::StaleOutcome`]), and the trait's commit asserts the same in a debug
+//! build. Any other state the candidate read is not checked: a candidate executed before another
+//! commit changed it is the builder's to execute again.
+//!
+//! # The witness is what the block commits
+//!
+//! Each pre-block step — the EIP-2935 call, the EIP-4788 call, the activation block's check of the
+//! EIP-7997 factory, the deployment of each of the five flat system contracts, the read of the
+//! `SequencerRegistry`'s pending changes and the `applyPendingChanges()` call, the registry's
+//! deployment and the resolution of the block's live system address — produces an [`EvmState`],
+//! and this executor commits each one on its own, in that order, before the first transaction;
+//! every committed transaction's returned state follows. A read is a read-only entry of its step's
+//! state: an account neither touched nor created, its slots unchanged. The sequence of committed
+//! states, with the exported block hashes and buckets, is the witness a stateless client needs. A
+//! node takes it with a commit hook on revm's `State` (`State::set_state_hook`), which `commit`
+//! hands every state whole, before the cache drops the accounts the state did not touch. The
+//! block's transitions and bundle keep only what a state changed, so a witness taken from them
+//! would miss the read-only entries — a system contract that already holds its code, the activation
+//! block's factory, the registry's pending slots and the slot the resolution reads, the L1 block
+//! info.
+//!
+//! The L1 block info is read outside every transaction's journal: op-revm prices the block's first
+//! non-deposit transaction other than a Mega System Transaction against the L1 block contract's
+//! slots read on the database itself, and this executor reads the DA footprint gas scalar the same
+//! way before every non-deposit transaction, so neither read lands in a transaction's returned
+//! state. The executor adds them to it: once each per block, the account and every slot either read
+//! reached are read-only entries of the returned state of the first transaction committed that
+//! read them — the L1 fee overhead among them only when the scalars the fee computation found are
+//! empty — beside, never in place of, what the transaction's own execution put there. Nothing of
+//! the contract is read before the block's transactions, so a block that reads none of it does not
+//! fail when the database cannot serve it.
+//!
+//! Which transaction is first is decided at the commit, by what the committing executor has
+//! committed, so it does not depend on which executor executed an outcome or in which order the
+//! builder executed its candidates. Every outcome carries its reads of the contract beside its
+//! returned state, whatever its executor had reported; its returned state carries what its
+//! executor would report if it committed it next, and the commit takes that out and adds what its
+//! own report lacks. An outcome committed where it executed, before anything else was committed,
+//! is committed as it was returned.
+//!
+//! # The pre-block system calls
+//!
+//! [`apply_pre_execution_changes`](BlockExecutor::apply_pre_execution_changes) makes the EIP-2935
+//! and EIP-4788 calls; in the block in which Satin activates, and in no other, checks that the
+//! EIP-7997 factory holds the code Satin expects; deploys the five flat system contracts, each
+//! installed where missing and given Satin's code where it holds other code; applies a role change
+//! the `SequencerRegistry` has due in this block; deploys the registry — kept at version 2.0.0,
+//! migrated in place from 1.0.0, seeded from the schedule's bootstrap values where its address
+//! holds no code, and the block refused over any other code — and last resolves the block's live
+//! system address from it, once. Every call is a system call on the pre-block budget
+//! ([`PRE_BLOCK_CALL_GAS_LIMIT`](crate::constants::PRE_BLOCK_CALL_GAS_LIMIT)), and one that does
+//! not succeed refuses the block.
+//!
+//! The resolution is the block's one read of the live system address: the executor hands the
+//! address to the EVM, and every transaction of the block is classified against it. The executor
+//! uses the same address before every non-deposit transaction, to decide before the transaction
+//! runs whether it is a Mega System Transaction: one pays no L1 fee, so the fee computation does
+//! not price it and it reports the footprint read alone, and a delayed commit checks the system
+//! address's account as its sender's. The packing budgets and the builder's policy hold it as any
+//! other non-deposit transaction. No transaction reads the registry for its classification, so
+//! none finds the registry's account or slot warm, or carries them in its returned state, for that
+//! reason.
 
-/// Executes the transactions of one block on a Satin EVM.
+#[cfg(not(feature = "std"))]
+use alloc as std;
+use core::fmt;
+use std::{boxed::Box, collections::BTreeMap, string::String, sync::Arc, vec::Vec};
+
+use alloy_consensus::{Eip658Value, Header, Transaction, TransactionEnvelope, TxReceipt};
+use alloy_eips::{eip7685::Requests, Encodable2718, Typed2718};
+use alloy_evm::{
+    block::{
+        state_changes::post_block_balance_increments, BlockExecutionError, BlockExecutionResult,
+        BlockExecutor, CommitChanges, ExecutableTx, GasOutput, StateDB,
+    },
+    eth::receipt_builder::ReceiptBuilderCtx,
+    Database, Evm, FromRecoveredTx, FromTxWithEncoded, RecoveredTx,
+};
+use alloy_op_evm::block::{receipt_builder::OpReceiptBuilder, OpTxEnv};
+use alloy_primitives::{Address, Bytes, TxHash, B256};
+use op_alloy_consensus::OpDepositReceipt;
+use op_revm::transaction::deposit::DEPOSIT_TRANSACTION_TYPE;
+use revm::{
+    context::{
+        result::{EVMError, ResultAndState},
+        Block, ContextTr,
+    },
+    database::DatabaseCommitExt,
+    state::{AccountInfo, EvmState},
+    DatabaseCommit, Inspector,
+};
+
+/// What [`MegaBlockExecutor::finish_with_counters`] hands back: the EVM the block ran on, and
+/// what the block produced and counted.
+pub type MegaFinishedBlock<DB, INSP, ExtEnvs, R> =
+    (MegaEvm<DB, INSP, ExtEnvs>, MegaBlockExecutionResult<<R as OpReceiptBuilder>::Receipt>);
+
+use crate::{
+    block::{
+        eips,
+        l1_block_info::{
+            read_fee_info, read_footprint_gas_scalar, L1BlockRead, L1BlockReads, L1BlockReport,
+        },
+    },
+    estimated_da_size,
+    system::{
+        check_system_contract, classify_system_transaction, create2_factory_spec,
+        deploy_sequencer_registry, deploy_system_contract, flat_system_contract_specs,
+        is_apply_pending_changes_due, resolve_system_address, transact_apply_pending_changes,
+        write_unexpected_code, SequencerRegistryError, SequencerRegistryRefusal,
+        SystemContractCheckError,
+    },
+    BlockGasCounters, BlockLimiter, BlockLimits, BucketId, ExternalEnvTypes,
+    MegaBlockExecutionResult, MegaBlockTxResult, MegaContext, MegaEvm, MegaHardforks,
+    MegaTransaction, MegaTransactionError, MegaTransactionExt, ProtocolLimits,
+};
+
+/// What the node hands block execution beside the EVM.
 ///
-/// A skeleton for now: it owns the EVM and hands it back.
-#[derive(Debug)]
-pub struct MegaBlockExecutor<E> {
-    evm: E,
+/// It carries what the pre-block calls need (the parent hash and the parent beacon block root, as
+/// alloy-op-evm does), the block's own extra data, the parent block's timestamp and the
+/// builder's packing policy.
+#[derive(Clone, Debug)]
+pub struct MegaBlockExecutionCtx {
+    /// The parent block's hash, which the EIP-2935 pre-block call records.
+    pub parent_hash: B256,
+    /// The parent block's beacon block root, which the EIP-4788 pre-block call records.
+    pub parent_beacon_block_root: Option<B256>,
+    /// The block's extra data.
+    pub extra_data: Bytes,
+    /// The parent block's timestamp.
+    ///
+    /// With the chain's schedule and the block's own timestamp it decides whether a fork
+    /// activates in this block, which makes the block admit only deposits, and whether Satin
+    /// does, which makes the pre-block step check the EIP-7997 factory. The executor works both
+    /// out itself.
+    ///
+    /// `None` is a block with no parent to compare against. The genesis block, number zero, has
+    /// none, and neither rule applies to it: a fork active at its timestamp is active from it, so
+    /// a chain on which Satin is active from genesis has no Satin activation block. Any other
+    /// block is accepted without it only where no parent could change the rules: when
+    /// every fork the schedule activates is active from timestamp zero. Where one could, executing
+    /// the block fails with [`MegaBlockExecutionError::MissingParentTimestamp`], since the block
+    /// would otherwise run as an ordinary one. A caller that executes a block with a parent must
+    /// supply it.
+    pub parent_timestamp: Option<u64>,
+    /// The builder's packing policy: the limits only a builder applies, and a cap on the block's
+    /// data-size budget below the protocol's ([`BlockLimits`]).
+    ///
+    /// A builder sets it; a validator re-executing a block leaves the default, which restricts
+    /// nothing, so the block is held to the protocol's limits alone.
+    pub block_limits: BlockLimits,
 }
 
-impl<E> MegaBlockExecutor<E> {
-    /// Creates an executor that runs the block on `evm`.
-    pub const fn new(evm: E) -> Self {
-        Self { evm }
+impl MegaBlockExecutionCtx {
+    /// A context for a block whose parent block is at `parent_timestamp`.
+    ///
+    /// `None` is a block with no parent to compare against, such as a genesis block: neither
+    /// activation-block rule applies to it. A block that has a parent must pass its timestamp:
+    /// where the schedule activates a fork after genesis, executing the block without it fails
+    /// with [`MegaBlockExecutionError::MissingParentTimestamp`].
+    pub const fn new(
+        parent_hash: B256,
+        parent_beacon_block_root: Option<B256>,
+        extra_data: Bytes,
+        block_limits: BlockLimits,
+        parent_timestamp: Option<u64>,
+    ) -> Self {
+        Self { parent_hash, parent_beacon_block_root, extra_data, parent_timestamp, block_limits }
     }
+}
 
+/// A block this engine refuses to execute.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MegaBlockExecutionError {
+    /// A block that activates a fork carries a transaction that is not a deposit.
+    UnexpectedNonDepositTxInActivationBlock,
+    /// The context names no parent timestamp for a block other than the genesis block whose
+    /// activation rules depend on it: a fork the schedule activates after timestamp zero is active
+    /// at the block, and whether it activates in this block, which makes the block deposit-only
+    /// and, for Satin, makes the pre-block step check the EIP-7997 factory, is decided by the
+    /// parent's timestamp.
+    ///
+    /// The caller's omission, not a verdict on the block: an internal error. Executing the block
+    /// without the timestamp would run it as an ordinary block.
+    MissingParentTimestamp {
+        /// The block's own timestamp.
+        block_timestamp: u64,
+    },
+    /// A transaction's data-availability footprint does not fit in what the block has left.
+    TransactionDaFootprintAboveGasLimit {
+        /// The footprint of the transaction that does not fit.
+        transaction_da_footprint: u64,
+        /// The footprint the block has left.
+        available_block_da_footprint: u64,
+    },
+    /// In the block in which Satin activates, the EIP-7997 factory's address does not hold the
+    /// factory's code: it holds other code, no code, or no account.
+    ///
+    /// Satin does not deploy the factory, which OP's genesis tooling preinstalls, so a chain
+    /// without it is not one Satin runs on.
+    UnexpectedSystemContractCode {
+        /// The predeploy's address.
+        address: Address,
+        /// The code hash Satin expects there.
+        expected: B256,
+        /// The code hash the address holds: the empty code's for no code or no account.
+        found: B256,
+    },
+    /// The pre-block `SequencerRegistry.applyPendingChanges()` call did not succeed, so a role
+    /// change due in this block could not be applied.
+    ApplyPendingChangesFailed {
+        /// What the call ended with: its result, or the error that stopped it.
+        message: String,
+    },
+    /// The `SequencerRegistry` makes the block invalid: its deployment found code it cannot
+    /// migrate, or the resolution of the block's live system address found it absent, holding
+    /// other code, or naming no system address.
+    SequencerRegistry(SequencerRegistryRefusal),
+    /// The block must seed the `SequencerRegistry` or migrate it from version 1.0.0, and the chain
+    /// configuration carries no usable bootstrap values for it: none, or one of them zero.
+    ///
+    /// The node's configuration, not a verdict on the block: an internal error. The genesis parser
+    /// and `MegaHardforks::validate_schedule` refuse such a schedule when it is loaded, and block
+    /// execution does not validate the schedule it is given, so only a schedule that skipped
+    /// validation reaches this; it stays the block's refusal of a schedule it cannot seed or
+    /// migrate the registry from, rather than seeding zero roles.
+    UnusableRegistryBootstrap,
+    /// An outcome handed to a delayed commit executed against another nonce or balance of its
+    /// sender than the block holds now: a commit since its execution moved them.
+    ///
+    /// The builder's to execute again, not a verdict on the block: an internal error.
+    StaleOutcome {
+        /// The transaction whose outcome is stale.
+        tx_hash: TxHash,
+        /// Its sender.
+        sender: Address,
+    },
+}
+
+impl fmt::Display for MegaBlockExecutionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnexpectedNonDepositTxInActivationBlock => {
+                f.write_str("unexpected non-deposit transaction in fork activation block")
+            }
+            Self::MissingParentTimestamp { block_timestamp } => write!(
+                f,
+                "the parent block's timestamp is missing: a fork the schedule activates after \
+                 genesis is active at the block's timestamp {block_timestamp}, and whether it \
+                 activates in this block depends on the parent's timestamp"
+            ),
+            Self::TransactionDaFootprintAboveGasLimit {
+                transaction_da_footprint,
+                available_block_da_footprint,
+            } => write!(
+                f,
+                "transaction DA footprint exceeds available block DA footprint. \
+                 transaction_da_footprint: {transaction_da_footprint}, \
+                 available_block_da_footprint: {available_block_da_footprint}"
+            ),
+            Self::UnexpectedSystemContractCode { address, expected, found } => {
+                write_unexpected_code(f, *address, *expected, *found)
+            }
+            Self::ApplyPendingChangesFailed { message } => {
+                write!(f, "the SequencerRegistry's pending changes could not be applied: {message}")
+            }
+            Self::SequencerRegistry(refusal) => write!(f, "{refusal}"),
+            Self::UnusableRegistryBootstrap => f.write_str(
+                "the SequencerRegistry must be seeded or migrated, and the chain configuration \
+                 carries no usable bootstrap values for it",
+            ),
+            Self::StaleOutcome { tx_hash, sender } => write!(
+                f,
+                "stale outcome of transaction {tx_hash}: it executed against another nonce or \
+                 balance of its sender {sender} than the block holds now"
+            ),
+        }
+    }
+}
+
+impl core::error::Error for MegaBlockExecutionError {}
+
+impl From<MegaBlockExecutionError> for BlockExecutionError {
+    /// A block refused for what the node itself does is an internal error: an outcome the builder
+    /// let go stale, a parent timestamp the caller left out and bootstrap values its configuration
+    /// lacks say nothing about the block, and a node must not mark a block invalid because of its
+    /// own choices. Every other refusal is a verdict on the block, a validation error.
+    fn from(error: MegaBlockExecutionError) -> Self {
+        match error {
+            MegaBlockExecutionError::StaleOutcome { .. } |
+            MegaBlockExecutionError::MissingParentTimestamp { .. } |
+            MegaBlockExecutionError::UnusableRegistryBootstrap => Self::other(error),
+            MegaBlockExecutionError::UnexpectedNonDepositTxInActivationBlock |
+            MegaBlockExecutionError::TransactionDaFootprintAboveGasLimit { .. } |
+            MegaBlockExecutionError::UnexpectedSystemContractCode { .. } |
+            MegaBlockExecutionError::ApplyPendingChangesFailed { .. } |
+            MegaBlockExecutionError::SequencerRegistry(_) => {
+                Self::Validation(alloy_evm::block::BlockValidationError::Other(Box::new(error)))
+            }
+        }
+    }
+}
+
+/// Executes the transactions of one block on a Satin EVM.
+#[derive(Debug)]
+pub struct MegaBlockExecutor<E, R: OpReceiptBuilder, Spec> {
+    /// The chain's hardfork schedule.
+    pub spec: Spec,
+    /// The receipt builder.
+    pub receipt_builder: R,
+    /// What the node handed this block.
+    pub ctx: MegaBlockExecutionCtx,
+    /// The EVM the block runs on.
+    pub evm: E,
+    /// The receipts of the transactions committed so far.
+    pub receipts: Vec<R::Receipt>,
+    /// What the block has used, and the limits it is held to. Private, so the limits cannot be
+    /// changed once the executor has read them; [`limiter`](Self::limiter) reads it.
+    limiter: BlockLimiter,
+    /// The limits the protocol holds this block to: the spec's.
+    protocol_limits: ProtocolLimits,
+    /// Which activation rules apply to this block, decided once when the block starts, or why
+    /// they cannot be decided.
+    activation: Result<ActivationRules, MegaBlockExecutionError>,
+    /// What the block's committed transactions reported of the L1 block contract, which their
+    /// fee computation and footprint read outside their journal.
+    l1_block_report: L1BlockReport,
+    /// What the fee computation read of the L1 block contract in this block, once this executor
+    /// executed a transaction it prices: what every transaction it prices in the block is priced
+    /// from.
+    l1_fee_read: Option<Arc<L1BlockRead>>,
+}
+
+/// The two rules a fork's activation puts on a block, decided from the schedule, the block's
+/// timestamp and its parent's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ActivationRules {
+    /// A fork activates in the block, so it admits only deposits.
+    admits_only_deposits: bool,
+    /// Satin activates in the block, so the pre-block step checks the EIP-7997 factory.
+    satin_activation_block: bool,
+}
+
+impl<E, R: OpReceiptBuilder, Spec> MegaBlockExecutor<E, R, Spec> {
     /// The EVM the block runs on.
     pub const fn evm(&self) -> &E {
         &self.evm
@@ -32,12 +408,881 @@ impl<E> MegaBlockExecutor<E> {
     pub fn into_evm(self) -> E {
         self.evm
     }
+
+    /// What the block has used, and the limits it is held to.
+    pub const fn limiter(&self) -> &BlockLimiter {
+        &self.limiter
+    }
+
+    /// The gas the block's transactions have spent so far, by ledger.
+    pub const fn gas(&self) -> &BlockGasCounters {
+        &self.limiter.gas
+    }
+}
+
+impl<DB, INSP, ExtEnvs, R, Spec> MegaBlockExecutor<MegaEvm<DB, INSP, ExtEnvs>, R, Spec>
+where
+    DB: Database,
+    ExtEnvs: ExternalEnvTypes,
+    R: OpReceiptBuilder,
+    Spec: MegaHardforks,
+{
+    /// Creates an executor that runs `ctx`'s block on `evm`.
+    ///
+    /// The limits are the spec's ([`ProtocolLimits::for_spec`]), for the spec `evm` executes:
+    /// their per-transaction half is installed on the EVM here, and again before every
+    /// transaction, so every route to an executor — this one and both factory constructors — runs
+    /// the block's transactions under them, whatever the caller did or did not apply to the EVM.
+    /// The block is held to the protocol's data-size budget, lowered to `ctx`'s building policy
+    /// where that is lower.
+    ///
+    /// The block's gas limit comes from the block environment, the executor's own state rather
+    /// than building policy: it is the number consensus holds the block to, and it is also the
+    /// budget the data-availability footprint of the block's transactions is held to.
+    pub fn new(
+        mut evm: MegaEvm<DB, INSP, ExtEnvs>,
+        ctx: MegaBlockExecutionCtx,
+        spec: Spec,
+        receipt_builder: R,
+    ) -> Self {
+        let block_gas_limit = evm.ctx().block().gas_limit();
+        let block_timestamp = evm.ctx().block().timestamp().saturating_to();
+        let genesis = evm.ctx().block().number().is_zero();
+        let protocol_limits = ProtocolLimits::for_spec(evm.ctx().spec());
+        evm.set_tx_runtime_limits(protocol_limits.tx_runtime_limits);
+        let limiter = BlockLimiter::new(ctx.block_limits.within(&protocol_limits), block_gas_limit);
+        let activation =
+            Self::activation_rules(&spec, genesis, ctx.parent_timestamp, block_timestamp);
+        Self {
+            spec,
+            receipt_builder,
+            ctx,
+            evm,
+            receipts: Vec::new(),
+            limiter,
+            protocol_limits,
+            activation,
+            l1_block_report: L1BlockReport::default(),
+            l1_fee_read: None,
+        }
+    }
+
+    /// The activation rules of the block at `block_timestamp` whose parent is at
+    /// `parent_timestamp`, decided once for the block.
+    ///
+    /// The `genesis` block has no parent, and a fork active at its timestamp is active from it:
+    /// no fork activates in it, so neither rule applies, as on a chain on which Satin is active
+    /// from genesis no block is Satin's activation block. Without the parent's timestamp the rules
+    /// of any other block are known only where no parent could change them: no fork the schedule
+    /// activates after timestamp zero is active at the block
+    /// ([`MegaHardforks::activation_depends_on_parent`]), so neither rule applies. Any other block
+    /// is refused with [`MegaBlockExecutionError::MissingParentTimestamp`], since running it as an
+    /// ordinary block would silently skip both rules.
+    fn activation_rules(
+        spec: &Spec,
+        genesis: bool,
+        parent_timestamp: Option<u64>,
+        block_timestamp: u64,
+    ) -> Result<ActivationRules, MegaBlockExecutionError> {
+        match parent_timestamp {
+            _ if genesis => {
+                Ok(ActivationRules { admits_only_deposits: false, satin_activation_block: false })
+            }
+            Some(parent) => Ok(ActivationRules {
+                admits_only_deposits: spec.admits_only_deposits(parent, block_timestamp),
+                satin_activation_block: spec.is_satin_activation_block(parent, block_timestamp),
+            }),
+            None if !spec.activation_depends_on_parent(block_timestamp) => {
+                Ok(ActivationRules { admits_only_deposits: false, satin_activation_block: false })
+            }
+            None => Err(MegaBlockExecutionError::MissingParentTimestamp { block_timestamp }),
+        }
+    }
+
+    /// The limits the protocol holds this block to: the spec's
+    /// ([`ProtocolLimits::for_spec`]).
+    pub const fn protocol_limits(&self) -> &ProtocolLimits {
+        &self.protocol_limits
+    }
+
+    /// Whether this block admits only deposit transactions because a fork activates in it: a
+    /// fork of the schedule is active at the block's timestamp and not at its parent's.
+    ///
+    /// `false` when the context carries no parent timestamp and no parent could change the answer,
+    /// and [`MegaBlockExecutionError::MissingParentTimestamp`] when one could.
+    pub fn admits_only_deposits(&self) -> Result<bool, MegaBlockExecutionError> {
+        self.activation.clone().map(|rules| rules.admits_only_deposits)
+    }
+
+    /// Whether Satin activates in this block, which makes the pre-block step check the EIP-7997
+    /// factory.
+    ///
+    /// The two answers differ: an Optimism fork at or after Jovian also makes a block
+    /// deposit-only. Decided as [`admits_only_deposits`](Self::admits_only_deposits) is.
+    pub fn is_satin_activation_block(&self) -> Result<bool, MegaBlockExecutionError> {
+        self.activation.clone().map(|rules| rules.satin_activation_block)
+    }
+
+    /// Holds this block to `limits` in place of the spec's: a counterfactual of a tool's or a
+    /// test's, which a node executing the chain never runs.
+    ///
+    /// Their per-transaction half is installed on the EVM and before every transaction from now
+    /// on, and the block's packing budgets are theirs, each lowered to the building policy where
+    /// that is lower. What the block counted so far stays counted. Behind the `test-utils` feature,
+    /// so a node build cannot reach it.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn with_protocol_limits(mut self, limits: ProtocolLimits) -> Self {
+        self.evm.set_tx_runtime_limits(limits.tx_runtime_limits);
+        let held = self.ctx.block_limits.within(&limits);
+        self.limiter.limits.block_txs_data_limit = held.block_txs_data_limit;
+        self.limiter.limits.block_kv_update_limit = held.block_kv_update_limit;
+        self.limiter.limits.block_state_growth_limit = held.block_state_growth_limit;
+        self.protocol_limits = limits;
+        self
+    }
+}
+
+impl<DB, INSP, ExtEnvs, R, Spec> MegaBlockExecutor<MegaEvm<DB, INSP, ExtEnvs>, R, Spec>
+where
+    DB: Database + DatabaseCommit,
+    INSP: Inspector<MegaContext<DB, ExtEnvs>>,
+    ExtEnvs: ExternalEnvTypes,
+    R: OpReceiptBuilder,
+    Spec: MegaHardforks,
+{
+    /// The inspector the EVM runs.
+    pub const fn inspector(&self) -> &INSP {
+        self.evm.inspector()
+    }
+
+    /// The data-availability footprint gas scalar the L1 block contract holds, and what the read
+    /// found, for the transaction's report.
+    ///
+    /// Read per transaction, as the fork's rule is stated: the block's own L1 info transaction
+    /// may set it, and the transactions after it are held to the value it set. It is a read of
+    /// the block's state, made between transactions, so it lands in no transaction's returned
+    /// state: the first transaction committed that made it reports it
+    /// ([`report_l1_block_reads`](Self::report_l1_block_reads)). A read that fails is an internal
+    /// error, whether or not the database declares it fatal: the block makes it for the
+    /// transaction, outside the transaction's execution.
+    fn da_footprint_gas_scalar(&mut self) -> Result<(u64, L1BlockRead), BlockExecutionError> {
+        let (scalar, read) = read_footprint_gas_scalar(self.evm.ctx_mut().db_mut())
+            .map_err(BlockExecutionError::other)?;
+        Ok((u64::from(scalar), read))
+    }
+
+    /// What the non-deposit transaction `tx_hash` read of the L1 block contract outside its
+    /// journal, which its outcome carries: `footprint`, the footprint read made before it ran,
+    /// and, when the fee computation `priced` it, the fee read
+    /// ([`l1_fee_read`](Self::l1_fee_read)). Adds to `state`, its returned state, what of them
+    /// no transaction this executor committed reported yet, as read-only entries: what its
+    /// commit reports when nothing is committed before it, which a commit settles again.
+    fn report_l1_block_reads(
+        &mut self,
+        state: &mut EvmState,
+        footprint: L1BlockRead,
+        priced: bool,
+        tx_hash: TxHash,
+    ) -> Result<L1BlockReads, BlockExecutionError> {
+        let fee = if priced { Some(self.l1_fee_read(tx_hash)?) } else { None };
+        let mut reads = L1BlockReads::new(footprint, fee);
+        self.l1_block_report.report(state, &mut reads);
+        Ok(reads)
+    }
+
+    /// What the fee computation read of the L1 block contract to price the transaction `tx_hash`.
+    ///
+    /// The fee computation reads the contract once per block, at the first transaction it prices,
+    /// and prices every later one from what it read. So the read is made once, after the first
+    /// transaction this executor executes that the computation prices ran, on the state it ran on,
+    /// through op-revm's own fetch, which a state cache serves without a database read once op-revm
+    /// made its own; every transaction it prices in the block carries that read from then on, so an
+    /// outcome reports it wherever it is committed, and nothing reads a key the fee computation
+    /// did not.
+    ///
+    /// A failed read is a failed read of the transaction's execution, as op-revm's fetch inside it
+    /// is: an internal error when the database declares it fatal, an invalid block when it does
+    /// not.
+    fn l1_fee_read(&mut self, tx_hash: TxHash) -> Result<Arc<L1BlockRead>, BlockExecutionError> {
+        if let Some(read) = &self.l1_fee_read {
+            return Ok(Arc::clone(read));
+        }
+        let number = self.evm.block().number();
+        let spec = self.evm.ctx().spec().into_op_spec();
+        let read = read_fee_info(self.evm.ctx_mut().db_mut(), number, spec).map_err(|error| {
+            BlockExecutionError::evm(
+                EVMError::<DB::Error, MegaTransactionError>::Database(error),
+                tx_hash,
+            )
+        })?;
+        let read = Arc::new(read);
+        self.l1_fee_read = Some(Arc::clone(&read));
+        Ok(read)
+    }
+
+    /// Commits `state` to the database.
+    fn commit(&mut self, state: EvmState) {
+        self.evm.ctx_mut().db_mut().commit(state);
+    }
+
+    /// Refuses a data-availability footprint the block has no room left for.
+    ///
+    /// The budget is the block's gas limit, as the fork's rule states it.
+    fn check_da_footprint(&self, footprint: u64) -> Result<(), BlockExecutionError> {
+        let available = self.limiter.available_da_footprint();
+        if footprint > available {
+            return Err(MegaBlockExecutionError::TransactionDaFootprintAboveGasLimit {
+                transaction_da_footprint: footprint,
+                available_block_da_footprint: available,
+            }
+            .into());
+        }
+        Ok(())
+    }
+
+    /// Whether the block, as its counters are now, still has room for the executed transaction
+    /// `output`: every check its execution held it to, before it ran and after, made again. It
+    /// reads the counters and changes nothing.
+    ///
+    /// Both commit paths share it: [`commit_transaction_outcome`](Self::commit_transaction_outcome)
+    /// refuses what it refuses, and [`commit_transaction`](BlockExecutor::commit_transaction)
+    /// asserts it in a debug build. It checks the counters only, not the state `output` executed
+    /// against.
+    fn check_room<T>(&self, output: &MegaBlockTxResult<T>) -> Result<(), BlockExecutionError> {
+        self.limiter.pre_execution_check(
+            output.tx_hash,
+            output.gas_limit,
+            output.tx_size,
+            output.da_size,
+            output.is_deposit,
+        )?;
+        self.check_da_footprint(output.da_footprint)
+    }
+
+    /// Whether `output` executed against the nonce and balance its sender has in the block's state
+    /// now: a delayed commit's check that no commit since its execution moved them.
+    ///
+    /// A commit writes the sender's account as the transaction left it. An outcome executed before
+    /// another commit moved the sender — a second transaction at the same nonce, a value or a fee
+    /// credited to the sender — would write that account over what the other commit did: the
+    /// sender debited once for two transactions, or a credit lost. Every other read the outcome
+    /// made is not checked; that the state it read is still the block's is the builder's to keep.
+    /// It reads the sender's account and changes nothing.
+    fn check_sender_unchanged<T>(
+        &mut self,
+        output: &MegaBlockTxResult<T>,
+    ) -> Result<(), BlockExecutionError> {
+        let now = self.sender_account(output.sender)?;
+        if (now.nonce, now.balance) != (output.sender_nonce, output.sender_balance) {
+            return Err(MegaBlockExecutionError::StaleOutcome {
+                tx_hash: output.tx_hash,
+                sender: output.sender,
+            }
+            .into());
+        }
+        Ok(())
+    }
+
+    /// The account of `sender` as the block's state holds it now, empty when it holds none. A read
+    /// the database cannot serve is an internal error: it says nothing about the block.
+    fn sender_account(&mut self, sender: Address) -> Result<AccountInfo, BlockExecutionError> {
+        Ok(self
+            .evm
+            .ctx_mut()
+            .db_mut()
+            .basic(sender)
+            .map_err(BlockExecutionError::other)?
+            .unwrap_or_default())
+    }
+
+    /// Whether `tx` is a Mega System Transaction: sent from the live system address the EVM
+    /// classifies transactions against, which the pre-block steps resolved, with the system shape.
+    /// A transaction from that address of another shape is not (the engine refuses it when it
+    /// validates it). A read the database cannot serve, which only an EVM whose read when it was
+    /// built failed makes before the pre-block steps resolved the address, is an internal error.
+    fn is_system_transaction(&mut self, tx: &MegaTransaction) -> Result<bool, BlockExecutionError> {
+        let system_address =
+            self.evm.ctx_mut().live_system_address().map_err(BlockExecutionError::other)?;
+        Ok(classify_system_transaction(tx, system_address).unwrap_or(false))
+    }
+
+    /// The bootstrap values the `SequencerRegistry`'s deployment needs from the chain
+    /// configuration, and the refusals its deployment and the resolution of the live system
+    /// address make, as the block's errors: a failed read and missing bootstrap values are the
+    /// node's internal errors, a refusal a verdict on the block.
+    fn registry_error<E>(error: SequencerRegistryError<E>) -> BlockExecutionError
+    where
+        E: core::error::Error + Send + Sync + 'static,
+    {
+        match error {
+            SequencerRegistryError::Database(error) => BlockExecutionError::other(error),
+            SequencerRegistryError::UnusableBootstrap => {
+                MegaBlockExecutionError::UnusableRegistryBootstrap.into()
+            }
+            SequencerRegistryError::Refused(refusal) => {
+                MegaBlockExecutionError::SequencerRegistry(refusal).into()
+            }
+        }
+    }
+}
+
+impl<DB, INSP, ExtEnvs, R, Spec> MegaBlockExecutor<MegaEvm<DB, INSP, ExtEnvs>, R, Spec>
+where
+    DB: Database,
+    ExtEnvs: ExternalEnvTypes,
+    R: OpReceiptBuilder,
+{
+    /// The block hashes this block's transactions have read so far.
+    ///
+    /// `BLOCKHASH` reads bypass the journal, so this is where a stateless witness learns of them.
+    /// The record covers this executor's block:
+    /// [`apply_pre_execution_changes`](BlockExecutor::apply_pre_execution_changes) empties it
+    /// when the block starts, so a database reused over a range of blocks does not report the
+    /// reads of an earlier one.
+    pub fn get_accessed_block_hashes(&self) -> BTreeMap<u64, B256> {
+        self.evm.get_accessed_block_hashes()
+    }
+
+    /// Forgets the block hashes read so far, so the next reads are attributable to one
+    /// transaction. The record decides nothing, so clearing it changes no execution result.
+    pub fn clear_accessed_block_hashes(&mut self) {
+        self.evm.clear_accessed_block_hashes();
+    }
+
+    /// The SALT buckets the SALT environment answered with a valid capacity during this block's
+    /// execution so far, in ascending order: every bucket a state charge was priced in.
+    ///
+    /// A bucket's capacity is read through the SALT environment, which no database sees, and a
+    /// validator that lacks a bucket's proof cannot price the charge that landed in it, so this is
+    /// where a stateless witness learns which buckets it must carry. The set is complete for the
+    /// transactions this executor's EVM ran: the engine asks about a bucket at a state charge site
+    /// and nowhere else, and a validator re-executing them reaches the same charge sites. A lookup
+    /// that failed, with an error or with a capacity below the minimum bucket, is not in it,
+    /// because it failed its transaction, which is in no block; the pre-block calls and the system
+    /// transactions read no bucket and add none.
+    ///
+    /// What the record covers, and what it does not:
+    ///
+    /// - It holds what this executor's EVM executed since the block started:
+    ///   [`apply_pre_execution_changes`](BlockExecutor::apply_pre_execution_changes) empties it,
+    ///   and nothing empties it between the block's transactions, whose own multiplier caches are
+    ///   forgotten one transaction at a time. A candidate the builder executed here and dropped
+    ///   leaves its buckets in the set, which a validator does not need but is not harmed by.
+    /// - It holds nothing of an outcome executed elsewhere: an outcome another EVM produced and
+    ///   this executor committed through
+    ///   [`commit_transaction_outcome`](Self::commit_transaction_outcome) added no bucket here. A
+    ///   node that executes on several EVMs, or builds one per transaction, takes the union of what
+    ///   each reports; one that clears the record between transactions
+    ///   ([`clear_accessed_bucket_ids`](Self::clear_accessed_bucket_ids)) does the same.
+    /// - An EVM reused across blocks outside a block executor is emptied by neither, and reports
+    ///   every block it ran since it was last cleared.
+    pub fn get_accessed_bucket_ids(&self) -> Vec<BucketId> {
+        self.evm.get_accessed_bucket_ids()
+    }
+
+    /// Forgets the SALT buckets asked about so far, so the next asks are attributable to one
+    /// transaction. The record decides nothing, so clearing it changes no execution result.
+    pub fn clear_accessed_bucket_ids(&mut self) {
+        self.evm.clear_accessed_bucket_ids();
+    }
+}
+
+impl<DB, INSP, ExtEnvs, R, Spec> BlockExecutor
+    for MegaBlockExecutor<MegaEvm<DB, INSP, ExtEnvs>, R, Spec>
+where
+    DB: Database + StateDB,
+    INSP: Inspector<MegaContext<DB, ExtEnvs>>,
+    ExtEnvs: ExternalEnvTypes,
+    R: OpReceiptBuilder<Transaction: Transaction + Encodable2718, Receipt: TxReceipt>,
+    Spec: MegaHardforks,
+    MegaTransaction: FromRecoveredTx<R::Transaction> + FromTxWithEncoded<R::Transaction>,
+{
+    type Transaction = R::Transaction;
+    type Receipt = R::Receipt;
+    type Evm = MegaEvm<DB, INSP, ExtEnvs>;
+    type Result = MegaBlockTxResult<<R::Transaction as TransactionEnvelope>::TxType>;
+
+    /// Runs what a block does before its transactions.
+    ///
+    /// In order: the reset of the block-hash and bucket records and of what the block reported of
+    /// the L1 block contract, then the pre-block sequence:
+    ///
+    /// 1. the EIP-2935 call, and 2. the EIP-4788 call, neither made in the genesis block, whose
+    ///    parent beacon block root must be zero;
+    /// 3. in the block in which Satin activates, and in no other, the check of the EIP-7997
+    ///    factory;
+    /// 4. the deployment of the Oracle, the high-precision timestamp, `KeylessDeploy`,
+    ///    `MegaAccessControl` and `MegaLimitControl`, each a step of its own;
+    /// 5. the read of whether the `SequencerRegistry` has a role change due, and when it has, the
+    ///    `applyPendingChanges()` call;
+    /// 6. the deployment of the `SequencerRegistry`, from the chain configuration's bootstrap
+    ///    values when it must be seeded or migrated;
+    /// 7. the resolution of the block's live system address, which the EVM classifies every
+    ///    transaction of the block against.
+    ///
+    /// Each step's state is committed here, on its own, before the next step runs, read-only
+    /// entries included, rather than inside its helper, so every step sees the ones before it and
+    /// a commit hook on the database sees every step's read and write set. The sequence of
+    /// committed states is the witness a stateless client needs. Nothing is charged, and nothing
+    /// counts toward the block's counters.
+    ///
+    /// Nothing reads the L1 block contract here. op-revm's handler fetches the L1 block info when
+    /// it deducts the caller of the first non-deposit transaction, which is after the block's own
+    /// L1 info deposit has committed, and the first transaction that reads it reports what it read
+    /// in its own returned state.
+    ///
+    /// Each pre-block call runs on the pre-block budget
+    /// ([`PRE_BLOCK_CALL_GAS_LIMIT`](crate::constants::PRE_BLOCK_CALL_GAS_LIMIT)), and one that
+    /// does not succeed refuses the block before its state is committed. A deployment installs a
+    /// missing system contract and replaces one whose code differs, keeping its storage, and
+    /// records one that holds the expected code as a read-only entry; the registry is seeded when
+    /// its address holds no code, migrated in place from version 1.0.0, and refuses the block when
+    /// it holds other code. The resolution comes last, on the state every other step left, so a
+    /// rotation due in this block governs this block's Mega System Transactions; nothing inside the
+    /// block can change the address again, and it refuses the block when the registry names none.
+    fn apply_pre_execution_changes(&mut self) -> Result<(), BlockExecutionError> {
+        // A block whose activation rules cannot be decided is refused before anything runs.
+        self.admits_only_deposits()?;
+
+        // The block starts with empty block-hash and bucket records, so what they hold at the end
+        // is what this block read, and with nothing of the L1 block contract read or reported.
+        self.evm.clear_accessed_block_hashes();
+        self.evm.clear_accessed_bucket_ids();
+        self.l1_block_report = L1BlockReport::default();
+        self.l1_fee_read = None;
+
+        let state = eips::transact_blockhashes_contract_call(
+            &self.spec,
+            self.ctx.parent_hash,
+            &mut self.evm,
+        )?;
+        if let Some(ResultAndState { state, .. }) = state {
+            self.commit(state);
+        }
+
+        let state = eips::transact_beacon_root_contract_call(
+            &self.spec,
+            self.ctx.parent_beacon_block_root,
+            &mut self.evm,
+        )?;
+        if let Some(ResultAndState { state, .. }) = state {
+            self.commit(state);
+        }
+
+        // The EIP calls above do not depend on what follows: they target their own contracts,
+        // not the MegaETH system addresses or the factory.
+        if self.is_satin_activation_block()? {
+            let state = check_system_contract(self.evm.db_mut(), &create2_factory_spec()).map_err(
+                |error| match error {
+                    SystemContractCheckError::Database(error) => BlockExecutionError::other(error),
+                    SystemContractCheckError::UnexpectedCode { address, expected, found } => {
+                        MegaBlockExecutionError::UnexpectedSystemContractCode {
+                            address,
+                            expected,
+                            found,
+                        }
+                        .into()
+                    }
+                },
+            )?;
+            self.commit(state);
+        }
+
+        for spec in flat_system_contract_specs() {
+            let state = deploy_system_contract(self.evm.db_mut(), &spec)
+                .map_err(BlockExecutionError::other)?;
+            self.commit(state);
+        }
+
+        let block_number = self.evm.block().number();
+        let (due, reads) =
+            is_apply_pending_changes_due(self.evm.db_mut(), block_number.saturating_to())
+                .map_err(BlockExecutionError::other)?;
+        self.commit(reads);
+        if due {
+            let ResultAndState { state, .. } = transact_apply_pending_changes(&mut self.evm)?;
+            self.commit(state);
+        }
+
+        let bootstrap = self.spec.sequencer_registry_bootstrap();
+        let state = deploy_sequencer_registry(self.evm.db_mut(), block_number, bootstrap)
+            .map_err(Self::registry_error)?;
+        self.commit(state);
+
+        let (system_address, state) =
+            resolve_system_address(self.evm.db_mut()).map_err(Self::registry_error)?;
+        self.commit(state);
+        self.evm.ctx_mut().set_system_address(Some(system_address));
+
+        Ok(())
+    }
+
+    fn execute_transaction_without_commit(
+        &mut self,
+        tx: impl ExecutableTx<Self>,
+    ) -> Result<Self::Result, BlockExecutionError> {
+        self.execute(tx, None)
+    }
+
+    /// Executes `tx` and commits it if `f` says so.
+    ///
+    /// The block's counters may have moved between the transaction executing and its commit — a
+    /// builder that executes candidates and then picks among them — so what the transaction adds
+    /// is checked against the block once more before it is committed.
+    fn execute_transaction_with_commit_condition(
+        &mut self,
+        tx: impl ExecutableTx<Self>,
+        f: impl FnOnce(&Self::Result) -> CommitChanges,
+    ) -> Result<Option<GasOutput>, BlockExecutionError> {
+        let output = self.execute_transaction_without_commit(tx)?;
+
+        if !f(&output).should_commit() {
+            return Ok(None);
+        }
+
+        self.commit_transaction_outcome(output).map(Some)
+    }
+
+    /// Commits `output`: builds its receipt, adds it to the block's counters and commits its
+    /// state.
+    ///
+    /// This commit cannot fail, and its contract is alloy-evm's: `output` is the outcome of the
+    /// transaction executed last, committed before the next one executes. The block's counters
+    /// are then the ones `output` was checked against, and a release build checks nothing again.
+    /// A caller that executes several candidates before it commits any commits through
+    /// [`commit_transaction_outcome`](MegaBlockExecutor::commit_transaction_outcome), which
+    /// refuses an outcome the block no longer has room for.
+    ///
+    /// [`commit_transaction_outcome`](MegaBlockExecutor::commit_transaction_outcome) also refuses
+    /// an outcome whose sender's nonce or balance another commit moved since it executed; any
+    /// other state the outcome read is the caller's to keep fresh.
+    ///
+    /// What the transaction read of the L1 block contract outside its journal is reported here, by
+    /// what this executor has committed: the state committed is the returned state with the
+    /// entries its executor's report added taken out and the ones this executor's report lacks
+    /// added, which is the returned state itself for an outcome executed here and committed
+    /// before anything else.
+    ///
+    /// # Panics
+    ///
+    /// In a debug build, when the block no longer has room for `output`, or when its sender's
+    /// nonce or balance moved since it executed — a caller that broke the contract, which would
+    /// otherwise pack the block past a limit or commit a stale outcome.
+    fn commit_transaction(&mut self, output: Self::Result) -> GasOutput {
+        debug_assert!(
+            self.check_room(&output).is_ok(),
+            "commit_transaction was handed an outcome the block no longer has room for, which \
+             commit_transaction_outcome refuses: {}",
+            self.check_room(&output).expect_err("the check just failed"),
+        );
+        #[cfg(debug_assertions)]
+        if let Err(stale) = self.check_sender_unchanged(&output) {
+            panic!(
+                "commit_transaction was handed a stale outcome, which commit_transaction_outcome \
+                 refuses: {stale}"
+            );
+        }
+        self.limiter.post_execution_update(&output.block_usage());
+
+        let MegaBlockTxResult {
+            tx_type,
+            is_deposit,
+            is_system_transaction,
+            depositor_nonce,
+            inner,
+            l1_block_reads,
+            ..
+        } = output;
+        let gas = inner.gas;
+        let cumulative_gas_used = self.limiter.block_gas_used;
+        let ResultAndState { result, mut state } = inner.result_and_state;
+
+        // What the transaction read of the L1 block contract outside its journal is reported by
+        // what this executor committed, whichever executor executed it and whatever was committed
+        // since.
+        let priced = !is_system_transaction;
+        debug_assert!(
+            l1_block_reads.are_of(is_deposit, priced),
+            "the outcome's reads of the L1 block contract are not its transaction's"
+        );
+        if !is_deposit {
+            self.l1_block_report.commit(&mut state, &l1_block_reads, priced);
+        }
+
+        self.receipts.push(
+            match self.receipt_builder.build_receipt(ReceiptBuilderCtx {
+                tx_type,
+                result,
+                cumulative_gas_used,
+                evm: &self.evm,
+                state: &state,
+            }) {
+                Ok(receipt) => receipt,
+                Err(ctx) => {
+                    let receipt = alloy_consensus::Receipt {
+                        // EIP-658 put the status code in the receipt.
+                        status: Eip658Value::Eip658(ctx.result.is_success()),
+                        cumulative_gas_used,
+                        logs: ctx.result.into_logs(),
+                    };
+
+                    // Satin executes only at or after Karst, which includes Canyon, and the
+                    // schedule check refuses a schedule in which Canyon is not active when Satin
+                    // activates: every deposit receipt carries Canyon's receipt version, which
+                    // says how the receipt hash is computed.
+                    self.receipt_builder.build_deposit_receipt(OpDepositReceipt {
+                        inner: receipt,
+                        deposit_nonce: depositor_nonce,
+                        deposit_receipt_version: is_deposit.then_some(1),
+                    })
+                }
+            },
+        );
+
+        self.commit(state);
+
+        GasOutput::with_state_gas(gas.gas_used, gas.state)
+    }
+
+    fn finish(
+        self,
+    ) -> Result<(Self::Evm, BlockExecutionResult<Self::Receipt>), BlockExecutionError> {
+        let (evm, result) = self.finish_with_counters()?;
+        Ok((evm, result.inner))
+    }
+
+    fn evm_mut(&mut self) -> &mut Self::Evm {
+        &mut self.evm
+    }
+
+    fn evm(&self) -> &Self::Evm {
+        &self.evm
+    }
+
+    fn receipts(&self) -> &[Self::Receipt] {
+        &self.receipts
+    }
+}
+
+impl<DB, INSP, ExtEnvs, R, Spec> MegaBlockExecutor<MegaEvm<DB, INSP, ExtEnvs>, R, Spec>
+where
+    DB: Database + StateDB,
+    INSP: Inspector<MegaContext<DB, ExtEnvs>>,
+    ExtEnvs: ExternalEnvTypes,
+    R: OpReceiptBuilder<Transaction: Transaction + Encodable2718, Receipt: TxReceipt>,
+    Spec: MegaHardforks,
+    MegaTransaction: FromRecoveredTx<R::Transaction> + FromTxWithEncoded<R::Transaction>,
+{
+    /// Executes `tx`, reading its hash and sizes from the transaction rather than computing
+    /// them.
+    ///
+    /// This is the entry point for a caller that already has those figures — a sequencer whose
+    /// mempool computed them at insertion. They feed the transaction-level and block-level size
+    /// limits directly and are not checked against the encoding in release builds, so an
+    /// understated value would pass a limit it should have been refused by; a debug build
+    /// cross-checks them against a fresh recompute and trips there instead. A transaction that
+    /// computes them from its own encoding is unconditionally safe.
+    ///
+    /// Nothing is committed. Hand the result to
+    /// [`commit_transaction`](BlockExecutor::commit_transaction) before the next transaction
+    /// executes, or to [`commit_transaction_outcome`](Self::commit_transaction_outcome) when
+    /// another outcome may commit first.
+    pub fn run_transaction<Tx>(
+        &mut self,
+        tx: Tx,
+    ) -> Result<
+        MegaBlockTxResult<<R::Transaction as TransactionEnvelope>::TxType>,
+        BlockExecutionError,
+    >
+    where
+        Tx: ExecutableTx<Self> + MegaTransactionExt,
+    {
+        let reported = (tx.tx_hash(), tx.tx_size(), tx.estimated_da_size());
+        self.execute(tx, Some(reported))
+    }
+
+    /// Re-checks the block's limits and commits `output`.
+    ///
+    /// This is the commit for a builder that executes several candidates and then chooses among
+    /// them: the block's counters may have moved between a candidate executing and its commit, so
+    /// everything the block holds a transaction to is checked once more — its data-availability
+    /// footprint included — and nothing changes before the check passes.
+    ///
+    /// The state `output` executed against may have moved too. The sender's account is checked
+    /// ([`MegaBlockExecutionError::StaleOutcome`]): an outcome whose sender's nonce or balance
+    /// another commit moved since it executed — the system address's, for a system-address
+    /// transaction — is refused, since committing it would write the sender's account over what
+    /// that commit did. Any other read the outcome made is not checked, and executing a candidate
+    /// again when another commit moved what it read is the builder's responsibility: a builder
+    /// that executes an Oracle-reading transaction, then executes and commits the system-address
+    /// transaction that writes the Oracle before it, commits both.
+    ///
+    /// The outcome may have been executed by another executor of the block, or before another
+    /// outcome committed here: what it read of the L1 block contract outside its journal, which
+    /// it carries, is reported by what this executor has committed, once each per block, with the
+    /// first transaction committed here that read it.
+    pub fn commit_transaction_outcome(
+        &mut self,
+        output: MegaBlockTxResult<<R::Transaction as TransactionEnvelope>::TxType>,
+    ) -> Result<GasOutput, BlockExecutionError> {
+        self.check_room(&output)?;
+        self.check_sender_unchanged(&output)?;
+        Ok(self.commit_transaction(output))
+    }
+
+    /// Runs one transaction of the block, with the hash and sizes the caller reported or
+    /// computed from the transaction itself.
+    fn execute(
+        &mut self,
+        tx: impl ExecutableTx<Self>,
+        reported: Option<(alloy_primitives::TxHash, u64, u64)>,
+    ) -> Result<
+        MegaBlockTxResult<<R::Transaction as TransactionEnvelope>::TxType>,
+        BlockExecutionError,
+    > {
+        let (tx_env, tx) = tx.into_parts();
+        let inner = tx.tx();
+        let is_deposit = inner.ty() == DEPOSIT_TRANSACTION_TYPE;
+
+        // A block that activates a fork carries the chain's own transactions only, so a user
+        // transaction in it is refused before anything runs.
+        if self.admits_only_deposits()? && !is_deposit {
+            return Err(MegaBlockExecutionError::UnexpectedNonDepositTxInActivationBlock.into());
+        }
+
+        let (tx_hash, tx_size, da_size) = reported.map_or_else(
+            || {
+                // The compressed size is estimated from the encoding, which the transaction
+                // environment carries when the node passes an encoded transaction and which is
+                // produced here when it does not.
+                let da_size = tx_env.encoded_bytes().map_or_else(
+                    || estimated_da_size(inner.encoded_2718().as_ref()),
+                    |encoded| estimated_da_size(encoded),
+                );
+                (inner.trie_hash(), inner.encode_2718_len() as u64, da_size)
+            },
+            |(tx_hash, tx_size, da_size)| {
+                // Only the sizes are cross-checked: they are what the limits are stated over.
+                // The hash names the transaction in an error and decides nothing.
+                debug_assert_eq!(
+                    (tx_size, da_size),
+                    (
+                        inner.encode_2718_len() as u64,
+                        estimated_da_size(inner.encoded_2718().as_ref()),
+                    ),
+                    "the transaction's reported sizes do not match a fresh recompute from the \
+                     encoded transaction"
+                );
+                (tx_hash, tx_size, da_size)
+            },
+        );
+        let gas_limit = inner.gas_limit();
+
+        // A Mega System Transaction is decided before it runs, from the live system address the
+        // block resolved after its pre-block steps: the engine validates the transaction against
+        // the same address, which the EVM holds, and a transaction of another shape from that
+        // address is no system transaction here but refused there.
+        let is_system_transaction = !is_deposit && self.is_system_transaction(&tx_env)?;
+
+        self.limiter.pre_execution_check(tx_hash, gas_limit, tx_size, da_size, is_deposit)?;
+
+        // A deposit is exempt from the data-availability footprint of the block, as it is from
+        // its data-availability size.
+        let (da_footprint, footprint_read) = if is_deposit {
+            (0, None)
+        } else {
+            let (scalar, read) = self.da_footprint_gas_scalar()?;
+            let footprint = da_size.saturating_mul(scalar);
+            self.check_da_footprint(footprint)?;
+            (footprint, Some(read))
+        };
+
+        // The sender's account as the transaction executes against it, read before execution: a
+        // delayed commit checks it against the state then, and committing the transaction cannot
+        // fail. Satin executes only at or after Karst, which includes Regolith, and the schedule
+        // check refuses a schedule in which Regolith is not active when Satin activates: every
+        // deposit receipt carries the depositor's nonce.
+        let sender = *tx.signer();
+        let sender_before = self.sender_account(sender)?;
+        let depositor_nonce = is_deposit.then_some(sender_before.nonce);
+
+        // The transaction runs under the block's limits, whatever was set on the EVM since the
+        // last one.
+        self.evm.set_tx_runtime_limits(self.protocol_limits.tx_runtime_limits);
+        let mut outcome = self
+            .evm
+            .execute_transaction(tx_env)
+            .map_err(|err| BlockExecutionError::evm(err, tx_hash))?;
+        // What the transaction read of the L1 block contract outside its journal: the footprint
+        // read, and the fee read of every non-deposit transaction but a Mega System Transaction,
+        // which pays no L1 fee.
+        let l1_block_reads = match footprint_read {
+            Some(footprint) => self.report_l1_block_reads(
+                &mut outcome.result_and_state.state,
+                footprint,
+                !is_system_transaction,
+                tx_hash,
+            )?,
+            None => L1BlockReads::default(),
+        };
+
+        let result = MegaBlockTxResult {
+            tx_type: inner.tx_type(),
+            tx_hash,
+            gas_limit,
+            tx_size,
+            da_size,
+            da_footprint,
+            is_deposit,
+            is_system_transaction,
+            depositor_nonce,
+            sender,
+            sender_nonce: sender_before.nonce,
+            sender_balance: sender_before.balance,
+            inner: outcome,
+            l1_block_reads,
+        };
+        Ok(result)
+    }
+
+    /// Finishes the block and reports what it counted, on top of what
+    /// [`finish`](BlockExecutor::finish) returns.
+    ///
+    /// The block's gas used is the sum of its receipts, as it has always been; the three ledgers
+    /// and the data-size and write-record counts ride beside it, where no upstream type has a
+    /// place for them. The blob gas used is the block's data-availability footprint.
+    pub fn finish_with_counters(
+        mut self,
+    ) -> Result<MegaFinishedBlock<DB, INSP, ExtEnvs, R>, BlockExecutionError> {
+        let balance_increments =
+            post_block_balance_increments::<Header>(&self.spec, self.evm.block(), &[], None);
+        self.evm
+            .ctx_mut()
+            .db_mut()
+            .increment_balances(balance_increments)
+            .map_err(|_| alloy_evm::block::BlockValidationError::IncrementBalanceFailed)?;
+
+        let BlockLimiter { gas, usage, block_gas_used, block_da_footprint_used, .. } = self.limiter;
+        Ok((
+            self.evm,
+            MegaBlockExecutionResult {
+                inner: BlockExecutionResult {
+                    receipts: self.receipts,
+                    requests: Requests::default(),
+                    gas_used: block_gas_used,
+                    blob_gas_used: block_da_footprint_used,
+                },
+                gas,
+                usage,
+            },
+        ))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{test_utils::MemoryDatabase, MegaContext, MegaEvm, MegaSpecId};
+    use crate::{test_utils::MemoryDatabase, MegaContext, MegaEvm, MegaHardforkConfig, MegaSpecId};
     use alloy_evm::Evm;
     use revm::context::BlockEnv;
 
@@ -45,10 +1290,126 @@ mod tests {
     fn test_executor_hands_back_its_evm() {
         let ctx = MegaContext::new(MemoryDatabase::default(), MegaSpecId::SATIN)
             .with_block(BlockEnv { gas_limit: 30_000_000, ..Default::default() });
-        let mut executor = MegaBlockExecutor::new(MegaEvm::new(ctx));
+        let mut executor = MegaBlockExecutor::new(
+            MegaEvm::new(ctx),
+            MegaBlockExecutionCtx::new(
+                B256::ZERO,
+                None,
+                Bytes::new(),
+                BlockLimits::default(),
+                None,
+            ),
+            MegaHardforkConfig::default().with_all_activated(),
+            alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder::default(),
+        );
 
         assert_eq!(executor.evm().block().gas_limit, 30_000_000);
+        assert_eq!(executor.limiter().block_gas_limit, 30_000_000);
+        assert_eq!(executor.protocol_limits(), &ProtocolLimits::for_spec(MegaSpecId::SATIN));
+        assert_eq!(
+            executor.evm().tx_runtime_limits().tx_data_size_limit,
+            crate::constants::TX_DATA_LIMIT,
+            "the executor installs the spec's per-transaction data-size cap"
+        );
+        assert_eq!(executor.evm().tx_runtime_limits().frame_data_size_limit, u64::MAX);
+        assert_eq!(
+            executor.limiter().limits.block_txs_data_limit,
+            crate::constants::BLOCK_DATA_LIMIT
+        );
+        assert_eq!(
+            (
+                executor.limiter().limits.block_kv_update_limit,
+                executor.limiter().limits.block_state_growth_limit
+            ),
+            (crate::constants::BLOCK_KV_UPDATE_LIMIT, crate::constants::BLOCK_STATE_GROWTH_LIMIT),
+            "and the spec's KV and state-growth budgets"
+        );
         executor.evm_mut().set_inspector_enabled(true);
         assert!(executor.into_evm().is_inspecting());
+    }
+
+    /// A block is held to its spec's limits whatever the node hands over: limits it set on the
+    /// EVM are replaced, a looser building policy gives way to the spec's budget, and the schedule
+    /// carries none. Only the test-and-tool override replaces them, and a policy still tightens
+    /// what it installs.
+    #[test]
+    fn test_a_block_is_held_to_its_specs_limits_whatever_the_node_passes() {
+        let satin = ProtocolLimits::for_spec(MegaSpecId::SATIN);
+        let ctx = MegaContext::new(MemoryDatabase::default(), MegaSpecId::SATIN)
+            .with_tx_runtime_limits(crate::EvmTxRuntimeLimits::no_limits());
+        let policy = BlockLimits::no_limits().with_block_txs_data_limit(u64::MAX);
+        let executor = MegaBlockExecutor::new(
+            MegaEvm::new(ctx),
+            MegaBlockExecutionCtx::new(B256::ZERO, None, Bytes::new(), policy, None),
+            MegaHardforkConfig::default().with_all_activated(),
+            alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder::default(),
+        );
+        assert_eq!(executor.protocol_limits(), &satin);
+        assert_eq!(*executor.evm().tx_runtime_limits(), satin.tx_runtime_limits);
+        assert_eq!(executor.limiter().limits.block_txs_data_limit, 13_107_200);
+
+        let counterfactual = ProtocolLimits::no_limits()
+            .with_block_txs_data_limit(7)
+            .with_block_kv_update_limit(8)
+            .with_block_state_growth_limit(9);
+        let executor = executor.with_protocol_limits(counterfactual);
+        assert_eq!(executor.protocol_limits(), &counterfactual);
+        assert_eq!(*executor.evm().tx_runtime_limits(), counterfactual.tx_runtime_limits);
+        assert_eq!(executor.limiter().limits.block_txs_data_limit, 7);
+        assert_eq!(executor.limiter().limits.block_kv_update_limit, 8);
+        assert_eq!(executor.limiter().limits.block_state_growth_limit, 9);
+
+        let tighter = MegaBlockExecutor::new(
+            MegaEvm::new(MegaContext::new(MemoryDatabase::default(), MegaSpecId::SATIN)),
+            MegaBlockExecutionCtx::new(
+                B256::ZERO,
+                None,
+                Bytes::new(),
+                BlockLimits::no_limits().with_block_txs_data_limit(5),
+                None,
+            ),
+            MegaHardforkConfig::default().with_all_activated(),
+            alloy_op_evm::block::receipt_builder::OpAlloyReceiptBuilder::default(),
+        )
+        .with_protocol_limits(counterfactual);
+        assert_eq!(tighter.limiter().limits.block_txs_data_limit, 5, "the policy still tightens");
+    }
+
+    /// The `MegaBlockExecutionError` an internal error carries; panics on a validation error.
+    fn internal(error: &BlockExecutionError) -> &MegaBlockExecutionError {
+        error
+            .as_internal()
+            .and_then(|error| error.downcast_other::<MegaBlockExecutionError>())
+            .unwrap_or_else(|| panic!("not an internal refusal of this engine: {error:?}"))
+    }
+
+    /// Every refusal but those for what the node itself does — an outcome it let go stale, here —
+    /// is a verdict on the block: a validation error. A predeploy that does not hold Satin's code
+    /// when Satin activates is one.
+    #[test]
+    fn test_a_refusal_of_the_block_is_a_validation_error() {
+        let address = alloy_primitives::Address::repeat_byte(1);
+        for refusal in [
+            MegaBlockExecutionError::UnexpectedNonDepositTxInActivationBlock,
+            MegaBlockExecutionError::TransactionDaFootprintAboveGasLimit {
+                transaction_da_footprint: 2,
+                available_block_da_footprint: 1,
+            },
+            MegaBlockExecutionError::UnexpectedSystemContractCode {
+                address,
+                expected: B256::ZERO,
+                found: B256::repeat_byte(1),
+            },
+            MegaBlockExecutionError::ApplyPendingChangesFailed { message: String::new() },
+        ] {
+            let error = BlockExecutionError::from(refusal.clone());
+            let Some(alloy_evm::block::BlockValidationError::Other(inner)) = error.as_validation()
+            else {
+                panic!("{refusal:?} is a verdict on the block: {error:?}");
+            };
+            assert_eq!(inner.downcast_ref::<MegaBlockExecutionError>(), Some(&refusal));
+        }
+        let stale = MegaBlockExecutionError::StaleOutcome { tx_hash: B256::ZERO, sender: address };
+        assert_eq!(internal(&BlockExecutionError::from(stale.clone())), &stale);
     }
 }

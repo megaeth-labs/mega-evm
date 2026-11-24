@@ -17,6 +17,17 @@ The protocol therefore needs a mechanism that preserves the original signer and 
 
 ## Specification
 
+<details>
+<summary>Satin (unstable): native keyless deployment</summary>
+
+Under Satin a node MUST NOT run the deployment in a sandbox.
+A `keylessDeploy(bytes,uint256)` call that is the transaction's own frame MUST deploy the carried creation as an ordinary creation frame, a child of the call, created by the recovered signer at the deploy address.
+Its checks and charges and their order, the signer's nonce, the answer and the limits are those of [Native Keyless Deployment](../upgrades/satin.md#15-native-keyless-deployment) in the Satin specification.
+The sandbox execution model, the state merge, the preflight, the gas reservation and the rescue this page specifies do not apply under Satin.
+The contract's address, bytecode and code hash are unchanged; its interface declares the errors [Error Classes](#error-classes) lists for Satin.
+
+</details>
+
 ### Address
 
 The KeylessDeploy system contract MUST exist at `KEYLESS_DEPLOY_ADDRESS`.
@@ -251,6 +262,43 @@ This enforces the EIP-3607 caller-with-code rule, keeping the keyless-deploy val
 `InvalidTransaction()`, `InternalError()`, and `SignerHasCode()` are selector-only so the top-level KeylessDeploy error ABI stays stable and does not depend on upstream internal error text.
 The KeylessDeploy interceptor is active only at call depth 0; calls from contracts are not intercepted and MUST revert through the on-chain `NotIntercepted()` path, so sandbox validation/internal-error returndata is not observable by an inner caller's `RETURNDATASIZE` or `RETURNDATACOPY` instructions.
 This top-level returndata can affect RPC responses, traces, relayer decoders, and exact-output replay tooling, but it is not included in transaction receipts and cannot be copied into contract storage through KeylessDeploy's intercepted path.
+
+<details>
+<summary>Satin (unstable): error set</summary>
+
+Under Satin the `IKeylessDeploy` interface declares exactly the following errors, and a node MUST NOT produce any other.
+
+A refusal reverts the `keylessDeploy` call:
+
+- `MalformedEncoding()`
+- `NotContractCreation()`
+- `NotPreEIP155()`
+- `NonZeroTxNonce(uint64)`
+- `NoEtherTransfer()`
+- `InvalidSignature()`
+- `InsufficientBalance()`
+- `ContractAlreadyExists()`
+- `SignerNonceTooHigh(uint64)`
+- `GasLimitTooLow(uint64,uint64)`
+- `InitCodeTooLarge(uint64,uint64)`
+- `SignerHasCode()`
+- `AddressMismatch()`
+- `NoContractCreated()`
+- `NotIntercepted()`
+
+An answer returns normally, with the error as `errorData`:
+
+- `ExecutionReverted(uint64,bytes)`
+- `ExecutionHalted(uint64)`
+- `EmptyCodeDeployed(uint64)`
+
+`ParentBudgetExceeded(uint8,uint64,uint64)`, `InsufficientComputeGas(uint64,uint64)`, `InternalError()` and `InvalidTransaction()` are removed from the interface.
+They reported the sandbox's preflight, the compute-gas check of the dispatch overhead, a failed read and the sandbox's own transaction validation, none of which a native deployment has: a call that cannot pay the overhead runs out of gas, and a failed database read or SALT lookup gives the transaction no outcome.
+`AddressMismatch()` and `NoContractCreated()` answer a creation reported at another address or at none, which no deployment reaches.
+`NotIntercepted()` is produced only by the contract's bytecode, for a call the node does not intercept.
+Removing the four errors changes neither the contract's bytecode nor its code hash: the bytecode names none of them.
+
+</details>
 
 ## Constants
 

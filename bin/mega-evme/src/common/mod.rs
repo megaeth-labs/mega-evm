@@ -1,22 +1,23 @@
 mod env;
 mod error;
-mod hardfork;
 mod hex;
 mod logging;
 mod outcome;
 mod provider;
+mod schedule;
 mod state;
 mod trace;
 mod tx;
 mod tx_override;
 
 pub use env::*;
+pub(crate) use error::sanitize_terminal_text;
 pub use error::*;
-pub use hardfork::*;
 pub use hex::*;
 pub use logging::*;
 pub use outcome::*;
 pub use provider::*;
+pub use schedule::*;
 pub use state::*;
 pub use trace::*;
 pub use tx::*;

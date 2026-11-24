@@ -11,7 +11,7 @@
 
 use std::{
     fmt, fs,
-    io::Write as _,
+    io::{Read, Write as _},
     path::{Path, PathBuf},
 };
 
@@ -252,12 +252,44 @@ impl CacheFileEnvelope {
 
     /// Read and validate an envelope from `path`.
     pub(super) fn load(path: &Path) -> Result<Self> {
-        let content = fs::read_to_string(path).map_err(|e| {
+        let file = fs::File::open(path).map_err(|e| {
             EvmeError::FixtureError(format!(
                 "Failed to read RPC cache file {}: {e}",
                 path.display()
             ))
         })?;
+        let len = file
+            .metadata()
+            .map_err(|e| {
+                EvmeError::FixtureError(format!(
+                    "Failed to read RPC cache file {}: {e}",
+                    path.display()
+                ))
+            })?
+            .len();
+        if len > crate::common::hex::MAX_TEXT_INPUT_BYTES {
+            return Err(EvmeError::FixtureError(format!(
+                "RPC cache file {} is {len} bytes; the limit is {} bytes",
+                path.display(),
+                crate::common::hex::MAX_TEXT_INPUT_BYTES,
+            )));
+        }
+        let mut content = String::new();
+        file.take(crate::common::hex::MAX_TEXT_INPUT_BYTES + 1)
+            .read_to_string(&mut content)
+            .map_err(|e| {
+                EvmeError::FixtureError(format!(
+                    "Failed to read RPC cache file {}: {e}",
+                    path.display()
+                ))
+            })?;
+        if content.len() as u64 > crate::common::hex::MAX_TEXT_INPUT_BYTES {
+            return Err(EvmeError::FixtureError(format!(
+                "RPC cache file {} exceeds the {} byte limit",
+                path.display(),
+                crate::common::hex::MAX_TEXT_INPUT_BYTES,
+            )));
+        }
         let envelope: Self = serde_json::from_str(&content).map_err(|e| {
             EvmeError::FixtureError(format!(
                 "Failed to parse RPC cache file {}: {e}",
@@ -275,7 +307,14 @@ impl CacheFileEnvelope {
     }
 
     /// Atomically write this envelope to `path`.
+    ///
+    /// An envelope [`Self::load`] would refuse for its size is not written: the file already at
+    /// `path` stays as it is, and the error says so. The tool never writes a file it cannot read.
     pub(super) fn save(&self, path: &Path) -> Result<()> {
+        self.save_within(path, crate::common::hex::MAX_TEXT_INPUT_BYTES)
+    }
+
+    fn save_within(&self, path: &Path, limit: u64) -> Result<()> {
         let dir = path.parent().unwrap_or_else(|| Path::new("."));
         fs::create_dir_all(dir).map_err(|e| {
             EvmeError::FixtureError(format!(
@@ -290,6 +329,16 @@ impl CacheFileEnvelope {
                 path.display()
             ))
         })?;
+
+        if serialized.len() as u64 > limit {
+            return Err(EvmeError::FixtureError(format!(
+                "The RPC cache for {} would be {} bytes, over the {limit} byte limit the tool \
+                 reads back; it was not written, and the file already there is unchanged. Capture \
+                 into a new file, or delete this one",
+                path.display(),
+                serialized.len(),
+            )));
+        }
 
         let mut tmp = tempfile::NamedTempFile::new_in(dir).map_err(|e| {
             EvmeError::FixtureError(format!("Failed to create temp file in {}: {e}", dir.display()))
@@ -391,5 +440,40 @@ mod tests {
         let err = CacheFileEnvelope::load(&p3).expect_err("missing version");
         let msg = format!("{err}");
         assert!(msg.contains("parse"), "error should mention parse: {msg}");
+    }
+
+    #[test]
+    fn test_envelope_rejects_an_oversized_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("big.json");
+        let limit = crate::common::hex::MAX_TEXT_INPUT_BYTES;
+        fs::File::create(&path).expect("create").set_len(limit + 1).expect("set_len");
+        let err = CacheFileEnvelope::load(&path).expect_err("over the limit");
+        let msg = err.to_string();
+        assert!(msg.contains(&limit.to_string()), "{msg}");
+        assert!(msg.contains(&(limit + 1).to_string()), "{msg}");
+        assert!(!msg.contains("parse"), "{msg}");
+    }
+
+    #[test]
+    fn test_envelope_save_refuses_what_load_would_refuse() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("grow.json");
+        let envelope = CacheFileEnvelope::new(&TransportCache::new(), 4326, None);
+        envelope.save(&path).expect("a small envelope saves");
+        let before = fs::read(&path).expect("read");
+        let size = before.len() as u64;
+
+        // At the limit the envelope is written, one byte under it is not, and the file stays.
+        envelope.save_within(&path, size).expect("at the limit");
+        let err = envelope.save_within(&path, size - 1).expect_err("over the limit");
+        let msg = err.to_string();
+        assert!(msg.contains(&size.to_string()) && msg.contains("unchanged"), "{msg}");
+        assert_eq!(fs::read(&path).expect("read"), before);
+
+        // A path with no file is not created either.
+        let fresh = dir.path().join("fresh.json");
+        envelope.save_within(&fresh, size - 1).expect_err("over the limit");
+        assert!(!fresh.exists());
     }
 }

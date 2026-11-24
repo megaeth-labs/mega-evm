@@ -6,18 +6,43 @@
 //!
 //! | Constant | Value | Meaning | Read by |
 //! |---|---:|---|---|
-//! | [`COST_PER_STATE_BYTE`] | 1,530 | gas per byte of new state (EIP-8037 CPSB) | the Satin gas table (not yet) |
-//! | [`SLOT_STATE_GAS`] | 97,920 | state gas of one new storage slot (64 bytes) | the Satin gas table (not yet) |
-//! | [`ACCOUNT_STATE_GAS`] | 183,600 | state gas of one new account (120 bytes) | the Satin gas table (not yet) |
-//! | [`COST_PER_HISTORY_BYTE`] | 88 | gas per history byte (CPHB) | history gas (not yet) |
+//! | [`COST_PER_STATE_BYTE`] | 1,530 | gas per byte of new state (EIP-8037 CPSB) | the Satin gas schedule |
+//! | [`SLOT_STATE_GAS`] | 97,920 | state gas of one new storage slot (64 bytes) | tests of the Satin gas schedule |
+//! | [`ACCOUNT_STATE_GAS`] | 183,600 | state gas of one new account (120 bytes) | tests of the Satin gas schedule |
+//! | [`COST_PER_HISTORY_BYTE`] | 88 | gas per history byte (CPHB) | history gas, and the schedule's deposited-code entry |
 //! | [`TX_GAS_LIMIT_CAP`] | 200,000,000 | execution cap: regular gas one transaction may spend | the spec configuration |
-//! | [`TX_DATA_LIMIT`] | 13,107,200 | data size one transaction may produce (as Rex6) | the data-size limit (not yet) |
-//! | [`BLOCK_DATA_LIMIT`] | 13,107,200 | data size one block may produce (as Rex6) | the data-size limit (not yet) |
+//! | [`MAX_CONTRACT_SIZE`] | 524,288 | the most bytes a deployed contract may hold | the spec configuration |
+//! | [`MAX_INITCODE_SIZE`] | 1,048,576 | the most bytes an initcode may hold | the spec configuration |
+//! | [`TX_DATA_LIMIT`] | 13,107,200 | data size one transaction may produce (as Rex6) | Satin's protocol limits |
+//! | [`BLOCK_DATA_LIMIT`] | 13,107,200 | data size one block may produce (as Rex6) | Satin's protocol limits |
+//! | [`TX_KV_UPDATE_LIMIT`] | 500,000 | write records one transaction may keep (as Rex6's KV updates) | Satin's protocol limits |
+//! | [`BLOCK_KV_UPDATE_LIMIT`] | 500,000 | write records one block's transactions may keep (as Rex6) | Satin's protocol limits |
+//! | [`TX_STATE_GROWTH_LIMIT`] | 1,000 | new accounts and slots one transaction may keep (as Rex6) | Satin's protocol limits |
+//! | [`BLOCK_STATE_GROWTH_LIMIT`] | 1,000 | new accounts and slots one block's transactions may keep (as Rex6) | Satin's protocol limits |
+//! | [`BLOCK_ENV_ACCESS_COMPUTE_GAS`] | 20,000,000 | compute a transaction may still spend once it read the block environment or the beneficiary (as Rex6) | Satin's protocol limits |
+//! | [`ORACLE_ACCESS_COMPUTE_GAS`] | 20,000,000 | compute a transaction may still spend once it read the Oracle's storage (as Rex6) | Satin's protocol limits |
+//! | [`MAX_TX_COMPUTE_GAS`] | 199,987,900 | the most compute one transaction can spend: the execution cap less EIP-2780's base cost and one warm account access | tests of the protocol limits, whose detention caps are below it |
+//! | [`PRE_BLOCK_CALL_GAS_LIMIT`] | 31,566,720 | gas limit of every pre-block system call: 30,000,000 of regular gas and a reservoir of sixteen fresh slots | the block's pre-block calls |
+//! | [`PRE_FORK_SSTORE_SET_COST`] | 20,000 | regular gas of a fresh slot's `SSTORE` before Satin | the legacy share of a slot's state gas, in the Satin gas schedule |
+//! | [`PRE_FORK_NEW_ACCOUNT_COST`] | 25,000 | regular gas of a new account before Satin | the legacy share of a new account's state gas |
+//! | [`PRE_FORK_CREATE_COST`] | 32,000 | regular gas of a `CREATE` before Satin | the legacy share of a created account's state gas |
 //!
-//! The storage call stipend and the per-transaction and per-block state-gas limits are further
-//! placeholders; history gas and the state-gas limits add them when they land.
+//! The Satin gas schedule builds its state-gas entries from the EIP-8037 byte counts at
+//! [`COST_PER_STATE_BYTE`], read through [`SatinPrices`](crate::SatinPrices) so a measurement
+//! build can run other byte prices without touching this table. [`SLOT_STATE_GAS`] and
+//! [`ACCOUNT_STATE_GAS`] are two of those products written out: the tests assert the schedule
+//! against them, and changing one of the two moves a test rather than a price.
+//! [`TX_DATA_LIMIT`], [`BLOCK_DATA_LIMIT`], the KV-update and state-growth limits and the two
+//! detention caps are Satin's protocol limits
+//! ([`ProtocolLimits::for_spec`](crate::ProtocolLimits::for_spec)).
 
-use revm::primitives::eip8037::{NEW_ACCOUNT_BYTES, SSTORE_SET_BYTES};
+use revm::{
+    context_interface::cfg::gas::WARM_STORAGE_READ_COST,
+    primitives::{
+        eip2780,
+        eip8037::{NEW_ACCOUNT_BYTES, SSTORE_SET_BYTES},
+    },
+};
 
 /// Gas per byte of new state, the EIP-8037 `COST_PER_STATE_BYTE`. Provisional.
 pub const COST_PER_STATE_BYTE: u64 = 1_530;
@@ -31,11 +56,23 @@ pub const SLOT_STATE_GAS: u64 = SSTORE_SET_BYTES * COST_PER_STATE_BYTE;
 pub const ACCOUNT_STATE_GAS: u64 = NEW_ACCOUNT_BYTES * COST_PER_STATE_BYTE;
 
 /// Gas per history byte (logs, deployed code, write records, transaction body). Provisional.
+///
+/// Every history charge is a byte count from the byte table at this price, read through
+/// [`SatinPrices`](crate::SatinPrices) so a measurement build can run other prices; the schedule's
+/// `code_deposit_history_gas` entry is this number, which is the one history charge revm makes
+/// itself.
 pub const COST_PER_HISTORY_BYTE: u64 = 88;
 
 /// The execution cap: the most regular gas one transaction may spend. Gas above it goes to
 /// the EIP-8037 state-gas reservoir. Provisional.
 pub const TX_GAS_LIMIT_CAP: u64 = 200_000_000;
+
+/// The most bytes a deployed contract may hold, replacing the EIP-170 limit. Provisional.
+pub const MAX_CONTRACT_SIZE: usize = 512 * 1024;
+
+/// The most bytes an initcode may hold: twice [`MAX_CONTRACT_SIZE`], the ratio EIP-3860 sets
+/// between the two. Provisional.
+pub const MAX_INITCODE_SIZE: usize = 2 * MAX_CONTRACT_SIZE;
 
 /// The most data one transaction may produce, 12.5 MiB as in Rex6. Provisional.
 pub const TX_DATA_LIMIT: u64 = 12 * 1024 * 1024 + 512 * 1024;
@@ -43,19 +80,98 @@ pub const TX_DATA_LIMIT: u64 = 12 * 1024 * 1024 + 512 * 1024;
 /// The most data one block may produce, 12.5 MiB as in Rex6. Provisional.
 pub const BLOCK_DATA_LIMIT: u64 = 12 * 1024 * 1024 + 512 * 1024;
 
+/// The most write records one transaction may keep: its KV count, as Rex6's KV-update limit.
+/// Provisional.
+pub const TX_KV_UPDATE_LIMIT: u64 = 500_000;
+
+/// The most write records one block's transactions may keep together, as Rex6's. Provisional.
+pub const BLOCK_KV_UPDATE_LIMIT: u64 = 500_000;
+
+/// The most new accounts and new storage slots one transaction may keep, net, as Rex6's
+/// state-growth limit. Provisional.
+pub const TX_STATE_GROWTH_LIMIT: u64 = 1_000;
+
+/// The most new accounts and new storage slots one block's transactions may keep together, as
+/// Rex6's. Provisional.
+pub const BLOCK_STATE_GROWTH_LIMIT: u64 = 1_000;
+
+/// The compute a transaction may still spend once it read the block environment or the block
+/// beneficiary's account: its compute at the read plus this. The value and its relative reading
+/// are Rex6's. Provisional.
+pub const BLOCK_ENV_ACCESS_COMPUTE_GAS: u64 = 20_000_000;
+
+/// The compute a transaction may still spend once it read the Oracle's storage: its compute at
+/// the read plus this. The value and its relative reading are Rex6's; the legacy engine's first
+/// specs capped an Oracle read at 1,000,000. Provisional.
+pub const ORACLE_ACCESS_COMPUTE_GAS: u64 = 20_000_000;
+
+/// The most compute one transaction can spend: the most regular gas its first frame can hold
+/// when that frame runs code. Derived from [`TX_GAS_LIMIT_CAP`].
+///
+/// Compute is the regular gas a transaction's frames spend, and the first frame holds what the
+/// execution cap leaves once the transaction paid for itself: EIP-2780's base cost, which every
+/// transaction pays, and the account whose code the frame runs — a recipient other than the sender
+/// at the cold rate, the delegate of a sender that calls itself at least at the warm one, 100,
+/// which EIP-8038 leaves where it was. A gas-detention cap at or above this never stops a
+/// transaction, however early it read, so a spec's caps are below it.
+pub const MAX_TX_COMPUTE_GAS: u64 =
+    TX_GAS_LIMIT_CAP - eip2780::TX_BASE_COST - WARM_STORAGE_READ_COST;
+
+/// The gas limit every pre-block system call runs on — the EIP-2935 and EIP-4788 calls and the
+/// `SequencerRegistry`'s `applyPendingChanges()` — whatever the block's gas limit. Provisional.
+///
+/// It is the 30,000,000 of regular gas a system call runs on at most
+/// ([`SYSTEM_CALL_REGULAR_GAS_LIMIT`](crate::SYSTEM_CALL_REGULAR_GAS_LIMIT)), and a state-gas
+/// reservoir of sixteen fresh storage slots at the minimum SALT bucket, which every system call
+/// prices at: `30,000,000 + 16 × SLOT_STATE_GAS = 30,000,000 + 16 × 97,920 = 31,566,720`.
+///
+/// Where the EIP-2935 and EIP-4788 addresses hold those EIPs' own code, the most fresh slots one
+/// pre-block call writes is six: an `applyPendingChanges()` that applies both roles, writing for
+/// each its current address, its history's length and the history's new entry, where all three
+/// were empty. The EIP-4788 call writes two, and the EIP-2935 call one. So the reservoir holds what
+/// any of them writes more than twice over, and at the byte prices of this table no pre-block
+/// call's state gas spills onto its regular gas; at a dearer state byte, or under other code at
+/// those addresses, what the reservoir does not hold spills onto the 30,000,000.
+pub const PRE_BLOCK_CALL_GAS_LIMIT: u64 =
+    crate::SYSTEM_CALL_REGULAR_GAS_LIMIT + 16 * SLOT_STATE_GAS;
+
+/// The regular gas a fresh slot's `SSTORE` cost before Satin, above its load: what a state charge
+/// for a fresh slot takes from regular gas before the reservoir, less what the write already
+/// charges in regular gas. A fixed pre-Satin price: the bucket multiplier does not scale it, and a
+/// change of the byte prices does not move it.
+pub const PRE_FORK_SSTORE_SET_COST: u64 = 20_000;
+
+/// The regular gas a new account cost before Satin: what a state charge for the account a value
+/// call or a keyless deployment's signer creates takes from regular gas before the reservoir, and,
+/// less the regular gas the schedule charges a `SELFDESTRUCT`'s new beneficiary, what that
+/// beneficiary's takes. A fixed pre-Satin price.
+pub const PRE_FORK_NEW_ACCOUNT_COST: u64 = 25_000;
+
+/// The regular gas a `CREATE` cost before Satin: less the creation's access, what a state charge
+/// for the account a `CREATE`, a `CREATE2` or a keyless deployment creates takes from regular gas
+/// before the reservoir. A fixed pre-Satin price.
+pub const PRE_FORK_CREATE_COST: u64 = 32_000;
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     /// The placeholder values, written out so a change to one is a visible diff.
     #[test]
-    fn test_provisional_values_match_the_work_order() {
+    fn test_the_provisional_values_are_written_out() {
         assert_eq!(COST_PER_STATE_BYTE, 1_530);
         assert_eq!(SLOT_STATE_GAS, 97_920);
         assert_eq!(ACCOUNT_STATE_GAS, 183_600);
         assert_eq!(COST_PER_HISTORY_BYTE, 88);
         assert_eq!(TX_GAS_LIMIT_CAP, 200_000_000);
-        assert_eq!(TX_DATA_LIMIT, 13_107_200);
-        assert_eq!(BLOCK_DATA_LIMIT, 13_107_200);
+        assert_eq!(MAX_CONTRACT_SIZE, 524_288);
+        assert_eq!(MAX_INITCODE_SIZE, 1_048_576);
+        // The data-size limits and the detention caps are written out with the protocol limits
+        // that read them, in `ProtocolLimits::for_spec`'s own test.
+        assert_eq!(MAX_TX_COMPUTE_GAS, 199_987_900);
+        assert_eq!(PRE_BLOCK_CALL_GAS_LIMIT, 31_566_720);
+        assert_eq!(PRE_FORK_SSTORE_SET_COST, 20_000);
+        assert_eq!(PRE_FORK_NEW_ACCOUNT_COST, 25_000);
+        assert_eq!(PRE_FORK_CREATE_COST, 32_000);
     }
 }

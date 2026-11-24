@@ -106,8 +106,10 @@ jobs:
 
       - uses: foundry-rs/foundry-toolchain@b00af27efadbc7b4ca8b82abbd903b17cc874d2a # v1
 
+      # Selected by manifest path: the tool links the released mega-evme 1.7.1
+      # as its legacy leg, so `-p mega-evme` names two packages.
       - name: Build mega-evme
-        run: cargo build --release --locked -p mega-evme
+        run: cargo build --release --locked --manifest-path bin/mega-evme/Cargo.toml
 
       # The built binary must report the tag's version (`mega-evme X.Y.Z`):
       # a mismatch warns on a rehearsal and stops a release; a binary that

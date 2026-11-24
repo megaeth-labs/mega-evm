@@ -29,11 +29,11 @@ concurrency:
 jobs:
   codspeed:
     name: instruction count
-    runs-on: blacksmith-32vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     # A cold full-suite run measured ~13 min on a GitHub-hosted 4-vCPU runner
     # (simulation mode executes each bench once — no criterion sampling loop);
-    # the 32vcpu runner only shortens the build — 30 min is ample headroom.
-    timeout-minutes: 30
+    # 45 min leaves headroom for a cold build on this runner.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
         with:
@@ -46,7 +46,7 @@ jobs:
         with:
           # Empty rustflags overrides this action's default `-D warnings` —
           # measurement builds should not fail on unrelated warnings (clippy CI
-          # is the warnings gate). Mirrors benchmark.yml.
+          # is the warnings gate).
           rustflags: ""
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1

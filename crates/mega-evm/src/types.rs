@@ -3,9 +3,9 @@
 //! These stay aliases of the OP types, because Satin adds nothing to them:
 //!
 //! - [`MegaTransaction`], [`MegaTxType`] and [`MegaTxEnvelope`]: Satin executes OP transactions.
-//! - [`MegaHaltReason`]: Satin halts only where the EVM does. A resource limit stops a transaction
-//!   with a revert whose output is [`MegaLimitExceeded`](crate::MegaLimitExceeded), not with a
-//!   halt, so the halt set is op-revm's.
+//! - [`MegaHaltReason`]: Satin halts only where the EVM does. A resource limit stops the frame that
+//!   crosses it with a revert whose output is [`MegaLimitExceeded`](crate::MegaLimitExceeded), not
+//!   with a halt, so the halt set is op-revm's.
 //! - [`MegaTransactionError`]: Satin validates transactions as op-revm does.
 //!
 //! What Satin does add has types of its own: the gas a transaction spent by ledger

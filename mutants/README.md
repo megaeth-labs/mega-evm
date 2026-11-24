@@ -12,6 +12,9 @@ Two scopes, mutated and gated separately:
 
 The two scopes are disjoint; a mutant belongs to exactly one of them.
 
+The infrastructure job runs nightly, and on a pull request only when it changes `.cargo/mutants-infra.toml`, the scenario runner, `scripts/mutation_test.sh` or `scripts/mutation_gate.py` (the `infra` path filter in `.github/workflows/mutation.yml`).
+It never reads `.cargo/mutants.toml`, and a change to `mutants/suppressions.toml` alone does not start it on a pull request: the suppression-hygiene job and the nightly run cover that file.
+
 ## Layout
 
 | Path | Purpose |
@@ -19,17 +22,20 @@ The two scopes are disjoint; a mutant belongs to exactly one of them.
 | `.cargo/mutants.toml` | Canonical `cargo-mutants` config for the production scope (nextest, excludes, timeouts). |
 | `.cargo/mutants-infra.toml` | Config for the infrastructure scope (no helper exclusion). |
 | `mutants/suppressions.toml` | Reviewed equivalent / dead-code mutants excluded from gating, in either scope. |
-| `scripts/mutation_test.sh` | Driver: `diff <base>`, `full`, `file <glob>`, `infra`; `MUTANTS_SHARD=k/n` runs one shard. |
-| `scripts/mutation_gate.py` | Scores a run, applies suppressions, gates the PR. |
-| `.github/workflows/mutation.yml` | Diff-scoped PR gate + result comment, and the infrastructure job. |
+| `scripts/mutation_test.sh` | Runs `diff <base>`, `full`, `file <glob>` or `infra`. Use `diff <base> --list` and `list` for the inventories, `changed <base>` to check whether a diff run builds, and `MUTANTS_SHARD=k/n` for one shard. |
+| `scripts/mutation_join.sh` | Lists the inventory, merges four shards and scores the joined result for either scope. |
+| `scripts/mutation_gate.py` | Merges shard results, applies suppressions and scores the run. |
+| `scripts/test_mutation_gate.py` | Tests of the scorer and the driver's guards (`python3 -m unittest discover -s scripts -p 'test_*.py'`). |
+| `.github/workflows/mutation.yml` | Four PR diff shards with one gate and result comment, four nightly full shards with one score, and the infrastructure job. |
 
 ## Local use
 
 ```bash
-# Mutate only what your branch changed (what CI runs on a PR):
+# Mutate the PR's diff in one local run:
 scripts/mutation_test.sh diff origin/main
 python3 scripts/mutation_gate.py report --results target/mutants/mutants.out \
-        --suppressions mutants/suppressions.toml
+        --recheck target/mutants/recheck/mutants.out --mega-eest target/mutants/mega-eest/mutants.out \
+        --status target/mutants/status --suppressions mutants/suppressions.toml
 
 # One subsystem while iterating:
 scripts/mutation_test.sh file 'crates/mega-evm/src/limit/**'
@@ -37,14 +43,70 @@ scripts/mutation_test.sh file 'crates/mega-evm/src/limit/**'
 # The infrastructure scope (its own output directory, so it does not overwrite the production run):
 OUT_DIR=target/mutants-infra scripts/mutation_test.sh infra
 python3 scripts/mutation_gate.py report --results target/mutants-infra/mutants.out \
+        --recheck target/mutants-infra/recheck/mutants.out --status target/mutants-infra/status \
         --suppressions mutants/suppressions.toml
 
-# Shard k of n of a large run (cargo-mutants' --shard), each into its own directory:
-MUTANTS_SHARD=0/4 OUT_DIR=target/mutants-0 scripts/mutation_test.sh diff origin/main
+# Run and score the four shards with fresh directories outside the checkout:
+base="$(git rev-parse origin/main)"
+staging="$(mktemp -d)"
+mkdir "$staging/shards" "$staging/report"
+for k in {0..3}; do
+    MUTANTS_SHARD="$k/4" OUT_DIR="$staging/shards/mutation-results-shard-$k" \
+        scripts/mutation_test.sh diff "$base"
+done
+MUTATION_INPUT_DIR="$staging/shards" MUTATION_OUTPUT_DIR="$staging/report" \
+    scripts/mutation_join.sh diff "$base"
 ```
 
-The driver needs bash 4 or later and Python 3.11 or later on `PATH`; with the macOS defaults (bash 3.2, Python 3.9) it fails before mutating anything.
-When to shard is in `REVIEW.md` (Test gates, Mutation testing).
+The driver needs bash 5 or later and Python 3.11 or later on `PATH`; it refuses to start under an older bash (macOS's `/bin/bash` is 3.2), and under an older Python (macOS's `python3` is 3.9) the gate's scripts say so and exit before anything is mutated.
+The gate's own tests run with `python3 -m unittest discover -s scripts -p 'test_*.py'`, on the same Python; an older one runs a single test in their place, which fails with the reason.
+The workflow installs the pinned cargo-mutants in the self-test job so the inventory comparison runs against the real binary.
+
+## Build speed and the time budget
+
+Every mutant rebuilds `mega-evm` and all of its test binaries, so the run's cost is dominated by builds.
+The driver first builds the unmutated tests into `./target` (the warm build), which `copy_target` copies into each scratch build directory.
+With incremental compilation, each mutant build then reuses everything the mutation did not touch.
+Cargo builds the dev profile incrementally by default, but `actions-rust-lang/setup-rust-toolchain` exports `CARGO_INCREMENTAL=0`, so the workflow sets `CARGO_INCREMENTAL=1` on the mutation steps.
+The workflow runs `scripts/mutation_test.sh changed <base>` once before scheduling the diff shards.
+When the driver says the diff changes no mutatable source, CI skips the matrix and the `cargo-mutants gate` reports **Nothing to test**.
+A failed scope decision or an unexpected skip fails that check.
+
+`MUTANTS_BUDGET=<seconds>` bounds each shard, counted from the driver's start and covering the warm build, cargo-mutants, the timeout re-check and the Mega EEST pass.
+When it runs out, the driver interrupts the running phase; cargo-mutants stops its in-flight mutants and keeps every outcome already recorded, and the driver exits 0 so that what was tested can still be scored and uploaded.
+A re-check the budget stops is recorded in its results (`run-failed.txt`), which the gate refuses.
+The driver's last line, also written to `target/mutants/status`, says how far the run got:
+
+```
+MUTANTS-STATUS status=<complete|partial|not-started|followup-stopped|baseline-failed|error> expected=<n|unknown> outcomes=<n>
+```
+
+`expected` is the number of mutants cargo-mutants planned (`unknown` if the run stopped before it planned them) and `outcomes` the number that got an outcome.
+`followup-stopped` is a run that tested every planned mutant and ran out of budget in a follow-up run.
+`baseline-failed` (the unmutated tree does not build or pass its tests) and `error` (the run itself failed) exit non-zero.
+`mutation_gate.py report --status target/mutants/status` fails the gate unless the status is `complete`, while still reporting what was tested; with `complete`, it reads the results fail-closed as below.
+
+For pull requests that change mutatable source and for nightly or dispatched full runs, CI runs four parallel shards that each take a consecutive slice of the driver's mutant list.
+The `cargo-mutants gate` job lists the diff inventory with `scripts/mutation_test.sh diff <base> --list` against the same base as the shards.
+The `cargo-mutants full run` job lists the full inventory with `scripts/mutation_test.sh list`.
+Both join jobs call `scripts/mutation_join.sh`, which combines the primary runs with `mutation_gate.py merge`, the re-checks and Mega EEST runs with `merge-runs`, and scores the joined result with `report` in the corresponding scope.
+CI downloads each run into a fresh directory outside the checkout and scores it into a separate empty directory.
+The join refuses a non-empty report directory so an earlier join's follow-up files cannot contribute evidence.
+The PR join requires a successful download and validates each shard's tested SHA, base SHA, index and count, along with the GitHub run ID and attempt in CI.
+Use **Re-run all jobs** to reproduce a PR gate in a new attempt so all four artifacts carry the current attempt.
+The PR shard artifact includes the main driver's log and the exact diff alongside its status and results.
+The merged record holds the inventory in `mutants.json` and combines the shard outcomes in `outcomes.json`.
+A complete empty diff needs only the empty inventory.
+Each shard's own status is folded into the combined status, and the report names every shard that did not complete and why.
+A shard whose budget ran out makes the combined status `partial` (or `not-started`), one whose baseline failed makes it `baseline-failed`, and one that errored, ended without a status line (cancelled or killed by the job timeout) or uploaded nothing makes it `error`.
+A diff shard that claims to be complete must show a finished run with a successful baseline or evidence of an empty selection.
+A shard whose results cannot be read (a record cut off while it was written) is named as `unreadable` and makes the combined status `error`; the other shards are still reported, and a follow-up run whose record cannot be read is refused like one that exited abnormally.
+A shard's re-check and Mega EEST pass are not sharded again: they take the shard's mutants by name, and a shard applied after that selection would cut their own short list (see below).
+The diff join takes a follow-up outcome from the shard that ran the mutant in its primary pass, since cargo-mutants can include extra struct-field deletions in a follow-up.
+Each contributing diff follow-up must prove its own successful baseline and completion before the join combines its outcomes.
+An outcome for a mutant the inventory does not list, a second outcome for one mutant, or shard plans that do not add up to the inventory mean the shards and the inventory were built from different mutant sets: the combined status is `mismatch`, and `unplanned.txt` lists the outcomes that do not fit.
+Only `complete` passes the gate.
+A cancelled run is not scored.
 
 ## The gate
 
@@ -53,6 +115,33 @@ Policy is **no new survivors**: if a mutant on changed code survives and is not 
 To pass, either add a test that kills it, or — only if it is provably equivalent/dead — add a justified entry to `suppressions.toml`.
 The reported mutation score is informational.
 
+The gate reads a run **fail-closed**: it scores `outcomes.json`, and only a run that finished, whose baseline succeeded, and whose every selected mutant has an outcome.
+cargo-mutants rewrites `outcomes.json` after every outcome, so a run that stops part way leaves one that looks whole; the gate reads completion from the two things the producer writes for it.
+One is `end_time`, which stays null until the run finishes.
+The other is `mutants.json`, the selection written before any mutant is tested, which the outcomes must name exactly.
+`total_mutants` counts the outcomes recorded so far, not the mutants selected, and the gate does not read it.
+Missing results, a run that did not finish, a missing or failed baseline, or a selected mutant without an outcome fail the gate with the reason, instead of reading as nothing to test.
+A run that tested nothing passes only on the producer's own word for it: cargo-mutants' empty `mutants.json` when its filters leave no mutant, or, when `--in-diff` leaves none and cargo-mutants writes no results at all, the line it printed saying so, which the driver records in `no-mutants.txt`.
+
+A mutant that **timed out** was tested beside the others the run tests at once, each running the whole suite on the same cores, so the driver re-runs every unsuppressed one once, alone (`--jobs 1`, into `recheck/mutants.out`), and the gate takes that outcome for it.
+One caught alone is caught, one that survives alone is a survivor, and one that times out again stays inconclusive and fails the gate.
+A re-check that exits abnormally proves nothing by the files it left, so the driver records its exit in its results (`run-failed.txt`), and the gate refuses to score them, saying why.
+
+A mutant the tests **missed** — in the run, or in the re-check of one that timed out — may still change an outcome a case of the Mega EEST conformance suite pins.
+In the production scope the driver runs each such unsuppressed mutant once more, into `mega-eest/mutants.out`, with mega-evm's ignored `mega_eest` test as the only test (`--test mega_eest`, nextest's `--run-ignored only`), which runs `scripts/mega_eest.sh` in plain mode on the mutated tree; pass that directory to the gate as `--mega-eest`.
+One the suite catches counts as caught, one it times out on stays inconclusive, and the rest stay survivors.
+A catch counts only on the suite's own verdict: the `mega_eest` test fails on any failure of the script, a build or a fetch that never reached a case included, and cargo-mutants records every such failure as caught, so the gate reads the mutant's log and counts the kill only when the script's summary line there says `result=FAIL` (the cases ran, completely, and one failed or erred); a caught outcome without that line makes the results unscorable, as `run-failed.txt` does.
+The suite is fetched and its adapter built on the unmutated tree first, which must pass there; a warm-up that fails, or a run that exits abnormally, is recorded in those results as `run-failed.txt` and refused.
+The mutants run one at a time (`--jobs 1`), each with the machine's parallelism for the suite's cases, as the baseline ran; mutants side by side would build mega-evm and run the cases on the same cores against a timeout the baseline set alone.
+The pass counts against `MUTANTS_BUDGET`; one the budget stops is recorded as `run-failed.txt` and the status says `followup-stopped`, which never passes.
+It costs nothing while the tests catch every mutant.
+Otherwise it costs the warm-up (a cold build of the adapter's dependencies when the job's cache holds none, and one run of the suite), cargo-mutants' baseline in its build directory (another run of the suite), the copy of `./target` (now with the warm-up's `target/mega-eest`) into that build directory, and, per mutant, an incremental build of mega-evm for the `mega_eest` test and again for the adapter, and one plain run of the 930 cases: about three minutes a mutant on a 4-vCPU runner, estimated from local runs (30 s a mutant on 15 cores), not measured there.
+The mutants it runs are those the tests missed, plus any struct-field-deletion mutant in the first run's scope (below), whose outcome the gate does not read.
+`MUTANTS_MEGA_EEST=0` leaves the pass out, and the mutants it would have run stay survivors.
+The re-check and this run take the first run's own restriction (its `--in-diff` file or `-f` glob) beside their `--re` selections, because cargo-mutants 27.1.0 adds struct-field-deletion mutants without matching them against `--re`; the gate reads their outcomes only for the mutants it asked about.
+They never take the first run's `--shard`: cargo-mutants applies a shard after the `--re` selection, so it would cut the follow-up's own short list, extras included, and drop mutants it was asked to decide.
+A run with no restriction of its own (the full run, sharded or not) has the follow-ups name the files of their mutants instead (`-f`, from `mutation_gate.py timeout-re`/`missed-re --with-files`), which keeps the extras to those files.
+
 ## Suppressions (hybrid)
 
 A survivor that is *not* a real gap (an **equivalent mutant** that can't change behavior, or dead/defensive code) is recorded in `suppressions.toml` with a justification and reviewer.
@@ -60,16 +149,19 @@ Two granularities:
 
 - `kind = "function"` — a regex `pattern` matched against the mutant name; excluded before generation.
   For whole equivalent/dead functions.
-- `kind = "line"` — the exact `mutant` text; filtered from results.
+- `kind = "line"` — one mutant, named by its location (`file`, `line`, `column`) and its exact `mutant` text (without the `file:line:col: ` prefix); filtered from results.
   For a single survivor inside an otherwise-tested function.
+  The anchor keeps the entry to the reviewed mutant: the same mutation text elsewhere in the function, such as a newly added `&&`, stays gated.
+  When code above it moves the mutant, the entry stops matching and the mutant is gated again (fail closed); the hygiene job reports the entry as stale, with the location its text moved to, and it is re-anchored once its justification is checked against the new code.
+  An entry without a well-formed anchor is refused.
 
 Inline `#[mutants::skip]` on a function is also honored natively by cargo-mutants; prefer `suppressions.toml` when the decision needs a record.
 
 Adding a suppression is a reviewed decision — scrutinize it like disabling a test.
 
-A suppression that stops matching any mutant (its function was renamed/deleted, or its line text changed) silently becomes a permanent blind spot.
-The **Suppression Hygiene** job (the `orphan-suppressions` job in `.github/workflows/mutation.yml`) guards against this: it assembles the full mutant universe from both engines and runs `mutation_gate.py orphans`, failing if any suppression matches nothing.
-It runs on PRs that touch `suppressions.toml` or `src/`, and weekly.
+A suppression that stops matching any mutant (its function was renamed or deleted, its line moved, or its text changed) silently becomes a permanent blind spot, or, for a moved line, gates the reviewed mutant again.
+The **Suppression Hygiene** job (the `orphan-suppressions` job in `.github/workflows/mutation.yml`) guards against this: it assembles the full mutant universe from both engines and both scopes (`scripts/mutation_test.sh list --all`, `scripts/mutation_test.sh infra --list` and `umutate.py plan`) and runs `mutation_gate.py orphans`, failing if any suppression matches nothing.
+It runs on PRs that touch `suppressions.toml`, `src/` or the mutation tooling, and nightly.
 For dead code, prefer deleting it or `#[mutants::skip]` over a permanent `kind = "function"` exclude.
 
 ## Fixing survivors
@@ -81,12 +173,13 @@ Run the `improve-mutation-score` skill: it triages each survivor (equivalent vs.
 cargo-mutants applies a fixed, generic operator set and cannot be extended.
 To mutate mega-evm-specific constructs — starting with **spec gates**, the lever for backward-compatibility — there is a second engine built on [universalmutator](https://github.com/agroce/universalmutator) in `--comby` mode.
 
-The two engines are complementary and **share one gate**: both produce the `caught.txt`/`missed.txt` file contract that `scripts/mutation_gate.py` scores, so suppressions, the PR comment, and the exit code are identical for both.
+The two engines are complementary and **share one gate**: both write `outcomes.json` in cargo-mutants' shape, with the `caught.txt`/`missed.txt` lists beside it, which `scripts/mutation_gate.py` scores, so suppressions, the PR comment, and the exit code are identical for both.
+`umutate.py` keeps the same completion contract: it writes `mutants.json` with every mutant it selected before it tests any, and `outcomes.json`, with its `end_time`, only once every one has an outcome.
 
 ```
 cargo-mutants ─(mutation_test.sh)─┐
-                                  ├─► caught.txt / missed.txt ─► mutation_gate.py ─► gate
-custom packs ─(umutate.py)────────┘            (shared contract)        (shared)
+                                  ├─► outcomes.json ─► mutation_gate.py ─► gate
+custom packs ─(umutate.py)────────┘  (shared contract)      (shared)
 ```
 
 ## Operator packs
@@ -147,5 +240,8 @@ python3 scripts/umutate.py run --packs spec-gate --diff origin/main --output tar
 
 ## Suppressions and CI
 
-Spec-gate equivalents (e.g. a gate guarding a state no test exercises — expect a meaningful rate) go in the **same** `suppressions.toml`, as `kind = "line"` entries matching the mutant text, prefixed with the pack name.
-The PR gate runs diff-scoped (instant on PRs that touch no gate lines); the full crate sweep runs on a nightly schedule (the `spec-gate-sweep` job in `.github/workflows/mutation.yml`).
+Spec-gate equivalents (e.g. a gate guarding a state no test exercises — expect a meaningful rate) go in the **same** `suppressions.toml`, as `kind = "line"` entries anchored like any other (spec-gate mutants sit at column 1 of their line), whose text starts with the pack name.
+A single-spec engine has no spec gate for these operators to mutate, so mutation CI does not run the pack.
+The operator pack stays on disk.
+Suppression hygiene still plans it and accepts an empty plan.
+The commands above run it by hand once a later spec has a gate to mutate.

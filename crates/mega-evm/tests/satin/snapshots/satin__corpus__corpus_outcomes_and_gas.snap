@@ -1,0 +1,96 @@
+---
+source: crates/mega-evm/tests/satin/corpus.rs
+expression: gas
+---
+{
+  "access_list_warm_slots_and_account": [
+    {
+      "outcome": "success",
+      "gas_used": 181749
+    }
+  ],
+  "create_success": [
+    {
+      "outcome": "success",
+      "gas_used": 363381
+    }
+  ],
+  "eip7702_delegate_new_authority": [
+    {
+      "outcome": "success",
+      "gas_used": 520385
+    }
+  ],
+  "logs_all_topic_counts": [
+    {
+      "outcome": "success",
+      "gas_used": 98665
+    }
+  ],
+  "nested_call_revert_with_spill": [
+    {
+      "outcome": "success",
+      "gas_used": 183060
+    }
+  ],
+  "precompile_ecrecover": [
+    {
+      "outcome": "success",
+      "gas_used": 399062
+    },
+    {
+      "outcome": "success",
+      "gas_used": 80157
+    }
+  ],
+  "precompile_modexp": [
+    {
+      "outcome": "success",
+      "gas_used": 392802
+    },
+    {
+      "outcome": "success",
+      "gas_used": 90338
+    }
+  ],
+  "selfdestruct_created_in_same_tx_to_existing_account": [
+    {
+      "outcome": "success",
+      "gas_used": 184965
+    }
+  ],
+  "sstore_set_spills": [
+    {
+      "outcome": "success",
+      "gas_used": 382917
+    }
+  ],
+  "system_call": [
+    {
+      "outcome": "success",
+      "gas_used": 220051
+    }
+  ],
+  "test_calldata_floor_with_sstore_fork_Amsterdam_state_test": [
+    {
+      "outcome": "success",
+      "gas_used": 182450
+    }
+  ],
+  "test_nested_state_gas_refund_consumed_at_depth_fork_Amsterdam_state_test_consume_deepest_depth_10_sstore_restoration": [
+    {
+      "outcome": "success",
+      "gas_used": 305844
+    }
+  ],
+  "two_txs_sequential": [
+    {
+      "outcome": "success",
+      "gas_used": 382917
+    },
+    {
+      "outcome": "success",
+      "gas_used": 62117
+    }
+  ]
+}

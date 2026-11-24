@@ -2,16 +2,14 @@
 //!
 //! All business logic lives in the `mega_evme` library crate (`src/lib.rs`).
 //! This binary is intentionally minimal: parse CLI arguments, install the panic
-//! hook, dispatch to the parsed command, and exit.
+//! hook, hand the arguments to the engine the spec names, and exit.
 
-use clap::Parser;
-use mega_evme::{
-    cmd::{Error, MainCmd},
-    set_thread_panic_hook,
-};
+use mega_evme::set_thread_panic_hook;
 
-#[tokio::main]
-async fn main() -> std::result::Result<(), Error> {
+#[tokio::main(flavor = "multi_thread")]
+async fn main() {
     set_thread_panic_hook();
-    MainCmd::parse().run().await.inspect_err(|e| println!("{e:?}"))
+    if let Err(error) = mega_evme::cmd::run_cli(std::env::args_os().collect()).await {
+        mega_evme::cmd::report_cli_error(&error);
+    }
 }

@@ -1,0 +1,20 @@
+---
+source: crates/mega-evm/tests/tracers/harness.rs
+expression: "&traced.prestate(true)"
+---
+{
+  "post": {
+    "0x0000000000000000000000000000000000400000": {
+      "nonce": 1
+    },
+    "0x84b48846131a217635c4abd490c5e11486253fd9": {
+      "code": "0x5f5ff3",
+      "nonce": 1
+    }
+  },
+  "pre": {
+    "0x0000000000000000000000000000000000400000": {
+      "balance": "0x38d7ea4c68000"
+    }
+  }
+}

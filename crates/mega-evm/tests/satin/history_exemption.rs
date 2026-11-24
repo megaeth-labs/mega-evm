@@ -1,0 +1,468 @@
+//! History gas is charged to every transaction, including deposits and the protocol's own.
+//! Only system calls are exempt; their state gas and resource usage are still counted.
+
+use alloy_evm::Evm;
+use alloy_op_evm::OpTx;
+use alloy_primitives::{address, Address, Bytes, TxKind, B256, U256};
+use alloy_sol_types::SolCall;
+use mega_evm::{
+    constants::{
+        ACCOUNT_STATE_GAS, COST_PER_HISTORY_BYTE, COST_PER_STATE_BYTE, SLOT_STATE_GAS,
+        TX_GAS_LIMIT_CAP,
+    },
+    spec_cfg,
+    system::{IOracle, MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE},
+    test_utils::{
+        neutral_cfg, op_transaction, zero_fee_l1_block_info, BytecodeBuilder, MemoryDatabase,
+    },
+    transaction_body_bytes, EthSpecId, EvmTxRuntimeLimits, LimitUsage, MegaContext, MegaEvm,
+    MegaEvmError, MegaHandler, MegaSpecId, MegaTransaction, MegaTransactionOutcome, LOG_BASE_SIZE,
+    TX_BODY_SIZE, WRITE_RECORD_SIZE,
+};
+use revm::{
+    bytecode::opcode::{CALL, CREATE, LOG0, POP},
+    context::{CfgEnv, ContextSetters, TxEnv},
+    handler::{EthFrame, Handler, SystemCallTx},
+    inspector::{InspectorHandler, NoOpInspector},
+    interpreter::interpreter::EthInterpreter,
+    ExecuteEvm,
+};
+
+use crate::common::{
+    account_share, context, create_share, deposit, runs_at_measurement_prices, slot_share,
+};
+
+const CALLER: Address = address!("0000000000000000000000000000000000400000");
+const CONTRACT: Address = address!("0000000000000000000000000000000000400001");
+const PAYEE: Address = address!("0000000000000000000000000000000000400002");
+/// A contract that writes its slot 0 and stops.
+const STORER: Address = address!("0000000000000000000000000000000000400003");
+
+/// Room for the state gas of a new slot, a new account and a deployment.
+const GAS_LIMIT: u64 = 50_000_000;
+
+/// The program every transaction here runs: a new slot, a log, a transfer that creates its
+/// recipient, and a deployment of [`DEPLOYED_BYTES`] bytes — one of each history site the engine
+/// charges, including the one revm charges itself out of the schedule.
+fn program() -> Bytes {
+    program_deploying(DEPLOYED_BYTES)
+}
+
+/// The same program with a creation that deploys `len` bytes.
+fn program_deploying(len: u64) -> Bytes {
+    BytecodeBuilder::default()
+        .sstore(U256::from(1), U256::from(1))
+        .push_number(0u64)
+        .push_number(32u64)
+        .push_number(0u64)
+        .append(LOG0)
+        // CALL(gas, PAYEE, 1, 0, 0, 0, 0)
+        .push_number(0u64)
+        .push_number(0u64)
+        .push_number(0u64)
+        .push_number(0u64)
+        .push_number(1u64)
+        .push_address(PAYEE)
+        .push_number(1_000_000u64)
+        .append(CALL)
+        .append(POP)
+        // `PUSH1 len; PUSH0; RETURN` in memory, then a CREATE over those four bytes.
+        .mstore(0, [0x60, len as u8, 0x5f, 0xf3])
+        .push_number(4u64)
+        .push_number(0u64)
+        .push_number(0u64)
+        .append(CREATE)
+        .append(POP)
+        .stop()
+        .build()
+}
+
+/// Bytes the program's creation deploys, which the schedule prices at a history byte each.
+const DEPLOYED_BYTES: u64 = 32;
+
+/// The history bytes a user transaction running the program from [`CALLER`] appends: its body
+/// with no calldata; the program's four write records — the new slot, then `CONTRACT` (the
+/// transfer's sender and the creator, recorded once: the transfer changed it, and its nonce bump
+/// adds nothing), `PAYEE` and the created account; its log of one word with no topic; and the
+/// deployed code. The transfer's log is data size and appends no history.
+const PROGRAM_HISTORY_BYTES: u64 =
+    TX_BODY_SIZE + 4 * WRITE_RECORD_SIZE + (LOG_BASE_SIZE + 32) + DEPLOYED_BYTES;
+
+/// The state gas the program adds, exempt or not: the new slot, `PAYEE`'s account, the created
+/// account and the code it deploys, in minimum-size buckets.
+const PROGRAM_STATE_GAS: u64 =
+    SLOT_STATE_GAS + 2 * ACCOUNT_STATE_GAS + DEPLOYED_BYTES * COST_PER_STATE_BYTE;
+
+fn db() -> MemoryDatabase {
+    MemoryDatabase::default()
+        .account_balance(CALLER, U256::from(10u64.pow(18)))
+        .account_balance(MEGA_SYSTEM_ADDRESS, U256::ZERO)
+        .account_balance(CONTRACT, U256::from(10u64.pow(9)))
+        .account_code(CONTRACT, program())
+        .account_code(ORACLE_CONTRACT_ADDRESS, ORACLE_CONTRACT_CODE)
+        .sequencer_registry(MEGA_SYSTEM_ADDRESS)
+}
+
+/// A call to `to` from `caller`.
+fn call_from(caller: Address, to: Address) -> MegaTransaction {
+    OpTx(op_transaction(TxEnv {
+        caller,
+        kind: TxKind::Call(to),
+        gas_limit: GAS_LIMIT,
+        ..Default::default()
+    }))
+}
+
+/// The slot of the Oracle the system transaction sets, and the value it sets it to.
+const ORACLE_SLOT: U256 = U256::from_limbs([7, 0, 0, 0]);
+const ORACLE_VALUE: B256 = B256::repeat_byte(0x5a);
+
+/// The protocol's own transaction: the system address setting [`ORACLE_SLOT`] of the Oracle, a
+/// contract it may call, through `setSlot`, which only the system address may call.
+fn system_tx() -> MegaTransaction {
+    let mut tx = call_from(MEGA_SYSTEM_ADDRESS, ORACLE_CONTRACT_ADDRESS);
+    tx.0.base.data =
+        IOracle::setSlotCall { slot: ORACLE_SLOT, value: ORACLE_VALUE }.abi_encode().into();
+    tx
+}
+
+/// The value `outcome` left in the Oracle's [`ORACLE_SLOT`], if it changed the slot.
+fn written_oracle_slot(outcome: &MegaTransactionOutcome) -> Option<B256> {
+    let slot = outcome.state.get(&ORACLE_CONTRACT_ADDRESS)?.storage.get(&ORACLE_SLOT)?;
+    slot.is_changed().then(|| B256::from(slot.present_value))
+}
+
+/// Runs `tx` and reports its history and state ledgers, and the outcome they are read from.
+fn ledgers(tx: MegaTransaction) -> (u64, u64, MegaTransactionOutcome) {
+    let outcome =
+        MegaEvm::new(context(db())).execute_transaction(tx).expect("the transaction is valid");
+    assert!(outcome.result.is_success(), "{:?}", outcome.result);
+    (outcome.gas.history, outcome.gas.state, outcome)
+}
+
+/// The control: a user transaction running the program pays for every byte of it, on top of its
+/// own body.
+#[test]
+fn test_a_user_transaction_pays_history_for_the_program() {
+    if runs_at_measurement_prices() {
+        return;
+    }
+    let (history, state, outcome) = ledgers(call_from(CALLER, CONTRACT));
+    assert!(history > 0, "a user transaction pays for the bytes it appends");
+    assert!(state > 0, "and for the state it adds");
+    assert_eq!(history, PROGRAM_HISTORY_BYTES * COST_PER_HISTORY_BYTE, "every byte of the program");
+    assert_eq!(outcome.gas.history_bytes, PROGRAM_HISTORY_BYTES);
+    assert_eq!(state, PROGRAM_STATE_GAS, "the slot, the two accounts and the code");
+}
+
+/// The one history charge revm makes itself is the deployed code's, out of the schedule; the
+/// exemption reaches it too, by handing an exempt transaction a schedule that prices a deposited
+/// byte at zero.
+///
+/// The program deploys thirty-two bytes. Transactions pay for them, and a system call running
+/// the same program pays no history.
+#[test]
+fn test_the_exempt_schedule_prices_a_deposited_byte_at_zero() {
+    if runs_at_measurement_prices() {
+        return;
+    }
+    let deployed = |code: Bytes| {
+        let db = db().account_code(CONTRACT, code);
+        let outcome = MegaEvm::new(context(db))
+            .execute_transaction(call_from(CALLER, CONTRACT))
+            .expect("the transaction is valid");
+        assert!(outcome.result.is_success(), "{:?}", outcome.result);
+        outcome.gas.history
+    };
+    let thirty_two = deployed(program());
+    let nothing = deployed(program_deploying(0));
+
+    assert_eq!(
+        thirty_two - nothing,
+        DEPLOYED_BYTES * mega_evm::constants::COST_PER_HISTORY_BYTE,
+        "a user transaction pays a history byte per deployed byte",
+    );
+    let mut evm = MegaEvm::new(context(db()));
+    Evm::transact_system_call(&mut evm, CALLER, CONTRACT, Bytes::new()).unwrap();
+    assert_eq!(evm.ctx().additional_limit().history_gas_spent(), 0);
+}
+
+/// Both field-based forms of system origin pay every history site, including deposited code.
+#[test]
+fn test_system_originated_transactions_pay_history_for_the_program() {
+    if runs_at_measurement_prices() {
+        return;
+    }
+    let mut stamped = deposit(call_from(CALLER, CONTRACT));
+    stamped.0.deposit.source_hash = mega_evm::system::MEGA_SYSTEM_TRANSACTION_SOURCE_HASH;
+    let from_system_caller = call_from(mega_evm::SYSTEM_ADDRESS, CONTRACT);
+    for (name, mut tx) in [("source hash", stamped), ("system caller", from_system_caller)] {
+        tx.0.base.data = Bytes::from_static(b"history");
+        let db = db().account_balance(mega_evm::SYSTEM_ADDRESS, U256::from(10u64.pow(18)));
+        let mut evm = MegaEvm::new(context(db));
+
+        let outcome = evm.execute_transaction(tx).expect("the transaction is included");
+
+        assert!(outcome.result.is_success(), "{name}: {:?}", outcome.result);
+        assert!(evm.ctx().is_system_originated(), "{name}");
+        assert_eq!(
+            outcome.gas.history,
+            (PROGRAM_HISTORY_BYTES + 7) * COST_PER_HISTORY_BYTE,
+            "{name}"
+        );
+        assert_eq!(outcome.gas.history_bytes, PROGRAM_HISTORY_BYTES + 7, "{name}");
+        assert_eq!(outcome.gas.state, PROGRAM_STATE_GAS, "{name}");
+        assert!(
+            evm.ctx().bucket_multipliers().cached_buckets().len() == 0,
+            "{name}: minimum bucket without a lookup"
+        );
+    }
+}
+
+/// A promoted Mega System Transaction pays for its body, calldata and the Oracle slot it writes.
+#[test]
+fn test_a_system_transaction_pays_history_gas() {
+    if runs_at_measurement_prices() {
+        return;
+    }
+    // The system address may only call a whitelisted contract, so the program runs there: the
+    // Oracle's own code is what a system transaction reaches, and `setSlot` writes a slot of its
+    // own.
+    let tx = system_tx();
+    let outcome =
+        MegaEvm::new(context(db())).execute_transaction(tx).expect("the transaction is valid");
+    let bytes = transaction_body_bytes(&system_tx()) + WRITE_RECORD_SIZE;
+    assert_eq!(outcome.gas.history, bytes * COST_PER_HISTORY_BYTE);
+    assert_eq!(outcome.gas.history_bytes, bytes);
+    assert!(outcome.result.is_success(), "{:?}", outcome.result);
+    assert_eq!(written_oracle_slot(&outcome), Some(ORACLE_VALUE), "it wrote the Oracle's slot");
+    assert_eq!(
+        outcome.usage,
+        LimitUsage {
+            data_size: transaction_body_bytes(&system_tx()) + WRITE_RECORD_SIZE,
+            write_records: 1,
+            state_growth: 2,
+        },
+        "the body and the slot's record pay history, and the new slot \
+         and the system address's new account are its state growth",
+    );
+    // The state is charged as usual: the new slot, and the system address's own account, which
+    // the database leaves empty, so the transaction creates it, as it does a deposit's caller.
+    assert_eq!(outcome.gas.state, SLOT_STATE_GAS + ACCOUNT_STATE_GAS);
+}
+
+/// A system call pays no history gas either: it is the protocol running, not a transaction
+/// anybody sent, and it has no sender to charge.
+#[test]
+fn test_a_system_call_pays_no_history_gas() {
+    if runs_at_measurement_prices() {
+        return;
+    }
+    let mut evm = MegaEvm::new(context(db()));
+    let result = Evm::transact_system_call(&mut evm, CALLER, CONTRACT, Bytes::new())
+        .expect("the system call runs");
+    assert!(result.result.is_success(), "{:?}", result.result);
+    assert_eq!(
+        evm.ctx().additional_limit().history_gas_spent(),
+        0,
+        "a system call pays no history gas",
+    );
+    assert!(result.result.gas().state_gas_spent_final() > 0, "the exemption is history's alone");
+    assert_eq!(result.result.gas().state_gas_spent_final(), PROGRAM_STATE_GAS);
+    assert_eq!(evm.ctx().additional_limit().history_bytes(), 0);
+}
+
+/// Every transaction reports its retained history bytes, both below and above the execution
+/// cap. Above the cap its reservoir pays history and state. System calls report no history.
+#[test]
+fn test_only_a_system_call_reports_no_history_bytes() {
+    if runs_at_measurement_prices() {
+        return;
+    }
+    const RESERVOIR: u64 = 100_000_000;
+    for gas_limit in [GAS_LIMIT, TX_GAS_LIMIT_CAP + RESERVOIR] {
+        // `shares` is what regular gas paid of the state charges, their legacy shares: the
+        // program's fresh slot, the account its value call creates and the account it creates;
+        // the system transaction's fresh slot in the Oracle.
+        let run = |mut tx: MegaTransaction, shares: u64| {
+            tx.0.base.gas_limit = gas_limit;
+            let outcome = MegaEvm::new(context(db()))
+                .execute_transaction(tx)
+                .expect("the transaction is valid");
+            let gas = outcome.gas;
+            if gas_limit > TX_GAS_LIMIT_CAP {
+                assert_eq!(
+                    gas.reservoir_remaining,
+                    RESERVOIR + shares - gas.state - gas.history,
+                    "the reservoir paid the state and history ledgers but the legacy shares",
+                );
+            }
+            outcome
+        };
+        let program_shares = slot_share() + account_share() + create_share();
+
+        let paying = run(call_from(CALLER, CONTRACT), program_shares).gas;
+        assert!(paying.history_bytes > 0);
+        assert_eq!(
+            paying.history,
+            paying.history_bytes * mega_evm::constants::COST_PER_HISTORY_BYTE,
+            "at {gas_limit}: the control pays for every byte it reports",
+        );
+
+        let deposit = run(deposit(call_from(CALLER, CONTRACT)), program_shares).gas;
+        assert_eq!(
+            (deposit.history, deposit.history_bytes),
+            (PROGRAM_HISTORY_BYTES * COST_PER_HISTORY_BYTE, PROGRAM_HISTORY_BYTES),
+            "at {gas_limit}: a deposit"
+        );
+        assert!(deposit.state > 0, "at {gas_limit}: state is charged too");
+        let system = run(system_tx(), slot_share());
+        assert!(system.result.is_success(), "at {gas_limit}: {:?}", system.result);
+        assert_eq!(written_oracle_slot(&system), Some(ORACLE_VALUE), "at {gas_limit}");
+        let system = system.gas;
+        assert_eq!(
+            (system.history, system.history_bytes),
+            (
+                (transaction_body_bytes(&system_tx()) + WRITE_RECORD_SIZE) * COST_PER_HISTORY_BYTE,
+                transaction_body_bytes(&system_tx()) + WRITE_RECORD_SIZE
+            ),
+            "at {gas_limit}: a system transaction",
+        );
+    }
+
+    let mut evm = MegaEvm::new(context(db()));
+    Evm::transact_system_call(&mut evm, CALLER, CONTRACT, Bytes::new())
+        .expect("the system call runs");
+    assert_eq!(evm.ctx().additional_limit().history_bytes(), 0, "a system call");
+}
+
+/// The exemption belongs to one transaction: the next transaction on the same EVM pays again.
+#[test]
+fn test_the_exemption_does_not_outlive_its_transaction() {
+    if runs_at_measurement_prices() {
+        return;
+    }
+    let mut evm = MegaEvm::new(context(db()));
+
+    Evm::transact_system_call(&mut evm, CALLER, CONTRACT, Bytes::new()).unwrap();
+    assert_eq!(evm.ctx().additional_limit().history_gas_spent(), 0);
+
+    // Nothing was committed, so the sender's nonce is where it was.
+    let paying =
+        evm.execute_transaction(call_from(CALLER, CONTRACT)).expect("the transaction is valid");
+    assert!(paying.result.is_success(), "{:?}", paying.result);
+    assert!(paying.gas.history > 0, "the next transaction pays for its own bytes");
+    assert_eq!(paying.gas.history, PROGRAM_HISTORY_BYTES * COST_PER_HISTORY_BYTE, "all of them");
+}
+
+/// Whether a transaction pays history, and whether it is the protocol's own, are decided when the
+/// transaction is prepared to run, from what it is: a transaction set in the context's hands but
+/// not run yet changes neither. After a user's transaction, a deposit or a system transaction set
+/// in its place still answers as the user's transaction did; after a system transaction, a user's
+/// transaction still answers that it is the protocol's own. Each answers for itself once it runs.
+#[test]
+fn test_what_a_transaction_pays_is_decided_when_it_is_prepared() {
+    let user = call_from(CALLER, CONTRACT);
+    // (case, transaction, pays history, the protocol's own)
+    let cases = [
+        ("a user's transaction", user.clone(), true, false),
+        ("a user's deposit", deposit(user), true, false),
+        ("a system transaction", system_tx(), true, true),
+    ];
+    for (ran, run, pays, own) in cases.clone() {
+        for (set, replacement, its_pays, its_own) in cases.clone() {
+            let mut evm = MegaEvm::new(context(db()));
+            evm.execute_transaction(run.clone()).expect("the transaction is valid");
+            assert_eq!(evm.ctx().prices_history(), pays, "{ran}");
+            assert_eq!(evm.ctx().is_system_originated(), own, "{ran}");
+
+            evm.ctx_mut().set_tx(replacement.clone());
+            assert_eq!(evm.ctx().prices_history(), pays, "{ran}, then {set} set and not run");
+            assert_eq!(evm.ctx().is_system_originated(), own, "{ran}, then {set} set and not run");
+
+            evm.execute_transaction(replacement).expect("the transaction is valid");
+            assert_eq!(evm.ctx().prices_history(), its_pays, "{ran}, then {set} run");
+            assert_eq!(evm.ctx().is_system_originated(), its_own, "{ran}, then {set} run");
+        }
+    }
+}
+
+/// Whether a context prices history is decided when its configuration is switched to the neutral
+/// one, as it is when a transaction is prepared, and kept until the next preparation decides
+/// again: switching back with `with_cfg` alone changes nothing. So a system call run straight
+/// through the handler's public entry points, plain or inspected, which prepare nothing, pays no
+/// history on a context switched to the neutral configuration and back: it spends what the same
+/// call spends where the neutral configuration still runs, and on exactly that gas limit it keeps
+/// the slot it writes.
+#[test]
+fn test_a_context_switched_back_from_the_neutral_configuration_prices_no_history_until_prepared() {
+    let evm = |switched_back: bool, gas_limit: Option<u64>| {
+        let db = MemoryDatabase::default()
+            .account_balance(CALLER, U256::from(10u64.pow(18)))
+            .account_code(
+                STORER,
+                BytecodeBuilder::default().sstore(U256::ZERO, U256::from(1)).stop().build(),
+            );
+        let ctx = MegaContext::new(db, MegaSpecId::SATIN)
+            .with_chain(zero_fee_l1_block_info())
+            .with_tx_runtime_limits(EvmTxRuntimeLimits::no_limits());
+        let mut ctx = if switched_back {
+            ctx.with_neutral_cfg(neutral_cfg(EthSpecId::OSAKA).expect("Osaka has a configuration"))
+                .with_cfg(CfgEnv::new_with_spec(MegaSpecId::SATIN))
+        } else {
+            // The neutral configuration on the spec's own fields: on this call, which starts no
+            // frame below its own, it differs from the spec's in the history it prices alone. A
+            // frame it started would also take the whole of its caller's reservoir and budgets,
+            // which the neutral configuration forwards whole whatever schedule it is given.
+            ctx.with_neutral_cfg(spec_cfg(CfgEnv::new_with_spec(MegaSpecId::SATIN)))
+        };
+        let mut call = MegaTransaction::new_system_tx_with_caller(CALLER, STORER, Bytes::new());
+        if let Some(gas_limit) = gas_limit {
+            call.0.base.gas_limit = gas_limit;
+        }
+        ctx.set_tx(call);
+        MegaEvm::new(ctx)
+    };
+    // (gas used, history gas, history bytes, slot 0 of STORER)
+    let run = |mut evm: MegaEvm<MemoryDatabase, NoOpInspector>, inspected: bool| {
+        let mut handler = MegaHandler::<
+            _,
+            MegaEvmError<core::convert::Infallible>,
+            EthFrame<EthInterpreter>,
+        >::new();
+        let result = if inspected {
+            handler.inspect_run_system_call(&mut evm)
+        } else {
+            handler.run_system_call(&mut evm)
+        };
+        let result = result.expect("the system call runs");
+        let layer = evm.ctx().additional_limit();
+        let (history, bytes) = (layer.history_gas_spent(), layer.history_bytes());
+        let state = ExecuteEvm::finalize(&mut evm);
+        let slot = state
+            .get(&STORER)
+            .and_then(|account| account.storage.get(&U256::ZERO))
+            .map(|slot| slot.present_value)
+            .unwrap_or_default();
+        assert!(result.is_success(), "inspected {inspected}: {result:?}");
+        (result.tx_gas_used(), history, bytes, slot)
+    };
+
+    for inspected in [false, true] {
+        let (spent, history, bytes, slot) = run(evm(false, None), inspected);
+        assert_eq!((history, bytes, slot), (0, 0, U256::from(1)), "inspected {inspected}: neutral");
+
+        let back = evm(true, None);
+        assert!(!back.ctx().prices_history(), "the switch decided it, and with_cfg left it");
+        assert_eq!(
+            run(back, inspected),
+            (spent, 0, 0, U256::from(1)),
+            "inspected {inspected}: switched back, the same call at the same price",
+        );
+        assert_eq!(
+            run(evm(true, Some(spent)), inspected),
+            (spent, 0, 0, U256::from(1)),
+            "inspected {inspected}: on exactly what it spends, it keeps its slot",
+        );
+    }
+}

@@ -160,13 +160,13 @@ The output uses the same JSON format as prestate files, so you can feed it direc
 Each top-level key is a checksummed or lowercase hex address.
 The value is an account object with these fields:
 
-| Field      | Type         | Description                       |
-| ---------- | ------------ | --------------------------------- |
-| `balance`  | hex quantity | Account balance in wei            |
-| `nonce`    | hex quantity | Transaction nonce                 |
-| `code`     | hex bytes    | Deployed bytecode (`0x` for EOAs) |
-| `codeHash` | hex bytes    | Keccak256 hash of `code`          |
-| `storage`  | object       | Map of storage slot to value      |
+| Field      | Type                | Description                                                                 |
+| ---------- | ------------------- | --------------------------------------------------------------------------- |
+| `balance`  | hex quantity        | Account balance in wei                                                      |
+| `nonce`    | hex quantity        | Transaction nonce                                                           |
+| `code`     | hex bytes or `null` | Deployed bytecode (`0x` for EOAs); `null` names the code by `codeHash` only |
+| `codeHash` | hex bytes           | Keccak256 hash of `code`                                                    |
+| `storage`  | object              | Map of storage slot to value                                                |
 
 Example:
 
@@ -201,16 +201,37 @@ All numeric values use Ethereum quantity encoding:
 - `balance` is in wei.
 - Storage keys and values are 32-byte hex strings (zero-padded to 64 hex characters).
 
+An account with `"code": null` and a `codeHash` that is not the empty code's names its code by hash only.
+A state dump writes such an account when the code was never fetched, and loads the code into the dump first whenever the database has it.
+Loading a file that holds one:
+
+- With `--fork`, the code is fetched from the RPC endpoint at the account's address and checked against `codeHash`.
+  A code that does not match is an error.
+- Without `--fork`, there is nothing to fetch it from, and the file is refused with an error naming the account.
+  Put the code in the file, or run with `--fork`.
+
+A `code` that is present is checked against `codeHash` and refused if they differ.
+
+### Overrides
+
+`--balance`, `--faucet` and `--storage` name one field of an account and leave the others as the prestate or the fork holds them.
+They hold for an account `run` or `tx` adds code to afterwards: the `run` receiver and the system contracts.
+
+A Satin `run` or `tx` puts the six system contracts and the EIP-7997 factory where the state does not hold their code, as a chain that ran `Rex6` holds them: an address that already holds the code is left as it is.
+Without `--fork` an address that lacks it gets the account `Rex6` left — the six at nonce 0, the `SequencerRegistry` naming `0xa887dcb9d5f39ef79272801d05abdf707cfbbd1d` in every role, the factory at nonce 1 — over any account the prestate file holds there, whose nonce and balance it replaces and whose slots it writes its own over; with `--fork` it gets the code alone, its nonce, balance and storage as the prestate or the fork holds them.
+Either way the overrides above hold over the account installed, whether or not the prestate file holds one at the address.
+
 ## RPC Cache and Retry
 
 When using fork mode, `mega-evme` caches RPC responses to avoid redundant network calls and supports configurable retry behavior for resilience against transient failures.
 
 These options take effect only when an RPC endpoint is actually contacted: on `run` and `tx` that requires `--fork` (without `--fork` they are accepted but silently ignored); on `replay` they apply to its `--rpc` fetches (an offline `--rpc.replay-file` run contacts no endpoint and does not use them).
 
-### Per-Chain Cache Files
+### Per-Endpoint Cache Files
 
-Each chain gets its own cache file named `rpc-cache-{chain_id}.json` inside the cache directory.
-The per-chain filename makes cross-chain contamination impossible by construction: a cache populated from mainnet physically cannot be loaded during a testnet run.
+Each endpoint of a chain gets its own cache file named `rpc-cache-{chain_id}-{endpoint}.json`.
+`{endpoint}` is a short hash of the URL with any userinfo removed, so the name does not contain the URL.
+A cache populated from one endpoint cannot be loaded for another, including another endpoint of the same chain.
 
 The default cache directory is the platform cache directory:
 
@@ -219,12 +240,12 @@ The default cache directory is the platform cache directory:
 
 ### Cache Flags
 
-| Flag                     | Type  | Default            | Description                                                                                                              |
-| ------------------------ | ----- | ------------------ | ------------------------------------------------------------------------------------------------------------------------ |
-| `--rpc.cache-size <N>`   | `u32` | `10000`            | Maximum number of items in the in-memory RPC LRU cache. Set to `0` to disable the cache layer entirely.                  |
-| `--rpc.cache-dir <PATH>` | path  | Platform cache dir | Directory for per-chain cache files. Each chain's cache is stored as `{cache_dir}/rpc-cache-{chain_id}.json`.            |
-| `--rpc.no-cache-file`    | flag  | `false`            | Disable on-disk cache persistence. The in-memory LRU cache still applies — use `--rpc.cache-size 0` to disable that too. |
-| `--rpc.clear-cache`      | flag  | `false`            | Delete the current chain's cache file before loading it. Recovery path for a polluted or corrupt cache.                  |
+| Flag                     | Type  | Default            | Description                                                                                                                                    |
+| ------------------------ | ----- | ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--rpc.cache-size <N>`   | `u32` | `10000`            | Maximum number of items in the in-memory RPC LRU cache. Set to `0` to disable the cache layer entirely.                                        |
+| `--rpc.cache-dir <PATH>` | path  | Platform cache dir | Directory for per-endpoint cache files, `{cache_dir}/rpc-cache-{chain_id}-{endpoint}.json`. `{endpoint}` hashes the URL with userinfo removed. |
+| `--rpc.no-cache-file`    | flag  | `false`            | Disable on-disk cache persistence. The in-memory LRU cache still applies — use `--rpc.cache-size 0` to disable that too.                       |
+| `--rpc.clear-cache`      | flag  | `false`            | Delete this endpoint's cache file before loading it. Recovery path for a polluted or corrupt cache.                                            |
 
 ### Retry Flags
 

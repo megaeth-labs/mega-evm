@@ -1,0 +1,235 @@
+---
+source: crates/mega-evm/tests/tracers/harness.rs
+expression: "&redacted(&traced.struct_logs())"
+---
+{
+  "failed": true,
+  "gas": "[gas]",
+  "returnValue": "MegaLimitExceeded(2, [gas])",
+  "structLogs": [
+    {
+      "depth": 1,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "TIMESTAMP",
+      "pc": 0,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 1,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "POP",
+      "pc": 1,
+      "refund": "[gas]",
+      "stack": [
+        "0x6553f100"
+      ]
+    },
+    {
+      "depth": 1,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMPDEST",
+      "pc": 2,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 1,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "PUSH8",
+      "pc": 3,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 1,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMP",
+      "pc": 12,
+      "refund": "[gas]",
+      "stack": [
+        "0x2"
+      ]
+    },
+    {
+      "depth": 1,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMPDEST",
+      "pc": 2,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 1,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "PUSH8",
+      "pc": 3,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 1,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMP",
+      "pc": 12,
+      "refund": "[gas]",
+      "stack": [
+        "0x2"
+      ]
+    },
+    {
+      "depth": 1,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMPDEST",
+      "pc": 2,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 1,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "PUSH8",
+      "pc": 3,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 1,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMP",
+      "pc": 12,
+      "refund": "[gas]",
+      "stack": [
+        "0x2"
+      ]
+    },
+    {
+      "depth": 1,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMPDEST",
+      "pc": 2,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 1,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "PUSH8",
+      "pc": 3,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 1,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMP",
+      "pc": 12,
+      "refund": "[gas]",
+      "stack": [
+        "0x2"
+      ]
+    },
+    {
+      "depth": 1,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMPDEST",
+      "pc": 2,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 1,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "PUSH8",
+      "pc": 3,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 1,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMP",
+      "pc": 12,
+      "refund": "[gas]",
+      "stack": [
+        "0x2"
+      ]
+    },
+    {
+      "depth": 1,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMPDEST",
+      "pc": 2,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 1,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "PUSH8",
+      "pc": 3,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 1,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMP",
+      "pc": 12,
+      "refund": "[gas]",
+      "stack": [
+        "0x2"
+      ]
+    },
+    {
+      "depth": 1,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMPDEST",
+      "pc": 2,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 1,
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "PUSH8",
+      "pc": 3,
+      "refund": "[gas]",
+      "stack": []
+    },
+    {
+      "depth": 1,
+      "error": "Some(OutOfGas)",
+      "gas": "[gas]",
+      "gasCost": "[gas]",
+      "op": "JUMP",
+      "pc": 12,
+      "refund": "[gas]",
+      "stack": [
+        "0x2"
+      ]
+    }
+  ]
+}

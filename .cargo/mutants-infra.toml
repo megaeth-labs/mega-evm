@@ -19,4 +19,6 @@ exclude_globs = ["**/generated/**"]
 
 minimum_test_timeout = 120
 timeout_multiplier = 3.0
+# As in .cargo/mutants.toml: seeded from the driver's warm build, incrementally with
+# CARGO_INCREMENTAL=1.
 copy_target = true

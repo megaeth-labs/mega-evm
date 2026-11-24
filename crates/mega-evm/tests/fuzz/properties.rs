@@ -1,0 +1,915 @@
+//! The properties a single transaction must hold, one test each.
+//!
+//! Every property draws its cases from the same generators, runs the case on a fresh EVM and
+//! states what the spec says of the outcome. A property that does not hold by design is stated
+//! as what does hold, and says so.
+
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Mutex,
+};
+
+use alloy_primitives::{Address, U256};
+use mega_evm::{
+    constants::TX_GAS_LIMIT_CAP,
+    op_revm::constants::BASE_FEE_RECIPIENT,
+    system::is_system_originated,
+    test_utils::{GasInspector, MemoryDatabase},
+    transaction_body_bytes, LimitCheck, LimitKind, MegaContext, MegaTransaction,
+    MegaTransactionOutcome, WRITE_RECORD_SIZE,
+};
+use revm::{
+    context::{result::ExecutionResult, Transaction},
+    interpreter::{interpreter::EthInterpreter, Interpreter},
+    state::Bytecode,
+    Database, Inspector,
+};
+use revm_inspectors::tracing::{TracingInspector, TracingInspectorConfig};
+
+use crate::{
+    gen::{
+        case::{case, Case, Envs},
+        tx::{tx, Delegate, Shape},
+        Flavor, Who, SYSTEM_ADDRESS,
+    },
+    harness::{check, print_tally, prop_check, prop_eq, require_coverage},
+    render::{render, render_outcome},
+};
+
+/// The number of cases each property runs in the bounded mode.
+const CASES: u32 = 768;
+
+/// The same input twice gives byte-identical outcomes: the result, its gas, logs and output, the
+/// gas by ledger, the usage, the stop and the state, or the same refusal.
+#[test]
+fn test_property_determinism() {
+    check(
+        "determinism",
+        CASES,
+        || case(Flavor::Satin),
+        |case| {
+            let first = render(&case.execute());
+            let second = render(&case.execute());
+            prop_eq!(first, second, "two runs of the same case differ");
+            Ok(())
+        },
+    );
+}
+
+/// A transaction's outcome does not depend on what its EVM ran before: on an EVM that already ran
+/// another transaction over the same pre-state it is byte-identical to its outcome on a fresh
+/// one, whether that transaction succeeded, reverted, halted, was stopped by a limit or was
+/// refused with an error, and running it once more gives the same again.
+///
+/// Nothing is committed between the runs, so the state is the same each time; what could differ
+/// is what the engine keeps for one transaction and must reset for the next: the limits layer and
+/// the stop it reported, gas detention, the SALT multipliers it read, the keyless frame. A
+/// transaction that ends in an error leaves through no settlement, so the reset is all that stands
+/// between it and the next. The tally of how the previous transaction ended is printed.
+#[test]
+fn test_property_a_reused_evm_runs_a_transaction_as_a_fresh_one_does() {
+    let tally: Mutex<BTreeMap<&'static str, u32>> = Mutex::new(BTreeMap::new());
+    check(
+        "reused_evm",
+        CASES,
+        || (case(Flavor::Satin), tx(Flavor::Satin)),
+        |(case, previous)| {
+            let fresh = render(&case.execute());
+            let mut evm = case.evm();
+            let previous = previous.build(&case.world, &case.main.assemble());
+            let ended = match Case::execute_on(&mut evm, previous) {
+                // A SALT bucket that cannot be read fails the transaction where the charge is
+                // made, in the middle of its run; every other error refuses it before it runs.
+                Err(error) if error.contains("the bucket cannot be read") => {
+                    "the previous transaction ended in an error while it ran"
+                }
+                Err(_) => "the previous transaction was refused with an error",
+                Ok(outcome) if outcome.limit_exceeded.is_some() => {
+                    "the previous transaction was stopped by a limit"
+                }
+                Ok(outcome) if outcome.result.is_success() => "the previous transaction succeeded",
+                Ok(_) => "the previous transaction reverted or halted",
+            };
+            *tally.lock().unwrap().entry(ended).or_default() += 1;
+            let reused = render(&Case::execute_on(&mut evm, case.transaction()));
+            prop_eq!(fresh, reused, "the outcome on a reused EVM differs: {ended}");
+            let again = render(&Case::execute_on(&mut evm, case.transaction()));
+            prop_eq!(fresh, again, "the outcome of a second run on the same EVM differs");
+            Ok(())
+        },
+    );
+    print_tally("reused_evm", tally.into_inner().unwrap());
+}
+
+/// An inspector that only records changes nothing: without one, under the gas inspector of the
+/// test utilities and under revm-inspectors' tracer, the outcome is byte-identical.
+#[test]
+fn test_property_inspector_transparency() {
+    check(
+        "inspector_transparency",
+        CASES,
+        || case(Flavor::Satin),
+        |case| {
+            let plain = render(&case.execute());
+            let (recorded, _) = case.execute_inspected(GasInspector::new());
+            prop_eq!(plain, render(&recorded), "the gas inspector changed the outcome");
+            let (traced, _) =
+                case.execute_inspected(TracingInspector::new(TracingInspectorConfig::all()));
+            prop_eq!(plain, render(&traced), "the tracing inspector changed the outcome");
+            Ok(())
+        },
+    );
+}
+
+/// Whether the transaction is fee-free: a deposit or the protocol's own transaction.
+/// Failed deposits can also keep a body larger than the transaction's resource limit.
+fn is_fee_exempt(tx: &MegaTransaction) -> bool {
+    tx.0.deposit.source_hash != alloy_primitives::B256::ZERO ||
+        is_system_originated(tx, SYSTEM_ADDRESS)
+}
+
+/// The account `address` had before the transaction, if any: an empty one is none, as the
+/// engine sees it.
+fn pre_account(db: &mut MemoryDatabase, address: Address) -> Option<revm::state::AccountInfo> {
+    db.basic(address).unwrap_or_default().filter(|info| !info.is_empty())
+}
+
+/// What the case's world held at `address`, an account empty under EIP-161 included: `None` where
+/// it held no account at all, the leaf a destruction of an account created in the transaction
+/// takes back.
+fn leaf_at_start(db: &mut MemoryDatabase, address: Address) -> Option<revm::state::AccountInfo> {
+    db.basic(address).unwrap_or_default()
+}
+
+/// The class of a case with an applied EIP-7702 authority the world holds as an account empty
+/// under EIP-161: the authority exists, so it is no new account.
+const EMPTY_AUTHORITY: &str = "an applied authority the world holds as an empty account";
+
+/// The class of a case in which an account the world holds as empty (not absent) ends non-empty
+/// by a value transfer or a creation, outside an authorization: emptiness decides it, so it is a
+/// new account.
+const EMPTY_LEAF_FILLED: &str = "an empty account of the world that the transaction fills";
+
+/// The class of a case with an account created in the transaction and destroyed over a leaf the
+/// world holds as empty: the leaf existed at the start, so the destruction does not take it back.
+const EMPTY_LEAF_DESTROYED: &str = "an account created and destroyed over an empty leaf";
+
+/// Holds a property's claim that its default run reached each of `classes` (see
+/// [`require_coverage`]).
+fn require_classes(
+    name: &str,
+    bounded_cases: u32,
+    tally: &BTreeMap<&'static str, u32>,
+    classes: &[&str],
+) {
+    let missing: Vec<String> = classes
+        .iter()
+        .filter(|class| tally.get(**class).copied().unwrap_or(0) == 0)
+        .map(|class| (*class).to_string())
+        .collect();
+    require_coverage(name, bounded_cases, &missing);
+}
+
+/// Whether the outcome's `account` was created in the transaction and destroyed since: its first
+/// effective destruction took back every part of it the transaction made — each slot it made
+/// non-zero, and, where its leaf was absent at the start, the account's record and its unit of
+/// state growth — and from that mark it counted nothing more.
+fn destroyed_in_the_transaction(account: &revm::state::Account) -> bool {
+    account.is_created() && account.is_selfdestructed()
+}
+
+/// The gas ledgers, as the spec defines them:
+///
+/// - the three ledgers add up to the raw spend: the regular ledger is defined as the spend less the
+///   two others, so what is checked is that the spend covers them;
+/// - the receipt's figure is the raw spend less the refund, at least the floor, at most the gas
+///   limit;
+/// - the refund is within its cap, a fifth of the raw spend;
+/// - the reservoir is the gas above the execution cap, and it pays state and history gas and
+///   nothing else, after a state charge's legacy share, which regular gas pays first; every
+///   give-back goes into a reservoir, whichever pool paid the charge, so what comes back of it can
+///   exceed what it held, and what is gone from it is at most the state and history ledgers. What
+///   comes back of it and the spend fit in the gas limit. Two rules bill it otherwise and are left
+///   out of the last: the EIP-7623 floor, when it is the receipt's figure, and op-revm's failed
+///   deposit, which bills the whole gas limit;
+/// - every transaction reports at least its body as history bytes and pays at most their price, the
+///   allowances paying some logs and a failed deposit reporting no history gas;
+/// - value is conserved: the balances change by what a deposit minted, less what a self-destruction
+///   burned;
+/// - the sender's nonce moves by one, or by more when its own code creates.
+#[test]
+fn test_property_gas_ledgers() {
+    check(
+        "gas_ledgers",
+        CASES,
+        || case(Flavor::Satin),
+        |case| {
+            let tx = case.transaction();
+            let Ok(outcome) = case.execute() else { return Ok(()) };
+            let result_gas = outcome.result.gas();
+            let gas = outcome.gas;
+            let total = result_gas.total_gas_spent();
+            let gas_limit = tx.gas_limit();
+            let failed_deposit = matches!(
+                &outcome.result,
+                ExecutionResult::Halt { reason: mega_evm::MegaHaltReason::FailedDeposit, .. }
+            );
+            if failed_deposit {
+                // op-revm's rule: a deposit that halts or is refused after Regolith bills its whole
+                // gas limit, the reservoir included, and everything it did is discarded.
+                prop_eq!(total, gas_limit, "a failed deposit bills its whole gas limit");
+                prop_eq!(gas.reservoir_remaining, 0, "a failed deposit keeps no reservoir");
+                prop_eq!(
+                    (gas.state, gas.history),
+                    (0, 0),
+                    "a failed deposit reports no state or history gas"
+                );
+            }
+
+            // The regular ledger is by definition the spend less the two others, so the three
+            // add up unless that subtraction saturates: this is the check that it does not.
+            prop_check!(
+                total >= gas.state + gas.history,
+                "the spend covers the state and history ledgers, so the three add up"
+            );
+            prop_eq!(
+                gas.gas_used,
+                total.saturating_sub(result_gas.inner_refunded()).max(gas.floor),
+                "the receipt figure is the spend less the refund, at least the floor"
+            );
+            prop_check!(gas.gas_used <= gas_limit, "the receipt figure is within the gas limit");
+            prop_check!(result_gas.inner_refunded() * 5 <= total, "the refund is within a fifth");
+
+            let reservoir = gas_limit.saturating_sub(gas_limit.min(TX_GAS_LIMIT_CAP));
+            prop_check!(
+                total + gas.reservoir_remaining <= gas_limit,
+                "the spend and the reservoir that comes back fit in the gas limit"
+            );
+            if !failed_deposit && gas.gas_used != gas.floor {
+                prop_check!(
+                    reservoir.saturating_sub(gas.reservoir_remaining) <= gas.state + gas.history,
+                    "the reservoir pays no more than the state and history gas the transaction \
+                     kept, and nothing else"
+                );
+            }
+
+            prop_check!(
+                gas.history_bytes >= transaction_body_bytes(&tx),
+                "the body is in the history bytes"
+            );
+            let worth = mega_evm::history_gas(gas.history_bytes).expect("the bytes have a price");
+            prop_check!(gas.history <= worth, "the history gas is at most what the bytes cost");
+            if failed_deposit {
+                prop_eq!(
+                    gas.history_bytes,
+                    transaction_body_bytes(&tx),
+                    "a failed deposit retains only its body as history"
+                );
+            }
+
+            let mut pre = case.database();
+            let mut delta = alloy_primitives::I256::ZERO;
+            for (address, account) in &outcome.state {
+                let before = pre_account(&mut pre, *address).map_or(U256::ZERO, |a| a.balance);
+                let after = account.info.balance;
+                let signed = |v: U256| alloy_primitives::I256::try_from(v).expect("a balance fits");
+                delta += signed(after) - signed(before);
+            }
+            let mint = alloy_primitives::I256::try_from(U256::from(tx.0.deposit.mint.unwrap_or(0)))
+                .expect("a mint fits");
+            if case.destroys() {
+                prop_check!(
+                    delta <= mint,
+                    "value is conserved but for what a destruction burned: {delta} vs {mint}"
+                );
+            } else {
+                prop_eq!(delta, mint, "value is conserved");
+            }
+
+            let sender = tx.caller();
+            let before = pre_account(&mut pre, sender).map_or(0, |a| a.nonce);
+            let after = outcome.state.get(&sender).map_or(before, |a| a.info.nonce);
+            // A sender that runs code, through a delegation or as an applied authority, may create
+            // and so bump its nonce further.
+            let runs_code = case.world.delegation.is_some_and(|d| d.delegator == Who::Caller) ||
+                matches!(&case.tx.shape, Shape::Eip7702 { auths, .. } if auths.iter().any(|a| a.authority == Who::Caller));
+            if runs_code {
+                prop_check!(
+                    after > before,
+                    "the sender's nonce moves by at least one: {before} -> {after}"
+                );
+            } else {
+                prop_eq!(after, before + 1, "the sender's nonce moves by one");
+            }
+            Ok(())
+        },
+    );
+}
+
+/// After every instruction the KV count never weighs more than the data size, `KV × 40 ≤ data
+/// size`; at the end the same holds, the history bytes are within the data size, every
+/// transaction keeps at least its body and the Oracle hints it forwarded, and a user's
+/// transaction keeps no more than its data-size limit: a frame that crossed the limit took what
+/// it counted back with it, whether its caller caught the stop or not. Deposits and the protocol's
+/// transactions are left out of the last: the protocol's are held to no limit, and a deposit whose
+/// body is over the limit keeps it as a failed deposit.
+#[test]
+fn test_property_kv_weighs_no_more_than_data_size() {
+    #[derive(Default)]
+    struct Probe {
+        steps: u64,
+        over: Option<(mega_evm::LimitUsage, u64)>,
+    }
+    impl Inspector<MegaContext<MemoryDatabase, Envs>, EthInterpreter> for Probe {
+        fn step_end(
+            &mut self,
+            _: &mut Interpreter<EthInterpreter>,
+            context: &mut MegaContext<MemoryDatabase, Envs>,
+        ) {
+            self.steps += 1;
+            let usage = context.limit_usage();
+            if usage.write_records * WRITE_RECORD_SIZE > usage.data_size {
+                self.over.get_or_insert((usage, self.steps));
+            }
+        }
+    }
+    check(
+        "kv_weighs_no_more_than_data_size",
+        CASES,
+        || case(Flavor::Satin),
+        |case| {
+            let tx = case.transaction();
+            let (execution, evm) = case.execute_inspected(Probe::default());
+            prop_eq!(
+                evm.inspector().over,
+                None,
+                "KV x 40 exceeded the data size after an instruction"
+            );
+            let Ok(outcome) = execution else { return Ok(()) };
+            let usage = outcome.usage;
+            prop_check!(
+                usage.write_records * WRITE_RECORD_SIZE <= usage.data_size,
+                "KV x 40 exceeded the data size at the end: {usage:?}"
+            );
+            prop_check!(
+                outcome.gas.history_bytes <= usage.data_size,
+                "the history bytes are within the data size: {:?} vs {usage:?}",
+                outcome.gas
+            );
+            // What left the machine stays counted, whatever became of the transaction, an exempt
+            // one and a failed deposit included: the body, which is in the block, and the hints
+            // forwarded to the oracle service.
+            let hints = forwarded_hint_bytes(&evm);
+            prop_check!(
+                usage.data_size >= transaction_body_bytes(&tx) + hints,
+                "the body and the {hints} bytes of hints forwarded are counted: {usage:?}"
+            );
+            if !is_fee_exempt(&tx) {
+                let limits = case.world.limits.runtime();
+                let limit = limits.tx_data_size_limit;
+                prop_check!(
+                    usage.data_size <= limit,
+                    "a user's transaction keeps more than its limit of {limit}: {usage:?}"
+                );
+                let limit = limits.tx_kv_update_limit;
+                prop_check!(
+                    usage.write_records <= limit,
+                    "a user's transaction keeps more records than its limit of {limit}: {usage:?}"
+                );
+            }
+            Ok(())
+        },
+    );
+}
+
+/// The write records a transaction reports are the net change of what it kept, computed from the
+/// case's pre-state and the outcome's state alone: one for every storage slot whose value differs
+/// from its original, and one for every account but the sender whose nonce, balance or code
+/// differs from what the case's world held. The sender's account is the body's, and so are the
+/// settlement's fee credits, which are taken out of the fee accounts' balances first: the fuzz
+/// world prices L1 and operator fees at nothing, so the settlement credits the beneficiary its tip
+/// and the base-fee vault the base fee, on the gas the receipt bills, and a transaction that pays
+/// no fee — a deposit, or one the protocol sent — credits nothing. What is left of a fee account's
+/// change is a write its execution made, a record like any other.
+///
+/// An account the transaction created and destroyed keeps no slot's record, and the account's own
+/// only where the world held an account there, a balance or an account empty under EIP-161: a
+/// leaf that existed at the start is an ordinary deletion, whose record stands, and one that did
+/// not is taken back with what the transaction made of it.
+///
+/// The destruction rule branches on whether the world held the account's leaf, so the case must
+/// reach an account created and destroyed over a leaf that existed empty (a class this property
+/// claims, see [`EMPTY_LEAF_DESTROYED`]).
+#[test]
+fn test_property_the_record_count_is_the_net_change() {
+    let tally: Mutex<BTreeMap<&'static str, u32>> = Mutex::new(BTreeMap::new());
+    check(
+        "record_count",
+        CASES,
+        || case(Flavor::Satin),
+        |case| {
+            check_record_count_observed(case, &|class| {
+                *tally.lock().unwrap().entry(class).or_default() += 1;
+            })
+        },
+    );
+    let tally = tally.into_inner().unwrap();
+    print_tally("record_count", tally.iter().map(|(class, n)| (class, *n)));
+    require_classes("record_count", CASES, &tally, &[EMPTY_LEAF_DESTROYED]);
+}
+
+/// What [`test_property_the_record_count_is_the_net_change`] checks of a case.
+pub(crate) fn check_record_count(case: &Case) -> Result<(), proptest::test_runner::TestCaseError> {
+    check_record_count_observed(case, &|_| {})
+}
+
+/// [`check_record_count`], reporting the classes the case reached to `observe`.
+fn check_record_count_observed(
+    case: &Case,
+    observe: &dyn Fn(&'static str),
+) -> Result<(), proptest::test_runner::TestCaseError> {
+    let tx = case.transaction();
+    let Ok(outcome) = case.execute() else { return Ok(()) };
+    let credit = fee_credits(case, &tx, &outcome);
+    let mut pre = case.database();
+    let mut expected = 0;
+    for (address, account) in &outcome.state {
+        if destroyed_in_the_transaction(account) {
+            let leaf = leaf_at_start(&mut pre, *address);
+            if leaf.as_ref().is_some_and(|info| info.is_empty()) {
+                observe(EMPTY_LEAF_DESTROYED);
+            }
+            expected += u64::from(leaf.is_some());
+            continue;
+        }
+        let slots = account.storage.values().filter(|slot| slot.is_changed()).count();
+        expected += slots as u64;
+        if *address == tx.caller() {
+            continue;
+        }
+        let before = pre_account(&mut pre, *address).unwrap_or_default();
+        let Some(balance) = account.info.balance.checked_sub(credit(*address)) else {
+            return Err(crate::harness::fail(format!("{address} holds less than its fee credit")));
+        };
+        let changed = account.info.nonce != before.nonce ||
+            balance != before.balance ||
+            account.info.code_hash != before.code_hash;
+        expected += u64::from(changed);
+    }
+    prop_eq!(
+        outcome.usage.write_records,
+        expected,
+        "the records reported are not the net change of the state"
+    );
+    Ok(())
+}
+
+/// What the settlement credits each account for `tx`'s fees, which `outcome` billed: the fuzz
+/// world prices L1 and operator fees at nothing, so the beneficiary gets the tip and the base-fee
+/// vault the base fee, on the gas the receipt bills, and a transaction that pays no fee — a
+/// deposit, or one the protocol sent — credits nothing.
+fn fee_credits(
+    case: &Case,
+    tx: &MegaTransaction,
+    outcome: &MegaTransactionOutcome,
+) -> impl Fn(Address) -> U256 {
+    let block = case.block();
+    let basefee = u128::from(block.basefee);
+    let used = u128::from(outcome.gas.gas_used);
+    let tip = tx.effective_gas_price(basefee).saturating_sub(basefee);
+    let pays_fees = !is_fee_exempt(tx);
+    move |address: Address| {
+        let mut credit = 0;
+        if pays_fees && address == block.beneficiary {
+            credit += tip * used;
+        }
+        if pays_fees && address == BASE_FEE_RECIPIENT {
+            credit += basefee * used;
+        }
+        U256::from(credit)
+    }
+}
+
+/// The state growth a transaction reports is the net count of the new accounts and new slots it
+/// kept, computed from the case's pre-state and the outcome's state alone: one for every slot whose
+/// original value is zero and whose present value is not, and one for every account the case's
+/// world held empty, or not at all, that the outcome holds non-empty once the settlement's fee
+/// credits are taken out of its balance — a fee credit is no rise. The sender's account is the
+/// body's, and is a rise only as the caller a deposit-like transaction created.
+///
+/// An applied EIP-7702 authority is decided by existence instead: it is a rise only where the
+/// world held no account at its address, and one the world held empty under EIP-161 is no new
+/// account. Every other site that adds an account counts an empty one as new.
+///
+/// An account the transaction created and destroyed keeps none of its slots, and its leaf only
+/// where the world held it as an account empty under EIP-161: the creation added that account and
+/// the destruction does not take a leaf back that existed at the start. One the world did not hold
+/// is taken back, and one that held a balance was no new account.
+///
+/// Existence and emptiness give different answers at three sites, and the property claims a case
+/// at each: an applied authority the world holds as an empty account (no new account), an empty
+/// account a value transfer or a creation fills (a new account), and an account created and
+/// destroyed over an empty leaf (a leaf the destruction does not take back).
+#[test]
+fn test_property_state_growth_is_the_net_count_of_new_state() {
+    let tally: Mutex<BTreeMap<&'static str, u32>> = Mutex::new(BTreeMap::new());
+    check(
+        "state_growth",
+        CASES,
+        || case(Flavor::Satin),
+        |case| {
+            check_state_growth_observed(case, &|class| {
+                *tally.lock().unwrap().entry(class).or_default() += 1;
+            })
+        },
+    );
+    let tally = tally.into_inner().unwrap();
+    print_tally("state_growth", tally.iter().map(|(class, n)| (class, *n)));
+    require_classes(
+        "state_growth",
+        CASES,
+        &tally,
+        &[EMPTY_AUTHORITY, EMPTY_LEAF_FILLED, EMPTY_LEAF_DESTROYED],
+    );
+}
+
+/// What [`test_property_state_growth_is_the_net_count_of_new_state`] checks of a case.
+pub(crate) fn check_state_growth(case: &Case) -> Result<(), proptest::test_runner::TestCaseError> {
+    check_state_growth_observed(case, &|_| {})
+}
+
+/// [`check_state_growth`], reporting the classes the case reached to `observe`.
+fn check_state_growth_observed(
+    case: &Case,
+    observe: &dyn Fn(&'static str),
+) -> Result<(), proptest::test_runner::TestCaseError> {
+    let tx = case.transaction();
+    let Ok(outcome) = case.execute() else { return Ok(()) };
+    let credit = fee_credits(case, &tx, &outcome);
+    let deposit_like =
+        tx.0.deposit.source_hash != alloy_primitives::B256::ZERO || tx.caller() == SYSTEM_ADDRESS;
+    let mut pre = case.database();
+    let authorities: BTreeSet<Address> =
+        applied_authorizations(case).into_iter().map(|(authority, _)| authority).collect();
+    let mut expected = 0;
+    for (address, account) in &outcome.state {
+        if destroyed_in_the_transaction(account) {
+            let empty_leaf = leaf_at_start(&mut pre, *address).is_some_and(|info| info.is_empty());
+            if empty_leaf {
+                observe(EMPTY_LEAF_DESTROYED);
+            }
+            expected += u64::from(empty_leaf);
+            continue;
+        }
+        let slots = account
+            .storage
+            .values()
+            .filter(|slot| slot.original_value.is_zero() && !slot.present_value.is_zero())
+            .count();
+        expected += slots as u64;
+        if *address == tx.caller() && !deposit_like {
+            continue;
+        }
+        // An authority is decided by existence: one whose account the world held, empty or not, is
+        // no new account, and its application leaves it with a nonce, so no later site in the
+        // transaction adds it either. Where the list was skipped or taken back, the account stands
+        // as the world held it, which is no rise whichever test decides it.
+        let leaf = leaf_at_start(&mut pre, *address);
+        if authorities.contains(address) && leaf.is_some() {
+            if leaf.as_ref().is_some_and(|info| info.is_empty()) {
+                observe(EMPTY_AUTHORITY);
+            }
+            continue;
+        }
+        if pre_account(&mut pre, *address).is_some() {
+            continue;
+        }
+        let Some(balance) = account.info.balance.checked_sub(credit(*address)) else {
+            return Err(crate::harness::fail(format!("{address} holds less than its fee credit")));
+        };
+        let exists = account.info.nonce != 0 ||
+            !balance.is_zero() ||
+            account.info.code_hash != revm::primitives::KECCAK_EMPTY;
+        if exists && leaf.is_some() {
+            observe(EMPTY_LEAF_FILLED);
+        }
+        expected += u64::from(exists);
+    }
+    prop_eq!(
+        outcome.usage.state_growth,
+        expected,
+        "the state growth reported is not the net count of new state"
+    );
+    Ok(())
+}
+
+/// What the Oracle hints `evm`'s transaction forwarded weigh as data size. A forwarded hint's
+/// payload is its call's whole input: the selector, the topic, the offset and length of the data,
+/// and the data padded to a word.
+fn forwarded_hint_bytes<I>(evm: &mega_evm::MegaEvm<MemoryDatabase, I, Envs>) -> u64 {
+    evm.ctx()
+        .external_envs()
+        .oracle_env
+        .recorded_hints()
+        .iter()
+        .map(|hint| 4 + 3 * 32 + (hint.data.len() as u64).div_ceil(32) * 32)
+        .sum()
+}
+
+/// A stopped transaction keeps only what the spec says survives: the stop is the crossing of its
+/// own frame, which names a limit the case runs under — the transaction's data-size, KV or
+/// state-growth limit, that frame's budget in one of them, which is below it, or a compute limit,
+/// which no frame budget is — and reverts
+/// that frame and so everything below it; it is a revert carrying `MegaLimitExceeded`, with no
+/// log; no storage write stands; no account changes but the sender's
+/// nonce and fee, the fee recipients' credit, an applied EIP-7702 authority's nonce and
+/// delegation, and a deposit's mint; the records kept are the applied authorities', and the data
+/// size is the body, those records and the payloads of the Oracle hints it forwarded, which have
+/// left the machine and are counted whatever the frame that sent them did, and nothing of a hint
+/// that crossed the limit, which was not forwarded (a hint that was admitted and did not decode
+/// is counted too, so where a program can send one the hints forwarded are a lower bound); the
+/// state gas kept is the applied
+/// authorizations', the sender's own delegation included, and that of the caller account a deposit
+/// created, which is the body's account and no record. An authority that is also a fee recipient
+/// is credited the fee, as any fee recipient is.
+#[test]
+fn test_property_a_stop_keeps_only_what_survives() {
+    check(
+        "a_stop_keeps_only_what_survives",
+        CASES,
+        || case(Flavor::Satin),
+        |case| {
+            let tx = case.transaction();
+            let (execution, evm) = case.execute_with_evm();
+            let Ok(outcome) = execution else { return Ok(()) };
+            let Some(stop) = outcome.limit_exceeded else { return Ok(()) };
+            check_survivors(case, &tx, &outcome, stop, forwarded_hint_bytes(&evm))
+        },
+    );
+}
+
+/// What [`test_property_a_stop_keeps_only_what_survives`] checks of a stopped transaction;
+/// `hint_bytes` is what the Oracle hints it forwarded weigh.
+pub(crate) fn check_survivors(
+    case: &Case,
+    tx: &MegaTransaction,
+    outcome: &MegaTransactionOutcome,
+    stop: LimitCheck,
+    hint_bytes: u64,
+) -> Result<(), proptest::test_runner::TestCaseError> {
+    let rendered = render_outcome(outcome);
+    let LimitCheck::ExceedsLimit { kind, limit, frame_local, .. } = stop else {
+        return Err(crate::harness::fail(format!(
+            "a reported stop that is within the limit\n{rendered}"
+        )));
+    };
+    let runtime = case.world.limits.runtime();
+    let tx_limit = match kind {
+        LimitKind::DataSize => runtime.tx_data_size_limit,
+        LimitKind::KvUpdate => runtime.tx_kv_update_limit,
+        LimitKind::StateGrowth => runtime.tx_state_growth_limit,
+        LimitKind::ComputeGas => u64::MAX,
+    };
+    match (kind, frame_local) {
+        (LimitKind::ComputeGas, frame_local) => {
+            prop_check!(!frame_local, "a compute stop is no frame budget\n{rendered}");
+        }
+        (_, false) => {
+            prop_eq!(limit, tx_limit, "the stop names the transaction's limit\n{rendered}");
+        }
+        (_, true) => {
+            prop_check!(limit <= tx_limit, "a frame budget is within the limit\n{rendered}");
+        }
+    }
+    match &outcome.result {
+        ExecutionResult::Revert { output, .. } => {
+            prop_eq!(*output, stop.revert_data(), "the stop's revert data\n{rendered}");
+        }
+        other => {
+            return Err(crate::harness::fail(format!(
+                "a stop that is not a revert: {other:?}\n{rendered}"
+            )))
+        }
+    }
+    prop_check!(outcome.result.logs().is_empty(), "a stop keeps no log\n{rendered}");
+
+    let sender = tx.caller();
+    let mut pre = case.database();
+    let is_deposit = tx.0.deposit.source_hash != alloy_primitives::B256::ZERO;
+    let fee_recipients = [
+        case.world.beneficiary_address(),
+        op_revm::constants::BASE_FEE_RECIPIENT,
+        op_revm::constants::L1_FEE_RECIPIENT,
+        op_revm::constants::OPERATOR_FEE_RECIPIENT,
+    ];
+    // The authorizations that apply, by revm's rules, and what the state says of them: either
+    // every one applied, or the runtime phase before the first frame took them all back.
+    let simulated = applied_authorizations(case);
+    let mut expected: BTreeMap<Address, (u64, Delegate)> = BTreeMap::new();
+    for (authority, delegate) in &simulated {
+        let entry = expected.entry(*authority).or_insert((0, *delegate));
+        entry.0 += 1;
+        entry.1 = *delegate;
+    }
+    let bumped = |address: Address, state_nonce: u64| {
+        let before = pre_account(&mut case.database(), address).map_or(0, |a| a.nonce);
+        state_nonce > before + u64::from(address == sender)
+    };
+    let taken_back = !expected.is_empty() &&
+        expected
+            .keys()
+            .all(|a| outcome.state.get(a).is_none_or(|acc| !bumped(*a, acc.info.nonce)));
+    if taken_back {
+        expected.clear();
+    }
+    let applied = expected.keys().filter(|a| **a != sender).count() as u64;
+    let mut created_caller = 0u64;
+    for (address, account) in &outcome.state {
+        let before = pre_account(&mut pre, *address);
+        let before_nonce = before.as_ref().map_or(0, |a| a.nonce);
+        let before_balance = before.as_ref().map_or(U256::ZERO, |a| a.balance);
+        let before_code =
+            before.as_ref().map_or(alloy_primitives::KECCAK256_EMPTY, |a| a.code_hash);
+        for (key, slot) in &account.storage {
+            prop_eq!(
+                slot.present_value,
+                slot.original_value,
+                "a stop keeps no storage write: {address} slot {key}\n{rendered}"
+            );
+        }
+        let is_sender = *address == sender;
+        if let Some((bumps, delegate)) = expected.get(address) {
+            prop_eq!(
+                account.info.nonce,
+                before_nonce + u64::from(is_sender) + bumps,
+                "an applied authority's nonce moves once per authorization: {address}\n{rendered}"
+            );
+            let expected_code = match delegate {
+                Delegate::Zero => alloy_primitives::KECCAK256_EMPTY,
+                other => Bytecode::new_eip7702(match other {
+                    Delegate::Contract => Who::Contract.address(),
+                    Delegate::A => Who::A.address(),
+                    Delegate::B => Who::B.address(),
+                    Delegate::Beneficiary => Who::Beneficiary.address(),
+                    Delegate::Zero => unreachable!(),
+                })
+                .hash_slow(),
+            };
+            prop_eq!(
+                account.info.code_hash,
+                expected_code,
+                "an applied authority delegates: {address}\n{rendered}"
+            );
+            if is_sender {
+                prop_check!(
+                    account.info.balance <= before_balance,
+                    "the sender pays and receives nothing\n{rendered}"
+                );
+            } else if fee_recipients.contains(address) {
+                // An authority may be the block beneficiary, which the transaction's fee is
+                // credited to whatever stopped it.
+                prop_check!(
+                    account.info.balance >= before_balance,
+                    "an authority that is a fee recipient is credited: {address}\n{rendered}"
+                );
+            } else {
+                prop_eq!(
+                    account.info.balance,
+                    before_balance,
+                    "an authority's balance stands: {address}\n{rendered}"
+                );
+            }
+            continue;
+        }
+        if is_sender {
+            prop_eq!(
+                account.info.nonce,
+                before_nonce + 1,
+                "the sender's nonce moves by one\n{rendered}"
+            );
+            prop_eq!(account.info.code_hash, before_code, "the sender's code stands\n{rendered}");
+            if is_deposit {
+                let mint = U256::from(tx.0.deposit.mint.unwrap_or(0));
+                prop_eq!(
+                    account.info.balance,
+                    before_balance + mint,
+                    "a deposit keeps its mint\n{rendered}"
+                );
+                if before.is_none() {
+                    created_caller = 1;
+                }
+            } else {
+                prop_check!(
+                    account.info.balance <= before_balance,
+                    "the sender pays and receives nothing\n{rendered}"
+                );
+            }
+            continue;
+        }
+        if fee_recipients.contains(address) {
+            prop_eq!(
+                account.info.nonce,
+                before_nonce,
+                "a fee recipient's nonce stands: {address}\n{rendered}"
+            );
+            prop_eq!(
+                account.info.code_hash,
+                before_code,
+                "a fee recipient's code stands: {address}\n{rendered}"
+            );
+            prop_check!(
+                account.info.balance >= before_balance,
+                "a fee recipient is credited: {address}\n{rendered}"
+            );
+            continue;
+        }
+        prop_eq!(
+            (account.info.nonce, account.info.balance, account.info.code_hash),
+            (before_nonce, before_balance, before_code),
+            "an account a stop touched stands as before: {address}\n{rendered}"
+        );
+    }
+
+    let usage = outcome.usage;
+    prop_eq!(
+        usage.write_records,
+        applied,
+        "the records kept are the distinct applied authorities' but the sender's\n{rendered}"
+    );
+    // The hints counted: what the data size holds beside the body and the records. Every hint
+    // forwarded is in it. A hint that was admitted and did not decode is in it too, and reached
+    // nobody: only a raw call of the Oracle, whose calldata is whatever memory holds, sends one.
+    let priced = transaction_body_bytes(tx) + usage.write_records * WRITE_RECORD_SIZE;
+    let Some(hints_counted) = usage.data_size.checked_sub(priced) else {
+        return Err(crate::harness::fail(format!(
+            "the data size kept is below the body and the records\n{rendered}"
+        )));
+    };
+    prop_check!(
+        hints_counted >= hint_bytes,
+        "a forwarded hint stays counted: {hints_counted} < {hint_bytes}\n{rendered}"
+    );
+    if !case.may_send_a_hint_that_does_not_decode() {
+        prop_eq!(
+            hints_counted,
+            hint_bytes,
+            "the data size kept is the body, the records and the hints forwarded\n{rendered}"
+        );
+    }
+    if !is_fee_exempt(tx) {
+        prop_eq!(
+            outcome.gas.history_bytes,
+            priced,
+            "the history bytes are the data size kept but the hints\n{rendered}"
+        );
+        let worth = mega_evm::history_gas(priced).expect("the bytes have a price");
+        prop_eq!(
+            outcome.gas.history,
+            worth,
+            "the history gas is the body's and the records'\n{rendered}"
+        );
+    }
+    // Every applied authorization keeps the state gas of its delegation, the sender's own
+    // included: a sender that delegates itself makes no record, its account being the body's, and
+    // pays the state gas of the designator all the same.
+    if expected.is_empty() && created_caller == 0 {
+        prop_eq!(outcome.gas.state, 0, "a stop keeps no state gas\n{rendered}");
+    }
+    Ok(())
+}
+
+/// The EIP-7702 authorizations of `case` that revm applies, in order, each with its delegate: the
+/// signature recovers, the chain id is this chain's, the nonce is the authority's at that point
+/// (the sender's after its own bump), and the authority has no code but a delegation.
+fn applied_authorizations(case: &Case) -> Vec<(Address, Delegate)> {
+    let Shape::Eip7702 { auths, .. } = &case.tx.shape else { return Vec::new() };
+    let world = &case.world;
+    let sender = Who::Caller.address();
+    let mut nonces: BTreeMap<Address, u64> = BTreeMap::new();
+    nonces.insert(sender, world.nonce_of(sender) + 1);
+    let has_plain_code = |address: Address| {
+        let program = [(Who::Contract, &case.main), (Who::A, &case.a), (Who::B, &case.b)]
+            .into_iter()
+            .find(|(who, _)| who.address() == address)
+            .map(|(_, program)| program);
+        let delegates = world.delegation.is_some_and(|d| d.delegator.address() == address);
+        !delegates && program.is_some_and(|p| !p.assemble().is_empty())
+    };
+    let mut applied = Vec::new();
+    for auth in auths {
+        if !auth.recovers || !auth.chain_ok {
+            continue;
+        }
+        let authority = auth.authority.address();
+        let nonce = world.nonce_of(authority) + u64::from(!auth.nonce_ok);
+        if nonce != nonces.get(&authority).copied().unwrap_or_else(|| world.nonce_of(authority)) {
+            continue;
+        }
+        if has_plain_code(authority) {
+            continue;
+        }
+        nonces.insert(authority, nonce + 1);
+        applied.push((authority, auth.delegate));
+    }
+    applied
+}

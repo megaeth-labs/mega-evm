@@ -32,8 +32,14 @@ import argparse
 from pathlib import Path
 
 # The behavior-introducing MegaSpecId progression, oldest -> newest, frozen and
-# unstable alike (see crates/mega-evm/src/evm/spec.rs). Keep in spec order.
+# unstable alike. Keep in spec order.
 # This is the *adjacency* universe: it decides which spec sits next to which.
+#
+# It is the legacy engine's ladder, which ends at REX6. SATIN, the unstable spec
+# that follows it, is deliberately absent: the engine that runs SATIN is
+# single-spec, with no `is_enabled` gate and no per-spec instruction table, so a
+# rule naming it could match nothing. When that engine gains its first gate, with
+# the spec after SATIN, this list becomes that engine's ladder.
 #
 # The alias rungs (MINI_REX_1, MINI_REX_2) are deliberately absent: is_enabled
 # gates compare behavior projections, and an alias executes an earlier spec's
@@ -49,11 +55,10 @@ ALL_SPECS = [
     "REX4",
     "REX5",
     "REX6",
-    "REX7",
 ]
 
-# The specs whose gates may be mutated. Currently everything through REX6 (see
-# CLAUDE.md for the current unstable spec).
+# The specs whose gates may be mutated. Currently every spec above: every rung of
+# the legacy ladder is frozen.
 #
 # This is a *subset* of ALL_SPECS, not a replacement for it, and the distinction
 # matters in both directions:
@@ -61,13 +66,14 @@ ALL_SPECS = [
 #   * A gate on a frozen spec is the mutation SOURCE — its activation fork is
 #     fixed, so shifting it is a backward-compatibility bug a test must catch.
 #   * The spec shifted TO is only a destination. It may be the unstable spec:
-#     `is_enabled(REX6) ==> is_enabled(REX7)` is the classic "gated one fork too
-#     late" regression — it silently disables frozen REX6 behavior on a REX6
-#     chain — and is exactly what freezing REX6 promises to catch.
+#     shifting the newest frozen spec's gate onto the unstable spec above it is
+#     the classic "gated one fork too late" regression — it silently disables
+#     frozen behavior on a chain running the frozen spec — and is exactly what
+#     freezing that spec promises to catch.
 #
 # Conflating the two lists drops every mutant whose destination is the unstable
 # spec, leaving the newest frozen spec's gates probed from one side only.
-FROZEN_SPECS = [s for s in ALL_SPECS if s != "REX7"]
+FROZEN_SPECS = list(ALL_SPECS)
 
 # Per-spec instruction-table modules wired in evm/instructions.rs, in spec order.
 #

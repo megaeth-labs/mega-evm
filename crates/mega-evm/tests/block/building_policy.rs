@@ -1,0 +1,310 @@
+//! The builder's policy against the protocol's limits: a builder's policy changes which
+//! transactions it packs, never what a packed block computes, and what a block counts of its
+//! data size is what its transactions kept.
+
+use alloy_consensus::transaction::Recovered;
+use alloy_evm::block::BlockExecutor;
+use alloy_primitives::{address, Address, Bytes, U256};
+use mega_evm::{
+    test_utils::{BytecodeBuilder, MemoryDatabase},
+    BlockLimits, LimitCheck, LimitKind, MegaSpecId, MegaTransactionExt, MegaTxEnvelope,
+    ProtocolLimits, TX_BODY_SIZE, WRITE_RECORD_SIZE,
+};
+use op_alloy_consensus::OpReceiptEnvelope;
+use revm::{
+    bytecode::opcode::{CALLDATALOAD, SSTORE},
+    database::State,
+    Database as _,
+};
+
+use crate::common::{self, incompressible};
+
+/// A contract that writes one fresh slot.
+const WRITES_ONE: Address = address!("0x1000000000000000000000000000000000000011");
+
+/// A contract that writes two fresh slots.
+const WRITES_TWO: Address = address!("0x1000000000000000000000000000000000000012");
+
+/// A contract that writes the slot its calldata names.
+const WRITES_NAMED: Address = address!("0x1000000000000000000000000000000000000013");
+
+/// The gas limit of the transactions here: enough for two writes at any byte price a measurement
+/// build runs, so what stops or refuses them is a limit, never their gas.
+const GAS_LIMIT: u64 = 2_000_000;
+
+/// Senders, one per transaction, so a transaction a builder leaves out does not stall the nonces
+/// of the ones after it.
+const SENDERS: [Address; 5] = [
+    address!("0x3000000000000000000000000000000000000001"),
+    address!("0x3000000000000000000000000000000000000002"),
+    address!("0x3000000000000000000000000000000000000003"),
+    address!("0x3000000000000000000000000000000000000004"),
+    address!("0x3000000000000000000000000000000000000005"),
+];
+
+/// The database every block here runs on: the three contracts, and every sender funded.
+fn database() -> MemoryDatabase {
+    let mut db = common::database();
+    db.set_account_code(
+        WRITES_ONE,
+        BytecodeBuilder::default().sstore(U256::from(1), U256::from(1)).stop().build(),
+    );
+    db.set_account_code(
+        WRITES_TWO,
+        BytecodeBuilder::default()
+            .sstore(U256::from(1), U256::from(1))
+            .sstore(U256::from(2), U256::from(1))
+            .stop()
+            .build(),
+    );
+    db.set_account_code(
+        WRITES_NAMED,
+        BytecodeBuilder::default()
+            .push_number(1_u8)
+            .push_number(0_u8)
+            .append(CALLDATALOAD)
+            .append(SSTORE)
+            .stop()
+            .build(),
+    );
+    for sender in SENDERS {
+        db.set_account_balance(sender, U256::from(1_000_000_000_000_000_u64));
+    }
+    db
+}
+
+/// A transaction from `sender`, its first, to `to` carrying `input`.
+fn tx_from(
+    sender: Address,
+    to: Address,
+    input: Bytes,
+    gas_limit: u64,
+) -> Recovered<MegaTxEnvelope> {
+    Recovered::new_unchecked(common::tx(0, to, input, gas_limit), sender)
+}
+
+/// An executor over `state`, for a block packed under `policy` and held to `limits`: the spec's,
+/// or another set a test holds a block to in their place.
+fn executor_under(
+    state: &mut State<MemoryDatabase>,
+    policy: BlockLimits,
+    limits: ProtocolLimits,
+) -> common::TestExecutor<'_> {
+    common::executor_with_spec(state, common::block_ctx(policy), common::chain_spec())
+        .with_protocol_limits(limits)
+}
+
+/// An Oracle hint that would cross the transaction's data-size limit is not forwarded, and
+/// the block's data-size counter takes nothing for it: the stopped transaction is included with
+/// its body alone. A hint that fits is forwarded and stays in the counter.
+#[test]
+fn test_a_hint_that_crosses_the_limit_adds_nothing_to_the_block_s_data_size() {
+    use alloy_sol_types::SolCall;
+    use mega_evm::system::{IOracle, ORACLE_CONTRACT_ADDRESS};
+
+    let hint = |data: &'static [u8]| -> Bytes {
+        IOracle::sendHintCall {
+            topic: alloy_primitives::B256::repeat_byte(0x7a),
+            data: Bytes::from_static(data),
+        }
+        .abi_encode()
+        .into()
+    };
+    let (small, large) = (hint(b""), hint(&[0x5a; 64]));
+    let (small_len, large_len) = (small.len() as u64, large.len() as u64);
+    // A transaction that calls `sendHint` counts its calldata in its body and again as the hint.
+    // The limit holds the small one twice and the large one once.
+    let tx_data_size_limit = TX_BODY_SIZE + 2 * large_len - 1;
+    assert!(TX_BODY_SIZE + 2 * small_len <= tx_data_size_limit);
+    let satin = ProtocolLimits::for_spec(MegaSpecId::SATIN);
+    let limits = satin.with_tx_runtime_limits(
+        satin.tx_runtime_limits.with_tx_data_size_limit(tx_data_size_limit),
+    );
+
+    let mut state = State::builder().with_database(database()).build();
+    let mut executor = executor_under(&mut state, BlockLimits::no_limits(), limits);
+    executor.apply_pre_execution_changes().expect("the block starts");
+
+    let outcome = executor
+        .run_transaction(&tx_from(SENDERS[0], ORACLE_CONTRACT_ADDRESS, large, GAS_LIMIT))
+        .expect("the transaction runs");
+    assert_eq!(
+        outcome.inner.limit_exceeded,
+        Some(LimitCheck::ExceedsLimit {
+            kind: LimitKind::DataSize,
+            limit: tx_data_size_limit,
+            used: TX_BODY_SIZE + 2 * large_len,
+            frame_local: false,
+        }),
+        "the hint crosses the transaction's limit"
+    );
+    assert_eq!(outcome.inner.usage.data_size, TX_BODY_SIZE + large_len);
+    executor.commit_transaction_outcome(outcome).expect("the stopped transaction is included");
+    assert_eq!(
+        executor.limiter().usage.data_size,
+        TX_BODY_SIZE + large_len,
+        "the block counts the stopped transaction's body and nothing for the hint"
+    );
+
+    let outcome = executor
+        .run_transaction(&tx_from(SENDERS[1], ORACLE_CONTRACT_ADDRESS, small, GAS_LIMIT))
+        .expect("the transaction runs");
+    assert!(outcome.inner.result.is_success(), "{:?}", outcome.inner.result);
+    executor.commit_transaction_outcome(outcome).expect("it is included");
+    assert_eq!(
+        executor.limiter().usage.data_size,
+        (TX_BODY_SIZE + large_len) + (TX_BODY_SIZE + 2 * small_len),
+        "a forwarded hint is counted beside its transaction's body"
+    );
+}
+
+/// What a block produced, with the state it left behind: the receipts, the counters and every
+/// account and slot the candidates could have touched.
+#[derive(Debug, PartialEq)]
+struct Block {
+    receipts: Vec<OpReceiptEnvelope>,
+    gas_used: u64,
+    blob_gas_used: u64,
+    counters: (mega_evm::BlockGasCounters, mega_evm::LimitUsage),
+    accounts: Vec<(Address, Option<(U256, u64)>)>,
+    slots: Vec<U256>,
+}
+
+/// Executes `candidates` in order on a fresh block held to `limits`, packed under
+/// `policy`: a candidate the block refuses is left out, as a builder leaves it out. Returns the
+/// block, and for each candidate whether it was packed or the refusal that left it out.
+fn build(
+    limits: ProtocolLimits,
+    policy: BlockLimits,
+    candidates: &[Recovered<MegaTxEnvelope>],
+) -> (Block, Vec<Result<(), String>>) {
+    let mut state = State::builder().with_database(database()).build();
+    let result = {
+        let mut executor = executor_under(&mut state, policy, limits);
+        executor.apply_pre_execution_changes().expect("the block starts");
+        let packed: Vec<_> = candidates
+            .iter()
+            .map(|candidate| {
+                executor.execute_transaction(candidate).map(drop).map_err(|err| err.to_string())
+            })
+            .collect();
+        let (_, result) = executor.finish_with_counters().expect("the block finishes");
+        (result, packed)
+    };
+    let (result, packed) = result;
+    let block = Block {
+        receipts: result.inner.receipts,
+        gas_used: result.inner.gas_used,
+        blob_gas_used: result.inner.blob_gas_used,
+        counters: (result.gas, result.usage),
+        accounts: SENDERS
+            .iter()
+            .chain([&Address::ZERO])
+            .map(|address| {
+                let info = state.basic(*address).expect("readable");
+                (*address, info.map(|info| (info.balance, info.nonce)))
+            })
+            .collect(),
+        slots: (0..6_u64)
+            .map(|slot| state.storage(WRITES_NAMED, U256::from(slot)).expect("readable"))
+            .collect(),
+    };
+    (block, packed)
+}
+
+/// A builder packs under its own policy — a data-availability cap on one transaction, a cap on a
+/// transaction's declared gas, and a block data-size cap below the protocol's — and leaves out
+/// what it refuses. A validator re-executing the block it packed, under no policy or under a
+/// policy of its own that differs, computes the same block: the same receipts, counters and
+/// state. One holding the block to other limits does not, which is why the limits are fixed per
+/// spec rather than any node's to choose.
+#[test]
+fn test_a_builder_and_a_validator_that_differ_on_building_policy_agree_on_the_block() {
+    let limits = ProtocolLimits::for_spec(MegaSpecId::SATIN);
+    let writes = |sender, slot: u8, input_len: usize, gas_limit| {
+        let mut input = vec![0_u8; 32];
+        input[31] = slot;
+        input.extend_from_slice(&incompressible(input_len));
+        tx_from(sender, WRITES_NAMED, input.into(), gas_limit)
+    };
+    // The builder's cap on a transaction's declared gas is the candidates' own, so only the one
+    // candidate above it is refused for gas.
+    let gas = GAS_LIMIT;
+    let candidates = [
+        writes(SENDERS[0], 1, 0, gas),
+        // Refused by the builder's data-availability cap on one transaction.
+        writes(SENDERS[1], 2, 4_000, gas),
+        // Refused by the builder's cap on a transaction's declared gas.
+        writes(SENDERS[2], 3, 0, gas + 1),
+        // Packed: it is the transaction that reaches the builder's data-size cap.
+        writes(SENDERS[3], 4, 0, gas),
+        // Refused: the block has reached the builder's data-size cap, not the protocol's.
+        writes(SENDERS[4], 5, 0, gas),
+    ];
+    let da_size = |index: usize| MegaTransactionExt::estimated_da_size(&candidates[index]);
+    assert!(da_size(1) > 2_000 && da_size(0) < 1_000, "{} {}", da_size(0), da_size(1));
+
+    // What one small write keeps of data size, so the builder's cap lands after two of them.
+    let (probe, _) = build(limits, BlockLimits::default(), &candidates[..1]);
+    let one_write = probe.counters.1.data_size;
+    assert_eq!(one_write, TX_BODY_SIZE + 32 + WRITE_RECORD_SIZE);
+
+    let builder_policy = BlockLimits::no_limits()
+        .with_tx_da_size_limit(2_000)
+        .with_tx_gas_limit(gas)
+        .with_block_txs_data_limit(2 * one_write);
+    let (built, outcomes) = build(limits, builder_policy, &candidates);
+    let refusal = |index: usize| outcomes[index].clone().expect_err("the builder refused it");
+    assert!(
+        refusal(1).contains("Transaction data availability size limit exceeded"),
+        "{}",
+        refusal(1)
+    );
+    assert!(
+        refusal(2).contains(&format!(
+            "Transaction gas limit exceeded: tx_gas_limit={} > limit={gas}",
+            gas + 1
+        )),
+        "{}",
+        refusal(2)
+    );
+    assert!(
+        refusal(4).contains(&format!(
+            "Block transactions data limit reached: block_used={0} >= limit={0}",
+            2 * one_write
+        )),
+        "{}",
+        refusal(4)
+    );
+    let packed: Vec<_> = (0..candidates.len()).filter(|index| outcomes[*index].is_ok()).collect();
+    assert_eq!(packed, [0, 3], "the builder's policy decided what it packed");
+    assert_eq!(built.receipts.len(), 2);
+    assert!(built.receipts.iter().all(|receipt| receipt.status()));
+    assert!(
+        limits.block_txs_data_limit > built.counters.1.data_size,
+        "the block is well inside the protocol's own data-size budget"
+    );
+
+    let block: Vec<_> = packed.iter().map(|index| candidates[*index].clone()).collect();
+    let validator_policies = [
+        BlockLimits::default(),
+        // A validator whose node was given a policy of its own, looser than the builder's.
+        BlockLimits::no_limits().with_tx_da_size_limit(8_000).with_block_txs_data_limit(10_000),
+    ];
+    for policy in validator_policies {
+        let (validated, outcomes) = build(limits, policy, &block);
+        assert_eq!(outcomes, [Ok(()), Ok(())], "{policy:?}: the validator packs the whole block");
+        assert_eq!(validated, built, "{policy:?}: the validator computes the builder's block");
+    }
+
+    // The same block under other limits computes a different result: the first transaction's
+    // write crosses that data-size limit and is stopped.
+    let stricter = limits.with_tx_runtime_limits(
+        limits.tx_runtime_limits.with_tx_data_size_limit(TX_BODY_SIZE + 32),
+    );
+    let (elsewhere, outcomes) = build(stricter, BlockLimits::default(), &block);
+    assert_eq!(outcomes, [Ok(()), Ok(())], "the stopped transactions are packed all the same");
+    assert_ne!(elsewhere.receipts, built.receipts);
+    assert!(!elsewhere.receipts[0].status(), "the stop is a failed receipt");
+    assert!(elsewhere.slots[1].is_zero(), "and its write is not kept");
+}

@@ -20,7 +20,13 @@ jobs:
   mega-evm-core:
     name: mega-evm core coverage
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    # The tests, then the Mega EEST cases through the suite's adapter, built against this tree with
+    # mega-evm instrumented (scripts/coverage_mega_evm.sh): a second build of mega-evm and its
+    # dependencies, and every case run plain and instrumented.
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write # Codecov upload over OIDC; no token secret
     steps:
       - uses: actions/checkout@v4
         with:
@@ -35,8 +41,14 @@ jobs:
         uses: foundry-rs/foundry-toolchain@v1
 
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          # Pin the version: scripts/coverage_mega_evm.sh places the Mega EEST adapter where this
+          # release's report finds executables, and checks it did; a new release can change both.
+          tool: cargo-llvm-cov@0.8.7
 
+      # The report merges the tests' coverage with the Mega EEST cases', so a line only a Mega EEST
+      # case runs counts as covered.
       - name: Generate coverage reports
         run: scripts/coverage_mega_evm.sh
 
@@ -50,14 +62,25 @@ jobs:
       - name: Record Rust version
         run: echo "RUST=$(rustc --version)" >> "$GITHUB_ENV"
 
+      # A failed upload does not fail the job (Codecov being down must not turn every PR red), but
+      # it is reported: the next step warns, so a missing report is seen rather than silent.
       - name: Upload coverage to Codecov
+        id: codecov
         uses: codecov/codecov-action@v5
+        continue-on-error: true
         with:
           disable_search: true
-          fail_ci_if_error: false
+          fail_ci_if_error: true
           files: target/coverage/mega-evm/lcov.info
           flags: mega-evm-core
           name: mega-evm-core
-          token: ${{ secrets.CODECOV_TOKEN }}
+          use_oidc: true
           env_vars: RUST
           verbose: true
+
+      - name: Warn when the Codecov upload failed
+        if: steps.codecov.outcome == 'failure'
+        run: |
+          echo "::warning title=Codecov upload failed::The coverage report did not reach Codecov, so no coverage comment or status follows. See the upload step's log."
+          echo "> [!WARNING]" >> "$GITHUB_STEP_SUMMARY"
+          echo "> The Codecov upload failed: no coverage comment or status for this run. See the upload step's log." >> "$GITHUB_STEP_SUMMARY"

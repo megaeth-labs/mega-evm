@@ -1,0 +1,454 @@
+//! The settlement of a keyless deployment: the creation's result returned into the
+//! `keylessDeploy` call that started it, and the call's answer in the `IKeylessDeploy` ABI.
+
+use alloy_evm::Database;
+use alloy_primitives::{Address, Bytes};
+use alloy_sol_types::SolCall;
+use revm::{
+    context::{
+        result::{HaltReason, OutOfGasError},
+        ContextError, ContextTr, FrameStack, JournalTr,
+    },
+    context_interface::{
+        cfg::gas::GasTracker, context::CodeDeposit, journaled_state::account::JournaledAccountTr,
+    },
+    handler::{handle_reservoir_remaining_gas, EthFrame, FrameResult},
+    interpreter::{
+        interpreter::EthInterpreter, Gas, InstructionResult, InterpreterAction, SuccessOrHalt,
+    },
+    primitives::KECCAK_EMPTY,
+};
+
+use crate::{
+    hold_creator,
+    limit::CreatorBefore,
+    system::keyless::{encode_error_result, IKeylessDeploy, KeylessDeployError},
+    ExternalEnvTypes, LimitCheck, MegaContext, MegaHaltReason,
+};
+
+use super::dispatch::{signer_account, state_gas, Started};
+
+/// What a `keylessDeploy` call answers from, once its creation returned into it.
+#[derive(Debug)]
+pub(crate) struct Returned {
+    started: Started,
+    creation: Creation,
+}
+
+/// What the creation a `keylessDeploy` call started returned.
+#[derive(Debug)]
+pub(crate) struct Creation {
+    result: InstructionResult,
+    output: Bytes,
+    /// What the creation spent ([`creation_gas_used`]).
+    gas_used: u64,
+    /// The address revm reports the creation at.
+    created: Option<Address>,
+}
+
+/// The creation a `keylessDeploy` call started, when `result`, about to be returned to the frame
+/// that waits for it, is that creation's, returning into the call; `None` for every other result.
+///
+/// It is read here, before revm merges it into the call, which keeps nothing of it but its gas and
+/// whether it succeeded. The frame stack says whether the result lands in the call
+/// ([`returns_into_the_call`]).
+pub(crate) fn returning<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    ctx: &MegaContext<DB, ExtEnvs>,
+    stack: &mut FrameStack<EthFrame<EthInterpreter>>,
+    result: &FrameResult,
+) -> Option<Creation> {
+    let started = ctx.keyless_creation.as_ref()?;
+    if !returns_into_the_call(stack) {
+        return None;
+    }
+    let result_code = result.instruction_result();
+    // The creation's gas as revm's settlement leaves it before the merge: a creation that failed
+    // rolls its state and history gas back into its reservoir, and one that halted spends its
+    // regular gas and returns the reservoir it was given.
+    let mut gas = *result.gas();
+    handle_reservoir_remaining_gas(result_code, &mut GasTracker::default(), gas.tracker_mut());
+    // What the destruction table gave back for the deploy address's leaf is a charge the creation
+    // did not make, so it does not lower what the creation spent, while the destruction stands
+    // when the creation ends.
+    let destroyed = result_code.is_ok() && ctx.accounts().is_destroyed(started.deploy_address);
+    let given_back = if destroyed { started.leaf_given_back } else { 0 };
+    Some(Creation {
+        result: result_code,
+        output: result.interpreter_result().output.clone(),
+        gas_used: creation_gas_used(gas.tracker(), started.reservoir_share, given_back),
+        created: match result {
+            FrameResult::Create(outcome) => outcome.address,
+            FrameResult::Call(_) => None,
+        },
+    })
+}
+
+/// Whether the result about to be returned lands in the frame at the bottom of the stack, which in
+/// a keyless deployment is the `keylessDeploy` call.
+///
+/// It does in two cases: the top of the stack is the creation, at index 1 and finished, which revm
+/// pops before it hands the result to the frame below; or the top is the call itself, at index 0
+/// and not finished, which a creation answered without a frame of its own returns into directly.
+/// A frame the creation started returning (index 2, finished) or answered while the creation runs
+/// (index 1, not finished) lands in the creation instead.
+fn returns_into_the_call(stack: &mut FrameStack<EthFrame<EthInterpreter>>) -> bool {
+    let Some(top) = stack.index() else { return false };
+    top == usize::from(stack.get().is_finished())
+}
+
+/// Whether the code `deposit` makes is the empty code a keyless deployment's constructor returned
+/// for the deploy address, which the deployment refuses: the creation reverts and the call answers
+/// `EmptyCodeDeployed`, leaving the address deployable.
+///
+/// Only the deposit at the deploy address while the creation runs is refused. A creation the
+/// constructor makes itself, which may return empty code, deposits at another address, and a
+/// constructor that destroyed its own account (`destroyed`) is left as it is: the account does not
+/// keep what it returned, and the answer reads that off the journal ([`holds_code`]).
+pub(crate) fn refuses_empty_deposit(
+    creation: &mut Option<Started>,
+    deposit: &CodeDeposit<'_>,
+    destroyed: bool,
+) -> bool {
+    match creation {
+        Some(started)
+            if deposit.code.is_empty() &&
+                deposit.address == started.deploy_address &&
+                !destroyed =>
+        {
+            started.empty_deposit_refused = true;
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Settles `creation`, which revm has just merged into the `keylessDeploy` call whose gas is
+/// `gas`, and returns what the call answers from ([`answer`]).
+///
+/// The merge is revm's own, as for a `CREATE`'s frame: the unspent forward, the reservoir, the
+/// creation's state and history gas when it succeeded, and the created account's charge when it
+/// did not — priced through the same hook it was charged through — with the history of the records
+/// the creation did not keep given back after it.
+///
+/// What is left is what a `CREATE` has no counterpart for. The signer's account comes back when
+/// the creation's start never created it. And a deployment from nonce 0 keeps the creation's nonce
+/// bump, while from nonce 1 the bump is taken back, whether the deployment succeeded or failed,
+/// only when it is the last nonce change the deployment made ([`take_back_bump`]), leaving the
+/// nonce at 1, as the legacy engine did; that record's history goes with it, unless the creation
+/// succeeded and moved value out of the signer. The call is permissionless and the signed
+/// transaction public, so a nonce every failure spent would let anybody make a signer's address
+/// undeployable with two failing calls; and a success that spent it would answer a resubmission
+/// with `SignerNonceTooHigh` rather than `ContractAlreadyExists`. When the signer's own code spent
+/// a nonce in the constructor that survived it — on a default configuration, a delegated signer's
+/// `CREATE` or `CREATE2`, successful or not — nothing is taken back: a later bump may stand for an
+/// account, so the nonce is never moved back under one. That signer ends above 1, and a
+/// resubmission is refused `SignerNonceTooHigh`.
+///
+/// Then the signer's nonce record is counted on the call, as a `CREATE`'s creator's is on the
+/// creator once its creation returned ([`hold_creator`]): read off the signer's account as the
+/// settlement left it — `signer` is the signer as it stood before revm decided the creation — when
+/// revm bumped the nonce, held to the call's budget and then to the transaction's limit. A nonce
+/// set back leaves no record to count, unless the account keeps the value the creation moved. A
+/// crossing is the stop the call returns on its resume, before its answer; it runs before the
+/// call resumes for that reason.
+pub(crate) fn settle<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    ctx: &mut MegaContext<DB, ExtEnvs>,
+    gas: &mut Gas,
+    creation: Creation,
+    signer: Option<CreatorBefore>,
+) -> Result<(Returned, Option<LimitCheck>), ContextError<DB::Error>> {
+    let Some(started) = ctx.keyless_creation.take() else {
+        unreachable!("a creation returns into a keylessDeploy call that started it")
+    };
+    // The creation's start is what creates an empty signer's account. revm bumps the nonce of
+    // every creation it is asked to build, and a creation the limits stop at its start is bumped
+    // all the same; one an inspector answered in its place never started, and adds no account.
+    // A signer that had an account was charged nothing, and gets nothing back.
+    let nonce = account_nonce(ctx, started.signer);
+    if nonce == started.signer_nonce && started.signer_account_charged {
+        gas.refill_reservoir(state_gas(ctx, signer_account(started.signer))?);
+    }
+    let bumped = signer.filter(|signer| ctx.accounts().bumped(signer));
+    // A deployment from nonce 1 keeps no bump of its own: a failure leaves the address
+    // deployable, a success leaves it occupied. The creation's bump is the one above the nonce
+    // the call started from, and it is taken back only when it is the last one: a later bump the
+    // signer's own code made may stand for an account, so the nonce is never moved back under it.
+    if started.signer_nonce > 0 && nonce == started.signer_nonce + 1 {
+        take_back_bump(ctx, gas, &started)?;
+    }
+    let stop = bumped.and_then(|signer| hold_creator(ctx, &signer));
+    Ok((Returned { started, creation }, stop))
+}
+
+/// The action of a `keylessDeploy` call resuming on `gas` once its creation `returned` into it, a
+/// stop aside, set on the call's interpreter for its run to return: `keylessDeploy`'s return — the
+/// deployed address when the creation left code at it, or the zero address and the error the
+/// creation failed with, `ExecutionReverted`, `ExecutionHalted`, or `EmptyCodeDeployed` for a
+/// creation that left no code, having deployed none or destroyed itself. The call succeeds, and
+/// keeps what the creation's start wrote: a signer at nonce 0 whose deployment failed has spent its
+/// nonce all the same.
+///
+/// `gasUsed` is what the creation spent from both pools taken together ([`creation_gas_used`]):
+/// its regular charges and the state and history gas it kept, net of every give-back of a charge it
+/// made. It is the same whether the transaction has a state-gas reservoir or not, and it counts
+/// nothing the call paid for the creation's start: a give-back of the call's charges the creation
+/// received is added back.
+///
+/// A creation revm reports as a success at another address than the pinned one, or at none, is a
+/// broken engine rather than a failed deployment: the call reverts with `AddressMismatch()` or
+/// `NoContractCreated()`, which no deployment reaches.
+pub(crate) fn answer<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    ctx: &MegaContext<DB, ExtEnvs>,
+    returned: &Returned,
+    gas: Gas,
+) -> InterpreterAction {
+    let (result, output) = answer_of(ctx, returned);
+    InterpreterAction::new_return(result, output, gas)
+}
+
+/// The result and output of [`answer`].
+fn answer_of<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    ctx: &MegaContext<DB, ExtEnvs>,
+    returned: &Returned,
+) -> (InstructionResult, Bytes) {
+    let Returned { started, creation } = returned;
+    let gas_used = creation.gas_used;
+    if started.empty_deposit_refused {
+        return failed(KeylessDeployError::EmptyCodeDeployed { gas_used }, gas_used);
+    }
+    if creation.result.is_revert() {
+        let output = creation.output.clone();
+        return failed(KeylessDeployError::ExecutionReverted { gas_used, output }, gas_used);
+    }
+    if !creation.result.is_ok() {
+        let reason = halt_reason(creation.result);
+        return failed(KeylessDeployError::ExecutionHalted { gas_used, reason }, gas_used);
+    }
+    if creation.created != Some(started.deploy_address) {
+        let error = if creation.created.is_some() {
+            KeylessDeployError::AddressMismatch
+        } else {
+            KeylessDeployError::NoContractCreated
+        };
+        return (InstructionResult::Revert, encode_error_result(error));
+    }
+    if !holds_code(ctx, started.deploy_address) {
+        return failed(KeylessDeployError::EmptyCodeDeployed { gas_used }, gas_used);
+    }
+    returned_value(gas_used, started.deploy_address, Bytes::new())
+}
+
+/// Whether the deployment left code at `address`. The code the journal holds, not the code the
+/// constructor returned: a constructor that destroyed its own account (EIP-6780) in this
+/// transaction returned code the account does not keep. A destruction an earlier transaction on
+/// the same journal made, whose mark revm keeps on the account, is not this one.
+fn holds_code<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    ctx: &MegaContext<DB, ExtEnvs>,
+    address: Address,
+) -> bool {
+    let code = ctx
+        .journal_ref()
+        .state
+        .get(&address)
+        .is_some_and(|account| account.info.code_hash != KECCAK_EMPTY);
+    code && !ctx.accounts().is_destroyed(address)
+}
+
+/// Takes back the creation's nonce bump of a signer whose nonce was already 1, with that record's
+/// history, so what stands is what would stand had the creation's start not bumped the nonce: the
+/// signer stays at 1, however many deployments it makes. The record itself is counted afterwards,
+/// off the account as this leaves it, so a nonce set back leaves none to take back.
+///
+/// The record follows the signer's account: it goes when the nonce set back leaves the account
+/// as the transaction loaded it, and stays when the account keeps another write it stands for —
+/// the value a creation that succeeded moved out of it, or into it. A creation that failed took
+/// its value transfer back with the rest of its writes.
+///
+/// The history given back is one record's, which the call paid when the transaction pays history.
+/// A signer the transaction had already changed when the call charged it paid nothing for the
+/// record, and the nonce set back never leaves such a signer as the transaction loaded it: it is
+/// the transaction's sender or an applied EIP-7702 authority, whose nonce the transaction moved
+/// from 0 to 1 before the call, and setting it back to 1 leaves it changed. So when the record
+/// goes, the call had paid for it.
+fn take_back_bump<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    ctx: &mut MegaContext<DB, ExtEnvs>,
+    gas: &mut Gas,
+    started: &Started,
+) -> Result<(), ContextError<DB::Error>> {
+    ctx.journal_mut().load_account_mut(started.signer)?.data.set_nonce(started.signer_nonce);
+    if !ctx.accounts().is_changed(started.signer) {
+        gas.refill_history(ctx.records_history_charge(1));
+    }
+    Ok(())
+}
+
+/// The nonce of an account the journal holds; zero for one it does not.
+fn account_nonce<DB: Database, ExtEnvs: ExternalEnvTypes>(
+    ctx: &MegaContext<DB, ExtEnvs>,
+    address: Address,
+) -> u64 {
+    ctx.journal_ref().state.get(&address).map_or(0, |account| account.info.nonce)
+}
+
+/// `keylessDeploy`'s return for a deployment that failed with `error`.
+fn failed(error: KeylessDeployError, gas_used: u64) -> (InstructionResult, Bytes) {
+    returned_value(gas_used, Address::ZERO, encode_error_result(error))
+}
+
+/// `keylessDeploy`'s return: a success, whatever the deployment did.
+fn returned_value(
+    gas_used: u64,
+    deployed_address: Address,
+    error_data: Bytes,
+) -> (InstructionResult, Bytes) {
+    let output = IKeylessDeploy::keylessDeployCall::abi_encode_returns(
+        &IKeylessDeploy::keylessDeployReturn {
+            gasUsed: gas_used,
+            deployedAddress: deployed_address,
+            errorData: error_data,
+        },
+    );
+    (InstructionResult::Return, output.into())
+}
+
+/// Why a creation that ended with `result` halted. The ABI's `ExecutionHalted` carries no reason,
+/// so this is what the error value, and whoever handles it off-chain, is told.
+fn halt_reason(result: InstructionResult) -> MegaHaltReason {
+    match SuccessOrHalt::<MegaHaltReason>::from(result) {
+        SuccessOrHalt::Halt(reason) => reason,
+        _ => MegaHaltReason::Base(HaltReason::OutOfGas(OutOfGasError::Basic)),
+    }
+}
+
+/// What a creation spent from both pools taken together, its gas `gas` as its own settlement left
+/// it: the regular gas it was given less the regular gas it returns, plus the reservoir it was
+/// given, `reservoir_share`, less the reservoir it returns, plus `given_back`, the give-backs it
+/// received for charges it did not make.
+///
+/// The two pools are netted together, not each clipped at zero: a creation that pays a state
+/// charge from regular gas and then reverts returns that charge in its reservoir, which offsets
+/// the regular gas it paid, so what is left is its regular charges and the state and history gas
+/// it kept, net of every give-back of a charge it made. The figure is the same whether the
+/// transaction carries a reservoir or not. A creation that halted returns no regular gas and the
+/// reservoir it was given, so it spent its whole forward.
+///
+/// The one give-back of a charge the creation did not make is the destruction table's for the
+/// account being created — the state gas of its leaf and the history of its write record, which
+/// the `keylessDeploy` call or the transfer that funded the address paid — and it is added back,
+/// so the figure is never below the creation's regular charges.
+fn creation_gas_used(gas: &GasTracker, reservoir_share: u64, given_back: u64) -> u64 {
+    let regular = i128::from(gas.limit()) - i128::from(gas.remaining());
+    let reservoir = i128::from(reservoir_share) - i128::from(gas.reservoir());
+    u64::try_from(regular + reservoir + i128::from(given_back)).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A halt is reported with its own reason.
+    #[test]
+    fn test_a_halt_keeps_its_reason() {
+        assert_eq!(
+            halt_reason(InstructionResult::InvalidFEOpcode),
+            MegaHaltReason::Base(HaltReason::InvalidFEOpcode),
+        );
+        assert_eq!(
+            halt_reason(InstructionResult::CreateContractStartingWithEF),
+            MegaHaltReason::Base(HaltReason::CreateContractStartingWithEF),
+        );
+        assert_eq!(
+            halt_reason(InstructionResult::Return),
+            MegaHaltReason::Base(HaltReason::OutOfGas(OutOfGasError::Basic)),
+            "what is not a halt is reported as running out of gas",
+        );
+    }
+
+    /// A creation's gas with give-backs to the reservoir alone, as a Satin frame's is: `limit` of
+    /// regular gas and `reservoir`.
+    fn creation_gas(limit: u64, reservoir: u64) -> Gas {
+        let mut gas = Gas::new_with_regular_gas_and_reservoir(limit, reservoir);
+        gas.set_reservoir_only_give_backs(true);
+        gas
+    }
+
+    /// Settles `gas` as revm settles a creation that ended with `result`.
+    fn settled(result: InstructionResult, mut gas: Gas) -> GasTracker {
+        handle_reservoir_remaining_gas(result, &mut GasTracker::default(), gas.tracker_mut());
+        *gas.tracker()
+    }
+
+    /// The creation's spend is the same figure whichever pool paid its state and history gas.
+    #[test]
+    fn test_the_creation_gas_used_does_not_depend_on_the_pool() {
+        for reservoir in [0, 100_000, 10_000_000] {
+            let mut gas = creation_gas(1_000_000, reservoir);
+            assert!(gas.record_regular_cost(30_000));
+            assert!(gas.record_state_cost_with_legacy_share(200_000, 10_000));
+            assert!(gas.record_history_cost(4_000));
+            let gas = settled(InstructionResult::Stop, gas);
+            assert_eq!(creation_gas_used(&gas, reservoir, 0), 234_000, "reservoir {reservoir}");
+        }
+    }
+
+    /// A creation that reverts returns its state and history charges in its reservoir, whichever
+    /// pool paid them, so it spent its regular charges alone; one that halts spent its whole
+    /// forward and returns the reservoir it was given.
+    #[test]
+    fn test_a_failed_creation_spent_its_regular_charges_or_its_forward() {
+        for reservoir in [0, 10_000_000] {
+            let charged = || {
+                let mut gas = creation_gas(1_000_000, reservoir);
+                assert!(gas.record_regular_cost(30_000));
+                assert!(gas.record_state_cost_with_legacy_share(200_000, 10_000));
+                gas
+            };
+            let reverted = settled(InstructionResult::Revert, charged());
+            assert_eq!(creation_gas_used(&reverted, reservoir, 0), 30_000, "{reservoir}");
+            let halted = settled(InstructionResult::OutOfGas, charged());
+            assert_eq!(halted.reservoir(), reservoir);
+            assert_eq!(creation_gas_used(&halted, reservoir, 0), 1_000_000, "{reservoir}");
+        }
+    }
+
+    /// A constructor that writes a fresh slot from regular gas alone and reverts reports its
+    /// regular charges, not the slot it gave back: 500,000 of forward and no reservoir, 113,549 of
+    /// regular gas spent of which 101,440 paid the slot's state gas and its record's history, both
+    /// returned as reservoir.
+    #[test]
+    fn test_a_reverted_fresh_slot_lowers_the_spend_by_what_regular_gas_paid_for_it() {
+        let mut gas = creation_gas(500_000, 0);
+        assert!(gas.record_regular_cost(3 + 2 + 2_100 + 10_000 + 2 + 2));
+        assert!(gas.record_state_cost_with_legacy_share(97_920, 10_000));
+        assert!(gas.record_history_cost(3_520));
+        let gas = settled(InstructionResult::Revert, gas);
+        assert_eq!((gas.remaining(), gas.reservoir()), (386_451, 101_440));
+        assert_eq!(creation_gas_used(&gas, 0, 0), 12_109);
+    }
+
+    /// A give-back of a charge the creation did not make is added back: a constructor that
+    /// destroys the account it creates is given back the leaf the call paid for and its record,
+    /// and reports what it spent of regular gas, not that spend less the give-back.
+    #[test]
+    fn test_a_give_back_of_the_calls_charges_does_not_lower_the_spend() {
+        let mut gas = creation_gas(500_000, 0);
+        assert!(gas.record_regular_cost(2 + 5_000));
+        gas.refill_reservoir(183_600);
+        gas.refill_history(3_520);
+        let gas = settled(InstructionResult::SelfDestruct, gas);
+        assert_eq!((gas.remaining(), gas.reservoir()), (494_998, 187_120));
+        assert_eq!(creation_gas_used(&gas, 0, 187_120), 5_002);
+    }
+
+    /// A creation that refilled more than it charged — a slot written back that its caller had
+    /// filled — reports what it spent of regular gas less the give-back, which it took off a
+    /// charge another frame of the creation made.
+    #[test]
+    fn test_a_net_refill_nets_against_the_regular_spend() {
+        let mut gas = creation_gas(1_000_000, 0);
+        assert!(gas.record_regular_cost(30_000));
+        gas.refill_reservoir(20_000);
+        let gas = settled(InstructionResult::Stop, gas);
+        assert_eq!(creation_gas_used(&gas, 0, 0), 10_000);
+    }
+}

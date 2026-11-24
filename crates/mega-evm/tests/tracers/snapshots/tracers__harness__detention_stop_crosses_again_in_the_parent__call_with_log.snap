@@ -1,0 +1,28 @@
+---
+source: crates/mega-evm/tests/tracers/harness.rs
+expression: "&redacted(&traced.call_frame(true))"
+---
+{
+  "calls": [
+    {
+      "error": "execution reverted",
+      "from": "0x0000000000000000000000000000000000400002",
+      "gas": "[gas]",
+      "gasUsed": "[gas]",
+      "input": "0x",
+      "output": "MegaLimitExceeded(2, [gas])",
+      "to": "0x0000000000000000000000000000000000400003",
+      "type": "CALL",
+      "value": "0x0"
+    }
+  ],
+  "error": "execution reverted",
+  "from": "0x0000000000000000000000000000000000400000",
+  "gas": "[gas]",
+  "gasUsed": "[gas]",
+  "input": "0x",
+  "output": "MegaLimitExceeded(2, [gas])",
+  "to": "0x0000000000000000000000000000000000400002",
+  "type": "CALL",
+  "value": "0x0"
+}

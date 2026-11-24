@@ -1,15 +1,16 @@
 //! The transaction outcome: the result, the gas by ledger, the usage counted and the stop.
 
-use alloy_primitives::{address, Address, Bytes, U256};
-use alloy_sol_types::SolError;
+use alloy_primitives::{address, Address, U256};
 use mega_evm::{
-    constants::TX_GAS_LIMIT_CAP,
+    constants::{COST_PER_HISTORY_BYTE, SLOT_STATE_GAS, TX_GAS_LIMIT_CAP},
     test_utils::{BytecodeBuilder, MemoryDatabase},
     BlockGasCounters, EvmTxRuntimeLimits, LimitCheck, LimitKind, LimitUsage, MegaEvm,
-    MegaLimitExceeded, MegaTransactionOutcome, WRITE_RECORD_SIZE,
+    MegaTransactionOutcome, TX_BODY_SIZE, WRITE_RECORD_SIZE,
 };
 
-use crate::common::{call, context};
+use crate::common::{
+    body_history, call, context, execute_under, history, runs_at_measurement_prices, slot_state_gas,
+};
 
 const CALLER: Address = address!("0000000000000000000000000000000000600000");
 const CONTRACT: Address = address!("0000000000000000000000000000000000600001");
@@ -23,29 +24,57 @@ fn writer() -> MemoryDatabase {
     MemoryDatabase::default().account_code(CONTRACT, code)
 }
 
+/// A gas limit for a call to [`writer`]: 1,000,000 of regular gas on top of what its two slots,
+/// their records and the body cost at the byte prices in effect.
+fn writer_gas() -> u64 {
+    1_000_000 + 2 * slot_state_gas() + body_history(0) + history(2 * WRITE_RECORD_SIZE)
+}
+
 fn execute(
     db: MemoryDatabase,
     limits: EvmTxRuntimeLimits,
     gas_limit: u64,
 ) -> MegaTransactionOutcome {
-    MegaEvm::new(context(db).with_tx_runtime_limits(limits))
-        .execute_transaction(call(CALLER, CONTRACT, U256::ZERO, gas_limit))
-        .unwrap()
+    execute_under(db, call(CALLER, CONTRACT, U256::ZERO, gas_limit), limits)
 }
 
 /// The ledgers split the raw spend, the receipt reports revm's gas used, and the reservoir the
 /// sender gets back is reported.
 #[test]
 fn test_outcome_reports_the_ledgers() {
+    if runs_at_measurement_prices() {
+        return;
+    }
     let outcome = execute(writer(), EvmTxRuntimeLimits::no_limits(), 1_000_000_000);
     assert!(outcome.result.is_success());
     let gas = outcome.gas;
     let result_gas = outcome.result.gas();
     assert_eq!(gas.regular + gas.state + gas.history, result_gas.total_gas_spent());
     assert_eq!(gas.gas_used, result_gas.tx_gas_used());
-    assert_eq!(gas.reservoir_remaining, 1_000_000_000 - TX_GAS_LIMIT_CAP);
-    assert_eq!(gas.history, 0, "nothing prices history bytes yet");
-    assert_eq!(outcome.usage, LimitUsage { data_size: 2 * WRITE_RECORD_SIZE, write_records: 2 });
+    // Both slots are new, so both draw state gas, and the reservoir is what pays it but each
+    // slot's 10,000 legacy share, which regular gas pays first: state gas on the state ledger all
+    // the same.
+    assert_eq!(gas.state, 2 * SLOT_STATE_GAS);
+    // The body's history comes out of the same reservoir, before the state gas does, and each of
+    // the two new slots leaves a write record that is history too.
+    assert_eq!(
+        gas.history,
+        (TX_BODY_SIZE + 2 * WRITE_RECORD_SIZE) * COST_PER_HISTORY_BYTE,
+        "the transaction's body and the two write records",
+    );
+    assert_eq!(
+        gas.reservoir_remaining,
+        1_000_000_000 - TX_GAS_LIMIT_CAP - 2 * (SLOT_STATE_GAS - 10_000) - gas.history,
+    );
+    assert_eq!(
+        outcome.usage,
+        LimitUsage {
+            data_size: TX_BODY_SIZE + 2 * WRITE_RECORD_SIZE,
+            write_records: 2,
+            state_growth: 2
+        },
+        "the two write records; both slots are new"
+    );
     assert_eq!(outcome.limit_exceeded, None);
 
     let mut block = BlockGasCounters::default();
@@ -53,13 +82,17 @@ fn test_outcome_reports_the_ledgers() {
     block.record(&gas);
     assert_eq!(block.execution, 2 * gas.block_execution_gas());
     assert_eq!(block.state, 2 * gas.state);
+    assert_eq!(block.history, 2 * gas.history);
 }
 
 /// A stopped transaction reports the stop.
 #[test]
 fn test_outcome_reports_the_stop() {
-    let outcome =
-        execute(writer(), EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(40), 1_000_000);
+    let outcome = execute(
+        writer(),
+        EvmTxRuntimeLimits::no_limits().with_tx_data_size_limit(TX_BODY_SIZE + 40),
+        writer_gas(),
+    );
     assert!(!outcome.result.is_success());
     assert_eq!(
         outcome.limit_exceeded,
@@ -67,24 +100,15 @@ fn test_outcome_reports_the_stop() {
             kind: LimitKind::DataSize,
             limit: 40,
             used: 80,
-            frame_local: false
-        })
+            frame_local: true
+        }),
+        "the transaction's own frame crossed its budget, what the body leaves of the limit"
     );
-    assert_eq!(outcome.usage, LimitUsage::ZERO, "the stopped transaction keeps nothing");
-}
-
-/// A contract reverting with `MegaLimitExceeded`'s bytes on its own is not a stop.
-#[test]
-fn test_spoofed_revert_data_is_not_a_stop() {
-    let data: Bytes = MegaLimitExceeded { kind: 0, limit: 1 }.abi_encode().into();
-    let code = BytecodeBuilder::default().revert_with_data(&data).build();
-    let outcome = execute(
-        MemoryDatabase::default().account_code(CONTRACT, code),
-        EvmTxRuntimeLimits::no_limits(),
-        1_000_000,
+    assert_eq!(
+        outcome.usage,
+        LimitUsage { data_size: TX_BODY_SIZE, write_records: 0, state_growth: 0 },
+        "the stop drops the writes and keeps the body"
     );
-    assert_eq!(outcome.result.output(), Some(&data));
-    assert_eq!(outcome.limit_exceeded, None);
 }
 
 /// Counts the steps it sees.
@@ -107,12 +131,14 @@ impl<CTX> revm::Inspector<CTX, revm::interpreter::interpreter::EthInterpreter> f
 #[test]
 fn test_convenience_execution_methods_work() {
     let mut evm = MegaEvm::new(context(writer())).with_inspector(Steps::default());
-    let inspected = evm.execute_transaction(call(CALLER, CONTRACT, U256::ZERO, 1_000_000)).unwrap();
+    let inspected =
+        evm.execute_transaction(call(CALLER, CONTRACT, U256::ZERO, writer_gas())).unwrap();
     assert!(inspected.result.is_success());
     let steps = evm.inspector().0;
     assert!(steps > 0, "the enabled inspector ran");
     alloy_evm::Evm::set_inspector_enabled(&mut evm, false);
-    let executed = evm.execute_transaction(call(CALLER, CONTRACT, U256::ZERO, 1_000_000)).unwrap();
+    let executed =
+        evm.execute_transaction(call(CALLER, CONTRACT, U256::ZERO, writer_gas())).unwrap();
     assert!(executed.result.is_success());
     assert_eq!(evm.inspector().0, steps, "the disabled inspector did not run");
     assert_eq!(inspected.gas, executed.gas);

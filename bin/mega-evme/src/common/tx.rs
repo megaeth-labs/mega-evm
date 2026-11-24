@@ -1,5 +1,10 @@
 //! Transaction configuration for mega-evme
 
+use alloy_eips::{
+    eip2930::{AccessList, AccessListItem},
+    eip7702::{Authorization, RecoveredAuthority, RecoveredAuthorization, SignedAuthorization},
+    Decodable2718, Encodable2718, Typed2718 as _,
+};
 use alloy_primitives::{address, Address, Bytes, Signature, B256, U256};
 use clap::Args;
 use mega_evm::{
@@ -7,15 +12,14 @@ use mega_evm::{
         transaction::SignerRecoverable, Sealed, Signed, Transaction as _, TxEip1559, TxEip2930,
         TxEip7702, TxLegacy,
     },
-    alloy_eips::{
-        eip2930::{AccessList, AccessListItem},
-        eip7702::{Authorization, RecoveredAuthority, RecoveredAuthorization, SignedAuthorization},
-        Decodable2718, Encodable2718, Typed2718 as _,
-    },
+    alloy_op_evm::OpTx,
     op_alloy_consensus::{OpTxEnvelope, TxDeposit},
-    op_revm::transaction::deposit::DepositTransactionParts,
-    revm::{context::tx::TxEnv, primitives::TxKind},
-    Either, MegaTransaction, MegaTxEnvelope, MegaTxType,
+    op_revm::{transaction::deposit::DepositTransactionParts, OpTransaction},
+    revm::{
+        context::{either::Either, tx::TxEnv},
+        primitives::TxKind,
+    },
+    MegaTransaction, MegaTxEnvelope, MegaTxType,
 };
 use tracing::{debug, trace};
 
@@ -347,8 +351,9 @@ impl TxArgs {
     /// Loads input data from `--input` or `--inputfile` arguments.
     pub fn create_tx(&self, chain_id: u64) -> Result<MegaTransaction> {
         let tx_env = self.create_tx_env(chain_id)?;
-        let envelope = create_fake_envelope(&tx_env)?;
-        let mut tx = MegaTransaction::new(tx_env);
+        let envelope =
+            create_fake_envelope(&tx_env, self.source_hash.unwrap_or(B256::ZERO), self.mint)?;
+        let mut tx = OpTx(OpTransaction::new(tx_env));
         tx.enveloped_tx = Some(Bytes::from(envelope.encoded_2718()));
 
         // Set deposit fields if this is a deposit transaction (type 126)
@@ -362,6 +367,18 @@ impl TxArgs {
 
         Ok(tx)
     }
+
+    /// The hash of the transaction [`Self::create_tx`] builds, when it has one.
+    ///
+    /// A deposit is unsigned, so the hash of its encoding is its hash. Any other type would be
+    /// signed, and the tool signs nothing: the encoding it builds carries a placeholder signature
+    /// and hashes to no transaction, so there is none.
+    pub fn tx_hash(&self, tx: &MegaTransaction) -> Option<B256> {
+        if !matches!(MegaTxType::try_from(tx.base.tx_type), Ok(MegaTxType::Deposit)) {
+            return None;
+        }
+        tx.enveloped_tx.as_ref().map(alloy_primitives::keccak256)
+    }
 }
 
 /// Result of decoding a raw EIP-2718 transaction.
@@ -374,6 +391,8 @@ pub struct DecodedRawTx {
     /// Deposit-specific fields, if this is a deposit transaction.
     /// `(source_hash, mint, is_system_transaction)`
     pub deposit: Option<(B256, Option<u128>, bool)>,
+    /// Whether an override changed the transaction from the one the bytes encode.
+    pub overridden: bool,
 }
 
 impl DecodedRawTx {
@@ -397,14 +416,14 @@ impl DecodedRawTx {
         });
 
         let decoded_chain_id = envelope.chain_id();
-        let (gas_price, gas_priority_fee) = match envelope {
+        let (gas_price, gas_priority_fee) = match &envelope {
             OpTxEnvelope::Legacy(_) | OpTxEnvelope::Eip2930(_) => {
                 (envelope.gas_price().unwrap_or(0), None)
             }
             OpTxEnvelope::Eip1559(_) | OpTxEnvelope::Eip7702(_) => {
                 (envelope.max_fee_per_gas(), envelope.max_priority_fee_per_gas())
             }
-            OpTxEnvelope::Deposit(_) => (0, None),
+            OpTxEnvelope::Deposit(_) | OpTxEnvelope::PostExec(_) => (0, None),
         };
 
         let authorization_list = envelope
@@ -429,7 +448,7 @@ impl DecodedRawTx {
             chain_id: decoded_chain_id,
         };
 
-        Ok(Self { tx_env, raw_bytes, deposit })
+        Ok(Self { tx_env, raw_bytes, deposit, overridden: false })
     }
 
     /// Applies explicitly-set [`TxArgs`] fields as overrides to the decoded [`TxEnv`].
@@ -437,8 +456,10 @@ impl DecodedRawTx {
     /// Only fields that were explicitly provided via CLI flags are overridden;
     /// `None` / empty fields in `tx_args` leave the base value unchanged.
     pub fn override_tx_env(mut self, tx_args: &TxArgs) -> Result<Self> {
+        let decoded = (self.tx_env.clone(), self.deposit);
         if let Some(tx_type) = tx_args.tx_type {
             self.tx_env.tx_type = tx_type;
+            self.drop_fields_the_type_cannot_carry();
         }
         if let Some(gas) = tx_args.gas {
             self.tx_env.gas_limit = gas;
@@ -486,14 +507,106 @@ impl DecodedRawTx {
                 *mint = tx_args.mint;
             }
         }
+        self.reject_inconsistent_override(tx_args)?;
+        self.overridden |= decoded != (self.tx_env.clone(), self.deposit);
         Ok(self)
+    }
+
+    /// The hash of the transaction that runs: the hash of the signed bytes, or none once an
+    /// override changed what they encode.
+    pub fn tx_hash(&self) -> Option<B256> {
+        (!self.overridden).then(|| alloy_primitives::keccak256(&self.raw_bytes))
+    }
+
+    /// Drops what the raw transaction carries and its new type cannot: the priority fee of a type
+    /// without one, the access list of a type without one, the authorization list of a type that
+    /// is not EIP-7702. Changing only the type then runs the transaction as that type, with what
+    /// it can carry. Fields given by a flag are set after this, so a flag that names one of them
+    /// for a type that cannot carry it is still refused.
+    fn drop_fields_the_type_cannot_carry(&mut self) {
+        let Ok(tx_type) = MegaTxType::try_from(self.tx_env.tx_type) else { return };
+        if matches!(tx_type, MegaTxType::Legacy | MegaTxType::Eip2930) {
+            self.tx_env.gas_priority_fee = None;
+        }
+        if !matches!(tx_type, MegaTxType::Eip2930 | MegaTxType::Eip1559 | MegaTxType::Eip7702) {
+            self.tx_env.access_list = Default::default();
+        }
+        if tx_type != MegaTxType::Eip7702 {
+            self.tx_env.authorization_list.clear();
+        }
+    }
+
+    /// Rejects a type and field combination [`TxArgs::validate`] would reject.
+    ///
+    /// The check reads the transaction after the override, with what the old type carried and the
+    /// new one cannot already dropped, so what it finds comes from a flag. It does not require
+    /// `--receiver`: a raw transaction already has its own destination. Setting `--tx-type 126`
+    /// does not fill deposit fields, so a raw transaction that is not a deposit cannot become
+    /// one.
+    fn reject_inconsistent_override(&self, tx_args: &TxArgs) -> Result<()> {
+        let tx_type = MegaTxType::try_from(self.tx_env.tx_type)
+            .map_err(|_| EvmeError::UnsupportedTxType(self.tx_env.tx_type))?;
+
+        if tx_args.create() && tx_args.receiver.is_some() {
+            return Err(EvmeError::InvalidInput(
+                "--receiver must not be set when --create is specified".to_string(),
+            ));
+        }
+
+        let deposit_flags = tx_args.source_hash.is_some() || tx_args.mint.is_some();
+        if tx_type == MegaTxType::Deposit && self.deposit.is_none() {
+            return Err(EvmeError::InvalidInput(
+                "--tx-type 126 does not make a raw transaction a deposit; --source-hash is \
+                 required for deposit transactions and is not applied here"
+                    .to_string(),
+            ));
+        }
+        if tx_type != MegaTxType::Deposit && self.deposit.is_some() {
+            return Err(EvmeError::InvalidInput(format!(
+                "the raw transaction is a deposit (type 126), and --tx-type {} would make it \
+                 another type",
+                self.tx_env.tx_type
+            )));
+        }
+        if tx_type != MegaTxType::Deposit && deposit_flags {
+            return Err(EvmeError::InvalidInput(
+                "--source-hash and --mint are only valid for deposit transactions (--tx-type 126)"
+                    .to_string(),
+            ));
+        }
+
+        if matches!(tx_type, MegaTxType::Legacy | MegaTxType::Eip2930) &&
+            self.tx_env.gas_priority_fee.is_some()
+        {
+            return Err(EvmeError::InvalidInput(
+                "--priority-fee is not valid for legacy (0) or EIP-2930 (1) transactions"
+                    .to_string(),
+            ));
+        }
+
+        if tx_type != MegaTxType::Eip7702 && !self.tx_env.authorization_list.is_empty() {
+            return Err(EvmeError::InvalidInput(
+                "--auth is only valid for EIP-7702 transactions (--tx-type 4)".to_string(),
+            ));
+        }
+
+        if !self.tx_env.access_list.is_empty() &&
+            !matches!(tx_type, MegaTxType::Eip2930 | MegaTxType::Eip1559 | MegaTxType::Eip7702)
+        {
+            return Err(EvmeError::InvalidInput(
+                "--access is only valid for EIP-2930 (1), EIP-1559 (2), or EIP-7702 (4) transactions"
+                    .to_string(),
+            ));
+        }
+
+        Ok(())
     }
 
     /// Converts the decoded raw transaction into a [`MegaTransaction`].
     ///
     /// Uses the stored raw bytes for `enveloped_tx` (used in L1 fee calculation).
     pub fn into_tx(self) -> MegaTransaction {
-        let mut tx = MegaTransaction::new(self.tx_env);
+        let mut tx = OpTx(OpTransaction::new(self.tx_env));
         tx.enveloped_tx = Some(self.raw_bytes);
         if let Some((source_hash, mint, is_system_transaction)) = self.deposit {
             tx.deposit = DepositTransactionParts { source_hash, mint, is_system_transaction };
@@ -506,9 +619,15 @@ impl DecodedRawTx {
 ///
 /// The created envelope only contains the information available in [`TxEnv`] and fills many
 /// fields with placeholder values. The encoded envelope is used for L1 data fee calculation.
+/// A deposit has no signature, so its envelope is the transaction itself, with the given
+/// `source_hash` and `mint`.
 /// A dummy signature is used since the CLI doesn't have access to signing keys — the non-zero
 /// r/s bytes ensure the encoded size is realistic (matching real signed transactions).
-fn create_fake_envelope(tx_env: &TxEnv) -> Result<MegaTxEnvelope> {
+fn create_fake_envelope(
+    tx_env: &TxEnv,
+    source_hash: B256,
+    mint: Option<u128>,
+) -> Result<MegaTxEnvelope> {
     let dummy_sig = Signature::new(U256::from(1u64), U256::from(1u64), false);
     let chain_id = tx_env.chain_id.unwrap_or(0);
     let tx_type = MegaTxType::try_from(tx_env.tx_type)
@@ -594,10 +713,10 @@ fn create_fake_envelope(tx_env: &TxEnv) -> Result<MegaTxEnvelope> {
         }
         MegaTxType::Deposit => {
             let tx = TxDeposit {
-                source_hash: B256::ZERO,
+                source_hash,
                 from: tx_env.caller,
                 to: tx_env.kind,
-                mint: 0,
+                mint: mint.unwrap_or(0),
                 value: tx_env.value,
                 gas_limit: tx_env.gas_limit,
                 is_system_transaction: false,
@@ -605,5 +724,135 @@ fn create_fake_envelope(tx_env: &TxEnv) -> Result<MegaTxEnvelope> {
             };
             Ok(MegaTxEnvelope::Deposit(Sealed::new_unchecked(tx, B256::ZERO)))
         }
+        MegaTxType::PostExec => Err(EvmeError::UnsupportedTxType(tx_env.tx_type)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bare_args() -> TxArgs {
+        TxArgs {
+            tx_type: None,
+            gas: None,
+            basefee: None,
+            priority_fee: None,
+            sender: None,
+            receiver: None,
+            nonce: None,
+            create: None,
+            value: None,
+            input: None,
+            inputfile: None,
+            source_hash: None,
+            mint: None,
+            auth: Vec::new(),
+            access: Vec::new(),
+        }
+    }
+
+    fn legacy_raw() -> DecodedRawTx {
+        let tx_env = mega_evm::revm::context::tx::TxEnvBuilder::new()
+            .tx_type(Some(0))
+            .build()
+            .expect("legacy transaction");
+        DecodedRawTx { tx_env, raw_bytes: Bytes::new(), deposit: None, overridden: false }
+    }
+
+    #[test]
+    fn test_raw_override_rejects_priority_fee_on_legacy() {
+        let mut args = bare_args();
+        args.priority_fee = Some(1);
+        let err = legacy_raw()
+            .override_tx_env(&args)
+            .expect_err("a legacy transaction has no priority fee");
+        assert!(matches!(err, EvmeError::InvalidInput(msg) if msg.contains("priority-fee")));
+    }
+
+    #[test]
+    fn test_raw_override_rejects_making_a_deposit() {
+        let mut args = bare_args();
+        args.tx_type = Some(126);
+        args.source_hash = Some(B256::ZERO);
+        let err = legacy_raw()
+            .override_tx_env(&args)
+            .expect_err("tx-type 126 does not fill deposit fields");
+        assert!(matches!(err, EvmeError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn test_raw_override_keeps_an_eip1559_priority_fee() {
+        let tx_env = mega_evm::revm::context::tx::TxEnvBuilder::new()
+            .tx_type(Some(2))
+            .gas_priority_fee(Some(1))
+            .build()
+            .expect("EIP-1559 transaction");
+        let decoded =
+            DecodedRawTx { tx_env, raw_bytes: Bytes::new(), deposit: None, overridden: false }
+                .override_tx_env(&bare_args())
+                .expect("an EIP-1559 transaction may carry a priority fee");
+        assert_eq!(decoded.tx_env.tx_type, 2);
+        assert_eq!(decoded.tx_env.gas_priority_fee, Some(1));
+    }
+
+    /// A raw EIP-1559 transaction carrying a priority fee and an access list.
+    fn eip1559_raw() -> DecodedRawTx {
+        let item = AccessListItem { address: Address::repeat_byte(0x11), storage_keys: vec![] };
+        let tx_env = mega_evm::revm::context::tx::TxEnvBuilder::new()
+            .tx_type(Some(2))
+            .gas_priority_fee(Some(1))
+            .access_list(AccessList(vec![item]))
+            .build()
+            .expect("EIP-1559 transaction");
+        DecodedRawTx { tx_env, raw_bytes: Bytes::new(), deposit: None, overridden: false }
+    }
+
+    /// Changing only the type of a raw transaction runs it as the new type: what the old type
+    /// carried and the new one cannot is dropped, and no flag the user did not pass is blamed.
+    #[test]
+    fn test_raw_override_of_the_type_alone_drops_what_the_type_cannot_carry() {
+        for tx_type in [0, 1] {
+            let mut args = bare_args();
+            args.tx_type = Some(tx_type);
+            let decoded = eip1559_raw()
+                .override_tx_env(&args)
+                .unwrap_or_else(|e| panic!("type {tx_type} alone: {e}"));
+            assert_eq!(decoded.tx_env.tx_type, tx_type);
+            assert_eq!(decoded.tx_env.gas_priority_fee, None, "type {tx_type}");
+            // Type 1 keeps the access list its type carries; type 0 has none.
+            assert_eq!(decoded.tx_env.access_list.0.len(), usize::from(tx_type == 1));
+        }
+    }
+
+    /// A flag that names a field the new type cannot carry is still refused, and by that flag.
+    #[test]
+    fn test_raw_override_refuses_a_flag_the_new_type_cannot_carry() {
+        let mut args = bare_args();
+        args.tx_type = Some(0);
+        args.priority_fee = Some(2);
+        let err = eip1559_raw().override_tx_env(&args).expect_err("--priority-fee on type 0");
+        assert!(matches!(err, EvmeError::InvalidInput(msg) if msg.contains("--priority-fee")));
+    }
+
+    /// A raw deposit cannot change its type, and the refusal names the type flag, not the
+    /// deposit flags the user did not pass.
+    #[test]
+    fn test_raw_override_of_a_deposits_type_names_the_type_flag() {
+        let tx_env = mega_evm::revm::context::tx::TxEnvBuilder::new()
+            .tx_type(Some(126))
+            .build()
+            .expect("deposit");
+        let decoded = DecodedRawTx {
+            tx_env,
+            raw_bytes: Bytes::new(),
+            deposit: Some((B256::ZERO, None, false)),
+            overridden: false,
+        };
+        let mut args = bare_args();
+        args.tx_type = Some(2);
+        let err = decoded.override_tx_env(&args).expect_err("a deposit stays a deposit");
+        let EvmeError::InvalidInput(msg) = err else { panic!("{err:?}") };
+        assert!(msg.contains("--tx-type 2") && !msg.contains("--source-hash"), "{msg}");
     }
 }

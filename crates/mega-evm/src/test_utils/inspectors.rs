@@ -1,6 +1,9 @@
 #[cfg(not(feature = "std"))]
 use alloc as std;
-use std::{rc::Rc, vec::Vec};
+use std::{
+    rc::{Rc, Weak},
+    vec::Vec,
+};
 
 use core::cell::RefCell;
 use revm::{
@@ -42,29 +45,6 @@ impl<T: Clone> Pointer<T> {
     }
 }
 
-/// A path to a specific node in the trace tree.
-///
-/// Each element represents the child index at that level of the tree.
-/// For example, `vec![0, 2, 1]` means: first child -> third child -> second child.
-pub type NodeLocation = Vec<usize>;
-
-/// A location of an item within a node's sections.
-///
-/// `(section_index, item_index)` where sections are interleaved with child calls.
-pub type ItemLocation = (usize, usize);
-
-/// A complete location representing a specific item in the trace tree.
-///
-/// Combines a node location (path through call tree) with an item location
-/// (position within that node's items).
-#[derive(Debug)]
-pub struct TraceLocation {
-    /// Path to the node containing the item.
-    pub call: NodeLocation,
-    /// Position of the item within the node.
-    pub item: ItemLocation,
-}
-
 /// A node in a hierarchical trace tree structure.
 ///
 /// This represents a call frame (either a message call or contract creation) and maintains
@@ -86,8 +66,8 @@ pub struct TraceLocation {
 pub struct TraceNode<ITEM, META> {
     /// Metadata about this call (e.g., call inputs, creation inputs).
     pub meta: META,
-    /// Reference to the parent node, if any.
-    pub parent: Option<Pointer<Self>>,
+    /// The parent node, if any. Weak, so a node and its parent do not keep each other alive.
+    pub parent: Option<Weak<RefCell<Self>>>,
     /// Sections of items. There is always one more section than children.
     /// Sections are interleaved with children to maintain chronological order.
     pub sections: Vec<Vec<Pointer<ITEM>>>,
@@ -100,13 +80,22 @@ impl<ITEM, META> TraceNode<ITEM, META> {
     ///
     /// If a parent is provided, this node is automatically added as a child of the parent.
     pub fn new(meta: META, parent: Option<Pointer<Self>>) -> Pointer<Self> {
-        let this: Pointer<Self> =
-            Self { meta, parent: parent.clone(), sections: vec![Vec::new()], childrens: vec![] }
-                .into();
+        let this: Pointer<Self> = Self {
+            meta,
+            parent: parent.as_ref().map(|parent| Rc::downgrade(&parent.0)),
+            sections: vec![Vec::new()],
+            childrens: vec![],
+        }
+        .into();
         if let Some(p) = parent {
             p.borrow_mut().add_child(this.clone());
         }
         this
+    }
+
+    /// The parent node, when it is still alive.
+    pub fn parent_node(&self) -> Option<Pointer<Self>> {
+        self.parent.as_ref().and_then(Weak::upgrade).map(Pointer)
     }
 
     /// Returns the last item added to this node across all sections.
@@ -137,70 +126,17 @@ impl<ITEM, META> Pointer<TraceNode<ITEM, META>> {
         items.extend(self.borrow().sections[self.borrow().childrens.len()].iter().cloned());
         items
     }
-
-    /// Retrieves a node at the specified location in the tree.
-    ///
-    /// Returns `None` if the location is invalid (out of bounds).
-    pub fn get_node(&self, location: NodeLocation) -> Option<Self> {
-        if location.is_empty() {
-            Some(self.clone())
-        } else {
-            self.borrow().childrens[location[0]].get_node(location[1..].to_vec())
-        }
-    }
-
-    /// Retrieves an item at the specified location within this node.
-    ///
-    /// Returns `None` if the location is invalid (out of bounds).
-    pub fn get_item(&self, location: ItemLocation) -> Option<Pointer<ITEM>> {
-        self.borrow().sections.get(location.0).and_then(|section| section.get(location.1)).cloned()
-    }
-
-    /// Retrieves an item using a complete trace location (node path + item position).
-    ///
-    /// Returns `None` if either the node location or item location is invalid.
-    pub fn get_item_nested(&self, location: TraceLocation) -> Option<Pointer<ITEM>> {
-        self.get_node(location.call).and_then(|n| n.get_item(location.item))
-    }
-
-    /// Iterates over all items in the tree in chronological order.
-    ///
-    /// For each item, calls the provided function with:
-    /// - The node location (path to the node containing the item)
-    /// - The node itself
-    /// - The item location within the node
-    /// - The item
-    pub fn iterate_with<F>(&self, mut f: F)
-    where
-        F: FnMut(NodeLocation, Self, ItemLocation, Pointer<ITEM>),
-    {
-        self.iterate_with_inner(&mut f, vec![]);
-    }
-
-    /// Internal helper for recursive iteration maintaining the current node location.
-    fn iterate_with_inner<F>(&self, f: &mut F, node_location: NodeLocation)
-    where
-        F: FnMut(NodeLocation, Self, ItemLocation, Pointer<ITEM>),
-    {
-        let sections = &self.borrow().sections;
-        for (section_idx, section) in sections.iter().enumerate() {
-            for (item_idx, item) in section.iter().enumerate() {
-                f(node_location.clone(), self.clone(), (section_idx, item_idx), item.clone());
-            }
-            if section_idx < sections.len() - 1 {
-                let mut child_node_location = node_location.clone();
-                child_node_location.push(section_idx);
-                self.borrow().childrens[section_idx].iterate_with_inner(f, child_node_location);
-            }
-        }
-    }
 }
 
 /// Represents gas information for a single opcode execution.
 #[derive(Clone)]
 pub struct OpcodeGasInfo {
-    /// The opcode executed.
+    /// The opcode executed. A byte no opcode is defined for, which halts the frame with
+    /// `OpcodeNotFound`, is recorded as `INVALID`; [`byte`](Self::byte) tells it from the
+    /// designated invalid opcode `0xFE`.
     pub opcode: OpCode,
+    /// The byte executed: the opcode's own, or the undefined byte the frame halted on.
+    pub byte: u8,
     /// Gas remaining before the opcode execution.
     pub gas_before: u64,
     /// Gas remaining after the opcode execution.
@@ -211,10 +147,14 @@ pub struct OpcodeGasInfo {
 
 impl core::fmt::Debug for OpcodeGasInfo {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        if self.is_undefined() {
+            write!(f, "UNDEFINED(0x{:02x})", self.byte)?;
+        } else {
+            f.write_str(self.opcode.as_str())?;
+        }
         write!(
             f,
-            "{}[depth={}] gas: {} -> {} (cost: {})",
-            self.opcode.as_str(),
+            "[depth={}] gas: {} -> {} (cost: {})",
             self.depth,
             self.gas_before,
             self.gas_after,
@@ -227,6 +167,11 @@ impl OpcodeGasInfo {
     /// Calculates the gas cost of this opcode execution.
     pub fn gas_cost(&self) -> u64 {
         self.gas_before.saturating_sub(self.gas_after)
+    }
+
+    /// Whether the byte executed is one no opcode is defined for.
+    pub fn is_undefined(&self) -> bool {
+        self.byte != self.opcode.get()
     }
 }
 
@@ -252,12 +197,6 @@ impl GasInspector {
     /// Creates a new enabled `GasInspector`.
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// Clears all recorded gas information.
-    pub fn clear(&mut self) {
-        self.trace = None;
-        self.stack = vec![];
     }
 
     /// Returns a flattened view of all opcode records in chronological order.
@@ -320,7 +259,8 @@ impl<CTX: ContextTr, INTR: InterpreterTypes> Inspector<CTX, INTR> for GasInspect
         let opcode = interp.bytecode.opcode();
         let depth = context.journal().depth();
         let step = OpcodeGasInfo {
-            opcode: OpCode::new(opcode).unwrap(),
+            opcode: OpCode::new(opcode).unwrap_or(OpCode::INVALID),
+            byte: opcode,
             gas_before,
             gas_after: gas_before, // Will be updated in step_end
             depth: depth as u64,
@@ -331,13 +271,67 @@ impl<CTX: ContextTr, INTR: InterpreterTypes> Inspector<CTX, INTR> for GasInspect
     }
 
     fn step_end(&mut self, interp: &mut Interpreter<INTR>, _context: &mut CTX) {
-        // Update the gas_after field with the actual gas remaining after execution
-        let current = self
-            .stack
-            .last()
-            .as_ref()
-            .and_then(|c| c.borrow_mut().last_item())
-            .expect("current is not None");
+        // A step that recorded nothing — an empty stack, or a frame with no item — has no gas to
+        // update. Recording starts in `step`, so a `step_end` that arrives without one is skipped.
+        let Some(current) = self.stack.last().and_then(|frame| frame.borrow().last_item()) else {
+            return;
+        };
         current.borrow_mut().gas_after = interp.gas.remaining();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use revm::{
+        context::Context,
+        interpreter::{CreateInputs, Interpreter},
+        Inspector, MainContext,
+    };
+
+    use super::*;
+
+    fn interpreter() -> Interpreter {
+        Interpreter::default_ext()
+    }
+
+    #[test]
+    fn test_step_end_skips_a_missing_item() {
+        let mut inspector = GasInspector::new();
+        let mut interp = interpreter();
+        let mut context = Context::mainnet();
+        Inspector::<_, _>::step_end(&mut inspector, &mut interp, &mut context);
+
+        inspector.stack.push(TraceNode::new(MsgCallMeta::Create(CreateInputs::default()), None));
+        Inspector::<_, _>::step_end(&mut inspector, &mut interp, &mut context);
+        assert!(inspector.records().is_empty());
+    }
+
+    #[test]
+    fn test_step_end_writes_the_gas_left_on_the_current_item() {
+        let mut inspector = GasInspector::new();
+        let node = TraceNode::new(MsgCallMeta::Create(CreateInputs::default()), None);
+        node.borrow_mut().add_item(OpcodeGasInfo {
+            opcode: OpCode::STOP,
+            byte: OpCode::STOP.get(),
+            gas_before: 50,
+            gas_after: 50,
+            depth: 0,
+        });
+        inspector.stack.push(node.clone());
+        inspector.trace = Some(node);
+        let mut interp = interpreter();
+        let mut context = Context::mainnet();
+        Inspector::<_, _>::step_end(&mut inspector, &mut interp, &mut context);
+        assert_eq!(inspector.records()[0].gas_after, interp.gas.remaining());
+        assert_eq!(inspector.records()[0].gas_before, 50);
+    }
+
+    #[test]
+    fn test_a_trace_parent_drops_with_the_parent() {
+        let parent = TraceNode::<(), u8>::new(1, None);
+        let child = TraceNode::<(), u8>::new(2, Some(parent.clone()));
+        assert_eq!(child.borrow().parent_node().expect("the parent is alive").borrow().meta, 1);
+        drop(parent);
+        assert!(child.borrow().parent_node().is_none());
     }
 }

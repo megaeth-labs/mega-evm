@@ -24,6 +24,22 @@ pub trait OracleEnv: Debug + Unpin {
     ///
     /// The storage value at the given slot of the oracle contract. If the oracle does not provide a
     /// value, the result will be `None`.
+    ///
+    /// The EVM asks for every `SLOAD` in the oracle contract's own frame, each time it runs, once
+    /// it loaded the slot from the chain's state, and uses the loaded value when the answer is
+    /// `None`. An answer is used even over a value the oracle contract's frame stored in the slot
+    /// earlier in the transaction. The slot is loaded whatever the answer, so a node that replays
+    /// a block without the service prices and witnesses it as the node that built the block did.
+    ///
+    /// Only a transaction that is neither a deposit nor a Mega System Transaction asks. A system
+    /// call, a deposit and a Mega System Transaction never do, and their reads use the loaded
+    /// value: none of them can have a value the service gave written on the chain before it, as a
+    /// node that replays the block without the service needs.
+    ///
+    /// A frame whose regular gas, the part gas detention withholds included, cannot pay the read's
+    /// cold access, and a frame whose volatile-data access is switched off, read nothing and do not
+    /// ask. A detained frame that holds the gas but may not spend it does ask, and the read's
+    /// charge then stops that frame at the compute limit.
     fn get_oracle_storage(&self, slot: U256) -> Option<U256>;
 
     /// Receives hints emitted on-chain by the oracle contract. A hint is a message sent from

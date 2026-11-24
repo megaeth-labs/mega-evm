@@ -14,14 +14,14 @@ use serde::{Deserialize, Serialize};
 
 /// `MegaETH` spec id: the EVM behavior the Satin engine executes.
 ///
-/// Satin is a single-spec engine. The specs of the legacy engine (`Equivalence` through `Rex7`)
+/// Satin is a single-spec engine. The specs of the legacy engine (`Equivalence` through `Rex6`)
 /// are not variants here and never parse to one; they are executed by the legacy engine.
 ///
 /// Each spec runs on top of an Optimism spec, which in turn runs on top of an Ethereum spec:
 /// - [`MegaSpecId::SATIN`] -> [`OpSpecId::KARST`] -> [`EthSpecId::OSAKA`]
 ///
-/// The discriminants continue after the legacy ladder (`EQUIVALENCE` = 0 through `REX7` = 11),
-/// so a raw `as u8` of a Satin spec never aliases a legacy one.
+/// The discriminants continue after those of the released legacy crate, which assigns 0 through
+/// 11, so a raw `as u8` of a Satin spec never aliases a legacy one.
 #[repr(u8)]
 #[derive(
     Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize,
@@ -57,7 +57,6 @@ pub const LEGACY_SPEC_NAMES: &[&str] = &[
     "Rex4",
     "Rex5",
     "Rex6",
-    "Rex7",
 ];
 
 impl MegaSpecId {
@@ -151,7 +150,7 @@ mod tests {
 
     /// Every spec name of the legacy engine, written out by hand so the rejection check does
     /// not read the list it is checking.
-    const LEGACY_NAMES: [&str; 12] = [
+    const LEGACY_NAMES: [&str; 11] = [
         "Equivalence",
         "MiniRex",
         "MiniRex1",
@@ -163,7 +162,6 @@ mod tests {
         "Rex4",
         "Rex5",
         "Rex6",
-        "Rex7",
     ];
 
     #[test]
@@ -204,7 +202,7 @@ mod tests {
     fn test_serde_uses_the_variant_name() {
         assert_eq!(serde_json::to_string(&MegaSpecId::SATIN).unwrap(), "\"SATIN\"");
         assert_eq!(serde_json::from_str::<MegaSpecId>("\"SATIN\"").unwrap(), MegaSpecId::SATIN);
-        for legacy in ["\"REX6\"", "\"REX7\"", "\"EQUIVALENCE\"", "\"Satin\""] {
+        for legacy in ["\"REX6\"", "\"EQUIVALENCE\"", "\"Satin\""] {
             assert!(
                 serde_json::from_str::<MegaSpecId>(legacy).is_err(),
                 "{legacy} must not deserialize"
@@ -218,8 +216,8 @@ mod tests {
         assert_eq!(*MegaSpecId::ALL.last().unwrap(), MegaSpecId::default());
     }
 
-    /// A raw `as u8` of a Satin spec never aliases a legacy rung (`EQUIVALENCE` = 0 through
-    /// `REX7` = 11).
+    /// A raw `as u8` of a Satin spec never aliases a legacy one: the released legacy crate
+    /// assigns 0 through 11.
     #[test]
     fn test_discriminant_continues_after_the_legacy_ladder() {
         assert_eq!(MegaSpecId::SATIN as u8, 12);

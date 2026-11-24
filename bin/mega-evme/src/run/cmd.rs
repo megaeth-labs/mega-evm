@@ -6,7 +6,8 @@ use tracing::{debug, info, trace, warn};
 
 use super::{load_hex, Result, RunError};
 use crate::common::{
-    print_execution_summary, print_execution_trace, EvmeOutcome, ExecutionSummary,
+    print_execution_summary, print_execution_trace, print_satin_report, EvmeOutcome,
+    ExecutionSummary,
 };
 
 // Re-export TracerType from common module
@@ -72,18 +73,16 @@ impl Cmd {
             self.prestate_args.create_initial_state(&sender, &self.rpc_args).await?;
         debug!(sender = %sender, "State initialized");
 
-        // Deploy system contracts based on spec
-        let spec = self.env_args.spec_id()?;
-        state.deploy_system_contracts(spec);
-        debug!(spec = ?spec, "System contracts deployed");
+        // Install Satin's predeploys
+        state.deploy_system_contracts()?;
+        debug!("System contracts deployed");
 
         let pre_execution_nonce = state.basic_ref(sender)?.map(|acc| acc.nonce).unwrap_or(0);
         debug!(nonce = pre_execution_nonce, "Pre-execution nonce");
 
         // Run-specific: If not in create mode, set the code at the receiver address
         if !self.tx_args.create() && !code.is_empty() {
-            let bytecode = Bytecode::new_raw_checked(code.clone())
-                .unwrap_or_else(|_| Bytecode::new_legacy(code.clone()));
+            let bytecode = checked_run_bytecode(code.clone())?;
             debug!(receiver = %self.tx_args.receiver(), "Setting code at receiver address");
             state.set_account_code(self.tx_args.receiver(), bytecode);
         }
@@ -107,19 +106,24 @@ impl Cmd {
         // Create EVM context and execute transaction
         let evm_context = self.env_args.create_evm_context(&mut state)?;
         let start = Instant::now();
-        let (exec_result, evm_state, trace_data) =
+        let (exec_result, mut evm_state, trace_data, mut satin) =
             self.trace_args.execute_transaction(evm_context, tx)?;
+        if self.dump_args.dump {
+            crate::materialize_dumped_code(&state, &mut evm_state)?;
+        }
+        satin.limits_override = self.env_args.limits_override_in_force()?;
         let exec_time = start.elapsed();
 
         // Log execution result
+        let gas_used = exec_result.tx_gas_used();
         match &exec_result {
-            ExecutionResult::Success { gas_used, .. } => {
+            ExecutionResult::Success { .. } => {
                 info!(gas_used, "Execution succeeded");
             }
-            ExecutionResult::Revert { gas_used, .. } => {
+            ExecutionResult::Revert { .. } => {
                 warn!(gas_used, "Execution reverted");
             }
-            ExecutionResult::Halt { reason, gas_used } => {
+            ExecutionResult::Halt { reason, .. } => {
                 warn!(?reason, gas_used, "Execution halted");
             }
         }
@@ -130,6 +134,7 @@ impl Cmd {
             state: evm_state,
             exec_time,
             trace_data,
+            satin,
         };
 
         // Step 4: Output results (including state dump if requested)
@@ -151,6 +156,7 @@ impl Cmd {
         if self.output_args.json {
             let mut summary = ExecutionSummary::from_result(&outcome.exec_result, contract_address);
             summary.fill_trace_and_dump(outcome, &self.trace_args, &self.dump_args)?;
+            summary.satin = Some(outcome.satin.clone());
             println!(
                 "{}",
                 serde_json::to_string_pretty(&summary).expect("failed to serialize output")
@@ -158,6 +164,7 @@ impl Cmd {
         } else {
             // Human-readable summary
             print_execution_summary(&outcome.exec_result, contract_address, outcome.exec_time);
+            print_satin_report(&outcome.satin);
 
             print_execution_trace(
                 outcome.trace_data.as_deref(),
@@ -170,5 +177,31 @@ impl Cmd {
         }
 
         Ok(())
+    }
+}
+
+/// Bytecode placed at the receiver.
+///
+/// A designation that is not valid EIP-7702 bytecode is an error, rather than code to execute.
+fn checked_run_bytecode(code: alloy_primitives::Bytes) -> Result<Bytecode> {
+    Bytecode::new_raw_checked(code).map_err(RunError::InvalidBytecode)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_run_bytecode_rejects_a_broken_delegation() {
+        let err = checked_run_bytecode(alloy_primitives::Bytes::from_static(&[0xef, 0x01]))
+            .expect_err("a truncated EIP-7702 designation is not bytecode");
+        assert!(matches!(err, RunError::InvalidBytecode(_)));
+    }
+
+    #[test]
+    fn test_run_bytecode_accepts_ordinary_code() {
+        let bytecode = checked_run_bytecode(alloy_primitives::Bytes::from_static(&[0x00]))
+            .expect("STOP is valid code");
+        assert_eq!(bytecode.original_bytes().as_ref(), &[0x00]);
     }
 }
