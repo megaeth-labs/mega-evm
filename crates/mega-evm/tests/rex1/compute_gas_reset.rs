@@ -83,7 +83,7 @@ fn make_evm(
 }
 
 fn make_tx(target: alloy_primitives::Address) -> MegaTransaction {
-    MegaTransaction {
+    MegaTransaction(op_revm::OpTransaction {
         base: TxEnvBuilder::new()
             .caller(CALLER)
             .call(target)
@@ -92,7 +92,7 @@ fn make_tx(target: alloy_primitives::Address) -> MegaTransaction {
             .build_fill(),
         enveloped_tx: Some(Bytes::new()),
         ..Default::default()
-    }
+    })
 }
 
 fn compute_gas_limit(evm: &MegaEvm<MemoryDatabase, NoOpInspector, EmptyExternalEnv>) -> u64 {
