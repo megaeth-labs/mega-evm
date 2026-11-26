@@ -491,6 +491,7 @@ mod tests {
             caller_address: address,
             input: revm::interpreter::CallInput::Bytes(Bytes::from(input)),
             call_value: Default::default(),
+            depth: 0,
         }
     }
 

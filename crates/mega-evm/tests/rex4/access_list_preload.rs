@@ -4,7 +4,7 @@
 //! account and each listed slot — before the first frame, so they are in the transaction's read
 //! set, the accounts and slots of the state it hands back, from which a node builds the stateless
 //! witness, whether or not execution touches them. An entry listing no keys was only marked warm.
-//! revm 40 marks every entry warm and reads none of them up front; `MegaETH` loads the ones with
+//! revm 43 marks every entry warm and reads none of them up front; `MegaETH` loads the ones with
 //! keys anyway. Every expectation here was measured on the deployed implementation.
 
 use alloy_primitives::{address, Address, Bytes, B256, U256};

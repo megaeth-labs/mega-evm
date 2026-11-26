@@ -1,9 +1,9 @@
-//! Journal residency left by an account read revm 40 skips, observed by a later CALL.
+//! Journal residency left by an account read revm 43 skips, observed by a later CALL.
 //!
 //! The deployed implementation read a CALL-family target (and its EIP-7702 delegate) and an
 //! `EXTCODECOPY` target before charging, so a frame that ran out of gas on those charges had
 //! already read them. A read of an absent pre-warmed address (a precompile, the coinbase) left a
-//! warm journal entry behind once the frame reverted. revm 40 charges first, so the same frame
+//! warm journal entry behind once the frame reverted. revm 43 charges first, so the same frame
 //! never reads, and a later CALL's storage-gas wrapper then inspects the address into a cold entry
 //! the deployed implementation never had. Every expectation here was measured on the deployed
 //! implementation.

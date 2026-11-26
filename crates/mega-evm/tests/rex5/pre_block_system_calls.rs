@@ -141,8 +141,8 @@ struct RecordingStateHook {
 }
 
 impl OnStateHook for RecordingStateHook {
-    fn on_state(&mut self, state: &EvmState) {
-        self.events.lock().unwrap().push(state.clone());
+    fn on_state(&mut self, state: EvmState) {
+        self.events.lock().unwrap().push(state);
     }
 }
 

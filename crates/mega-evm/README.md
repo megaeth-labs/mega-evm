@@ -4,9 +4,9 @@ A specialized Ethereum Virtual Machine (EVM) implementation tailored for MegaETH
 
 ## EVM Version
 
-- **Base EVM**: [revm v40.0.3](https://github.com/bluealloy/revm)
-- **Optimism EVM**: [op-revm v20.0.0](https://github.com/ethereum-optimism/optimism/tree/develop/rust/op-revm), from the Optimism monorepo
-- **Alloy EVM**: [alloy-evm v0.36.0](https://github.com/alloy-rs/alloy-evm)
+- **Base EVM**: [revm v43.0.3](https://github.com/bluealloy/revm)
+- **Optimism EVM**: [op-revm v20.0.0](https://github.com/ethereum-optimism/optimism/tree/develop/rust/op-revm), from the Optimism monorepo (commit `f8498888`)
+- **Alloy EVM**: [alloy-evm v0.39.0](https://github.com/alloy-rs/alloy-evm)
 
 The exact pins, including the Optimism monorepo revision, are in the workspace `Cargo.toml`.
 

@@ -957,7 +957,7 @@ fn bench_oracle_real_data(c: &mut Criterion) {
 // Halting CALL-Family Window Benchmarks
 // ============================================================================
 //
-// revm 40 charges the CALL family's static gas ahead of revm's body and its
+// revm 43 charges the CALL family's static gas ahead of revm's body and its
 // value-transfer cost ahead of the load, where the schedule MegaETH deployed
 // charged both after. A frame that halts on either — or on a memory expansion
 // it could have paid for before the static charge — therefore has to recreate

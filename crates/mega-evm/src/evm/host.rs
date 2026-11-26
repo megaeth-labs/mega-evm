@@ -213,7 +213,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> Host for MegaContext<DB, ExtEnvs> 
     /// Every account-reading opcode — BALANCE, EXTCODESIZE, EXTCODECOPY, EXTCODEHASH and the CALL
     /// family — reaches the journal through here, and marks here before the load can give up on a
     /// cold account it cannot afford, so the mark lands where the account is read. The instruction
-    /// layer marks in one other case only: a CALL-family or EXTCODECOPY frame that revm 40 halts
+    /// layer marks in one other case only: a CALL-family or EXTCODECOPY frame that revm 43 halts
     /// before its load, where the deployed implementation, which loaded before charging, had
     /// already marked. Marking is idempotent.
     ///
@@ -368,11 +368,11 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
             .is_some_and(|storage_keys| !storage_keys.is_empty())
     }
 
-    /// Reads a storage slot revm 40 declined to read because the frame could not afford a cold
+    /// Reads a storage slot revm 43 declined to read because the frame could not afford a cold
     /// access, and returns the error the declining host method reports.
     ///
     /// `MegaETH` has always read a slot before charging for it, so a frame too poor for a cold
-    /// `SLOAD` read the slot and then ran out of gas on the charge. revm 40 halts it before the
+    /// `SLOAD` read the slot and then ran out of gas on the charge. revm 43 halts it before the
     /// read, which would drop the slot from the transaction's read set and from the state the
     /// transaction hands back, which is what a stateless witness is built from. Reading it here
     /// keeps both. The read warms the slot inside the halting frame, whose revert cools it
@@ -388,7 +388,7 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaContext<DB, ExtEnvs> {
         }
     }
 
-    /// Reads, without its code, an account revm 40 declined to read because the frame could not
+    /// Reads, without its code, an account revm 43 declined to read because the frame could not
     /// afford a cold access, and returns the error the declining host method reports.
     ///
     /// The account counterpart of [`Self::read_declined_slot`], for `SELFDESTRUCT`'s beneficiary,
@@ -558,7 +558,7 @@ pub trait HostExt: Host {
     fn end_call_target_resolution(&mut self);
 
     /// Leaves in the journal what the deployed implementation's read of `address` left once the
-    /// frame that issued it reverted, for a read revm 40 never issues because it halts first.
+    /// frame that issued it reverted, for a read revm 43 never issues because it halts first.
     ///
     /// The deployed read loaded an absent account the way every journal load does: warm if the
     /// address is pre-warmed (a precompile, the coinbase, an access-list entry), otherwise cold

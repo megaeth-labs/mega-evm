@@ -588,59 +588,63 @@ fn test_rex5_caller_materialization_first_deploy_charged_retry_not_recharged() {
 // 6. GASPRICE inside the REX5 sandbox returns 0 (consensus-observable)
 // ============================================================================
 
-/// REX5 deposit-style sandbox sets `tx.gas_price = 0`. As a consequence, the
-/// `GASPRICE` opcode executed inside the constructor returns 0, even though
-/// the keyless transaction's signed gas price is non-zero (100 gwei here).
-/// This test pins the spec choice so future "restore raw `gas_price`" attempts
-/// fail loudly.
+/// The fee-free sandbox constructor logs zero for `GASPRICE` with a nonzero signed gas price.
 #[test]
-fn test_rex5_sandbox_gasprice_opcode_returns_zero() {
+fn test_fee_free_sandbox_gasprice_opcode_returns_zero() {
     // Constructor:
     //   slot 0x42 ← 1                                  (marker; proves SSTORE ran)
     //   slot 0x43 ← GASPRICE                           (the assertion)
+    //   LOG0(GASPRICE)                               (the forwarded log)
     //   RETURN single-byte STOP                        (avoid EmptyCodeDeployed)
     //
     // Bytecode:
     //   60 01  60 42  55       PUSH1 1, PUSH1 0x42, SSTORE
     //   3a     60 43  55       GASPRICE, PUSH1 0x43, SSTORE
+    //   3a  5f  52  60 20  5f  a0  MSTORE(0, GASPRICE), LOG0(0, 32)
     //   60 00  60 00  52       PUSH1 0, PUSH1 0, MSTORE
     //   60 01  60 1f  f3       PUSH1 1, PUSH1 0x1f, RETURN
     let init_code = Bytes::from_static(&[
         0x60, 0x01, 0x60, 0x42, 0x55, // SSTORE(0x42, 1)
         0x3a, 0x60, 0x43, 0x55, // SSTORE(0x43, GASPRICE)
+        0x3a, 0x5f, 0x52, 0x60, 0x20, 0x5f, 0xa0, // LOG0(0, 32) with GASPRICE in memory
         0x60, 0x00, 0x60, 0x00, 0x52, // mem[0:32] = 0
         0x60, 0x01, 0x60, 0x1f, 0xf3, // return mem[0x1f:0x20] = 0x00 (STOP)
     ]);
     let (keyless_tx_bytes, signer) = build_keyless_tx_with_init_code(init_code);
     let deploy_address = calculate_keyless_deploy_address(signer);
 
-    let mut db = MemoryDatabase::default();
-    db.set_account_balance(RELAYER, U256::from(1_000_000_000u64));
+    for spec in [MegaSpecId::REX5, MegaSpecId::REX6] {
+        let mut db = MemoryDatabase::default();
+        db.set_account_balance(RELAYER, U256::from(1_000_000_000u64));
 
-    let external_envs = TestExternalEnvs::<std::convert::Infallible>::new();
-    let result = run_keyless_outer(
-        MegaSpecId::REX5,
-        &mut db,
-        external_envs,
-        keyless_tx_bytes,
-        LARGE_GAS_LIMIT_OVERRIDE,
-    );
-    assert!(result.is_success(), "deploy must succeed; got {result:?}");
-    assert!(has_code(&mut db, deploy_address), "deploy address must have runtime code");
+        let external_envs = TestExternalEnvs::<std::convert::Infallible>::new();
+        let result = run_keyless_outer(
+            spec,
+            &mut db,
+            external_envs,
+            keyless_tx_bytes.clone(),
+            LARGE_GAS_LIMIT_OVERRIDE,
+        );
+        assert!(result.is_success(), "deploy must succeed; got {result:?}");
+        let [log] = result.logs() else { panic!("{spec:?}: expected one constructor log") };
+        assert_eq!(log.address, deploy_address);
+        assert_eq!(log.data.data.as_ref(), &[0u8; 32], "{spec:?}: constructor GASPRICE");
+        assert!(has_code(&mut db, deploy_address), "deploy address must have runtime code");
 
-    let marker = storage_slot(&mut db, deploy_address, U256::from(0x42u64));
-    assert_eq!(marker, U256::from(1u64), "marker proves the constructor's SSTORE actually ran");
+        let marker = storage_slot(&mut db, deploy_address, U256::from(0x42u64));
+        assert_eq!(marker, U256::from(1u64), "marker proves the constructor's SSTORE actually ran");
 
-    let observed_gas_price = storage_slot(&mut db, deploy_address, U256::from(0x43u64));
-    assert_eq!(
-        observed_gas_price,
-        U256::ZERO,
-        "REX5 sandbox: GASPRICE opcode must return 0 even though the signed gas_price is {SIGNED_GAS_PRICE} wei",
-    );
+        let observed_gas_price = storage_slot(&mut db, deploy_address, U256::from(0x43u64));
+        assert_eq!(
+            observed_gas_price,
+            U256::ZERO,
+            "{spec:?} sandbox: GASPRICE opcode must return 0 even though the signed gas_price is {SIGNED_GAS_PRICE} wei",
+        );
 
-    // Sanity: deployed code is the 1-byte STOP we returned.
-    let code = deployed_code(&mut db, deploy_address);
-    assert_eq!(code.as_ref(), &[0x00u8]);
+        // Sanity: deployed code is the 1-byte STOP we returned.
+        let code = deployed_code(&mut db, deploy_address);
+        assert_eq!(code.as_ref(), &[0x00u8]);
+    }
 }
 
 // ============================================================================

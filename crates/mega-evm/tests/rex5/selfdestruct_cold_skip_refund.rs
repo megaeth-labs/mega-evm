@@ -4,7 +4,7 @@
 //! account's state growth, and from Rex5 one that sends value to an empty beneficiary records the
 //! new account before the opcode runs. The deployed implementation read the beneficiary and
 //! destroyed the account before charging for either, so a frame that could not afford the cold
-//! read still recorded the refund before it ran out of gas; revm 40 skips the read and halts
+//! read still recorded the refund before it ran out of gas; revm 43 skips the read and halts
 //! first. The halt discards the refund with the rest of the frame's usage, but the frame-end limit
 //! check sees it: without it, the new beneficiary puts a frame with a tight state-growth budget
 //! over, and the out-of-gas halt becomes a revert that returns the frame's gas to its caller.

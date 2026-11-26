@@ -175,11 +175,9 @@ impl<DB: Database, ExtEnvs: ExternalEnvTypes> MegaEvm<DB, NoOpInspector, ExtEnvs
     ///
     /// A new `Evm` instance configured with the provided context and inspector.
     pub fn new(mut context: MegaContext<DB, ExtEnvs>) -> Self {
-        // Settle EIP-8037 here as well as before each transaction, so the snapshot taken below and
-        // everything read back through it describe the configuration transactions will actually
-        // run with. See `context::force_amsterdam_eip8037_off` for why the flag is not a caller's
-        // to set.
-        self::context::force_amsterdam_eip8037_off(&mut context.inner.cfg);
+        // Keep the public config snapshot consistent with the Amsterdam gas flags pinned at
+        // transaction entry.
+        self::context::force_amsterdam_gas_flags_off(&mut context.inner.cfg);
 
         let spec = context.mega_spec();
         let mega_cfg = context.cfg().clone().into_megaeth_cfg(spec);
@@ -538,7 +536,7 @@ mod tests {
 
     /// Trait-plumbing smoke test for the `EvmTr` / `InspectorEvmTr` accessors.
     ///
-    /// These are pure field projections required by revm 40's traits — every tuple element has a
+    /// These are pure field projections required by revm 43's traits — every tuple element has a
     /// distinct type, so a miswired projection would not compile. There is no logic to get wrong;
     /// this pins only that each projection is wired and callable, so the surface stays exercised.
     #[test]
@@ -671,7 +669,7 @@ mod tests {
     /// `operator_fee_refund`. A default `L1BlockInfo` (operator fee scalars `None`) is the
     /// factory path used by block executors; under Isthmus, incorrectly calling refund panics
     /// with `Missing operator fee scalar for isthmus L1 Block`. Frozen pre-migration and
-    /// revm-handler 20 skip post-execution for system calls entirely — gas outcome is the
+    /// revm-handler 43 skip post-execution for system calls entirely — gas outcome is the
     /// execution gas only (no fee reimbursement side-effects).
     #[test]
     fn test_system_call_default_chain_skips_operator_fee_refund() {

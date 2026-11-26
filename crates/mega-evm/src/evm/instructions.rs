@@ -1441,7 +1441,7 @@ pub mod volatile_data_ext {
     }
 
     /// Recreates what the deployed host did as revm's CALL-family body loaded its target, for a
-    /// frame that halted before revm 40's body got there although the deployed schedule did: from
+    /// frame that halted before revm 43's body got there although the deployed schedule did: from
     /// `REX6` the stack operand's cold journal entry, when the storage-gas wrapper did not already
     /// inspect it; then the body's own read of the operand and, through an EIP-7702 designation,
     /// of its delegate; and the beneficiary-access mark (see [`mark_call_target_beneficiary`]).
@@ -1471,7 +1471,7 @@ pub mod volatile_data_ext {
     /// body loaded it: the raw stack operand when it is the block beneficiary, and from `REX6` the
     /// operand's one-hop EIP-7702 delegate when that is.
     ///
-    /// revm 40 charges the static gas and the value-transfer cost ahead of that load, so a frame
+    /// revm 43 charges the static gas and the value-transfer cost ahead of that load, so a frame
     /// that halts on either never reaches the host's marking; the halting exits call this in its
     /// place, only where the deployed schedule would have reached the load. The mark is idempotent,
     /// so calling it after a halt that did follow the load changes nothing.
@@ -1666,7 +1666,7 @@ pub mod volatile_data_ext {
             }
 
             // The deployed schedule read the target right after the pop and charged for it
-            // afterwards; revm 40 can halt ahead of that read on two paths, and on both the
+            // afterwards; revm 43 can halt ahead of that read on two paths, and on both the
             // wrapper recreates what the read left behind. Captured before the body pops it.
             //
             // - `EXTCODECOPY` validates its operands, charges the copy cost and expands memory
@@ -2305,7 +2305,7 @@ pub mod storage_gas_ext {
                     let charged = new_account_storage_gas - drained;
                     if !context.interpreter.gas.record_regular_cost(charged) {
                         // The deployed schedule took this charge with the opcode's static gas
-                        // still in the frame — revm 40 debits it first, through this family's
+                        // still in the frame — revm 43 debits it first, through this family's
                         // wrapper or the interpreter's pre-charge — so a frame short of the charge
                         // by less than that static gas paid it there and went on towards its load.
                         // A failed charge debits nothing, so the frame's gas is as it was.
@@ -2337,7 +2337,7 @@ pub mod storage_gas_ext {
                     0
                 };
 
-                // revm 40 takes two charges ahead of its load that the deployed schedule took after
+                // revm 43 takes two charges ahead of its load that the deployed schedule took after
                 // it — the opcode's static gas, debited before this handler was entered, and the
                 // body's value-transfer cost — so a frame that halts on either never reaches the
                 // load. That is where the deployed host marked beneficiary access and, from REX6,
@@ -3287,7 +3287,7 @@ pub mod compute_gas_ext {
     /// `remaining`, the amount the deployed implementation left.
     ///
     /// The deployed implementation charged the opcode's whole cost in one step and, when that
-    /// charge failed, halted with the frame's gas as it stood before the opcode; revm 40 charges in
+    /// charge failed, halted with the frame's gas as it stood before the opcode; revm 43 charges in
     /// steps and zeroes a frame that halts out of gas. The halted frame's remaining gas is
     /// observable: a frame-local limit exceed turns the halt into a revert that hands it back to
     /// the caller, and a transaction-level one refunds it to the sender. The halt action set here

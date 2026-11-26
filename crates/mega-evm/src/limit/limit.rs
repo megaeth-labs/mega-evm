@@ -269,7 +269,7 @@ impl AdditionalLimit {
         let mut trial = Self::new(spec, limits);
         trial.before_tx_start(tx);
 
-        let initial_and_floor_gas = calculate_initial_tx_gas_for_tx(tx, spec.into_eth_spec());
+        let initial_and_floor_gas = calculate_initial_tx_gas_for_tx(tx, spec.into_eth_spec(), None);
         trial.record_compute_gas(initial_and_floor_gas.initial_regular_gas);
 
         trial.check_limit()

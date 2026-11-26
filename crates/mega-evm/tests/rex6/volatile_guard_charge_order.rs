@@ -493,7 +493,7 @@ fn test_underfunded_selfdestruct_still_marks_beneficiary_access() {
 /// A frame too poor to afford `SLOAD`'s static gas still issues the oracle read, so oracle access
 /// is marked.
 ///
-/// revm 40 skips the journal load outright when the frame cannot cover the cold-storage surcharge
+/// revm 43 skips the journal load outright when the frame cannot cover the cold-storage surcharge
 /// and reports `ColdLoadSkipped`, where the pre-`GasTable` revm loaded the slot and then failed the
 /// combined charge. Both end the frame out of gas, and `MegaETH`'s oracle read marks before either
 /// branch is taken, so the frame result and the bitmap come out the same either way.

@@ -398,7 +398,7 @@ fn check_evm_execution(
 /// Apply a fixture post-map / unit [`MegaSpecId`] onto `cfg`, keeping mainnet
 /// [`mega_evm::revm::context_interface::cfg::GasParams`] in sync.
 ///
-/// revm 40 stores per-spec gas params in [`CfgEnv`]. Assigning `cfg.spec` alone
+/// revm 43 stores per-spec gas params in [`CfgEnv`]. Assigning `cfg.spec` alone
 /// leaves the previous params in place and drifts gas accounting. Shared by
 /// [`execute_test_suite`] and single-unit execution.
 fn set_cfg_spec_and_mainnet_gas_params(cfg: &mut CfgEnv<MegaSpecId>, spec: MegaSpecId) {
@@ -689,7 +689,7 @@ fn run_unit_once(
 ) -> Result<(Duration, ExecutionResult<MegaHaltReason>, Option<TestValidationResult>), TestErrorKind>
 {
     let mut cfg = CfgEnv::default();
-    // See execute_test_suite: revm-27 chain-id gate-off (revm 40 default is true).
+    // See execute_test_suite: revm-27 chain-id gate-off (revm 43 default is true).
     cfg.tx_chain_id_check = false;
     cfg.chain_id = resolve_chain_id(&unit.env)?;
     set_cfg_spec_and_mainnet_gas_params(

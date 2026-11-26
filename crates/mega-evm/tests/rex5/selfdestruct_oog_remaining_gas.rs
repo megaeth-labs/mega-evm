@@ -4,7 +4,7 @@
 //! resource usage before the opcode runs. When the opcode then runs out of gas, the frame-end
 //! check sees that usage over the frame's budget and turns the halt into a revert that hands the
 //! frame's remaining gas back to its caller. The deployed implementation charged the opcode's
-//! whole cost in one step and, when that charge failed, left the frame's gas untouched; revm 40
+//! whole cost in one step and, when that charge failed, left the frame's gas untouched; revm 43
 //! zeroes an out-of-gas frame unless the handler keeps it. Every expectation here was measured on
 //! the deployed implementation.
 //!

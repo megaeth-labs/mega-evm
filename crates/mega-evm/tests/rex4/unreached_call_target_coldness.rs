@@ -8,7 +8,7 @@
 //! inspection of the account it meters, which runs before revm's body, and (from `Rex6`) the
 //! raw-operand delegate resolution inside the body's own load.
 //!
-//! revm 40 charges this family's static gas before the body and its value-transfer cost before the
+//! revm 43 charges this family's static gas before the body and its value-transfer cost before the
 //! load, where the deployed implementation charged both later. Moving the static charge ahead of
 //! the body also moves it ahead of the body's two memory expansions, so a frame can now fail an
 //! expansion the deployed implementation would have paid for and reached the load through. The
@@ -317,7 +317,7 @@ fn test_static_charge_window_callcode_tracks_its_metered_address() {
 }
 
 /// The same matrix one charge later: the frame affords the static gas, enters revm's body and
-/// halts on the value-transfer cost that revm 40 charges before the load.
+/// halts on the value-transfer cost that revm 43 charges before the load.
 #[test]
 fn test_value_transfer_window_matches_the_static_charge_window() {
     for spec in WRAPPED_CALL_SPECS {
@@ -534,7 +534,7 @@ fn test_delegated_callcode_recreates_the_operand_and_never_its_delegate() {
         ),
         // Memory the frame could afford only before the relocated static charge.
         ("Rex6 memory expansion", MegaSpecId::REX6, MEMORY_WINDOW_BUDGET, 0, 1024, LEFT_COLD),
-        // The transfer cost revm 40 charges ahead of its load.
+        // The transfer cost revm 43 charges ahead of its load.
         ("Rex6 value transfer", MegaSpecId::REX6, VALUE_TRANSFER_BUDGET, 1, 0, LEFT_COLD),
     ];
     for (exit, spec, budget, value, ret_size, operand_expected) in rows {

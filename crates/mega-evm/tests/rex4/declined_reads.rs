@@ -1,6 +1,6 @@
-//! The accounts and storage slots a transaction reads when revm 40 would read fewer.
+//! The accounts and storage slots a transaction reads when revm 43 would read fewer.
 //!
-//! The deployed implementation read an account or a slot before charging for it. revm 40 declines
+//! The deployed implementation read an account or a slot before charging for it. revm 43 declines
 //! a cold read the frame cannot afford, halting it out of gas first. `MegaETH` makes those reads
 //! anyway, so a transaction's read set — the accounts and slots in the state it hands back, from
 //! which a node builds the stateless witness — stays what the deployed implementation read.
